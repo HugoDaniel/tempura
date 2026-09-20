@@ -35,6 +35,10 @@ pub const pattern = @import("pattern.zig");
 /// `Module` → `.it` bytes in plan 06's canonical layout.
 pub const write = @import("write.zig");
 
+/// The timing walk: the order walk with every timing-affecting effect,
+/// `Module` → `RowMap` in IT ticks.
+pub const walk = @import("walk.zig");
+
 // The names a consumer reaches for most, lifted to the part's namespace.
 pub const Module = model.Module;
 pub const Builder = model.Builder;
@@ -52,4 +56,5 @@ test {
     _ = read;
     _ = pattern;
     _ = write;
+    _ = walk;
 }
