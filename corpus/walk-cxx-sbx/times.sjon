@@ -1,0 +1,12 @@
+; walk-cxx-sbx — a pattern loop in progress beats a break on its row.
+;
+; `SB0` marks row 0; `SB1` on row 2 runs the loop once; `C02` sits on the
+; same row and loses the first time round, then is honoured the second,
+; when there is no loop left to make.
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk)

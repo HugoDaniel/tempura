@@ -546,13 +546,15 @@ const Walker = struct {
         while (true) {
             const pat_idx = self.module.orders[order];
             const pat = self.module.patterns[pat_idx];
-            // A jump or a break can name a row the pattern does not
-            // reach; the walk moves on to the next order, as IT does.
-            if (row >= pat.rows) {
-                order = self.resolveOrder(@as(u32, order) + 1) orelse break;
-                row = 0;
-                continue;
-            }
+            // A jump or a break can name a row the target pattern does
+            // not reach — `C05` into a two-row pattern, or a `Bxx` and a
+            // `Cxx` on one row. The row is CLAMPED to that pattern's row
+            // 0, which is what IT itself and OpenMPT do (plan 09's
+            // `walk-cxx-past-end`): the target order is the order the
+            // effect named, and only the row inside it was out of range.
+            // `resolveOrder` never returns an order whose pattern has no
+            // rows, so row 0 always exists and the walk always advances.
+            if (row >= pat.rows) row = 0;
 
             // The cap. A module whose timing state never repeats — a
             // tempo that slides for ever, a `Bxx` backwards onto a
@@ -1468,4 +1470,78 @@ test "walk.derive: a module with nothing playable ends instead of walking for ev
     try testing.expectEqual(@as(usize, 0), map.diags.items().len);
     // The one segment every map has: the initial tempo at tick 0.
     try testing.expectEqualSlices(TempoSeg, &.{.{ .start_tick = 0, .tempo = 125 }}, map.segments);
+}
+
+test "walk.derive: a Cxx past the target pattern's end lands on ROW 0 of that pattern" {
+    // The ruling (plan 09's `walk-cxx-past-end` case): a `Cxx` — or a
+    // `Bxx` and a `Cxx` on one row — whose row is past the TARGET
+    // pattern's end lands on row 0 of that pattern, which is what IT
+    // itself and OpenMPT do. It does not skip on to the order after it.
+    //
+    // Hand computation A. Speed 6, tempo 125; orders [0, 1] naming
+    // patterns 0 and 1, two rows each; `C05` on channel 0 of pattern 0's
+    // row 0. Row 5 is past pattern 1's two rows.
+    //
+    //   idx  order  pattern  row  start  what the row does
+    //   0    0      0        0    0      C05 → order 1, row 5 → row 0
+    //   1    1      1        0    6
+    //   2    1      1        1    12     end of pattern → past the last
+    //                                    order → the song loops
+    //   `Cxx` has no memory and nothing here touches the state, so (0,0)
+    //   is revisited in index 0's state → the walk ends, loop point 0.
+    //   Three rows, 18 ticks. Under the old rule the walk stepped to the
+    //   order AFTER 1, wrapped straight back to (0,0) and stopped with a
+    //   single row.
+    var b: model.Builder = .init(testing.allocator);
+    defer b.deinit();
+    try b.addOrder(0);
+    try b.addOrder(1);
+    const pat0 = try b.addPattern(2);
+    _ = try b.addPattern(2);
+    pat0.at(0, 0).* = .{ .fx = fx_c, .param = 5 };
+    var m = b.finish();
+    defer m.deinit();
+
+    var map = try derive(testing.allocator, &m, .{});
+    defer map.deinit();
+
+    try testing.expectEqualSlices(PlayedRow, &.{
+        .{ .order = 0, .pattern = 0, .row = 0, .start_tick = 0, .ticks = 6 },
+        .{ .order = 1, .pattern = 1, .row = 0, .start_tick = 6, .ticks = 6 },
+        .{ .order = 1, .pattern = 1, .row = 1, .start_tick = 12, .ticks = 6 },
+    }, map.rows);
+    try testing.expectEqual(@as(i64, 18), map.total_ticks);
+    try testing.expectEqual(@as(?u32, 0), map.loop_row);
+
+    // Hand computation B — the `Bxx` + `Cxx` pair, the other half of the
+    // ruling. Orders [0, 1]; pattern 0 is two rows, pattern 1 is two.
+    // `B01` and `C07` share pattern 0's row 0: the jump names the order,
+    // the break names the row, and row 7 is past pattern 1's end.
+    //
+    //   idx  order  pattern  row  start
+    //   0    0      0        0    0      B01 + C07 → order 1, row 7 → 0
+    //   1    1      1        0    6
+    //   2    1      1        1    12     → the song loops back to (0,0)
+    //   Three rows, 18 ticks, loop point 0.
+    var b2: model.Builder = .init(testing.allocator);
+    defer b2.deinit();
+    try b2.addOrder(0);
+    try b2.addOrder(1);
+    const p0 = try b2.addPattern(2);
+    _ = try b2.addPattern(2);
+    p0.at(0, 0).* = .{ .fx = fx_b, .param = 1 };
+    p0.at(0, 1).* = .{ .fx = fx_c, .param = 7 };
+    var m2 = b2.finish();
+    defer m2.deinit();
+
+    var map2 = try derive(testing.allocator, &m2, .{});
+    defer map2.deinit();
+
+    try testing.expectEqualSlices(PlayedRow, &.{
+        .{ .order = 0, .pattern = 0, .row = 0, .start_tick = 0, .ticks = 6 },
+        .{ .order = 1, .pattern = 1, .row = 0, .start_tick = 6, .ticks = 6 },
+        .{ .order = 1, .pattern = 1, .row = 1, .start_tick = 12, .ticks = 6 },
+    }, map2.rows);
+    try testing.expectEqual(@as(i64, 18), map2.total_ticks);
+    try testing.expectEqual(@as(?u32, 0), map2.loop_row);
 }

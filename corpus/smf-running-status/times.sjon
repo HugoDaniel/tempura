@@ -1,0 +1,9 @@
+; smf-running-status — the status byte that is not repeated.
+;
+; Three note-ons of one status, three note-offs of another, then a meta
+; event that RESETS running status and two control changes after it. The
+; writer's rule (consecutive channel messages of the same status share
+; it; every meta and sysex resets) and the reader's are one rule read
+; twice, which is what rung 1 asserts here.
+(read)
+(roundtrip)

@@ -173,6 +173,32 @@ pub fn build(b: *std.Build) void {
     const corpus_step = b.step("corpus", "Verify the golden corpus (native); `-- --update` regenerates");
     corpus_step.dependOn(&run_corpus.step);
 
+    // `zig build fixtures` — re-derive the corpus's binary fixtures from
+    // the format cores' `Builder`s. The bytes are COMMITTED: this verb
+    // only regenerates them, and a `git diff` afterwards is the drift
+    // showing (the goldens hash every fixture, so drift fails `corpus`
+    // too). Takes the corpus directory the same way the corpus verb
+    // does, and goes through the PUBLIC module like the CLI — a fixture
+    // that needs a surface `src/root.zig` does not export fails here.
+    //
+    // Its own tests run first: the generator is rooted in `tools/`, so
+    // it rides neither `src/root.zig`'s discovery nor `-Dtest-root`, and
+    // the verb carries its gate rather than leaving it unreachable.
+    const fixtures_mod = b.createModule(.{
+        .root_source_file = b.path("tools/gen_fixtures.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "tempura", .module = tempura_mod }},
+    });
+    const fixtures_exe = b.addExecutable(.{ .name = "gen-fixtures", .root_module = fixtures_mod });
+    const fixtures_tests = b.addTest(.{ .root_module = fixtures_mod });
+    const run_fixtures = b.addRunArtifact(fixtures_exe);
+    run_fixtures.addDirectoryArg(b.path("corpus"));
+    run_fixtures.has_side_effects = true;
+    run_fixtures.step.dependOn(&b.addRunArtifact(fixtures_tests).step);
+    const fixtures_step = b.step("fixtures", "Regenerate the corpus's committed binary fixtures");
+    fixtures_step.dependOn(&run_fixtures.step);
+
     // `zig build cli` — the native `tempura` multi-tool. Built against the
     // PUBLIC `tempura` module rather than the sources, deliberately: the
     // CLI is a CONSUMER, so going through `@import("tempura")` makes

@@ -1,0 +1,13 @@
+; walk-t0x-slide — the tempo slides once per NON-row tick.
+;
+; `T02` on row 0 walks the tempo down two per tick for the five ticks of
+; the row that are not tick 0; `T12` on row 1 walks it back up. Every
+; step is its own tempo segment, and the tempo comes home — only the
+; channel memories tell the second pass from the first.
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk)

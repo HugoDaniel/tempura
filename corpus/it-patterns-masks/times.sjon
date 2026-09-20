@@ -1,0 +1,21 @@
+; it-patterns-masks — the pattern stream's own corners.
+;
+; Channel 0 repeats one cell four rows running, so its mask is sent once
+; and then reused (a bare lead byte per row). Channel 1 walks every
+; family of the volume column — volume, the five slide families, pan,
+; tone porta, vibrato — as IT's raw bytes. Channels 2–6 carry the command
+; bytes 27–31, which sit inside ITTECH's range and name no effect: the
+; reader keeps the cell, drops the command and says so
+; (`it_command_unknown`).
+;
+; No `(roundtrip)`: those five commands read as NO effect, so writing the
+; module back produces a legitimately SHORTER stream. Rung 1 is a gate on
+; files the canonical writer produced from a module it can read back, and
+; this file is authored to fail that premise. The mask cache and the
+; volume column round-trip under `it-minimal` and `it-passthrough`.
+;
+; `(write)` is what stands in for it: the normalised module written back,
+; hashed — so the mask cache, every volume byte and the five dropped
+; commands are all pinned by a number that moves if any of them does.
+(read)
+(write)

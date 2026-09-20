@@ -1,0 +1,13 @@
+; walk-sdx — the note delay, and the note that never sounds.
+;
+; `SD3` sounds three ticks into the row, `SD0` behaves as `SD1`, and
+; `SD6` is the row's whole tick count, so that note has no onset at all.
+; Onsets come out in (row, channel) order, which is time order within a
+; channel and not across them.
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk)

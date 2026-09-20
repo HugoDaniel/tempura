@@ -1,0 +1,10 @@
+; it-passthrough — one of everything the IT core never decodes.
+;
+; An instrument body, three samples (PCM, IT215-compressed and ModPlug
+; ADPCM — three different ways of deciding where the data ENDS), a
+; foreign trailing chunk another tracker wrote, and tempura's own `TMPU`
+; payload. Rung 2 compares every one of those regions as BYTES against
+; its own anchor: pass-through means the bytes come back, not that the
+; offsets do.
+(read)
+(roundtrip)

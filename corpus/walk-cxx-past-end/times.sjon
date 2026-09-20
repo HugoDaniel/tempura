@@ -1,0 +1,14 @@
+; walk-cxx-past-end — a break past the target pattern's last row.
+;
+; `C05` on pattern 0's row 0 breaks to row 5 of the next order, whose
+; pattern has two rows. The ruling (plan 09): it lands on ROW 0 OF THAT
+; PATTERN, which is what IT itself and OpenMPT do — it does not step on
+; to the order after it. Under the old rule this walk played one row and
+; stopped; under this one it plays three.
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk)

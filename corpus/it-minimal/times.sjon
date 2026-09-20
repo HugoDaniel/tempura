@@ -1,0 +1,8 @@
+; it-minimal — the smallest module the canonical writer produces.
+;
+; One order, one 64-row pattern, a cell carrying all four fields, a note
+; off, and a song message. Rung 1 over it is the whole layout — header,
+; order list, parapointer arrays, message, pattern — agreeing with
+; itself byte for byte.
+(read)
+(roundtrip)

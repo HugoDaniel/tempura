@@ -1,0 +1,18 @@
+; smf-smpte — a wall-clock division, and the tempo event nobody believes.
+;
+; 25 frames per second, 40 ticks per frame: OpenMPT's `frames ·
+; subframes / 2` makes that a 500-pulse grid, and the file's `set-tempo`
+; is kept and recorded as ignored (`smpte_tempo_ignored`, plan 03).
+;
+; No `(roundtrip)`: the canonical writer's division is ALWAYS pulses per
+; quarter (plan 05, "The canonical writer"), so `write(read(bytes))`
+; deliberately differs from these bytes in exactly the two division bytes
+; — rung 1 is a gate on files the writer produced, and this one is
+; authored to be one it never would. What a round trip WOULD preserve
+; here, event for event, is gated by the canonical cases beside it.
+;
+; `(write)` is what stands in for it: the canonical writer's output for
+; this file, hashed — the SMPTE file written back onto the 500-pulse grid
+; its division converted to, which is the rule plan 05 states.
+(read)
+(write)

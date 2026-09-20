@@ -1,0 +1,13 @@
+; walk-txx-memory — `Txx` sets the tempo, `T00` recalls it per CHANNEL.
+;
+; `T80` on channel 0, `T40` on channel 1, then `T00` on channel 0 (which
+; recalls 0x80) and `T00` on channel 2 (which remembers nothing and does
+; nothing). The memories are part of the timing state a revisited row is
+; compared on, which is why the walk goes round twice.
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk)

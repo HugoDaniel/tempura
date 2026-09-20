@@ -1,0 +1,13 @@
+; walk-sex — the row delay repeats a row without re-reading it.
+;
+; Row 0 carries `S62` (frame delay 2), `SE1` (play the row twice), a note
+; and a second `SEx` further right that loses — the LEFTMOST wins. Only
+; the first play carries the frame delay and the note sounds once, so the
+; row is one `(row …)` of fourteen ticks: one row READ.
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk)

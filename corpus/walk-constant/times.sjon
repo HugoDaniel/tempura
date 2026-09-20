@@ -1,0 +1,13 @@
+; walk-constant — speed 6, tempo 125, four rows of six ticks.
+;
+; Orders [0]; one four-row pattern with a C-5 on channel 0 of row 0. Past
+; row 3 the order list ends, the song loops to (0, 0) in the state it
+; started in, and the walk stops there with row 0 as the loop point: 24
+; ticks, one tempo segment, one onset.
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk)

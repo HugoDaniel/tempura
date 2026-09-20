@@ -1,0 +1,13 @@
+; walk-axx — `Axx` sets the speed from the row it sits on.
+;
+; `A03` on row 2 shortens THAT row (a tick-0 effect), and `A00` on row 3
+; keeps what it found — IT gives `Axx` no memory. The second pass round
+; the song runs at speed 3, so the walk plays seven rows for 27 ticks and
+; the loop point is index 3, not index 4.
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk)

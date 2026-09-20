@@ -51,6 +51,11 @@ test {
     _ = smf;
     _ = itf;
     _ = time;
+    // Not part of the `tempura` module — the corpus runner is its own
+    // executable root, built against these same sources — but its
+    // harness vocabulary, its canonical renderer and its verdict earn
+    // the same discovery as everything else (pacer's precedent).
+    _ = @import("corpus_runner.zig");
 }
 
 test "version: src/root.zig and build.zig.zon spell the same version" {

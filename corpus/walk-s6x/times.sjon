@@ -1,0 +1,12 @@
+; walk-s6x — the fine pattern delay lengthens the row it sits on.
+;
+; `S62` makes row 0 eight ticks instead of six, and `S00` on row 2
+; recalls the whole `Sxy` its channel last saw. Channel 1's `S00` on row
+; 3 remembers nothing, so it is no timing effect at all.
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk)

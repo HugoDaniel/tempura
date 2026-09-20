@@ -1,0 +1,10 @@
+; smf-format0 — three tracks merged into one.
+;
+; A format 1 file: a conductor (name, meter, tempo, a marker at tick 96),
+; a lead track and a bass track on another channel. `(write :format0
+; true)` merges every track by tick, stable, the first track's events
+; first at a tie — and tick 96 carries a tie on purpose, so the sort's
+; stability is in the hash.
+(read)
+(roundtrip)
+(write :format0 true)

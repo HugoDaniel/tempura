@@ -1,0 +1,9 @@
+; smf-vlq-edges — every width a delta time has.
+;
+; The fixture is one track whose deltas are 0 (one byte), 0x7F (the last
+; one-byte value), 0x80 (the first two-byte one) and 0x0FFF_FFFF (the
+; largest delta a variable-length quantity may hold, four bytes). The
+; reader sums them into absolute ticks and the writer re-derives them, so
+; the round trip is the decoder and the encoder gating each other.
+(read)
+(roundtrip)

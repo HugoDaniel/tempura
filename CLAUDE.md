@@ -101,6 +101,7 @@ level above the aggregators for a subtree to see what the root sees.
 | `zig build test` | all inline tests (root.zig forces submodule discovery); `-Dtest-root=<path-relative-to-src>` for one subtree |
 | `zig build verify` | the whole gate: test + native corpus + the pacer-schema drift check |
 | `zig build corpus` | the native golden gate; `-- --update` regenerates, diff reviewed |
+| `zig build fixtures` | re-derive `corpus/*/song.{mid,it}` from the cores' `Builder`s (the bytes are committed; `git diff` shows drift) |
 | `zig build fuzz` | never-panic harnesses, separate from `verify` so the gate stays fast |
 | `zig build audit-diagnostics` | every `Diag.Code` variant is referenced by name in some test |
 | `zig build wasm` | `tempura.wasm` (wasm32-freestanding, ReleaseSmall, `rdynamic`) |

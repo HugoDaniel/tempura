@@ -1,0 +1,14 @@
+; walk-skip-end — `+++` is skipped and `---` ends the song.
+;
+; Orders [0, +++, 1, ---, 2]: the `+++` plays nothing and the walk moves
+; on, the `---` is where the song ends and loops back to order 0, and the
+; order after it never plays. (The canonical writer appends its own
+; trailing `---`, so the file carries six orders where the module had
+; five; neither marker is reached twice.)
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk)

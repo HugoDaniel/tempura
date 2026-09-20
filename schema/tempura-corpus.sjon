@@ -27,7 +27,7 @@
 ; No `:version`, for the reason `schema/tempura.sjon` declares none.
 
 (plugin :name tempura-corpus
-  :description "The golden corpus's harness vocabulary: the ordered script of queries and verbs a case replays — positions, snaps, edit plans, the score export, the timing walk, the built file and the re-dump."
+  :description "The golden corpus's harness vocabulary: the ordered script of queries and verbs a case replays — the format cores' read, round trip, walk and write, then positions, snaps, edit plans, the score export, the timing walk, the built file and the re-dump."
 
   ; ---- value kinds ----
 
@@ -52,6 +52,12 @@
     :unit (unit-shape :reject true)
     :repr (repr-shape :type f32))
 
+  (value-kind :name row-cap
+    :description "A cap on how many tracker rows a walk may play before it gives up, 1..2^20. The walk's own default is the ceiling, so a case that wants the runaway diagnostic asks for a small one; the cap is a walk INPUT, and the `walk_runaway` it trips is a diagnostic the golden pins."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 1048576 :integer true)
+    :unit (unit-shape :reject true))
+
   (value-kind :name build-kind
     :description "Which file a (build …) writes."
     :underlying symbol
@@ -64,6 +70,25 @@
     :underlying symbol)
 
   ; ---- the script, executed in document order ----
+  ;
+  ; The four format-core verbs first (P107, the cores half): they take a
+  ; case whose fixture is `song.mid` or `song.it` and need no document.
+
+  (form :name read
+    :description "Read the case's fixture with the core its name selects — `song.mid` through the SMF reader, `song.it` through the IT one — and echo what came back: the header fields and the track, event and record counts, then every diagnostic with its numeric code, severity and span. Takes no rows.")
+
+  (form :name roundtrip
+    :description "The two fidelity rungs of plan 09 over the case's fixture. Rung 1 is `write(read(bytes)) == bytes`, which holds for a file tempura's own canonical writer produced; rung 2 is `read(write(read(bytes)))` equal to `read(bytes)` event for event for a `.mid` (every `at`, kind and active payload, foreign chunks included) and field for field for an `.it` (header, orders, patterns cell by cell, every pass-through region byte-equal). A case whose fixture is deliberately NOT canonical — a SMPTE division, a command byte no IT effect names — carries `(read)` alone and says why. Takes no rows.")
+
+  (form :name walk
+    :description "Echo the IT timing walk's `RowMap`: one row per row PLAYED with its start and length, the tempo segments, the note onsets, the total and the loop point, then the walk's diagnostics. An `.it` fixture only — an SMF conductor is the `timing` verb's business."
+    (key :name max-rows :type row-cap :optional true :default 1048576
+      :description "Stop the walk after this many rows and raise `walk_runaway`. The default is the walk's own ceiling, so only a runaway case states it."))
+
+  (form :name write
+    :description "Write the case's fixture back through the canonical writer with the switches below, and echo the bytes' sha256, their length and the event count. What `(roundtrip)` asserts, this verb SHOWS: a layout change is a diff in the golden, and the hash is what x86_64, aarch64 and wasm32 must agree on."
+    (key :name format0 :type boolean :optional true :default false
+      :description "`--format 0`: merge every track into one, by tick, stable, the first track's events first at a tie. SMF only."))
 
   (form :name at
     :description "One Playhead.at per positional seconds value: the tick, bar, beat, sub-tick, the sections in force and the surrounding cues, after the end-behaviour wrap. May repeat and interleave with the other script forms."

@@ -1,0 +1,14 @@
+; walk-runaway — the cap, and the diagnostic it raises.
+;
+; Four rows the walk would play in 24 ticks, stopped after three:
+; `:max-rows` is what plan 06's "cap of 2^20 rows trips `walk_runaway`"
+; is for, since a module whose timing state never repeats would otherwise
+; walk for ever. The map keeps the rows it played, there is no loop
+; point, and the diagnostic is an error.
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk :max-rows 3)

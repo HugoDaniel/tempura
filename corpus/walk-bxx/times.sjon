@@ -1,0 +1,13 @@
+; walk-bxx — a jump to an order, forwards and backwards.
+;
+; `B02` on pattern 0's row 0 jumps over order 1; `B01` on pattern 2's row
+; 0 jumps back. A jump takes effect when its row is over and lands on row
+; 0 of its order, so the song becomes a loop that never plays order 0
+; again.
+;
+; The fixture's patterns are shorter than IT 2.14's floor of 32 rows, so
+; the reader warns once per pattern and honours them — which is what puts
+; this row map beside plan 06's hand computation instead of beside a
+; padded one.
+(read)
+(walk)
