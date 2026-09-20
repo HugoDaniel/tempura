@@ -79,6 +79,11 @@ const Resolver = @import("Resolver.zig");
 const bridge_it = @import("bridge_it.zig");
 const bridge_smf = @import("bridge_smf.zig");
 const fromSjon = @import("fromSjon.zig");
+const time_derive = @import("../time/derive.zig");
+const render_smf = @import("../export/render_smf.zig");
+const render_it = @import("../export/render_it.zig");
+const residue_essence = @import("../residue/essence.zig");
+const walk = @import("../itf/walk.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -207,8 +212,15 @@ fn dumpSmf(
     });
     defer gpa.free(tier);
 
+    // A residue the CARRIER could not read is rule 4, never rule 1: a
+    // split essence with a part missing comes back as no essence at all,
+    // and handing that on as `.payloads` would head the document "no
+    // residue found" while `detach` has already said `residue_corrupt`.
+    // The carrier names the loss; this only routes it.
     const found: reconcile.Found = if (newer) |v|
         .{ .newer = v }
+    else if (detached.diags.count(.residue_corrupt) > 0)
+        .corrupt
     else
         .{ .payloads = detached.payloads };
 
@@ -235,8 +247,14 @@ fn dumpIt(
     const chunk_bytes = if (read.module.tmpu) |r| r.slice(bytes) else null;
     const newer = newerIt(chunk_bytes);
 
-    var chosen = try residue_it.choose(gpa, chunk_bytes, read.module.message, diags);
+    // `choose`'s own report goes into a list of its own first: whether
+    // it found the chunk UNREADABLE is the difference between rule 4 and
+    // rule 1, and the merged list cannot be asked that question.
+    var carrier: Diag.List = .init(gpa);
+    defer carrier.deinit();
+    var chosen = try residue_it.choose(gpa, chunk_bytes, read.module.message, &carrier);
     defer chosen.deinit();
+    try copyDiags(diags, &carrier);
 
     // The tail is TEXT in IT's own encoding — CR newlines, `%XX` escapes
     // — and rule 5 reads it as SJON, so it is undone here rather than
@@ -257,13 +275,27 @@ fn dumpIt(
     });
     defer gpa.free(tier);
 
+    // Plan 04's rule 5 decides the order, and `choose` has already
+    // applied it: the chunk wins when it is readable, and the TAIL wins
+    // over a chunk that is absent, corrupt or truncated — with
+    // `residue_partial` naming what the tail cannot carry. So a corrupt
+    // chunk beside a tail is rule 5, not rule 4, and only a corrupt
+    // chunk with NO tail falls through to the skeleton.
     const found: reconcile.Found = switch (chosen) {
         .chunk => |p| .{ .payloads = p.payloads },
         .tail => .{ .tail = tail_src.? },
         // A chunk of a version this build does not read, with no tail to
         // fall back on, is rule 3 and not rule 1: the payload is still
-        // in the file, as the opaque region the writer re-emits.
-        .none => if (newer) |v| .{ .newer = v } else .none,
+        // in the file, as the opaque region the writer re-emits. One
+        // whose framing does not hold is rule 4, for the same reason —
+        // the file carried a residue, and saying "no residue found" over
+        // a `residue_corrupt` would be two surfaces disagreeing.
+        .none => if (newer) |v|
+            .{ .newer = v }
+        else if (carrier.count(.residue_corrupt) > 0)
+            .corrupt
+        else
+            .none,
     };
 
     return assemble(gpa, schema, bytes, name, opts, diags, .{
@@ -493,11 +525,436 @@ fn verdictWord(decoded: bool, ok: bool) []const u8 {
 }
 
 // ---------------------------------------------------------------------
-// Tests
+// build
 // ---------------------------------------------------------------------
 
-const residue_essence = @import("../residue/essence.zig");
-const walk = @import("../itf/walk.zig");
+/// `build`'s switches — plan 10's `build` row, and plan 08's renderers
+/// under it.
+///
+/// `in_place` is the HOST's: this function produces bytes and never
+/// touches a path. It rides here so a CLI can carry one options value.
+pub const BuildOptions = struct {
+    /// Write a file that carries nothing the format cannot say itself.
+    no_residue: bool = false,
+    /// Write tempura's own residue even over one a NEWER tempura left in
+    /// the anchor (plan 04, rule 3).
+    force_residue: bool = false,
+
+    // ---- the `.mid` side ----
+    ppq: u15 = render_smf.default_ppq,
+    /// `--cc`: which controller a native curve lane renders onto.
+    cc: ?u7 = null,
+    cc_rate: i64 = render_smf.default_cc_rate,
+    section_markers: bool = false,
+    format0: bool = false,
+    running_status: bool = true,
+
+    // ---- the `.it` side ----
+    speed: u8 = 6,
+    rows: u16 = 64,
+    voices: u8 = 4,
+    /// `--fx "Z"`: render curves as this effect letter's parameter byte.
+    fx: ?u8 = null,
+    loose: bool = false,
+
+    /// The anchor's own bytes, where an `it/` tier's opaque regions are
+    /// copied from. Null for a native document, which has none.
+    anchor_bytes: ?[]const u8 = null,
+    /// The host's, kept here so one options value crosses the CLI.
+    in_place: bool = false,
+};
+
+/// A document, built.
+pub const Built = struct {
+    bytes: []const u8,
+    /// One per rendered native lane — what rode in the file, with the
+    /// hash of what was written at each address.
+    lanes: []const records.LaneRecord,
+    conductor: ?records.ConductorRecord,
+    /// How many bytes of essence rode in the file; zero when none did.
+    essence_bytes: usize,
+    diags: Diag.List,
+    gpa: Allocator,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn deinit(self: *Built) void {
+        self.gpa.free(self.bytes);
+        self.diags.deinit();
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+/// A document as a `.mid` or a `.it` — plan 10's `build` row, whole.
+///
+/// ```
+/// doc
+///   → render_smf.renderSmf / render_it.renderIt    the native view
+///   → residue.essence.pack + the lane records      what the format cannot say
+///   → residue.smf.attach / residue.it.chunk + tail the carriers
+///   → smf.write / itf.write.write                  the canonical bytes
+/// ```
+///
+/// **The records are hashed over the FILE.** The renderers hash what they
+/// wrote, which is the same thing whenever the writer's layout is the
+/// renderer's; `--format 0` is the case where it is not, because the
+/// writer merges tracks the renderer kept apart. So this function writes
+/// once WITHOUT the residue, reads that back, and hashes the addresses
+/// exactly as a `dump` of the finished bytes will — then attaches and
+/// writes for real. A residue payload is a meta event or a trailing
+/// chunk, so it never moves a hash, and the two writes agree by
+/// construction.
+///
+/// Cross-kind is refused (plan 08, "Cross-kind builds"): v1 builds a
+/// document into its own anchor's kind, or, for a native document, into
+/// either.
+pub fn build(
+    gpa: Allocator,
+    schema: *const Schema,
+    doc_source: [:0]const u8,
+    doc: *const Doc.Doc,
+    derived: *const time_derive.Derived,
+    kind: Doc.AnchorKind,
+    opts: BuildOptions,
+) Error!Built {
+    // Nothing here validates: the document was handed over BY
+    // `fromSource`, which is where every host check runs, and a second
+    // reading of the schema would be a second opinion about a document
+    // that already has one. The parameter is in the signature because
+    // plan 10's verb holds a schema and every other entry point here
+    // takes it.
+    _ = schema;
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena.deinit();
+    var diags: Diag.List = .init(gpa);
+    errdefer diags.deinit();
+
+    const pieces: Pieces = if (try refuseCrossKind(&diags, doc, kind))
+        .{ .bytes = try gpa.alloc(u8, 0), .lanes = &.{}, .conductor = null, .essence_bytes = 0 }
+    else switch (kind) {
+        .smf => try buildSmf(gpa, arena.allocator(), doc_source, doc, derived, opts, &diags),
+        .it => try buildIt(gpa, arena.allocator(), doc_source, doc, derived, opts, &diags),
+    };
+
+    return .{
+        .bytes = pieces.bytes,
+        .lanes = pieces.lanes,
+        .conductor = pieces.conductor,
+        .essence_bytes = pieces.essence_bytes,
+        .diags = diags,
+        .gpa = gpa,
+        .arena = arena,
+    };
+}
+
+/// What one kind's build produced, before it is wrapped.
+const Pieces = struct {
+    bytes: []const u8,
+    lanes: []const records.LaneRecord,
+    conductor: ?records.ConductorRecord,
+    essence_bytes: usize,
+};
+
+/// Plan 08's "Cross-kind builds": true when this document may not be
+/// built into `kind` at all.
+fn refuseCrossKind(diags: *Diag.List, doc: *const Doc.Doc, kind: Doc.AnchorKind) Error!bool {
+    if (doc.anchors.len == 0) return false;
+    for (doc.anchors) |a| {
+        if (a.kind == kind) return false;
+    }
+    try diags.add(
+        .build_cross_kind,
+        .err,
+        doc.anchors[0].span,
+        "this document is arranged around a {t} anchor and a {t} file was asked for; v1 builds a document into its own anchor's kind, or a native document into either (plan 08)",
+        .{ doc.anchors[0].kind, kind },
+    );
+    return true;
+}
+
+/// Whether this build writes a residue of its own. A newer tempura's
+/// payloads are kept where they are unless the caller insists (plan 04,
+/// rule 3).
+fn wantsResidue(diags: *Diag.List, opts: BuildOptions, newer: ?u8) Error!bool {
+    if (opts.no_residue) return false;
+    const v = newer orelse return true;
+    if (opts.force_residue) return true;
+    try diags.add(
+        .residue_newer_kept,
+        .warning,
+        .{ .start = 0, .end = 0 },
+        "this anchor carries a residue of envelope version {d}, which this build does not read; it was kept and no residue of this build's own was written (--force-residue overrides)",
+        .{v},
+    );
+    return false;
+}
+
+/// The lane records as carrier bodies. Caller frees each.
+fn encodeLanes(gpa: Allocator, lanes: []const records.LaneRecord) Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (out.items) |b| gpa.free(b);
+        out.deinit(gpa);
+    }
+    for (lanes) |rec| try out.append(gpa, try records.encodeLane(gpa, rec));
+    return out.toOwnedSlice(gpa);
+}
+
+fn freeBodies(gpa: Allocator, bodies: []const []const u8) void {
+    for (bodies) |b| gpa.free(b);
+    gpa.free(bodies);
+}
+
+/// A rendered record into the caller's arena, with the hash the file
+/// itself answers.
+fn keepRecord(a: Allocator, src: records.LaneRecord, hash: [32]u8) Error!records.LaneRecord {
+    const segments = try a.alloc(records.Segment, src.steps_only.len);
+    for (src.steps_only, segments) |from, *to| to.* = .{
+        .at = from.at,
+        .ease = try a.dupe(u8, from.ease),
+    };
+    return .{
+        .lane = try a.dupe(u8, src.lane),
+        .address = src.address,
+        .hash = hash,
+        .steps_only = segments,
+    };
+}
+
+fn buildSmf(
+    gpa: Allocator,
+    a: Allocator,
+    doc_source: [:0]const u8,
+    doc: *const Doc.Doc,
+    derived: *const time_derive.Derived,
+    opts: BuildOptions,
+    diags: *Diag.List,
+) Error!Pieces {
+    // The anchor's own `Sequence`, when the document carries one: the
+    // lanes render INTO it and its tracks come out unchanged.
+    const base: ?*const smf.Sequence = blk: {
+        for (doc.midi) |*tier| {
+            const anchor = doc.anchorById(tier.anchor) orelse continue;
+            if (anchor.kind == .smf) break :blk &tier.sequence;
+        }
+        break :blk null;
+    };
+
+    var rendered = try render_smf.renderSmf(gpa, doc, derived, base, .{
+        .ppq = opts.ppq,
+        .cc = opts.cc,
+        .cc_rate = opts.cc_rate,
+        .section_markers = opts.section_markers,
+        .format0 = opts.format0,
+    });
+    defer rendered.deinit();
+    try copyDiags(diags, &rendered.diags);
+
+    const wopts: smf.Options = .{
+        .running_status = opts.running_status,
+        .format0 = opts.format0,
+    };
+
+    const lanes = try a.alloc(records.LaneRecord, rendered.lanes.len);
+    var conductor: ?records.ConductorRecord = null;
+    {
+        var pass1 = try smf.write(gpa, &rendered.seq, wopts);
+        defer pass1.deinit();
+        var back = try smf.read(gpa, pass1.bytes);
+        defer back.deinit();
+
+        const ppq = back.sequence.division.pulsesPerQuarter();
+        for (rendered.lanes, lanes) |src, *dst| {
+            const address = src.address.smf;
+            dst.* = try keepRecord(a, src, records.hashSmfLane(
+                &back.sequence,
+                address.track - 1,
+                address.ch,
+                ppq,
+            ));
+        }
+        if (rendered.conductor != null) {
+            conductor = .{ .hash = records.hashSmfConductor(&back.sequence) };
+        }
+    }
+
+    if (!try wantsResidue(diags, opts, if (base) |s| newerSmf(s) else null)) {
+        var plain = try smf.write(gpa, &rendered.seq, wopts);
+        defer plain.deinit();
+        try copyDiags(diags, &plain.diags);
+        return .{
+            .bytes = try gpa.dupe(u8, plain.bytes),
+            .lanes = lanes,
+            .conductor = conductor,
+            .essence_bytes = 0,
+        };
+    }
+
+    var packed_tier = try residue_essence.pack(gpa, doc, doc_source);
+    defer packed_tier.deinit(gpa);
+    try copyDiags(diags, &packed_tier.diags);
+
+    const bodies = try encodeLanes(gpa, lanes);
+    defer freeBodies(gpa, bodies);
+
+    var cond_body: [32]u8 = undefined;
+    const cond_slice: ?[]const u8 = if (conductor) |c| blk: {
+        cond_body = records.encodeConductor(c);
+        break :blk &cond_body;
+    } else null;
+
+    var carried = try residue_smf.attach(gpa, &rendered.seq, .{
+        .essence = packed_tier.bytes,
+        .conductor = cond_slice,
+        .lanes = bodies,
+    }, .{});
+    defer carried.deinit();
+    try copyDiags(diags, &carried.diags);
+
+    var file = try smf.write(gpa, &carried.sequence, wopts);
+    defer file.deinit();
+    try copyDiags(diags, &file.diags);
+
+    return .{
+        .bytes = try gpa.dupe(u8, file.bytes),
+        .lanes = lanes,
+        .conductor = conductor,
+        .essence_bytes = packed_tier.bytes.len,
+    };
+}
+
+fn buildIt(
+    gpa: Allocator,
+    a: Allocator,
+    doc_source: [:0]const u8,
+    doc: *const Doc.Doc,
+    derived: *const time_derive.Derived,
+    opts: BuildOptions,
+    diags: *Diag.List,
+) Error!Pieces {
+    const base: ?*const itf.Module = blk: {
+        for (doc.it) |*tier| {
+            const anchor = doc.anchorById(tier.anchor) orelse continue;
+            if (anchor.kind == .it) break :blk &tier.module;
+        }
+        break :blk null;
+    };
+
+    var rendered = try render_it.renderIt(gpa, doc, derived, base, .{
+        .speed = opts.speed,
+        .rows = opts.rows,
+        .voices = opts.voices,
+        .fx = opts.fx,
+    });
+    defer rendered.deinit();
+    try copyDiags(diags, &rendered.diags);
+
+    // The HUMAN half of the song message alone: a rebuild of a document
+    // that was dumped from a `.it` would otherwise stack one tail on the
+    // one the file already carried.
+    const human = residue_it.splitMessage(rendered.module.message).human;
+    rendered.module.message = human;
+
+    const source = opts.anchor_bytes;
+    const wopts: itf.write.Options = .{
+        .loose = opts.loose,
+        // Not a build switch: the block is in the document only because
+        // `dump --preserve-history` put it there.
+        .preserve_history = rendered.module.edit_history != null,
+    };
+
+    const lanes = try a.alloc(records.LaneRecord, rendered.lanes.len);
+    var conductor: ?records.ConductorRecord = null;
+    {
+        var pass1 = try itf.write.write(gpa, &rendered.module, source, wopts);
+        defer pass1.deinit();
+        var back = try itf.read.read(gpa, pass1.bytes);
+        defer back.deinit();
+
+        var rows = try walk.derive(gpa, &back.module, .{});
+        defer rows.deinit();
+        var scratch: std.heap.ArenaAllocator = .init(gpa);
+        defer scratch.deinit();
+        const pats = try reconcile.playedPatterns(scratch.allocator(), &rows);
+
+        for (rendered.lanes, lanes) |src, *dst| {
+            dst.* = try keepRecord(a, src, records.hashItLane(
+                &back.module,
+                &rows,
+                &[_]u8{src.address.it.channel},
+                pats,
+            ));
+        }
+        if (rendered.conductor != null) {
+            conductor = .{ .hash = records.hashItConductor(&back.module) };
+        }
+    }
+
+    const newer = if (base) |m| blk: {
+        const region = m.tmpu orelse break :blk null;
+        const bytes = source orelse break :blk null;
+        break :blk newerIt(region.slice(bytes));
+    } else null;
+
+    if (!try wantsResidue(diags, opts, newer)) {
+        var plain = try itf.write.write(gpa, &rendered.module, source, wopts);
+        defer plain.deinit();
+        try copyDiags(diags, &plain.diags);
+        return .{
+            .bytes = try gpa.dupe(u8, plain.bytes),
+            .lanes = lanes,
+            .conductor = conductor,
+            .essence_bytes = 0,
+        };
+    }
+
+    var packed_tier = try residue_essence.pack(gpa, doc, doc_source);
+    defer packed_tier.deinit(gpa);
+    try copyDiags(diags, &packed_tier.diags);
+
+    const bodies = try encodeLanes(gpa, lanes);
+    defer freeBodies(gpa, bodies);
+
+    var cond_body: [32]u8 = undefined;
+    const cond_slice: ?[]const u8 = if (conductor) |c| blk: {
+        cond_body = records.encodeConductor(c);
+        break :blk &cond_body;
+    } else null;
+
+    const payload = try residue_it.chunk(gpa, .{
+        .essence = packed_tier.bytes,
+        .conductor = cond_slice,
+        .lanes = bodies,
+    });
+    defer gpa.free(payload);
+
+    var tail = try residue_it.tail(gpa, doc, &derived.map);
+    defer tail.deinit(gpa);
+    try copyDiags(diags, &tail.diags);
+    const whole = try residue_it.appendTail(gpa, human, tail.bytes);
+    defer gpa.free(whole);
+
+    var file = try itf.write.write(gpa, &rendered.module, source, .{
+        .loose = wopts.loose,
+        .preserve_history = wopts.preserve_history,
+        .tmpu = payload,
+        .message_tail = whole[human.len..],
+    });
+    defer file.deinit();
+    try copyDiags(diags, &file.diags);
+
+    return .{
+        .bytes = try gpa.dupe(u8, file.bytes),
+        .lanes = lanes,
+        .conductor = conductor,
+        .essence_bytes = packed_tier.bytes.len,
+    };
+}
+
+// ---------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------
 
 /// A small document with one native lane, so the file it builds into has
 /// exactly one lane record and one conductor record.
@@ -832,4 +1289,394 @@ test "pipeline: checkResidue names both IT carriers" {
     defer bare.deinit();
     try testing.expect(std.mem.indexOf(u8, bare.text, "chunk: absent") != null);
     try testing.expect(std.mem.indexOf(u8, bare.text, "tail: absent") != null);
+}
+
+/// A NATIVE document — no anchor, so `build` has both kinds open to it
+/// and the whole timeline has to ride in the residue.
+const native_doc: [:0]const u8 =
+    \\; a native piece — every root here has to come back out of the file
+    \\(timeline :title "built" :length 2bar)
+    \\
+    \\(tempo-point :at 0bar :qpm 120)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(cue :name "drop" :at 1bar)
+    \\
+    \\(lane :name kick :kind notes
+    \\  (note :at 0bar :dur 1q :key 36 :vel 100)
+    \\  (note :at 1q :dur 1q :key 38 :vel 80))
+    \\(lane :name glow :kind curve
+    \\  (keyframe :at 0bar :value 0)
+    \\  (keyframe :at 1bar :value 1 :ease linear))
+    \\(lane :name hats :kind query :query (euclid 3 8 1))
+    \\
+;
+
+/// One document, loaded and derived — what `build` takes.
+const Ready = struct {
+    res: fromSjon.Result,
+    derived: time_derive.Derived,
+
+    fn deinit(self: *Ready) void {
+        self.derived.deinit();
+        self.res.deinit();
+    }
+};
+
+fn ready(gpa: Allocator, schema: *const Schema, source: [:0]const u8) !Ready {
+    var res = try fromSjon.fromSource(gpa, schema, source, null);
+    errdefer res.deinit();
+    if (res.diags.hasErrors()) {
+        for (res.diags.items()) |d| std.debug.print("build fixture: {t}: {s}\n", .{ d.code, d.message });
+        return error.FixtureDoesNotLoad;
+    }
+    const derived = try time_derive.derive(gpa, &res.doc);
+    return .{ .res = res, .derived = derived };
+}
+
+test "pipeline.build: a native document builds to a .mid that dumps back essence-exact" {
+    // Plan 09's rung 3, and plan 08 phase 5's first red: the document
+    // goes in, a `.mid` comes out, and the dump of that `.mid` is the
+    // document again — form for form, comment for comment — with every
+    // lane record's hash and the conductor record's hash matching.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var fx = try ready(gpa, &schema, native_doc);
+    defer fx.deinit();
+
+    var built = try build(gpa, &schema, native_doc, &fx.res.doc, &fx.derived, .smf, .{ .cc = 74 });
+    defer built.deinit();
+    try testing.expect(!built.diags.hasErrors());
+    try testing.expect(built.essence_bytes > 0);
+    // The two rendered lanes; the `query` lane is essence only.
+    try testing.expectEqual(@as(usize, 2), built.lanes.len);
+    try testing.expectEqual(@as(usize, 1), built.diags.count(.residue_only));
+    try testing.expect(built.conductor != null);
+
+    var got = try dump(gpa, &schema, built.bytes, .smf, .{});
+    defer got.deinit();
+
+    try testing.expectEqual(reconcile.Rule.restored, got.rule);
+    try testing.expect(!got.diags.hasErrors());
+    try testing.expect(got.conductor.?.hash_ok);
+    try testing.expectEqual(@as(usize, 2), got.verdicts.len);
+    for (got.verdicts) |v| {
+        try testing.expect(v.hash_ok);
+        try testing.expectEqual(reconcile.Action.restored_native, v.action);
+    }
+    // Essence-exact, plan 04's own words: the timeline tier comes back
+    // FORM FOR FORM. The text is the essence re-printed by SJON, so the
+    // claim is over the document it reads back as and not over its
+    // layout — the tiers and the anchor the dump had to invent are
+    // lifted off, and what is left has to be the document that went in.
+    // (A shallow copy: the arena it names is the dumped document's.)
+    var tier_free = got.doc;
+    tier_free.anchors = &.{};
+    tier_free.midi = &.{};
+    tier_free.it = &.{};
+    try testing.expect(tier_free.eql(&fx.res.doc));
+    try testing.expectEqual(@as(usize, 3), got.doc.lanes.len);
+    for (got.doc.lanes) |l| try testing.expect(l.binding == null);
+    // Comments ride in the essence too (`pack` uses SJON's `full` mode).
+    try testing.expect(std.mem.indexOf(u8, got.text, "; a native piece") != null);
+    // And the easing the format cannot hold is back, verbatim.
+    try testing.expect(std.mem.indexOf(u8, got.text, ":ease linear") != null);
+}
+
+test "pipeline.build: the same document builds to a .it that dumps back essence-exact" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var fx = try ready(gpa, &schema, native_doc);
+    defer fx.deinit();
+
+    var built = try build(gpa, &schema, native_doc, &fx.res.doc, &fx.derived, .it, .{});
+    defer built.deinit();
+    try testing.expect(!built.diags.hasErrors());
+    // No instrument in a module tempura authored, and the cells say so.
+    try testing.expectEqual(@as(usize, 1), built.diags.count(.it_no_instrument));
+
+    var got = try dump(gpa, &schema, built.bytes, .it, .{});
+    defer got.deinit();
+
+    try testing.expectEqual(reconcile.Rule.restored, got.rule);
+    try testing.expect(!got.diags.hasErrors());
+    try testing.expect(got.conductor.?.hash_ok);
+    try testing.expect(got.verdicts.len > 0);
+    for (got.verdicts) |v| {
+        try testing.expect(v.hash_ok);
+        try testing.expectEqual(reconcile.Action.restored_native, v.action);
+    }
+    var tier_free = got.doc;
+    tier_free.anchors = &.{};
+    tier_free.midi = &.{};
+    tier_free.it = &.{};
+    try testing.expect(tier_free.eql(&fx.res.doc));
+    try testing.expect(std.mem.indexOf(u8, got.text, "; a native piece") != null);
+}
+
+test "pipeline.build: --no-residue writes a file that carries nothing of its own" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var fx = try ready(gpa, &schema, native_doc);
+    defer fx.deinit();
+
+    var built = try build(gpa, &schema, native_doc, &fx.res.doc, &fx.derived, .smf, .{
+        .cc = 74,
+        .no_residue = true,
+    });
+    defer built.deinit();
+    try testing.expectEqual(@as(usize, 0), built.essence_bytes);
+
+    var got = try dump(gpa, &schema, built.bytes, .smf, .{});
+    defer got.deinit();
+    try testing.expectEqual(reconcile.Rule.derived, got.rule);
+}
+
+test "pipeline.build: an IT-anchored document refuses to build a .mid" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var fx = try ready(gpa, &schema, it_doc);
+    defer fx.deinit();
+
+    var built = try build(gpa, &schema, it_doc, &fx.res.doc, &fx.derived, .smf, .{});
+    defer built.deinit();
+
+    try testing.expectEqual(@as(usize, 1), built.diags.count(.build_cross_kind));
+    try testing.expect(built.diags.hasErrors());
+    try testing.expectEqual(@as(usize, 0), built.bytes.len);
+}
+
+test "pipeline.build: a newer residue in the anchor is kept, and --force-residue overrides" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    // A `.mid` whose payloads a newer tempura wrote, dumped: the tier
+    // keeps them as the plain `sequencer-specific` events they are.
+    const bytes = try smfBytes(gpa, records.version + 1, true);
+    defer gpa.free(bytes);
+    var dumped = try dump(gpa, &schema, bytes, .smf, .{});
+    defer dumped.deinit();
+    try testing.expectEqual(reconcile.Rule.version, dumped.rule);
+
+    var derived = try time_derive.derive(gpa, &dumped.doc);
+    defer derived.deinit();
+
+    var kept = try build(gpa, &schema, dumped.text, &dumped.doc, &derived, .smf, .{});
+    defer kept.deinit();
+    try testing.expectEqual(@as(usize, 1), kept.diags.count(.residue_newer_kept));
+    try testing.expectEqual(@as(usize, 0), kept.essence_bytes);
+
+    var forced = try build(gpa, &schema, dumped.text, &dumped.doc, &derived, .smf, .{
+        .force_residue = true,
+    });
+    defer forced.deinit();
+    try testing.expectEqual(@as(usize, 0), forced.diags.count(.residue_newer_kept));
+    try testing.expect(forced.essence_bytes > 0);
+}
+
+// ---- rules 3 and 4 over the carriers themselves ----------------------
+
+/// A `.mid` whose essence rides in several events with one of them gone
+/// — plan 04's "a split body with a missing part". `reassemble` refuses
+/// it whole, which is exactly why this is rule 4 and not "a shorter
+/// essence".
+fn smfSplitBytes(gpa: Allocator) ![]u8 {
+    var seq = try smfSequence(gpa, 100);
+    defer seq.deinit();
+
+    var packed_tier = try residue_essence.packFor(gpa, smf_doc, "song");
+    defer packed_tier.deinit(gpa);
+
+    // Small events, so the essence really does split.
+    var carried = try residue_smf.attach(gpa, &seq, .{
+        .essence = packed_tier.bytes,
+    }, .{ .max_event = 64 });
+    defer carried.deinit();
+    dropOneEssencePart(&carried.sequence);
+
+    var file = try smf.write(gpa, &carried.sequence, .{});
+    defer file.deinit();
+    return gpa.dupe(u8, file.bytes);
+}
+
+/// Remove the second essence event — a DAW that dropped one payload and
+/// kept the rest, which is the failure this carrier was split for.
+fn dropOneEssencePart(seq: *smf.Sequence) void {
+    var seen: usize = 0;
+    for (seq.tracks) |*t| {
+        var i: usize = 0;
+        while (i < t.events.len) : (i += 1) {
+            if (t.events[i].kind != .tempura_residue) continue;
+            if (t.events[i].payload.residue.kind != @intFromEnum(records.Kind.essence)) continue;
+            seen += 1;
+            if (seen != 2) continue;
+            std.mem.copyForwards(smf.Event, t.events[i..], t.events[i + 1 ..]);
+            t.events = t.events[0 .. t.events.len - 1];
+            return;
+        }
+    }
+}
+
+/// What a `.it` carries, for the two rules that are about the CARRIER
+/// rather than about the music.
+const ItCarrier = struct {
+    /// The envelope version stamped on every record in the chunk.
+    ver: u8 = records.version,
+    /// Break the first record's length field, so the framing does not
+    /// hold and `parseChunk` refuses the chunk whole.
+    corrupt: bool = false,
+    /// Whether the message tail is written beside the chunk.
+    tail: bool = true,
+};
+
+fn itCarrierBytes(gpa: Allocator, schema: *const Schema, carry: ItCarrier) ![]u8 {
+    var module = try itModule(gpa);
+    defer module.deinit();
+
+    var packed_tier = try residue_essence.packFor(gpa, it_doc, "song");
+    defer packed_tier.deinit(gpa);
+    const payload = try residue_it.chunk(gpa, .{ .essence = packed_tier.bytes });
+    defer gpa.free(payload);
+
+    if (carry.ver != records.version) stampChunkVersion(payload, carry.ver);
+    if (carry.corrupt) breakChunkFraming(payload);
+
+    var loaded = try fromSjon.fromSource(gpa, schema, it_doc, null);
+    defer loaded.deinit();
+    var t = try residue_it.tail(gpa, &loaded.doc, &loaded.map);
+    defer t.deinit(gpa);
+    const whole = try residue_it.appendTail(gpa, module.message, t.bytes);
+    defer gpa.free(whole);
+
+    var file = try itf.write.write(gpa, &module, null, .{
+        .tmpu = payload,
+        .message_tail = if (carry.tail) whole[module.message.len..] else null,
+    });
+    defer file.deinit();
+    return gpa.dupe(u8, file.bytes);
+}
+
+/// Re-stamp every record's `ver` — what a newer tempura's chunk looks
+/// like to this one. Each record carries its own length, which is what
+/// lets a reader step over a version it does not know.
+fn stampChunkVersion(payload: []u8, ver: u8) void {
+    var at: usize = 0;
+    while (at + records.head_len + 4 <= payload.len) {
+        payload[at + 4] = ver;
+        const len = std.mem.readInt(u32, payload[at + records.head_len ..][0..4], .little);
+        at += records.head_len + 4 + len;
+    }
+}
+
+/// The first record claims more bytes than the chunk holds.
+fn breakChunkFraming(payload: []u8) void {
+    if (payload.len < records.head_len + 4) return;
+    std.mem.writeInt(u32, payload[records.head_len..][0..4], 0xFFFF_FFF0, .little);
+}
+
+test "pipeline: an SMF essence with a part missing is rule 4, not rule 1" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const bytes = try smfSplitBytes(gpa);
+    defer gpa.free(bytes);
+
+    var got = try dump(gpa, &schema, bytes, .smf, .{});
+    defer got.deinit();
+
+    try testing.expectEqual(reconcile.Rule.corrupt, got.rule);
+    try testing.expect(got.diags.count(.residue_corrupt) > 0);
+    // The two surfaces agree: the header does not say "no residue found"
+    // over a file whose diagnostics say the residue would not decode.
+    try testing.expect(std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue would not decode"));
+    try testing.expect(std.mem.indexOf(u8, got.text, "no residue found") == null);
+    try testing.expect(!got.diags.hasErrors());
+}
+
+test "pipeline: an IT chunk whose framing does not hold is rule 4 when nothing else survived" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const bytes = try itCarrierBytes(gpa, &schema, .{ .corrupt = true, .tail = false });
+    defer gpa.free(bytes);
+
+    var got = try dump(gpa, &schema, bytes, .it, .{});
+    defer got.deinit();
+
+    try testing.expectEqual(reconcile.Rule.corrupt, got.rule);
+    try testing.expect(got.diags.count(.residue_corrupt) > 0);
+    try testing.expect(std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue would not decode"));
+    try testing.expect(std.mem.indexOf(u8, got.text, "no residue found") == null);
+    try testing.expect(!got.diags.hasErrors());
+    // The skeleton is total all the same: the module is a document
+    // again, bound lanes and all.
+    try testing.expect(got.verdicts.len > 0);
+    for (got.verdicts) |v| try testing.expectEqual(reconcile.Action.skeleton, v.action);
+}
+
+test "pipeline: a corrupt IT chunk beside a tail is rule 5 — the tail wins" {
+    // Plan 04, rule 5, in its own words: "the message tail is used when
+    // the chunk is absent, corrupt or truncated, with `residue_partial`
+    // naming what the tail lacks". So a chunk that will not frame does
+    // not take the file to the skeleton while a readable tail is sitting
+    // beside it — the shape of the piece is more than nothing.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const bytes = try itCarrierBytes(gpa, &schema, .{ .corrupt = true, .tail = true });
+    defer gpa.free(bytes);
+
+    var got = try dump(gpa, &schema, bytes, .it, .{});
+    defer got.deinit();
+
+    try testing.expectEqual(reconcile.Rule.partial, got.rule);
+    // Both facts are on the record: the chunk was unreadable AND the
+    // tail is all that could be used.
+    try testing.expect(got.diags.count(.residue_corrupt) > 0);
+    try testing.expect(got.diags.count(.residue_partial) > 0);
+    try testing.expect(std.mem.startsWith(u8, got.text, "; partial:"));
+    try testing.expect(!got.diags.hasErrors());
+    // The shape came back and none of the content.
+    try testing.expect(std.mem.indexOf(u8, got.text, "(timeline :title \"smaller\"") != null);
+    try testing.expect(std.mem.indexOf(u8, got.text, "(note ") == null);
+}
+
+test "pipeline: an IT chunk of a newer envelope leaves it in the file and derives" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    // No tail: `it.choose` prefers a readable tail over a chunk it
+    // cannot read, so rule 3's own branch is the one with nothing else
+    // to fall back on.
+    const bytes = try itCarrierBytes(gpa, &schema, .{
+        .ver = records.version + 1,
+        .tail = false,
+    });
+    defer gpa.free(bytes);
+
+    var got = try dump(gpa, &schema, bytes, .it, .{});
+    defer got.deinit();
+
+    try testing.expectEqual(reconcile.Rule.version, got.rule);
+    try testing.expect(got.diags.count(.residue_version) > 0);
+    try testing.expectEqual(@as(usize, 0), got.diags.count(.residue_corrupt));
+    try testing.expect(std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue is a newer version"));
+    try testing.expect(!got.diags.hasErrors());
+
+    // The file was not touched: the chunk is still under its 4CC, and
+    // `check-residue` reads the version off it rather than the records.
+    try testing.expect(std.mem.indexOf(u8, bytes, residue_it.tag) != null);
+    var rep = try checkResidue(gpa, bytes, .it);
+    defer rep.deinit();
+    try testing.expect(std.mem.indexOf(u8, rep.text, "envelope version 2") != null);
+    try testing.expect(std.mem.indexOf(u8, rep.text, "does not read") != null);
 }

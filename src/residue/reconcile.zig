@@ -179,6 +179,17 @@ pub const Found = union(enum) {
     /// carrier has already raised `residue_version` over them, so this
     /// arm derives the skeleton and does not say it twice.
     newer: u8,
+    /// Rule 4: the carrier held a residue and could not read it — a
+    /// `TMPU` chunk whose framing does not hold, a split essence with a
+    /// part missing. The carrier has already raised `residue_corrupt`,
+    /// so this arm derives the skeleton under the CORRUPT header and
+    /// does not say it twice.
+    ///
+    /// It exists because `.none` and this are not the same file: `.none`
+    /// prints "no residue found", and printing that over a file that
+    /// carried one — while the diagnostics say `residue_corrupt` — is
+    /// two surfaces contradicting each other.
+    corrupt,
 };
 
 pub const Options = struct {
@@ -307,6 +318,7 @@ pub fn reconcile(
     switch (found) {
         .none => try run.derive(.derived),
         .newer => try run.derive(.version),
+        .corrupt => try run.derive(.corrupt),
         .tail => |text| try run.partial(text),
         .payloads => |p| try run.fromPayloads(p),
     }
@@ -425,6 +437,14 @@ const Run = struct {
             .entries = &.{.{ .path = self.file.name, .bytes = self.file.bytes }},
         };
 
+        // Its diagnostics are DISCARDED, and only here: this document is
+        // tempura's own wrapper, three lines it just wrote from the
+        // bridge's text, and anything it complained of would be a defect
+        // in this function rather than anything a caller could act on.
+        // The wrapper is thrown away too — what survives is the skeleton
+        // derived from it. `doc/pipeline.zig` loads the text that
+        // actually comes out, with a resolver and with every diagnostic
+        // kept, which is where a real fault surfaces.
         var res = try fromSjon.fromSource(self.gpa, self.schema, source, Resolver.memory(&table));
         defer res.deinit();
 
@@ -597,7 +617,7 @@ const Run = struct {
             rec.hash_ok = std.mem.eql(u8, &rec.hash, &now);
         }
 
-        try self.emit(&tree, text, recs.items, file_conducts);
+        try self.emit(&tree, text, recs.items, if (file_conducts) .file_wins else .document);
     }
 
     /// The essence decoded but does not parse — which can only mean the
@@ -632,7 +652,7 @@ const Run = struct {
         defer tree.deinit();
         if (tree.hasErrors()) return self.corruptEssence();
 
-        try self.emit(&tree, src, &.{}, false);
+        try self.emit(&tree, src, &.{}, .file_only);
 
         // A verdict per lane the tail could ADDRESS, and no more. The
         // tail carries a native lane's declaration without a `:from`,
@@ -667,8 +687,9 @@ const Run = struct {
         tree: *const Ast.Tree,
         source: []const u8,
         recs: []const Record,
-        file_conducts: bool,
+        conducting: Conducting,
     ) Error!void {
+        const file_conducts = conducting != .document;
         var out: std.ArrayList(u8) = .empty;
         if (self.rule == .partial) {
             try out.appendSlice(self.a, header_partial);
@@ -724,7 +745,9 @@ const Run = struct {
 
             // The file won the conductor: the document's own points and
             // cues are not restored, and `:conductor` says who does.
-            if (file_conducts) {
+            // `.file_only` sets the `:conductor` below and drops
+            // nothing — there was never anything to drop.
+            if (conducting == .file_wins) {
                 if (isForm(tree, idx, "tempo-point")) {
                     try dropped.append(self.a, try self.labelTempo(tree, source, idx));
                     continue;
@@ -737,6 +760,10 @@ const Run = struct {
                     try dropped.append(self.a, try self.label(tree, source, idx, "cue", "name"));
                     continue;
                 }
+            }
+
+            // …and BOTH ways the file conducts say so on the header.
+            if (file_conducts) {
                 if (isForm(tree, idx, "timeline") and keyValue(tree, idx, "conductor") == null) {
                     // Last, just inside the closing paren: `:conductor`
                     // is the canonical printer's final key, so a
@@ -791,11 +818,12 @@ const Run = struct {
 
         self.text = out.items;
 
-        // Raised whenever the FILE took the baton, dropped list or no:
+        // Raised whenever the file took the baton FROM a document that
+        // had its own time, dropped list or no:
         // a document that conducted itself and now says `:conductor` is
         // timed by other numbers than it was, and that is the loss
         // being reported even when there was no point to drop.
-        if (file_conducts) try self.diags.add(
+        if (conducting == .file_wins) try self.diags.add(
             .residue_stale,
             .warning,
             .{ .start = 0, .end = 0 },
@@ -808,7 +836,23 @@ const Run = struct {
 
         // The verdicts, in the order the records rode in the file, so the
         // same bytes always report the same table.
+        //
+        // A record whose lane the essence does not declare gets NO
+        // verdict: a verdict is a statement about a lane in the document
+        // that came out, and `became_bound` over a lane nobody can find
+        // in the text would be one more contradiction between two
+        // surfaces. The record is still a loss, so it is named.
         for (recs) |rec| {
+            if (!hasLane(tree, rec.lane)) {
+                try self.diags.add(
+                    .residue_stale,
+                    .warning,
+                    .{ .start = 0, .end = 0 },
+                    "a lane record names {s} at {s}, which the restored essence does not declare; the record is orphaned and was dropped",
+                    .{ rec.lane, try self.addressText(rec.address) },
+                );
+                continue;
+            }
             var hints: []const Hint = &.{};
             if (!rec.hash_ok) hints = try self.verifiedHints(rec);
             try self.verdicts.append(self.a, .{
@@ -928,30 +972,8 @@ const Run = struct {
         );
     }
 
-    /// The binding keys of `address`, spelled exactly as the canonical
-    /// printer spells them (`doc/toSjon.zig`'s `binding`).
     fn addressKeys(self: *Run, out: *std.ArrayList(u8), address: Doc.Address) Error!void {
-        switch (address) {
-            .smf => |s| {
-                try out.print(self.a, " :track {d} :ch {d}", .{ s.track, @as(u8, s.ch) + 1 });
-                if (s.key) |k| try out.print(self.a, " :key {d}", .{k});
-                if (s.curve) |c| switch (c) {
-                    .cc => |n| try out.print(self.a, " :cc {d}", .{n}),
-                    .cc14 => |pair| try out.print(self.a, " :cc [{d} {d}]", .{ pair[0], pair[1] }),
-                    .bend => try out.appendSlice(self.a, " :bend true"),
-                    .pressure => try out.appendSlice(self.a, " :pressure true"),
-                    .velocity => try out.appendSlice(self.a, " :velocity true"),
-                };
-            },
-            .it => |s| {
-                try out.print(self.a, " :channel {d}", .{@as(u8, s.channel) + 1});
-                if (s.column) |col| {
-                    try out.appendSlice(self.a, " :column ");
-                    try out.appendSlice(self.a, @tagName(col));
-                }
-                if (s.fx) |letter| try out.print(self.a, " :fx \"{c}\"", .{letter});
-            },
-        }
+        return addressKeysInto(self.a, out, address);
     }
 
     fn addressText(self: *Run, address: Doc.Address) Error![]const u8 {
@@ -1040,10 +1062,47 @@ const Run = struct {
     }
 };
 
+/// The binding keys of `address`, spelled exactly as the canonical
+/// printer spells them (`doc/toSjon.zig`'s `binding`).
+///
+/// The two spellings MUST agree: a bound lane this writes is read back
+/// and re-printed by `toSjon`, and a disagreement would make a dump
+/// non-idempotent — dump, print, dump again and the text moves. A test
+/// at the bottom of this file loads what this produces and compares the
+/// printer's own output with it, address shape by address shape.
+pub fn addressKeysInto(a: Allocator, out: *std.ArrayList(u8), address: Doc.Address) Error!void {
+    switch (address) {
+        .smf => |s| {
+            try out.print(a, " :track {d} :ch {d}", .{ s.track, @as(u8, s.ch) + 1 });
+            if (s.key) |k| try out.print(a, " :key {d}", .{k});
+            if (s.curve) |c| switch (c) {
+                .cc => |n| try out.print(a, " :cc {d}", .{n}),
+                .cc14 => |pair| try out.print(a, " :cc [{d} {d}]", .{ pair[0], pair[1] }),
+                .bend => try out.appendSlice(a, " :bend true"),
+                .pressure => try out.appendSlice(a, " :pressure true"),
+                .velocity => try out.appendSlice(a, " :velocity true"),
+            };
+        },
+        .it => |s| {
+            try out.print(a, " :channel {d}", .{@as(u8, s.channel) + 1});
+            if (s.column) |col| {
+                try out.appendSlice(a, " :column ");
+                try out.appendSlice(a, @tagName(col));
+            }
+            if (s.fx) |letter| try out.print(a, " :fx \"{c}\"", .{letter});
+        },
+    }
+}
+
 /// The address as a diagnostic says it — the same facts `addressKeys`
 /// spells as document keys, in prose, because a warning is read by a
 /// person and `:track 2 :ch 1` in the middle of a sentence is not.
 /// `check-residue`'s table reads it too.
+///
+/// The slice is `a`'s and is never freed on its own: pass an ARENA (the
+/// result's, or a scratch one the caller drops whole). It is an
+/// `ArrayList`'s `items`, so `a.free` on it is wrong whenever the list
+/// over-allocated.
 pub fn addressProse(a: Allocator, address: Doc.Address) Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     switch (address) {
@@ -1145,6 +1204,10 @@ pub const Hasher = struct {
 /// The comment a derived document opens with, by the rule that derived it.
 fn headerFor(rule: Rule) []const u8 {
     return switch (rule) {
+        // `.restored` cannot reach here — only `derive` asks for a
+        // header, and `derive` never sets it — but the switch is total
+        // rather than `unreachable`, and rule 1's line is the honest
+        // fallback if a later rule ever does derive after restoring.
         .derived, .restored => header_skeleton,
         .version => header_version,
         .corrupt => header_corrupt,
@@ -1183,6 +1246,29 @@ fn hexDigest(bytes: []const u8) [64]u8 {
 // ---------------------------------------------------------------------
 // Rule 2: the essence restored, hash by hash
 // ---------------------------------------------------------------------
+
+/// Who keeps time in the document that comes out.
+const Conducting = enum {
+    /// The document does, as it did when it was built: its own
+    /// `tempo-point`s, `meter-point`s and `cue`s are restored and it
+    /// gains no `:conductor` (rule 2 with the conductor hash matching,
+    /// or with no conductor record at all).
+    document,
+    /// The FILE does, and it TOOK the baton: someone edited the tempo,
+    /// the meter or a marker after the residue was written, so
+    /// `:conductor` is set, the document's own points and cues are
+    /// dropped and `residue_stale` names them (rule 2, mismatch).
+    file_wins,
+    /// The file does, and there was never a contest: the message tail
+    /// carries no `tempo-point`s by construction (plan 04, "The IT
+    /// carriers": the addressed summary, no native content), so the
+    /// restored shape has no time of its own and `:conductor` is the
+    /// only honest answer. Nothing is dropped and nothing is named —
+    /// `residue_partial` has already said what the tail lacks, and a
+    /// document with neither points nor a conductor would not even
+    /// re-read (`tempo_map_invalid`).
+    file_only,
+};
 
 /// One lane record, decoded into the result's arena and answered.
 const Record = struct {
@@ -1252,6 +1338,17 @@ const Step = struct {
     value: f32,
 };
 
+/// Does the restored text declare a lane called `name`?
+fn hasLane(tree: *const Ast.Tree, name: []const u8) bool {
+    for (tree.root) |idx| {
+        if (!isForm(tree, idx, "lane")) continue;
+        const v = keyValue(tree, idx, "name") orelse continue;
+        const text = atomText(tree, v) orelse continue;
+        if (std.mem.eql(u8, text, name)) return true;
+    }
+    return false;
+}
+
 /// The record for `name`, when its hash no longer matches — the one
 /// verdict that rewrites a lane.
 fn staleRecord(recs: []const Record, name: []const u8) ?Record {
@@ -1269,6 +1366,10 @@ fn staleRecord(recs: []const Record, name: []const u8) ?Record {
 /// order two implementations can agree on (plan 04's open question,
 /// "Hash scope for IT rendered lanes", answered here and restated in
 /// `docs/residue.md` at E3).
+///
+/// The slice is `a`'s and is never freed on its own: pass an ARENA. It
+/// is an `ArrayList`'s `items` and its capacity may exceed its length,
+/// so `a.free` on it is wrong.
 pub fn playedPatterns(a: Allocator, rows: *const walk.RowMap) Error![]u16 {
     var seen: std.ArrayList(u16) = .empty;
     for (rows.rows) |row| {
@@ -1486,6 +1587,9 @@ const smf_bare: [:0]const u8 =
     \\(lane :name kick :kind notes
     \\  (note :at 0bar :dur 1q :key 36 :vel 100))
     \\
+    \\(lane :name cutoff :kind curve :range [0 1]
+    \\  (keyframe :at 0bar :value 0))
+    \\
 ;
 
 /// What a DAW may have done to the file after tempura wrote it. Every
@@ -1583,6 +1687,9 @@ const SmfCase = struct {
 const SmfCarry = struct {
     /// The document the essence is packed from.
     source: [:0]const u8 = smf_source,
+    /// The name the kick's RECORD carries. A name the essence does not
+    /// declare makes that record an orphan.
+    kick_name: []const u8 = "kick",
     /// The edit the file carries when the RECORDS were computed. The
     /// default is no edit at all: the residue and the music agree.
     written: Edit = .{},
@@ -1605,7 +1712,7 @@ fn smfCase(gpa: Allocator, carry: SmfCarry) !SmfCase {
     defer written.deinit();
 
     const kick = try records.encodeLane(gpa, .{
-        .lane = "kick",
+        .lane = carry.kick_name,
         .address = .{ .smf = .{ .track = 2, .ch = 0, .key = 36, .curve = null } },
         .hash = records.hashSmfLane(&written, 1, 0, carry.written.ppq),
     });
@@ -2022,7 +2129,7 @@ fn findDiag(got: *const Result, code: Diag.Code) ?Diag.Diagnostic {
 /// can.
 const it_source: [:0]const u8 =
     \\; impulsos, as the author wrote it
-    \\(timeline :title "impulsos" :length 1bar)
+    \\(timeline :title "impulsos" :length 2bar)
     \\
     \\(anchor :id song :kind it :file "song.it" :size 1 :sha256 "9f2a")
     \\
@@ -2036,7 +2143,7 @@ const it_source: [:0]const u8 =
     \\
     \\(lane :name bass-vol :kind curve :range [0 1]
     \\  (keyframe :at 0bar :value 0)
-    \\  (keyframe :at 1q :value 1 :ease in-cubic))
+    \\  (keyframe :at 8q :value 1 :ease in-cubic))
     \\
     \\(lane :name hats :kind notes :from song :channel 4)
     \\
@@ -2051,6 +2158,18 @@ const ItEdit = struct {
     tempo: u8 = 125,
     /// A note on the BOUND lane's channel, which no record covers.
     hat: u8 = 72,
+    /// The note the bass-vol channel opens on. Editing it moves that
+    /// lane's hash without touching its volume column — a stale curve
+    /// whose steps still say exactly what they said.
+    bass_note: u8 = 48,
+};
+
+/// What the bass-vol record's own easing hint claims. The module's
+/// volume column ramps 0, 16, 32, 48, 64 over five played rows, which is
+/// LINEAR — so `linear` verifies against those steps and `in-cubic` does
+/// not.
+const ItHint = struct {
+    ease: []const u8 = "in-cubic",
 };
 
 /// The module tempura rendered `it_source` into: the kick on channel 1,
@@ -2064,7 +2183,7 @@ fn itFile(gpa: Allocator, e: ItEdit) !itf.Module {
     p0.at(0, 0).* = .{ .note = 60, .ins = 1, .vol = 64 };
     p0.at(16, 0).* = .{ .note = 60, .ins = 1, .vol = 64 };
 
-    p0.at(0, 1).* = .{ .note = 48, .ins = 2, .vol = 0 };
+    p0.at(0, 1).* = .{ .note = e.bass_note, .ins = 2, .vol = 0 };
     p0.at(8, 1).* = .{ .vol = 16 };
     p0.at(16, 1).* = .{ .vol = e.vol };
     p0.at(24, 1).* = .{ .vol = 48 };
@@ -2123,6 +2242,8 @@ const ItCase = struct {
 const ItCarry = struct {
     written: ItEdit = .{},
     read_as: ItEdit = .{},
+    /// The easing the bass-vol record hints at.
+    hint: ItHint = .{},
     /// The `TMPU` chunk — off for the tail-only case.
     chunk: bool = true,
     /// The message tail.
@@ -2150,7 +2271,7 @@ fn itCase(gpa: Allocator, schema: *const Schema, carry: ItCarry) !ItCase {
     defer gpa.free(kick);
     var segments = [_]records.Segment{
         .{ .at = 0, .ease = "linear" },
-        .{ .at = q, .ease = "in-cubic" },
+        .{ .at = 8 * q, .ease = carry.hint.ease },
     };
     const bass = try records.encodeLane(gpa, .{
         .lane = "bass-vol",
@@ -2298,6 +2419,39 @@ test "reconcile: rule 2 — a cell edit binds the lane it moved and leaves the r
         got.doc_text,
         "(lane :name bass-vol :kind curve :from song :channel 2 :column vol :range [0 1])",
     ) != null);
+
+    // The hint rule, over IT's own steps: the module's volume column
+    // ramps linearly across the five rows it plays, so the record's
+    // `in-cubic` claim is contradicted and dropped.
+    try testing.expectEqual(@as(usize, 0), bass.hints.len);
+    try testing.expectEqual(@as(usize, 1), got.diags.count(.ease_hint_mismatch));
+    const h = findDiag(&got, .ease_hint_mismatch).?;
+    try testing.expect(std.mem.indexOf(u8, h.message, "lane bass-vol") != null);
+    try testing.expect(std.mem.indexOf(u8, h.message, "in-cubic") != null);
+}
+
+test "reconcile: rule 2 — an IT hint the volume column really follows is kept" {
+    // The other half of the same rule on the same steps: a `linear`
+    // claim over a linear ramp survives, and nothing is raised.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var case = try itCase(gpa, &schema, .{
+        .hint = .{ .ease = "linear" },
+        .read_as = .{ .bass_note = 49 },
+    });
+    defer case.deinit();
+
+    var got = try reconcile(gpa, &schema, case.input(), case.found(), .{});
+    defer got.deinit();
+
+    const bass = got.verdictFor("bass-vol").?;
+    try testing.expectEqual(Action.became_bound, bass.action);
+    try testing.expectEqual(@as(usize, 1), bass.hints.len);
+    try testing.expectEqualStrings("linear", bass.hints[0].ease);
+    try testing.expectEqual(@as(i64, 0), bass.hints[0].from);
+    try testing.expectEqual(@as(i64, 8 * q), bass.hints[0].to);
+    try testing.expectEqual(@as(usize, 0), got.diags.count(.ease_hint_mismatch));
 }
 
 test "reconcile: rule 2 — an edit to a bound lane's channel moves no verdict" {
@@ -2363,8 +2517,18 @@ test "reconcile: rule 5 — the tail alone is the shape of the piece and says wh
     try testing.expectEqual(@as(?ConductorVerdict, null), got.conductor);
 
     // The shape came back: the timeline's keys, the cue, and every
-    // lane's declaration.
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(timeline :title \"impulsos\"") != null);
+    // lane's declaration — with the MODULE conducting, because the tail
+    // carries no `tempo-point`s by construction and a restored shape
+    // with neither points nor a `:conductor` would not re-read at all.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        got.doc_text,
+        "(timeline :title \"impulsos\" :length 2bar :conductor song)",
+    ) != null);
+    // Nothing was DROPPED, though: `residue_partial` has already said
+    // what the tail lacks, and there was no point or cue to lose.
+    try testing.expectEqual(@as(usize, 0), got.diags.count(.residue_stale));
+    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(cue :name \"intro\" :at 0bar)") != null);
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "(cue :name \"intro\" :at 0bar)") != null);
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "(lane :name kick :kind notes :target drums)") != null);
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "(lane :name hats :kind notes :from song :channel 4)") != null);
@@ -2409,4 +2573,123 @@ test "reconcile: rule 2 — a document with no points of its own still hears the
         got.doc_text,
         "(timeline :title \"bare\" :conductor song)",
     ) != null);
+}
+
+test "reconcile: a carrier that could not read its residue is rule 4, never rule 1" {
+    // `Found.corrupt`: the carrier held a residue and the framing did
+    // not hold. The difference from `.none` is the HEADER — a document
+    // that says "no residue found" over a file that carried one is two
+    // surfaces contradicting each other, and the diagnostics say
+    // `residue_corrupt`.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var case = try smfCase(gpa, .{ .essence = false, .conductor = false, .lanes = false });
+    defer case.deinit();
+
+    var got = try reconcile(gpa, &schema, case.input(), .corrupt, .{});
+    defer got.deinit();
+
+    try testing.expectEqual(Rule.corrupt, got.rule);
+    try testing.expect(std.mem.startsWith(u8, got.doc_text, header_corrupt));
+    try testing.expect(std.mem.indexOf(u8, got.doc_text, "no residue found") == null);
+    // The carrier named the loss; this arm does not say it twice.
+    try testing.expectEqual(@as(usize, 0), got.diags.items().len);
+    try testing.expect(got.verdicts.len > 0);
+    for (got.verdicts) |v| try testing.expectEqual(Action.skeleton, v.action);
+}
+
+test "reconcile: a lane record naming a lane the essence has not got is named and dropped" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    // The record says `ghost`; the essence declares `kick` and
+    // `cutoff`. Nothing in the document can carry that verdict.
+    var case = try smfCase(gpa, .{ .kick_name = "ghost" });
+    defer case.deinit();
+
+    var got = try reconcile(gpa, &schema, case.input(), case.found(), .{});
+    defer got.deinit();
+
+    try testing.expectEqual(Rule.restored, got.rule);
+    // One verdict, not two: the orphan gets none.
+    try testing.expectEqual(@as(usize, 1), got.verdicts.len);
+    try testing.expectEqualStrings("cutoff", got.verdicts[0].lane);
+    try testing.expectEqual(@as(?LaneVerdict, null), got.verdictFor("ghost"));
+
+    // …and the loss is named rather than swallowed.
+    try testing.expectEqual(@as(usize, 1), got.diags.count(.residue_stale));
+    const d = findDiag(&got, .residue_stale).?;
+    try testing.expect(std.mem.indexOf(u8, d.message, "names ghost at track 2 ch 1 key 36") != null);
+    try testing.expect(std.mem.indexOf(u8, d.message, "orphaned") != null);
+    // The real lanes came back untouched, content and all. (The
+    // assertion is on the FORM's content rather than on its line: SJON's
+    // full-mode printer reflows a multi-child form across lines, so what
+    // the essence preserves is the comments, the spellings and the
+    // content — not the author's exact whitespace.)
+    try testing.expect(std.mem.indexOf(u8, got.doc_text, ":name kick") != null);
+    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(note :at 0bar :dur 1q :key 36 :vel 100)") != null);
+    try testing.expect(std.mem.indexOf(u8, got.doc_text, "; the kick, as the author wrote it") != null);
+}
+
+test "reconcile: the binding keys it writes are the ones the printer writes back" {
+    // `addressKeysInto` and `toSjon`'s `binding` are two spellings of one
+    // thing, and a disagreement would make a dump non-idempotent: the
+    // bound lane a stale verdict writes is read back and re-printed, and
+    // the text would move on the second pass. Every address shape, once.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    const Case = struct { kind: []const u8, address: Doc.Address };
+    const cases = [_]Case{
+        .{ .kind = "notes", .address = .{ .smf = .{ .track = 2, .ch = 0, .key = 36, .curve = null } } },
+        .{ .kind = "notes", .address = .{ .smf = .{ .track = 1, .ch = 15, .key = null, .curve = null } } },
+        .{ .kind = "curve", .address = .{ .smf = .{ .track = 3, .ch = 4, .key = null, .curve = .{ .cc = 74 } } } },
+        .{ .kind = "curve", .address = .{ .smf = .{ .track = 3, .ch = 4, .key = null, .curve = .{ .cc14 = .{ 74, 106 } } } } },
+        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = 1, .key = null, .curve = .bend } } },
+        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = 1, .key = null, .curve = .pressure } } },
+        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = 1, .key = null, .curve = .velocity } } },
+        .{ .kind = "notes", .address = .{ .it = .{ .channel = 3, .column = null, .fx = null } } },
+        .{ .kind = "curve", .address = .{ .it = .{ .channel = 5, .column = .vol, .fx = null } } },
+        .{ .kind = "curve", .address = .{ .it = .{ .channel = 5, .column = .fx, .fx = 'T' } } },
+    };
+
+    for (cases) |c| {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var keys: std.ArrayList(u8) = .empty;
+        try addressKeysInto(a, &keys, c.address);
+
+        const kind_name = switch (c.address) {
+            .smf => "smf",
+            .it => "it",
+        };
+        const source = try std.fmt.allocPrintSentinel(
+            a,
+            "(timeline :title \"t\")\n" ++
+                "(anchor :id song :kind {s} :file \"x\" :size 1 :sha256 \"9f2a\")\n" ++
+                "(tempo-point :at 0bar :qpm 120)\n" ++
+                "(meter-point :at 0bar :sig [4 4])\n" ++
+                "(lane :name l :kind {s} :from song{s}{s})\n",
+            .{
+                kind_name,
+                c.kind,
+                keys.items,
+                if (std.mem.eql(u8, c.kind, "curve")) " :range [0 1]" else "",
+            },
+            0,
+        );
+
+        var res = try fromSjon.fromSource(gpa, &schema, source, null);
+        defer res.deinit();
+        try testing.expect(!res.diags.hasErrors());
+
+        const printed = try toSjon.print(gpa, &res.doc, &res.map, .{});
+        defer gpa.free(printed);
+        // The printer's own spelling of the very same binding.
+        try testing.expect(std.mem.indexOf(u8, printed, keys.items) != null);
+    }
 }
