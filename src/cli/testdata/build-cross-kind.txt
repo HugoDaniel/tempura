@@ -3,6 +3,6 @@
 exit: 1
 --- stdout (0 bytes)
 
---- stderr (172 bytes)
-corpus/tempo-three-conductors-it/doc.sjon:25:1: error build_cross_kind: this document's anchor is kind `it`; building it as `mid` is refused (plan 08, "Cross-kind builds")
+--- stderr (192 bytes)
+corpus/tempo-three-conductors-it/doc.sjon:25:1: error build_cross_kind: this document carries no `smf` anchor (it has: song=it); building it as `mid` is refused (plan 08, "Cross-kind builds")
 

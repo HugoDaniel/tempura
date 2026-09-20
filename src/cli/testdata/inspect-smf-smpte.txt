@@ -20,6 +20,6 @@ chunk   1  MTrk  at 0x0000000E  header 8  body 28  track 1
 
 residue: none
 
---- stderr (109 bytes)
-corpus/smf-smpte/song.mid:1:1: info smpte_tempo_ignored: a SMPTE file's tempo event is kept and not believed
+--- stderr (116 bytes)
+corpus/smf-smpte/song.mid:0x00000020: info smpte_tempo_ignored: a SMPTE file's tempo event is kept and not believed
 

@@ -30,13 +30,7 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     const bytes = Cli.load(ctx.a, ctx.io, ctx.cmd.path) catch |e|
         return Cli.reportLoadFailure(ctx, e);
 
-    const kind = Cli.sniff(bytes, ctx.cmd.path) orelse {
-        try ctx.err.print(
-            "tempura: {s}: not a .mid (MThd/RMID) or a .it (IMPM), and the name does not say which\n",
-            .{Diags.label(ctx.cmd.path)},
-        );
-        return Cli.Exit.usage;
-    };
+    const kind = try ctx.sniffKind(bytes) orelse return Cli.Exit.usage;
 
     var art: Writer.Allocating = .init(ctx.gpa);
     defer art.deinit();
@@ -46,16 +40,12 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
         Diags.label(ctx.cmd.path), bytes.len, @tagName(kind),
     });
 
-    // Diagnostics have no source TEXT to point into — a `.mid` is bytes,
-    // not a document — so every span reads as line 1 through an index
-    // over an empty source. The byte offsets in the map are the real
-    // coordinates, and they are in the dump itself.
-    var index = try Diags.LineIndex.build(ctx.a, "");
-    defer index.deinit(ctx.a);
-
+    // Every diagnostic here is the READER's, so its span counts bytes of
+    // the file — the same coordinate the map itself prints, which is what
+    // lets a reported offset be looked up in the dump above it.
     const code = switch (kind) {
-        .mid => try smfMap(ctx, w, bytes, &index),
-        .it => try itMap(ctx, w, bytes, &index),
+        .mid => try smfMap(ctx, w, bytes),
+        .it => try itMap(ctx, w, bytes),
     };
     try ctx.out.writeAll(art.written());
     return code;
@@ -65,7 +55,7 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
 // SMF
 // ---------------------------------------------------------------------
 
-fn smfMap(ctx: *const Cli.Ctx, w: *Writer, bytes: []const u8, index: *const Diags.LineIndex) Cli.Error!u8 {
+fn smfMap(ctx: *const Cli.Ctx, w: *Writer, bytes: []const u8) Cli.Error!u8 {
     var res = try tempura.smf.read(ctx.gpa, bytes);
     defer res.deinit();
     const seq = &res.sequence;
@@ -87,7 +77,7 @@ fn smfMap(ctx: *const Cli.Ctx, w: *Writer, bytes: []const u8, index: *const Diag
     // other way: for each chunk, which track (if any) came out of it.
     for (map.chunks, 0..) |c, ci| {
         try w.print("chunk {d: >3}  {s}  at 0x{X:0>8}  header 8  body {d}", .{
-            ci, printableTag(&c.tag), c.offset, c.len,
+            ci, Cli.printableTag(&c.tag), c.offset, c.len,
         });
         if (c.clamped_len != c.len) try w.print("  (only {d} present)", .{c.clamped_len});
 
@@ -120,7 +110,7 @@ fn smfMap(ctx: *const Cli.Ctx, w: *Writer, bytes: []const u8, index: *const Diag
     }
     if (!residue) try w.writeAll("residue: none\n");
 
-    try Diags.render(ctx.err, ctx.cmd.path, index, res.diags.items(), ctx.style);
+    try Diags.render(ctx.err, ctx.cmd.path, .bytes, res.diags.items(), ctx.style);
     return Diags.exitCode(res.diags.items());
 }
 
@@ -138,19 +128,11 @@ fn isForeign(map: *const tempura.smf.SourceMap, chunk: u32) bool {
     return false;
 }
 
-/// A chunk tag, with anything unprintable spelled as a dot — a tag is
-/// four arbitrary bytes and a terminal is not the place to find that out.
-fn printableTag(tag: *const [4]u8) [4]u8 {
-    var out: [4]u8 = undefined;
-    for (tag, &out) |b, *o| o.* = if (b >= 0x20 and b < 0x7f) b else '.';
-    return out;
-}
-
 // ---------------------------------------------------------------------
 // IT
 // ---------------------------------------------------------------------
 
-fn itMap(ctx: *const Cli.Ctx, w: *Writer, bytes: []const u8, index: *const Diags.LineIndex) Cli.Error!u8 {
+fn itMap(ctx: *const Cli.Ctx, w: *Writer, bytes: []const u8) Cli.Error!u8 {
     var res = try tempura.itf.read.read(ctx.gpa, bytes);
     defer res.deinit();
     const m = &res.module;
@@ -179,7 +161,7 @@ fn itMap(ctx: *const Cli.Ctx, w: *Writer, bytes: []const u8, index: *const Diags
         if (e.kind == .pattern and e.index < m.patterns.len)
             try w.print("  rows {d}", .{m.patterns[e.index].rows});
         if (e.kind == .foreign and e.index < m.foreign.len)
-            try w.print("  tag \"{s}\"", .{printableTag(&m.foreign[e.index].tag)});
+            try w.print("  tag \"{s}\"", .{Cli.printableTag(&m.foreign[e.index].tag)});
         try w.writeAll("\n");
     }
 
@@ -198,7 +180,7 @@ fn itMap(ctx: *const Cli.Ctx, w: *Writer, bytes: []const u8, index: *const Diags
     }
     if (!any) try w.writeAll("residue: none\n");
 
-    try Diags.render(ctx.err, ctx.cmd.path, index, res.diags.items(), ctx.style);
+    try Diags.render(ctx.err, ctx.cmd.path, .bytes, res.diags.items(), ctx.style);
     return Diags.exitCode(res.diags.items());
 }
 
@@ -282,4 +264,89 @@ test "inspect: a truncated file still maps what it has, and says what is wrong" 
     try t.expectEqual(Cli.Exit.errors, c.code);
     try t.expect(std.mem.indexOf(u8, c.out.written(), "chunk   0  MThd") != null);
     try t.expect(std.mem.indexOf(u8, c.err.written(), ": error ") != null);
+}
+
+/// Write `bytes` into a fresh temp directory and inspect them.
+///
+/// The two residue branches below have no corpus fixture to stand on —
+/// nothing committed carries a `7D 'tem'` event or a `;; tempura` message
+/// tail — so each builds its own file through the residue carriers
+/// themselves, which is also the only way the test can be sure what it is
+/// looking for is really there.
+fn inspectBytes(tmp: *std.testing.TmpDir, name: []const u8, bytes: []const u8) !Cli.Captured {
+    const a = t.allocator;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name }, 0);
+    defer a.free(path);
+    return Cli.invoke(&.{ "tempura", "inspect", path });
+}
+
+test "inspect: an SMF carrying a 7D 'tem' event reports where the residue sits" {
+    const a = t.allocator;
+
+    var b: tempura.smf.Builder = .init(a);
+    errdefer b.deinit();
+    b.format = 0;
+    b.division = .{ .ppq = 96 };
+    const track = try b.addTrack();
+    try b.addEvent(track, 0, .set_tempo, .{ .tempo = 500_000 });
+    try b.addEvent(track, 96, .note_on, .{ .note = .{ .ch = 0, .key = 60, .vel = 100 } });
+    var seq = try b.finish();
+    defer seq.deinit();
+
+    // The carrier's own `attach`, so what lands in the file is exactly
+    // what a real residue is — envelope bytes and all.
+    var attached = try tempura.residue.smf.attach(a, &seq, .{ .essence = "tempura-essence" }, .{});
+    defer attached.deinit();
+    try t.expect(!attached.diags.hasErrors());
+
+    var file = try tempura.smf.write(a, &attached.sequence, .{});
+    defer file.deinit();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var c = try inspectBytes(&tmp, "residue.mid", file.bytes);
+    defer c.deinit();
+
+    try t.expectEqual(Cli.Exit.ok, c.code);
+    const text = c.out.written();
+    try t.expect(std.mem.indexOf(u8, text, "tempura_residue  <- residue") != null);
+    try t.expect(std.mem.indexOf(u8, text, "residue: track 1 event ") != null);
+    try t.expect(std.mem.indexOf(u8, text, "residue: none") == null);
+}
+
+test "inspect: an IT whose song message carries a tail reports the split" {
+    const a = t.allocator;
+
+    const message = try tempura.residue.it.appendTail(
+        a,
+        "written by hand",
+        tempura.residue.it.marker ++ "\r(timeline)",
+    );
+    defer a.free(message);
+
+    var b: tempura.itf.Builder = .init(a);
+    errdefer b.deinit();
+    b.setTitle("tail");
+    try b.addOrder(0);
+    _ = try b.addPattern(32);
+    try b.setMessage(message);
+    var module = b.finish();
+    defer module.deinit();
+
+    var file = try tempura.itf.write.write(a, &module, null, .{});
+    defer file.deinit();
+    try t.expect(!file.diags.hasErrors());
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var c = try inspectBytes(&tmp, "tail.it", file.bytes);
+    defer c.deinit();
+
+    try t.expectEqual(Cli.Exit.ok, c.code);
+    const text = c.out.written();
+    try t.expect(std.mem.indexOf(u8, text, "residue: message tail") != null);
+    // The human half is measured too: 15 bytes of "written by hand".
+    try t.expect(std.mem.indexOf(u8, text, "15 of song text") != null);
+    try t.expect(std.mem.indexOf(u8, text, "residue: none") == null);
 }

@@ -60,19 +60,7 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     const bytes = Cli.load(ctx.a, ctx.io, ctx.cmd.path) catch |e|
         return Cli.reportLoadFailure(ctx, e);
 
-    const kind = Cli.sniff(bytes, ctx.cmd.path) orelse {
-        try ctx.err.print(
-            "tempura: {s}: not a .mid (MThd/RMID) or a .it (IMPM), and the name does not say which\n",
-            .{Diags.label(ctx.cmd.path)},
-        );
-        return Cli.Exit.usage;
-    };
-
-    // Diagnostics ABOUT THE FILE have byte offsets into bytes, not into
-    // any text, so they are rendered through an index over an empty
-    // source: line 1, column 1, and the message carries the detail.
-    var file_index = try Diags.LineIndex.build(ctx.a, "");
-    defer file_index.deinit(ctx.a);
+    const kind = try ctx.sniffKind(bytes) orelse return Cli.Exit.usage;
 
     var file_diags: tempura.Diag.List = .init(ctx.gpa);
     defer file_diags.deinit();
@@ -88,7 +76,7 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     const assembled = try std.fmt.allocPrintSentinel(
         ctx.a,
         "(timeline :conductor {s})\n\n(anchor :id {0s} :kind {1s} :file \"{2s}\" :size {3d} :sha256 \"{4s}\")\n{5s}",
-        .{ anchor_id, @tagName(anchorKind(kind)), file_name, bytes.len, &hexDigest(bytes), tier.text },
+        .{ anchor_id, @tagName(Cli.anchorKind(kind)), file_name, bytes.len, &hexDigest(bytes), tier.text },
         0,
     );
 
@@ -139,14 +127,16 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
 
     if (!try ctx.emit(art.written())) return Cli.Exit.usage;
 
-    // Two reports, two coordinate spaces, and the labels say which is
-    // which: the FILE's diagnostics point at bytes, and the assembled
-    // document's point at the text the bridge just produced — the second
-    // set can only ever mean a tempura defect, so it is never swallowed.
-    try Diags.render(ctx.err, ctx.cmd.path, &file_index, file_diags.items(), ctx.style);
+    // Two reports in two coordinate spaces, and each line says which:
+    // the FILE's diagnostics count bytes of the file and print the
+    // offset, and the assembled document's count characters of the text
+    // the bridge just produced and print a line and a column. The second
+    // set can only ever mean a tempura defect, so it is labelled
+    // `<dump>` and never swallowed.
+    try Diags.render(ctx.err, ctx.cmd.path, .bytes, file_diags.items(), ctx.style);
     var doc_index = try Diags.LineIndex.build(ctx.a, assembled);
     defer doc_index.deinit(ctx.a);
-    try Diags.render(ctx.err, "<dump>", &doc_index, res.diags.items(), ctx.style);
+    try Diags.render(ctx.err, "<dump>", .{ .text = &doc_index }, res.diags.items(), ctx.style);
 
     return @max(Diags.exitCode(file_diags.items()), Diags.exitCode(res.diags.items()));
 }
@@ -177,7 +167,7 @@ fn smfTier(ctx: *const Cli.Ctx, bytes: []const u8, diags: *tempura.Diag.List) Cl
         });
         for (res.source_map.chunks, 0..) |c, i| {
             try w.print(";   chunk {d}  {s}  at 0x{X:0>8}  body {d}\n", .{
-                i, tagText(&c.tag), c.offset, c.len,
+                i, Cli.printableTag(&c.tag), c.offset, c.len,
             });
         }
         for (res.source_map.tracks, res.sequence.tracks, 0..) |tm, tr, ti| {
@@ -246,13 +236,6 @@ pub fn spliceAfterAnchor(w: *Writer, head: []const u8, spans: []const u8, tier: 
     try w.writeAll(head[cut..]);
 }
 
-fn anchorKind(kind: Args.Kind) tempura.doc.AnchorKind {
-    return switch (kind) {
-        .mid => .smf,
-        .it => .it,
-    };
-}
-
 /// What the dumped anchor's `:file` says.
 ///
 /// The BASENAME, because plan 02 resolves an `:file` "relative to the
@@ -276,12 +259,6 @@ fn hexDigest(bytes: []const u8) [64]u8 {
         out[i * 2] = alphabet[b >> 4];
         out[i * 2 + 1] = alphabet[b & 0xf];
     }
-    return out;
-}
-
-fn tagText(tag: *const [4]u8) [4]u8 {
-    var out: [4]u8 = undefined;
-    for (tag, &out) |b, *o| o.* = if (b >= 0x20 and b < 0x7f) b else '.';
     return out;
 }
 

@@ -22,29 +22,19 @@
 //! `tempura validate d.sjon && tempura dump s.mid -o d.sjon` composes.
 
 const std = @import("std");
-const tempura = @import("tempura");
 
 const Cli = @import("Cli.zig");
 const Diags = @import("Diags.zig");
 
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
-    const source = Cli.load(ctx.a, ctx.io, ctx.cmd.path) catch |e|
-        return Cli.reportLoadFailure(ctx, e);
+    var loaded = switch (try ctx.loadDoc()) {
+        .failed => |code| return code,
+        .ok => |l| l,
+    };
+    defer loaded.deinit();
 
-    var index = try Diags.LineIndex.build(ctx.a, source);
-    defer index.deinit(ctx.a);
-
-    var schema = try tempura.Schema.load(ctx.gpa);
-    defer schema.deinit();
-
-    var store = tempura.doc.fs(ctx.gpa, ctx.io, ctx.inputDir());
-    defer store.deinit();
-
-    var res = try tempura.doc.fromSource(ctx.gpa, &schema, source, store.resolver());
-    defer res.deinit();
-
-    const items = res.diags.items();
-    try Diags.render(ctx.err, ctx.cmd.path, &index, items, ctx.style);
+    const items = loaded.result.diags.items();
+    try Diags.render(ctx.err, ctx.cmd.path, loaded.space(), items, ctx.style);
     try Diags.summary(ctx.err, ctx.cmd.path, items);
     return Diags.exitCode(items);
 }

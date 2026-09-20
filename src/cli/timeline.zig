@@ -33,22 +33,13 @@ const Stringify = std.json.Stringify;
 pub const format_version: u32 = 1;
 
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
-    const source = Cli.load(ctx.a, ctx.io, ctx.cmd.path) catch |e|
-        return Cli.reportLoadFailure(ctx, e);
+    var loaded = switch (try ctx.loadDoc()) {
+        .failed => |code| return code,
+        .ok => |l| l,
+    };
+    defer loaded.deinit();
 
-    var index = try Diags.LineIndex.build(ctx.a, source);
-    defer index.deinit(ctx.a);
-
-    var schema = try tempura.Schema.load(ctx.gpa);
-    defer schema.deinit();
-
-    var store = tempura.doc.fs(ctx.gpa, ctx.io, ctx.inputDir());
-    defer store.deinit();
-
-    var res = try tempura.doc.fromSource(ctx.gpa, &schema, source, store.resolver());
-    defer res.deinit();
-
-    var derived = try tempura.time.derive.derive(ctx.gpa, &res.doc);
+    var derived = try tempura.time.derive.derive(ctx.gpa, &loaded.result.doc);
     defer derived.deinit();
 
     // One list for the report, in producer order: what the DOCUMENT got
@@ -56,13 +47,13 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     // ask which one to believe.
     var all: std.ArrayList(tempura.Diag.Diagnostic) = .empty;
     defer all.deinit(ctx.a);
-    try all.appendSlice(ctx.a, res.diags.items());
+    try all.appendSlice(ctx.a, loaded.result.diags.items());
     try all.appendSlice(ctx.a, derived.diags.items());
 
     var art: Writer.Allocating = .init(ctx.gpa);
     defer art.deinit();
     if (ctx.cmd.json) {
-        try writeJson(&art.writer, ctx, &index, source, all.items, &derived);
+        try writeJson(&art.writer, ctx, &loaded.index, loaded.source, all.items, &derived);
     } else {
         try derived.echo(&art.writer);
     }
@@ -72,7 +63,7 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     // — so the artifact is emitted either way and the exit code carries
     // the verdict.
     if (!try ctx.emit(art.written())) return Cli.Exit.usage;
-    try Diags.render(ctx.err, ctx.cmd.path, &index, all.items, ctx.style);
+    try Diags.render(ctx.err, ctx.cmd.path, loaded.space(), all.items, ctx.style);
     return Diags.exitCode(all.items);
 }
 

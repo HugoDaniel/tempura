@@ -39,6 +39,7 @@
 const std = @import("std");
 const tempura = @import("tempura");
 
+const Cli = @This();
 const Args = @import("Args.zig");
 const Diags = @import("Diags.zig");
 const build_verb = @import("build.zig");
@@ -171,8 +172,63 @@ pub const Ctx = struct {
     /// The report half: every diagnostic, then nothing. No summary line —
     /// a verb whose product is an artifact should not editorialise about
     /// it on the other channel.
-    pub fn report(self: *const Ctx, index: *const Diags.LineIndex, diags: []const tempura.Diag.Diagnostic) Error!void {
-        try Diags.render(self.err, self.cmd.path, index, diags, self.style);
+    ///
+    /// `space` says which bytes the spans count, and every caller has to
+    /// answer: a document's spans are text coordinates, a reader's and a
+    /// writer's are file offsets (`Diags.Space`).
+    pub fn report(self: *const Ctx, space: Diags.Space, diags: []const tempura.Diag.Diagnostic) Error!void {
+        try Diags.render(self.err, self.cmd.path, space, diags, self.style);
+    }
+
+    /// The format these bytes are, or null having said on stderr that
+    /// there is no answer. One sentence, in one place: `dump` and
+    /// `inspect` ask the same question and a user should not get two
+    /// spellings of the same "I cannot tell".
+    pub fn sniffKind(self: *const Ctx, bytes: []const u8) Error!?Args.Kind {
+        return sniff(bytes, self.cmd.path) orelse {
+            try self.err.print(
+                "tempura: {s}: not a .mid (MThd/RMID) or a .it (IMPM), and the name does not say which\n",
+                .{Diags.label(self.cmd.path)},
+            );
+            return null;
+        };
+    }
+
+    /// The one load path the three document verbs share: read the
+    /// source, index its lines, preload the manifests, point a resolver
+    /// at the document's own directory (plan 02 resolves an anchor's
+    /// `:file` "relative to the document"), and walk it.
+    ///
+    /// Returns the exit code instead when the input could not be read —
+    /// a file you named that is not there is a user error like any other,
+    /// and every verb answers it the same way.
+    pub fn loadDoc(self: *const Ctx) Error!union(enum) { ok: Loaded, failed: u8 } {
+        const source = Cli.load(self.a, self.io, self.cmd.path) catch |e|
+            return .{ .failed = try reportLoadFailure(self, e) };
+
+        var loaded: Loaded = .{
+            .a = self.a,
+            .source = source,
+            .index = try Diags.LineIndex.build(self.a, source),
+            .schema = undefined,
+            .store = undefined,
+            .result = undefined,
+        };
+        errdefer loaded.index.deinit(self.a);
+
+        loaded.schema = try tempura.Schema.load(self.gpa);
+        errdefer loaded.schema.deinit();
+
+        loaded.store = tempura.doc.fs(self.gpa, self.io, self.inputDir());
+        errdefer loaded.store.deinit();
+
+        loaded.result = try tempura.doc.fromSource(
+            self.gpa,
+            &loaded.schema,
+            source,
+            loaded.store.resolver(),
+        );
+        return .{ .ok = loaded };
     }
 
     /// The input's directory, for an anchor's `:file` — plan 02 resolves
@@ -181,6 +237,36 @@ pub const Ctx = struct {
     pub fn inputDir(self: *const Ctx) []const u8 {
         if (Diags.isStdin(self.cmd.path)) return ".";
         return std.fs.path.dirname(self.cmd.path) orelse ".";
+    }
+};
+
+/// A document, loaded: the text, its line index, the preloaded
+/// manifests, the resolver that read its anchors, and the walk's result.
+///
+/// Every piece owns an arena and each was returned BY VALUE from its own
+/// constructor, so moving this struct out of `loadDoc` is sound: nothing
+/// in it points at itself. `store` is kept because `build` still needs
+/// the anchor's bytes after the walk, and the store cached them on the
+/// way through — a second read of the same file never happens.
+pub const Loaded = struct {
+    a: Allocator,
+    source: [:0]u8,
+    index: Diags.LineIndex,
+    schema: tempura.Schema,
+    store: tempura.doc.Fs,
+    result: tempura.doc.Result,
+
+    /// Inside-out, the order they were built in.
+    pub fn deinit(self: *Loaded) void {
+        self.result.deinit();
+        self.store.deinit();
+        self.schema.deinit();
+        self.index.deinit(self.a);
+    }
+
+    /// The document's spans are TEXT coordinates.
+    pub fn space(self: *const Loaded) Diags.Space {
+        return .{ .text = &self.index };
     }
 };
 
@@ -236,6 +322,25 @@ pub fn sniff(bytes: []const u8, path: []const u8) ?Args.Kind {
     if (bytes.len >= 12 and std.mem.startsWith(u8, bytes, "RIFF") and
         std.mem.eql(u8, bytes[8..12], "RMID")) return .mid;
     return Args.kindFromPath(path);
+}
+
+/// The `(anchor …)` kind a `--kind` names. Two vocabularies for one
+/// thing — the CLI's flag says `mid`, the document says `smf` — so the
+/// translation lives once.
+pub fn anchorKind(kind: Args.Kind) tempura.doc.AnchorKind {
+    return switch (kind) {
+        .mid => .smf,
+        .it => .it,
+    };
+}
+
+/// A four-byte chunk tag, with anything unprintable spelled as a dot — a
+/// tag is four arbitrary bytes and a terminal is not the place to find
+/// that out.
+pub fn printableTag(tag: *const [4]u8) [4]u8 {
+    var out: [4]u8 = undefined;
+    for (tag, &out) |b, *o| o.* = if (b >= 0x20 and b < 0x7f) b else '.';
+    return out;
 }
 
 pub fn run(

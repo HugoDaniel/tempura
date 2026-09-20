@@ -16,6 +16,23 @@
 //! doc.sjon:12:5: error anchor_missing: no (anchor …) is named `song`
 //! ```
 //!
+//! ## Two coordinate spaces, and the line says which
+//!
+//! A span means different things depending on who raised it, so `Space`
+//! makes the caller say. A DOCUMENT diagnostic's span indexes the source
+//! text and becomes a line and a column. A FILE diagnostic's — the SMF and
+//! IT readers', and the writers', whose `Emit.diag` carries the emission's
+//! own cursor — indexes bytes that are not that text at all, and is shown
+//! as the offset it is:
+//!
+//! ```text
+//! song.mid:0x0000002b: error smf_track_truncated: 40 bytes declared, 31 present
+//! ```
+//!
+//! Rendering the second as a line and column was a bug this CLI shipped
+//! for an afternoon: `build --ppq 7` blamed line 1 column 34 of a header
+//! comment for a tick the writer could not rescale.
+//!
 //! Colour is decided ONCE, by `main`, through `colorEnabled` — a pure
 //! function of the two facts that matter, so `NO_COLOR` is a tested rule
 //! and not an untestable `if` in an entry point.
@@ -90,7 +107,20 @@ pub fn exitCode(diags: []const Diag.Diagnostic) u8 {
     return if (count(diags).errors > 0) 1 else 0;
 }
 
-/// One `path:line:col: severity code: message` line per diagnostic.
+/// Which bytes a diagnostic's span is counting.
+pub const Space = union(enum) {
+    /// Into a source TEXT: the span becomes a 1-based line and column
+    /// through this index.
+    text: *const LineIndex,
+    /// Into a FILE, or into the bytes a writer is producing. There is no
+    /// text to count lines in, so the offset is printed as an offset —
+    /// which is also the coordinate `tempura inspect` prints, so the two
+    /// can be read side by side.
+    bytes,
+};
+
+/// One `path:LINE:COL:` or `path:0xOFFSET:` line per diagnostic, then
+/// `severity code: message`.
 ///
 /// In the order the producer found them — never sorted, because the order
 /// a walk reports in is information (the first error is usually the
@@ -98,14 +128,19 @@ pub fn exitCode(diags: []const Diag.Diagnostic) u8 {
 pub fn render(
     w: *Writer,
     path: []const u8,
-    index: *const LineIndex,
+    space: Space,
     diags: []const Diag.Diagnostic,
     style: Style,
 ) Writer.Error!void {
     const name = label(path);
     for (diags) |d| {
-        const pos = index.at(d.span.start);
-        try w.print("{s}:{d}:{d}: ", .{ name, pos.line, pos.col });
+        switch (space) {
+            .text => |index| {
+                const pos = index.at(d.span.start);
+                try w.print("{s}:{d}:{d}: ", .{ name, pos.line, pos.col });
+            },
+            .bytes => try w.print("{s}:0x{X:0>8}: ", .{ name, d.span.start }),
+        }
         try style.severity(w, d.severity);
         try w.writeAll(severityWord(d.severity));
         try style.reset(w);
@@ -279,7 +314,7 @@ fn rendered(source: []const u8, diags: []const Diag.Diagnostic, style: Style) ![
     defer li.deinit(t.allocator);
     var out: Writer.Allocating = .init(t.allocator);
     errdefer out.deinit();
-    try render(&out.writer, "doc.sjon", &li, diags, style);
+    try render(&out.writer, "doc.sjon", .{ .text = &li }, diags, style);
     try summary(&out.writer, "doc.sjon", diags);
     return out.toOwnedSlice();
 }
@@ -330,4 +365,21 @@ test "exitCode and the counts: a warning never fails, an error always does" {
 
     try list.add(.smf_bad_header, .err, .{ .start = 0, .end = 0 }, "bad", .{});
     try t.expectEqual(@as(u8, 1), exitCode(list.items()));
+}
+
+test "render: a file diagnostic shows its byte offset, not a line and a column" {
+    // The readers' and the writers' spans index bytes that are not the
+    // text being reported against, so a line and a column would name a
+    // place with nothing to do with them.
+    var list: Diag.List = .init(t.allocator);
+    defer list.deinit();
+    try list.add(.smf_track_truncated, .err, .{ .start = 0x2b, .end = 0x2b }, "40 declared, 31 present", .{});
+
+    var out: Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    try render(&out.writer, "song.mid", .bytes, list.items(), .{});
+    try t.expectEqualStrings(
+        "song.mid:0x0000002B: error smf_track_truncated: 40 declared, 31 present\n",
+        out.written(),
+    );
 }
