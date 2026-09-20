@@ -137,8 +137,14 @@ pub const Summary = plan_file.Summary;
 
 /// Every native operation's planner.
 pub const ops_native = @import("ops_native.zig");
+/// Every bound operation's planner.
+pub const ops_bound = @import("ops_bound.zig");
 /// Plan an operation over a document. Pure, total, deterministic.
-pub const plan = ops_native.plan;
+pub const plan = ops_bound.plan;
+/// `plan` for a caller that already holds the document's map — the one
+/// `doc.fromSource` returned. The map is the DOCUMENT LAYER's
+/// (`doc.fromSjon.mapOf`), and handing it in saves deriving it twice.
+pub const planWith = ops_native.planWith;
 /// Apply a plan to a document's bytes, layout preserved.
 pub const apply = apply_file.apply;
 /// What `apply` returns.
@@ -169,5 +175,6 @@ test {
     _ = locate;
     _ = value;
     _ = ops_native;
+    _ = ops_bound;
     _ = ops_quantize;
 }

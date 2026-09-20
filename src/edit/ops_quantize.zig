@@ -73,14 +73,10 @@ fn previousLine(map: *const TimeMap.TimeMap, tick: i64, grid: Snap.Grid) i64 {
     return if (at < tick) at else @max(0, tick -| step);
 }
 
-/// The grid's step in the bar `tick` falls in.
+/// The grid's step in the bar `tick` falls in — `Snap`'s own, because a
+/// second copy of it here is a second answer to the same question.
 fn stepOf(map: *const TimeMap.TimeMap, tick: i64, grid: Snap.Grid) i64 {
-    const b = map.barOf(tick);
-    return switch (grid) {
-        .bar => Grid.barTicks(b.meter.n, b.meter.d),
-        .beat => Grid.beatTicks(b.meter.d),
-        .div => |n| @max(1, @divFloor(4 * Grid.TPQ, @as(i64, n))),
-    };
+    return Snap.stepOf(map, tick, grid);
 }
 
 // ---------------------------------------------------------------------------

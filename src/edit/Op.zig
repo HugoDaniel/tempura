@@ -309,7 +309,7 @@ const Reader = struct {
                 return null;
             },
         };
-        const name = self.str(o.get("op") orelse {
+        const name = try self.str(o.get("op") orelse {
             try self.fail("the operation has no \"op\"", .{});
             return null;
         }) orelse {
@@ -338,7 +338,7 @@ const Reader = struct {
         }
         if (eql(name, "ease")) return .{ .ease = .{
             .sel = try self.select(o.get("sel")),
-            .ease = self.str(o.get("ease") orelse .null) orelse {
+            .ease = try self.str(o.get("ease") orelse .null) orelse {
                 try self.fail("ease wants an \"ease\": a pacer easing, as SJON text", .{});
                 return null;
             },
@@ -408,7 +408,7 @@ const Reader = struct {
                 try self.fail("insert-tempo wants a \"us\" or a \"qpm\"", .{});
                 return null;
             };
-            const mode = self.str(o.get("mode") orelse .null) orelse "musical";
+            const mode = try self.str(o.get("mode") orelse .null) orelse "musical";
             return .{ .insert_tempo = .{
                 .point = .{ .tick = at, .tempo = tempo },
                 .mode = if (eql(mode, "wall-clock")) .wall_clock else .musical,
@@ -426,29 +426,29 @@ const Reader = struct {
             } } };
         }
         if (eql(name, "rename")) {
-            const what = self.str(o.get("what") orelse .null) orelse "";
+            const what = try self.str(o.get("what") orelse .null) orelse "";
             const which = std.meta.stringToEnum(Renamed, what) orelse {
                 try self.fail("rename wants a \"what\": lane, section, phrase, target or anchor", .{});
                 return null;
             };
             return .{ .rename = .{
                 .what = which,
-                .from = self.str(o.get("from") orelse .null) orelse {
+                .from = try self.str(o.get("from") orelse .null) orelse {
                     try self.fail("rename wants a \"from\" and a \"to\"", .{});
                     return null;
                 },
-                .to = self.str(o.get("to") orelse .null) orelse {
+                .to = try self.str(o.get("to") orelse .null) orelse {
                     try self.fail("rename wants a \"from\" and a \"to\"", .{});
                     return null;
                 },
             } };
         }
         if (eql(name, "bind")) {
-            const lane = self.str(o.get("lane") orelse .null) orelse {
+            const lane = try self.str(o.get("lane") orelse .null) orelse {
                 try self.fail("bind wants a \"lane\"", .{});
                 return null;
             };
-            const anchor = self.str(o.get("anchor") orelse .null) orelse {
+            const anchor = try self.str(o.get("anchor") orelse .null) orelse {
                 try self.fail("bind wants an \"anchor\"", .{});
                 return null;
             };
@@ -456,7 +456,7 @@ const Reader = struct {
             return .{ .bind = .{ .lane = lane, .anchor = anchor, .address = where } };
         }
         if (eql(name, "unbind")) return .{ .unbind = .{
-            .lane = self.str(o.get("lane") orelse .null) orelse {
+            .lane = try self.str(o.get("lane") orelse .null) orelse {
                 try self.fail("unbind wants a \"lane\"", .{});
                 return null;
             },
@@ -467,7 +467,7 @@ const Reader = struct {
     }
 
     fn insert(self: *Reader, o: std.json.ObjectMap) Error!?Op {
-        const lane = self.str(o.get("lane") orelse .null);
+        const lane = try self.str(o.get("lane") orelse .null);
         inline for (@typeInfo(New).@"union".fields) |field| {
             if (o.get(field.name)) |v| {
                 const what = try self.newOf(field.name, v) orelse return null;
@@ -504,12 +504,12 @@ const Reader = struct {
                 .at = self.optInt(o.get("at")) orelse 0,
                 .value = got.value,
                 .ncomp = got.ncomp,
-                .ease = self.str(o.get("ease") orelse .null),
+                .ease = try self.str(o.get("ease") orelse .null),
             } };
         }
         if (comptime eql(name, "clip")) return .{ .clip = .{
             .at = self.optInt(o.get("at")) orelse 0,
-            .phrase = self.str(o.get("phrase") orelse .null) orelse {
+            .phrase = try self.str(o.get("phrase") orelse .null) orelse {
                 try self.fail("a clip names its \"phrase\"", .{});
                 return null;
             },
@@ -519,7 +519,7 @@ const Reader = struct {
             .transpose = if (self.optInt(o.get("transpose"))) |x| @intCast(std.math.clamp(x, -120, 120)) else null,
         } };
         if (comptime eql(name, "section")) return .{ .section = .{
-            .name = self.str(o.get("name") orelse .null) orelse {
+            .name = try self.str(o.get("name") orelse .null) orelse {
                 try self.fail("a section has a \"name\"", .{});
                 return null;
             },
@@ -527,22 +527,22 @@ const Reader = struct {
             .dur = self.optInt(o.get("dur")) orelse 0,
         } };
         if (comptime eql(name, "cue")) return .{ .cue = .{
-            .name = self.str(o.get("name") orelse .null) orelse {
+            .name = try self.str(o.get("name") orelse .null) orelse {
                 try self.fail("a cue has a \"name\"", .{});
                 return null;
             },
             .at = self.optInt(o.get("at")) orelse 0,
         } };
         if (comptime eql(name, "lane")) return .{ .lane = .{
-            .name = self.str(o.get("name") orelse .null) orelse {
+            .name = try self.str(o.get("name") orelse .null) orelse {
                 try self.fail("a lane has a \"name\"", .{});
                 return null;
             },
-            .kind = std.meta.stringToEnum(doc.LaneKind, self.str(o.get("kind") orelse .null) orelse "notes") orelse .notes,
-            .target = self.str(o.get("target") orelse .null),
+            .kind = std.meta.stringToEnum(doc.LaneKind, try self.str(o.get("kind") orelse .null) orelse "notes") orelse .notes,
+            .target = try self.str(o.get("target") orelse .null),
         } };
         if (comptime eql(name, "phrase")) return .{ .phrase = .{
-            .name = self.str(o.get("name") orelse .null) orelse {
+            .name = try self.str(o.get("name") orelse .null) orelse {
                 try self.fail("a phrase has a \"name\"", .{});
                 return null;
             },
@@ -554,8 +554,8 @@ const Reader = struct {
 
     fn address(self: *Reader, o: std.json.ObjectMap) Error!?doc.Address {
         if (o.get("channel")) |v| {
-            const column = self.str(o.get("column") orelse .null);
-            const fx = self.str(o.get("fx") orelse .null);
+            const column = try self.str(o.get("column") orelse .null);
+            const fx = try self.str(o.get("fx") orelse .null);
             return .{ .it = .{
                 .channel = @intCast(std.math.clamp((self.int(v) orelse 1) - 1, 0, 63)),
                 .column = if (column) |c| std.meta.stringToEnum(doc.ItColumn, c) else null,
@@ -616,7 +616,7 @@ const Reader = struct {
             var set: Kinds = .{};
             if (kinds == .array) {
                 for (kinds.array.items) |item| {
-                    const name = self.str(item) orelse continue;
+                    const name = try self.str(item) orelse continue;
                     if (std.meta.stringToEnum(Kind, name)) |kind| switch (kind) {
                         .note => set.note = true,
                         .keyframe => set.keyframe = true,
@@ -632,7 +632,7 @@ const Reader = struct {
     }
 
     fn grid(self: *Reader, v: ?std.json.Value) Error!?Snap.Grid {
-        const text = self.str(v orelse .null) orelse {
+        const text = try self.str(v orelse .null) orelse {
             try self.fail("this operation wants a \"grid\": 1/4, 1/8, 1/12, 1/16, 1/32, 1bar or 1b", .{});
             return null;
         };
@@ -644,9 +644,13 @@ const Reader = struct {
 
     // ---- the leaves ----
 
-    fn str(self: *Reader, v: std.json.Value) ?[]const u8 {
+    /// A JSON string, copied into the arena so the caller's text need
+    /// not outlive the call. Running out of memory is an ERROR and never
+    /// a "this was not a string": a plan that quietly dropped a lane's
+    /// name under memory pressure would edit the wrong lane.
+    fn str(self: *Reader, v: std.json.Value) Error!?[]const u8 {
         return switch (v) {
-            .string => |text| self.a.dupe(u8, text) catch null,
+            .string => |text| try self.a.dupe(u8, text),
             else => null,
         };
     }
@@ -658,7 +662,7 @@ const Reader = struct {
         };
         var out: std.ArrayList([]const u8) = .empty;
         for (arr) |item| {
-            const one = self.str(item) orelse continue;
+            const one = try self.str(item) orelse continue;
             try out.append(self.a, one);
         }
         return out.toOwnedSlice(self.a);

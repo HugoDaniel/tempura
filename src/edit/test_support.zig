@@ -117,3 +117,64 @@ pub const clips: [:0]const u8 =
     \\    (note :at 0q :dur 0.25q :key 38 :vel 100)))
     \\
 ;
+
+/// A document CONDUCTED by an inline SMF dump. The file says `[3 4]`, so
+/// a `bar` here is three quarter notes and not four — which is how a test
+/// tells the document's own map from the 120-qpm `[4 4]` placeholder a
+/// conducted document would otherwise be spelled under.
+pub const conducted: [:0]const u8 =
+    \\(timeline :conductor song)
+    \\(anchor :id song :kind smf :file "x.mid")
+    \\(midi/smf :format 1 :division 480)
+    \\(midi/mtrk
+    \\  (time-signature :at 0 :num 3 :denom 4 :clocks 24 :thirty-seconds 8)
+    \\  (set-tempo :at 0 :us 500000)
+    \\  (end-of-track :at 1920))
+    \\
+    \\(cue :name "two" :at 1bar)
+    \\(lane :name flash
+    \\  (note :at 0q :dur 1q :key 36))
+    \\
+;
+
+/// Four notes in one lane, evenly spaced: the shape a multi-target move
+/// is asked about, where two of them cross the two that stay.
+pub const four: [:0]const u8 =
+    \\(timeline :length 1bar)
+    \\(tempo-point :at 0q :qpm 120)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(lane :name flash
+    \\  (note :at 0q :dur 0.25q :key 36)
+    \\  (note :at 1q :dur 0.25q :key 38)
+    \\  (note :at 2q :dur 0.25q :key 40)
+    \\  (note :at 3q :dur 0.25q :key 41))
+    \\
+;
+
+/// A lane the printer did not write: its notes are not sorted by `:at`.
+/// Legal — the schema does not require the order and plan 07 says a plan
+/// never reorders a document it did not write.
+pub const unsorted: [:0]const u8 =
+    \\(timeline :length 1bar)
+    \\(tempo-point :at 0q :qpm 120)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(lane :name flash
+    \\  (note :at 2q :dur 0.6q :key 36)
+    \\  (note :at 0.4q :dur 0.6q :key 38))
+    \\
+;
+
+/// Two notes on ONE key that do not overlap where they are and would if
+/// they were quantized onto the same line.
+pub const crossing: [:0]const u8 =
+    \\(timeline :length 1bar)
+    \\(tempo-point :at 0q :qpm 120)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(lane :name flash
+    \\  (note :at 0.4q :dur 0.1q :key 36)
+    \\  (note :at 0.6q :dur 0.1q :key 36))
+    \\
+;

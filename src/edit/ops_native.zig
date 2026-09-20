@@ -35,21 +35,37 @@ pub const Error = error{OutOfMemory};
 /// is the one way to make this function say `sjon_diagnostic` about
 /// itself.
 ///
-/// The time map is re-derived here from the document's own points, by
-/// the same rule the bridge used (`:length`, or the last event rounded up
-/// to a bar) — so a position this plan spells is the position the
-/// canonical printer would have spelled.
+/// The time map comes from the DOCUMENT LAYER (`doc.fromSjon.mapOf`),
+/// which is the layer that owns it: a position this plan spells is then
+/// the position the canonical printer would have spelled, conductor and
+/// all. A caller that already holds the map — one that loaded the
+/// document and kept `Result.map` — calls `planWith` and does not pay
+/// for a second derive.
 pub fn plan(
     gpa: std.mem.Allocator,
     d: *const doc.Doc,
     tree: *const sjon.Ast.Tree,
     op: Op.Op,
 ) Error!Plan.Plan {
+    var map = try doc.fromSjon.mapOf(gpa, d);
+    defer map.deinit();
+    return planWith(gpa, d, tree, &map, op);
+}
+
+/// `plan`, for a caller that already has the document's map.
+///
+/// `map` must be the map `d` resolved its positions against —
+/// `Result.map`, or `doc.fromSjon.mapOf(gpa, d)`. Another map would
+/// spell positions the document does not mean.
+pub fn planWith(
+    gpa: std.mem.Allocator,
+    d: *const doc.Doc,
+    tree: *const sjon.Ast.Tree,
+    map: *const TimeMap.TimeMap,
+    op: Op.Op,
+) Error!Plan.Plan {
     var b: Plan.Builder = .init(gpa);
     errdefer b.deinit();
-
-    var res = try deriveMap(gpa, d);
-    defer res.deinit();
 
     var loc: locate.Map = try .init(gpa, tree);
     defer loc.deinit();
@@ -58,55 +74,12 @@ pub fn plan(
         .gpa = gpa,
         .d = d,
         .tree = tree,
-        .map = &res.map,
+        .map = map,
         .loc = &loc,
         .b = &b,
     };
     try ctx.run(op);
     return b.finish();
-}
-
-/// The document's own time map, derived the way `doc/fromSjon` derives
-/// it: the document's points, `:length` or the default rule, and the
-/// conductor's placeholder when a conducted document carries no points
-/// of its own (the anchor's real tables are the anchored half's, and
-/// nothing here depends on them).
-fn deriveMap(gpa: std.mem.Allocator, d: *const doc.Doc) Error!TimeMap.Result {
-    const seeded_tempo = [_]doc.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
-    const seeded_meter = [_]doc.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
-    const tempo: []const doc.TempoPoint =
-        if (d.conductor != null and d.tempo.len == 0) &seeded_tempo else d.tempo;
-    const meter: []const doc.MeterPoint =
-        if (d.conductor != null and d.meter.len == 0) &seeded_meter else d.meter;
-
-    const length = d.length orelse len: {
-        const end = contentEnd(d);
-        if (end <= 0) break :len 0;
-        var probe = try TimeMap.derive(gpa, tempo, meter, end, d.end);
-        defer probe.deinit();
-        const bars = probe.map.bars;
-        break :len if (bars.len == 0) end else bars[bars.len - 1];
-    };
-    return TimeMap.derive(gpa, tempo, meter, length, d.end);
-}
-
-/// The last tick any content reaches — the document's length when it
-/// declares none, rounded up to a bar by the caller.
-fn contentEnd(d: *const doc.Doc) i64 {
-    var end: i64 = 0;
-    for (d.sections) |s| end = @max(end, s.at +| s.dur);
-    for (d.cues) |c| end = @max(end, c.at);
-    for (d.lanes) |lane| {
-        for (lane.notes) |n| end = @max(end, n.at +| n.dur);
-        for (lane.keyframes) |k| end = @max(end, k.at);
-        for (lane.clips) |c| {
-            const phrase = d.phraseByName(c.phrase);
-            const window = c.length orelse
-                (if (phrase) |p| @max(0, p.length * @as(i64, c.repeat) - c.offset) else 0);
-            end = @max(end, c.at +| window);
-        }
-    }
-    return end;
 }
 
 /// One child of a lane, as both readings see it: where its bytes are and
@@ -182,13 +155,22 @@ const Ctx = struct {
             }
         }
         const w = try self.loc.at(self.a(), span);
-        if (w == null) try self.b.refuse(
+        if (w == null) try self.refuseUnaddressable(span);
+        return w;
+    }
+
+    /// The document and its tree disagree: a form the `Doc` holds that
+    /// the tree cannot address, or one with no container where a
+    /// container is needed. Nothing a document can say causes it — a
+    /// host that handed in the wrong tree can — and it is said out loud
+    /// rather than quietly shortening the plan.
+    fn refuseUnaddressable(self: *Ctx, span: Diag.Span) Error!void {
+        try self.b.refuse(
             .sjon_diagnostic,
             span,
             "the document and its source tree disagree about the form at {d}..{d}",
             .{ span.start, span.end },
         );
-        return w;
     }
 
     /// The selection's targets, or a refusal: bound content is not
@@ -484,104 +466,285 @@ const Ctx = struct {
     fn retime(self: *Ctx, x: Op.Retime) Error!void {
         var r = (try self.targets(x.sel)) orelse return;
         defer r.deinit();
+
+        var moves: std.ArrayList(Move) = .empty;
+        defer moves.deinit(self.gpa);
         for (r.targets) |t| {
             const to = if (x.delta) |delta| t.at +| delta else (x.to orelse t.at);
-            try self.move(t, @max(0, to));
+            try moves.append(self.gpa, .{ .t = t, .to = @max(0, to) });
+        }
+        try self.moveAll(moves.items);
+    }
+
+    /// One target and where it goes, plus the duration an operation
+    /// wants on it (a `dur-too` quantize) or null for the document's
+    /// own.
+    const Move = struct {
+        t: Select.Target,
+        to: i64,
+        dur: ?i64 = null,
+    };
+
+    /// Plan a whole batch of moves.
+    ///
+    /// The batch and not one target at a time, because `apply` runs
+    /// EVERY removal before ANY insert: an index computed against the
+    /// untouched document names the wrong slot — or no slot at all — by
+    /// the time the insert is reached. So a lane's moves are planned
+    /// together, against a running model of the document the plan
+    /// produces, exactly as `duplicate` builds one.
+    ///
+    /// Within a lane the rule is plan 07's: `set_keyword :at` wherever
+    /// the positional order the document already has still holds, so the
+    /// node keeps its comments, and a remove + insert only for the
+    /// children that no longer fit where they sit. A whole-lane drag
+    /// therefore touches no structure at all.
+    fn moveAll(self: *Ctx, moves: []const Move) Error!void {
+        if (moves.len == 0) return;
+        if (try self.refuseOverlaps(moves)) return;
+
+        // Targets arrive in the plan's order — lanes in document order,
+        // then tick — so one lane's moves are contiguous and the roots
+        // come last.
+        var i: usize = 0;
+        while (i < moves.len) {
+            const li = moves[i].t.lane orelse {
+                try self.moveRoot(moves[i]);
+                i += 1;
+                continue;
+            };
+            var j = i + 1;
+            while (j < moves.len and moves[j].t.lane != null and moves[j].t.lane.? == li) j += 1;
+            try self.moveInLane(li, moves[i..j]);
+            i = j;
         }
     }
 
-    /// Move one target to `to`.
-    ///
-    /// `set_keyword :at` whenever the positional order the document
-    /// already has still holds — the common drag, and the node keeps its
-    /// comments. Otherwise the node is removed and re-inserted at the
-    /// index its new position asks for, and its comments are lost with
-    /// it (plan 07's risk).
-    fn move(self: *Ctx, t: Select.Target, to: i64) Error!void {
-        if (t.at == to) return;
-        if (t.kind == .note) {
-            if (self.overlapping(t.lane.?, t.key.?, to, t.dur, t.span)) |span| {
-                try self.b.refuse(
-                    .edit_overlap,
-                    span,
-                    "moving this note to {d} would sound it over another on key {d}",
-                    .{ to, t.key.? },
-                );
-                return;
+    /// A root is not sorted by anything: the document's order is the
+    /// author's, and a retime never reorders roots.
+    fn moveRoot(self: *Ctx, m: Move) Error!void {
+        const w = (try self.where(m.t.span)) orelse return;
+        for (try self.writesFor(m)) |write| {
+            try self.b.setKeyword(w.site, write.key, write.json.?);
+        }
+    }
+
+    /// One lane's whole batch.
+    fn moveInLane(self: *Ctx, li: u32, moves: []const Move) Error!void {
+        const kids = (try self.children(li)) orelse return;
+        if (kids.len == 0) return;
+        const arena = self.a();
+
+        // Where each child ends up, and which move put it there.
+        const finals = try arena.alloc(i64, kids.len);
+        const by_kid = try arena.alloc(?usize, kids.len);
+        for (kids, finals, by_kid) |kid, *f, *m| {
+            f.* = kid.at;
+            m.* = null;
+        }
+        for (moves, 0..) |m, mi| {
+            const w = (try self.where(m.t.span)) orelse return;
+            for (kids, 0..) |kid, k| {
+                if (kid.slot != w.slot) continue;
+                finals[k] = m.to;
+                by_kid[k] = mi;
             }
         }
-        const w = (try self.where(t.span)) orelse return;
 
-        // A root is not sorted by anything: the document's order is the
-        // author's, and a retime never reorders roots.
-        const li = t.lane orelse {
-            try self.b.setKeyword(w.site, "at", try self.positionJson(to));
-            try self.respell(t, w.site, to);
-            return;
-        };
-
-        const kids = (try self.children(li)) orelse return;
-        var here: usize = 0;
-        for (kids, 0..) |kid, i| {
-            if (kid.slot == w.slot) here = i;
-        }
-        const before_ok = here == 0 or kids[here - 1].at <= to;
-        const after_ok = here + 1 >= kids.len or kids[here + 1].at >= to;
-        if (before_ok and after_ok) {
-            try self.b.setKeyword(w.site, "at", try self.positionJson(to));
-            try self.respell(t, w.site, to);
-            return;
-        }
-
-        const parent = w.parent orelse return;
-        const node = self.nodeOf(t.span) orelse return;
-
-        // The index the node lands on in the document this plan
-        // produces: its place among the OTHER children, which is what is
-        // left once the removal has run.
-        var index: u32 = @intCast(kids.len - 1);
-        var seen: u32 = 0;
-        for (kids) |kid| {
-            if (kid.slot == w.slot) continue;
-            if (kid.at > to) {
-                index = seen;
+        // Who keeps its slot. An UNMOVED child always does — the plan
+        // never reorders a document it did not write (plan 07's risk
+        // note) — and a moved one does when it still sits between the
+        // last child that kept its slot and the next child that will.
+        const keep = try arena.alloc(bool, kids.len);
+        var last: i64 = std.math.minInt(i64);
+        for (0..kids.len) |k| {
+            if (by_kid[k] == null) {
+                keep[k] = true;
+                last = finals[k];
+                continue;
+            }
+            var next: i64 = std.math.maxInt(i64);
+            for (k + 1..kids.len) |n| {
+                if (by_kid[n] != null) continue;
+                next = finals[n];
                 break;
             }
-            seen += 1;
+            keep[k] = finals[k] >= last and finals[k] <= next;
+            if (keep[k]) last = finals[k];
         }
 
-        var overrides: std.ArrayList(value.Override) = .empty;
-        defer overrides.deinit(self.gpa);
-        try overrides.append(self.gpa, .{ .key = "at", .json = try self.positionJson(to) });
-        for (duration_keys) |key| {
-            if (try self.driftJson(t, key, to)) |json| {
-                try overrides.append(self.gpa, .{ .key = key, .json = json });
+        // The ones that stay, in slot order.
+        for (0..kids.len) |k| {
+            const mi = by_kid[k] orelse continue;
+            if (!keep[k]) continue;
+            const w = (try self.where(moves[mi].t.span)) orelse return;
+            for (try self.writesFor(moves[mi])) |write| {
+                try self.b.setKeyword(w.site, write.key, write.json.?);
             }
         }
 
-        var out: value.Buf = .empty;
-        defer out.deinit(self.gpa);
-        try value.form(self.gpa, &out, self.tree, node, overrides.items);
+        // The ones that move: every removal, then every insert against
+        // the list the removals leave behind.
+        var rest: std.ArrayList(i64) = .empty;
+        defer rest.deinit(self.gpa);
+        var relocated: std.ArrayList(usize) = .empty;
+        defer relocated.deinit(self.gpa);
+        var parent: ?locate.Site = null;
 
-        try self.b.removePositional(parent, w.slot);
-        try self.b.insertPositional(parent, index, out.items);
+        for (0..kids.len) |k| {
+            if (by_kid[k] == null or keep[k]) {
+                try rest.append(self.gpa, finals[k]);
+                continue;
+            }
+            const m = moves[by_kid[k].?];
+            const w = (try self.where(m.t.span)) orelse return;
+            parent = w.parent orelse {
+                try self.refuseUnaddressable(m.t.span);
+                return;
+            };
+            try self.b.removePositional(parent.?, w.slot);
+            try relocated.append(self.gpa, k);
+        }
+        if (relocated.items.len == 0) return;
+
+        // Ascending destination, so every index is a slot in the list as
+        // it stands when that insert is reached.
+        std.sort.insertion(usize, relocated.items, @as([]const i64, finals), byFinal);
+        for (relocated.items) |k| {
+            const m = moves[by_kid[k].?];
+            const node = self.nodeOf(m.t.span) orelse {
+                try self.refuseUnaddressable(m.t.span);
+                return;
+            };
+            var out: value.Buf = .empty;
+            defer out.deinit(self.gpa);
+            try value.form(self.gpa, &out, self.tree, node, try self.writesFor(m));
+
+            var index: u32 = @intCast(rest.items.len);
+            for (rest.items, 0..) |at, n| {
+                if (at > m.to) {
+                    index = @intCast(n);
+                    break;
+                }
+            }
+            try rest.insert(self.gpa, index, m.to);
+            try self.b.insertPositional(parent.?, index, out.items);
+        }
     }
 
     /// The keys whose value is a DURATION measured from its form's own
     /// `:at` — the ones a move can silently change the meaning of.
     const duration_keys = [_][]const u8{ "dur", "offset", "length" };
 
-    /// Re-spell the durations a move would otherwise change.
+    /// Everything a move writes on its form: the new `:at`, the duration
+    /// the operation asked for, and the durations whose SPELLING has to
+    /// follow the anchor.
     ///
-    /// `:dur 1bar` on a note at a bar line is four quarters; the same
-    /// four bytes on a note one quarter later is three. So after a move
-    /// every duration key is re-read AT ITS NEW ANCHOR, and the ones that
-    /// would come back a different tick are written out again in a
-    /// spelling that means what the document meant.
-    fn respell(self: *Ctx, t: Select.Target, site: locate.Site, to: i64) Error!void {
-        for (duration_keys) |key| {
-            if (try self.driftJson(t, key, to)) |json| try self.b.setKeyword(site, key, json);
+    /// ONE list, so the in-place branch and the rebuild write exactly the
+    /// same thing and neither writes a key twice: `:dur 1bar` on a note
+    /// at a bar line is four quarters and the same four bytes one quarter
+    /// later are three, so a duration is re-read AT ITS NEW ANCHOR and
+    /// written out again only when it would come back a different tick.
+    fn writesFor(self: *Ctx, m: Move) Error![]value.Override {
+        var out: std.ArrayList(value.Override) = .empty;
+        const arena = self.a();
+        if (m.to != m.t.at) {
+            try out.append(arena, .{ .key = "at", .json = try self.positionJson(m.to) });
         }
+        const asked = self.durKeyOf(m.t);
+        for (duration_keys) |key| {
+            if (m.dur) |d| {
+                if (asked != null and std.mem.eql(u8, asked.?, key) and d != m.t.dur) {
+                    try out.append(arena, .{ .key = key, .json = try self.durationJson(@max(0, d), m.to) });
+                    continue;
+                }
+            }
+            // An anchor that did not move cannot change what a duration
+            // spelled against it means.
+            if (m.to == m.t.at) continue;
+            if (try self.driftJson(m.t, key, m.to)) |json| {
+                try out.append(arena, .{ .key = key, .json = json });
+            }
+        }
+        return out.toOwnedSlice(arena);
+    }
+
+    /// Which key says how long this target lasts — and only when the
+    /// document SPELLS it: a clip's window is the phrase's length times
+    /// `:repeat` unless it says otherwise, and writing that out would fix
+    /// a number the document left to the phrase.
+    fn durKeyOf(self: *Ctx, t: Select.Target) ?[]const u8 {
+        return switch (t.kind) {
+            .note, .section => "dur",
+            .clip => if (self.keyText(t.span, "length") != null) "length" else null,
+            .keyframe, .cue => null,
+        };
+    }
+
+    /// Refuse a batch that would sound two notes on one key at once.
+    ///
+    /// The whole batch at once, because a plan collides with ITSELF: two
+    /// notes quantizing onto one line overlap each other and neither
+    /// overlaps anything in the document as it stands. Two notes that
+    /// already overlap before the edit are the document's own
+    /// `note_overlap` and not this operation's business.
+    ///
+    /// Answers whether it refused.
+    fn refuseOverlaps(self: *Ctx, moves: []const Move) Error!bool {
+        var seen: std.ArrayList(u32) = .empty;
+        defer seen.deinit(self.gpa);
+        for (moves) |m| {
+            if (m.t.kind != .note) continue;
+            const li = m.t.lane orelse continue;
+            var already = false;
+            for (seen.items) |one| {
+                if (one == li) already = true;
+            }
+            if (already) continue;
+            try seen.append(self.gpa, li);
+            if (try self.refuseLaneOverlaps(li, moves)) return true;
+        }
+        return false;
+    }
+
+    fn refuseLaneOverlaps(self: *Ctx, li: u32, moves: []const Move) Error!bool {
+        const notes = self.d.lanes[li].notes;
+        if (notes.len == 0) return false;
+        const arena = self.a();
+        const at = try arena.alloc(i64, notes.len);
+        const dur = try arena.alloc(i64, notes.len);
+        const moving = try arena.alloc(bool, notes.len);
+        for (notes, at, dur, moving) |n, *x, *d, *mv| {
+            x.* = n.at;
+            d.* = n.dur;
+            mv.* = false;
+        }
+        for (moves) |m| {
+            if (m.t.kind != .note) continue;
+            if ((m.t.lane orelse continue) != li or m.t.item >= notes.len) continue;
+            at[m.t.item] = m.to;
+            dur[m.t.item] = m.dur orelse notes[m.t.item].dur;
+            moving[m.t.item] = true;
+        }
+        for (notes, 0..) |x, i| {
+            if (dur[i] <= 0) continue;
+            for (notes[i + 1 ..], i + 1..) |y, j| {
+                if (y.key != x.key or dur[j] <= 0) continue;
+                if (!moving[i] and !moving[j]) continue;
+                if (at[i] >= at[j] +| dur[j] or at[j] >= at[i] +| dur[i]) continue;
+                // Name the one that is NOT moving, which is the obstacle
+                // a musician sees; when both move, the later of the two.
+                const obstacle = if (!moving[j]) y.span else if (!moving[i]) x.span else y.span;
+                try self.b.refuse(
+                    .edit_overlap,
+                    obstacle,
+                    "this edit would sound two notes on key {d} at once",
+                    .{x.key},
+                );
+                return true;
+            }
+        }
+        return false;
     }
 
     /// `key`'s value re-spelled for an anchor at `to`, or null when the
@@ -710,39 +873,42 @@ const Ctx = struct {
     // ---- snapping ----
 
     /// Every selected onset onto the grid, a `strength` of the way.
+    ///
+    /// `dur-too` moves the END onto the grid as well, and rides along in
+    /// the move so it lands whether the onset stays where it is or has
+    /// to be re-inserted somewhere else.
     fn quantize(self: *Ctx, x: Op.Quantize) Error!void {
         var r = (try self.targets(x.sel)) orelse return;
         defer r.deinit();
+
+        var moves: std.ArrayList(Move) = .empty;
+        defer moves.deinit(self.gpa);
         for (r.targets) |t| {
             const to = ops_quantize.quantized(self.map, t.at, x.grid, x.strength, x.swing);
+            var dur: ?i64 = null;
             if (x.dur_too and t.dur > 0) {
                 const end = ops_quantize.quantized(self.map, t.at +| t.dur, x.grid, x.strength, x.swing);
-                try self.resizeTo(t, to, @max(0, end - to));
+                dur = @max(0, end - to);
             }
-            try self.move(t, to);
+            try moves.append(self.gpa, .{ .t = t, .to = to, .dur = dur });
         }
+        try self.moveAll(moves.items);
     }
 
     /// By ticks, or by counted steps of a grid.
     fn nudge(self: *Ctx, x: Op.Nudge) Error!void {
         var r = (try self.targets(x.sel)) orelse return;
         defer r.deinit();
-        for (r.targets) |t| {
-            try self.move(t, @max(0, ops_quantize.nudged(self.map, t.at, x.delta)));
-        }
-    }
 
-    /// The `:dur` half of a `dur-too` quantize, spelled at the onset the
-    /// move is about to put the form on.
-    fn resizeTo(self: *Ctx, t: Select.Target, at: i64, dur: i64) Error!void {
-        const w = (try self.where(t.span)) orelse return;
-        switch (t.kind) {
-            .note, .section => try self.b.setKeyword(w.site, "dur", try self.durationJson(dur, at)),
-            .clip => if (self.keyText(t.span, "length") != null) {
-                try self.b.setKeyword(w.site, "length", try self.durationJson(dur, at));
-            },
-            .keyframe, .cue => {},
+        var moves: std.ArrayList(Move) = .empty;
+        defer moves.deinit(self.gpa);
+        for (r.targets) |t| {
+            try moves.append(self.gpa, .{
+                .t = t,
+                .to = @max(0, ops_quantize.nudged(self.map, t.at, x.delta)),
+            });
         }
+        try self.moveAll(moves.items);
     }
 
     // ---- the clip operations ----
@@ -773,8 +939,14 @@ const Ctx = struct {
             }
 
             const w = (try self.where(t.span)) orelse return;
-            const parent = w.parent orelse return;
-            const node = self.nodeOf(t.span) orelse return;
+            const parent = w.parent orelse {
+                try self.refuseUnaddressable(t.span);
+                return;
+            };
+            const node = self.nodeOf(t.span) orelse {
+                try self.refuseUnaddressable(t.span);
+                return;
+            };
             const clip = self.d.lanes[t.lane.?].clips[t.item];
             const left = x.at - t.at;
 
@@ -848,7 +1020,10 @@ const Ctx = struct {
             return;
         }
 
-        const parent = bw.parent orelse return;
+        const parent = bw.parent orelse {
+            try self.refuseUnaddressable(b_t.span);
+            return;
+        };
         try self.b.setKeyword(aw.site, "length", try self.durationJson(b_t.at +| b_t.dur - a_t.at, a_t.at));
         try self.b.removePositional(parent, bw.slot);
     }
@@ -880,7 +1055,10 @@ const Ctx = struct {
                     return;
                 }
             }
-            const node = self.nodeOf(t.span) orelse return;
+            const node = self.nodeOf(t.span) orelse {
+                try self.refuseUnaddressable(t.span);
+                return;
+            };
 
             var overrides: std.ArrayList(value.Override) = .empty;
             defer overrides.deinit(self.gpa);
@@ -907,7 +1085,10 @@ const Ctx = struct {
                 for (kids) |kid| try sim.append(self.gpa, kid.at);
             }
             const w = (try self.where(t.span)) orelse return;
-            const parent = w.parent orelse return;
+            const parent = w.parent orelse {
+                try self.refuseUnaddressable(t.span);
+                return;
+            };
 
             var index: u32 = @intCast(sim.items.len);
             for (sim.items, 0..) |at, i| {
@@ -948,8 +1129,12 @@ const Ctx = struct {
             return;
         }
         var inexact: u32 = 0;
+        // The range's own growth is not a POSITION: it is how far what
+        // follows moves, and rounding it is one fact about the stretch
+        // rather than one document position that landed off the grid.
+        var growth_rounded: u32 = 0;
         const span = x.to - x.from;
-        const growth = scaleTicks(span, x.p, x.q, &inexact) - span;
+        const growth = scaleTicks(span, x.p, x.q, &growth_rounded) - span;
 
         var r = try Select.resolve(self.gpa, self.d, .{});
         defer r.deinit();
@@ -984,14 +1169,19 @@ const Ctx = struct {
             try self.b.setKeyword(w.site, key, try self.durationJson(@max(0, dur), to));
         }
 
-        if (inexact > 0) {
+        if (inexact > 0 or growth_rounded > 0) {
             self.b.summary.inexact = inexact;
             try self.b.note(
                 .edit_inexact,
                 .warning,
                 .{ .start = 0, .end = 0 },
-                "{d} position(s) rounded onto the grid by {d}/{d}",
-                .{ inexact, x.p, x.q },
+                "{d} position(s) rounded onto the grid by {d}/{d}{s}",
+                .{
+                    inexact,
+                    x.p,
+                    x.q,
+                    if (growth_rounded > 0) "; the range's own growth rounded too" else "",
+                },
             );
         }
     }
@@ -1022,6 +1212,8 @@ const Ctx = struct {
             self.b.summary.targets = @intCast(moved.targets.len);
 
             var inexact: u32 = 0;
+            var moves: std.ArrayList(Move) = .empty;
+            defer moves.deinit(self.gpa);
             for (moved.targets) |t| {
                 const seconds = self.map.secondsFromTick(t.at);
                 const to = after.map.tickFromSeconds(seconds) catch {
@@ -1029,8 +1221,9 @@ const Ctx = struct {
                     continue;
                 };
                 if (after.map.secondsFromTick(to) != seconds) inexact += 1;
-                try self.move(t, to);
+                try moves.append(self.gpa, .{ .t = t, .to = to });
             }
+            try self.moveAll(moves.items);
             if (inexact > 0) {
                 self.b.summary.inexact = inexact;
                 try self.b.note(
@@ -1407,6 +1600,12 @@ const Ctx = struct {
 
 fn bySlot(_: void, x: Child, y: Child) bool {
     return x.slot < y.slot;
+}
+
+/// Two children of one lane by where they are GOING — the order a batch
+/// of inserts has to land in.
+fn byFinal(finals: []const i64, x: usize, y: usize) bool {
+    return finals[x] < finals[y];
 }
 
 fn byDocumentOrder(_: void, x: Ctx.Write, y: Ctx.Write) bool {
@@ -1813,24 +2012,6 @@ test "ops: stretch scales the range and shifts what follows, counting what round
     );
 }
 
-test "ops: stretch by a factor the grid cannot hold counts what it rounded" {
-    const gpa = testing.allocator;
-    var fx = try test_support.Fixture.init(gpa, test_support.native);
-    defer fx.deinit();
-
-    // A third of a quarter note is 15375360 ticks exactly, but a third
-    // of ONE tick is not: 1q scaled by 1/3 lands between two ticks.
-    var p = try plan(gpa, fx.doc_(), &fx.tree, .{
-        .stretch = .{ .from = 0, .to = 2 * TPQ + 1, .p = 1, .q = 3 },
-    });
-    defer p.deinit();
-
-    try testing.expect(!p.summary.refused);
-    try testing.expect(p.summary.inexact > 0);
-    const d = p.findDiag(.edit_inexact).?;
-    try testing.expectEqual(Diag.Severity.warning, d.severity);
-}
-
 test "ops: insert-tempo, musical — one root and nothing moves" {
     try expectEdit(
         .{ .insert_tempo = .{ .point = .{ .tick = 4 * TPQ, .tempo = .{ .qpm = 240 } } } },
@@ -2108,8 +2289,8 @@ test "ops: quantize with :dur-too moves the end onto the grid as well" {
             .dur_too = true,
         } },
         \\[
-        \\{"op":"set_keyword","root":3,"path":[0],"key":"dur","value":{"$num":[1,"q"]}},
-        \\{"op":"set_keyword","root":3,"path":[0],"key":"at","value":{"$num":[0,"bar"]}}
+        \\{"op":"set_keyword","root":3,"path":[0],"key":"at","value":{"$num":[0,"bar"]}},
+        \\{"op":"set_keyword","root":3,"path":[0],"key":"dur","value":{"$num":[1,"q"]}}
         \\]
         \\
     ,
@@ -2257,4 +2438,239 @@ test "ops: the same document and the same operation give the same plan" {
     var again = try test_support.Fixture.init(gpa, test_support.native);
     defer again.deinit();
     try testing.expect(fx.doc_().eql(again.doc_()));
+}
+
+test "ops: a whole-lane retime moves every child and touches no structure" {
+    // The bug this pins: `apply` runs EVERY removal before ANY insert, so
+    // a batch planned one target at a time would remove three children
+    // and then insert three at indices that named the untouched
+    // document. Planned together, the lane's order never changes and
+    // nothing structural happens at all.
+    try expectEdit(
+        .{ .retime = .{ .sel = .{ .lanes = &.{"flash"} }, .delta = 10 * TPQ } },
+        \\[
+        \\{"op":"set_keyword","root":6,"path":[0],"key":"at","value":{"$num":[10,"q"]}},
+        \\{"op":"set_keyword","root":6,"path":[1],"key":"at","value":{"$num":[11,"q"]}},
+        \\{"op":"set_keyword","root":6,"path":[2],"key":"at","value":{"$num":[3,"bar"]}},
+        \\{"op":"set_keyword","root":6,"path":[3],"key":"at","value":{"$num":[14,"q"]}}
+        \\]
+        \\
+    ,
+        &.{
+            .{ .from = "(note :at 0q :dur 0.5q :key 36 :vel 110)", .to = "(note :at 10q :dur 0.5q :key 36 :vel 110)" },
+            .{ .from = "(note :at 1q :dur 0.5q :key 60 :vel 90)", .to = "(note :at 11q :dur 0.5q :key 60 :vel 90)" },
+            .{ .from = "(note :at 2q :dur 0.5q :key 36 :vel 80)", .to = "(note :at 3bar :dur 0.5q :key 36 :vel 80)" },
+            .{ .from = "(clip :at 4q :phrase fill :repeat 2)", .to = "(clip :at 14q :phrase fill :repeat 2)" },
+        },
+    );
+}
+
+test "ops: two of four moved backwards past one that stays" {
+    // Slots 2 and 3 move to 0.5q and 1.5q. The second still fits where
+    // it sits; the first does not, so it alone is removed and inserted —
+    // and its index is a slot in the list the removal LEAVES, which is
+    // the whole of critical fix 1.
+    const want =
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\
+        \\(lane :name flash
+        \\  (note :at 0q :dur 0.25q :key 36)
+        \\  (note :at 0.5q :dur 0.25q :key 40)
+        \\  (note :at 1q :dur 0.25q :key 38)
+        \\  (note :at 1.5q :dur 0.25q :key 41))
+        \\
+    ;
+    try expectPlanOn(
+        test_support.four,
+        .{ .retime = .{
+            .sel = .{ .lanes = &.{"flash"}, .range = .{ 2 * TPQ, 4 * TPQ } },
+            .delta = -3 * @divExact(TPQ, 2),
+        } },
+        \\[
+        \\{"op":"set_keyword","root":3,"path":[3],"key":"at","value":{"$num":[1.5,"q"]}},
+        \\{"op":"remove_positional","root":3,"path":[],"index":2},
+        \\{"op":"insert_positional","root":3,"path":[],"index":1,"value":{"$form":"note","at":{"$num":[0.5,"q"]},"dur":{"$num":[0.25,"q"]},"key":40}}
+        \\]
+        \\
+    ,
+        want,
+    );
+}
+
+test "ops: a quantize that would stack two notes on one key is edit_overlap" {
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.crossing);
+    defer fx.deinit();
+
+    // A half-note grid puts both notes on tick 0, where they would sound
+    // over each other — a collision the plan makes with ITSELF, invisible
+    // to a check that only looks at the document as it stands.
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{ .quantize = .{
+        .sel = .{ .lanes = &.{"flash"} },
+        .grid = .{ .div = 2 },
+    } });
+    defer p.deinit();
+
+    try testing.expectEqual(@as(usize, 0), p.actions.len);
+    const d = p.findDiag(.edit_overlap).?;
+    try testing.expectEqual(fx.doc_().lanes[0].notes[1].span, d.span);
+}
+
+test "ops: dur-too lands on an unsorted lane, moved or not" {
+    // The lane is not sorted, which is legal. One note stays where it is
+    // and takes only the quantized `:dur`; the other moves far enough to
+    // be re-inserted, and carries its `:dur` into the rebuilt form —
+    // both halves of one override set.
+    const want =
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\
+        \\(lane :name flash
+        \\  (note :at 0bar :dur 1q :key 38)
+        \\  (note :at 2q :dur 1q :key 36))
+        \\
+    ;
+    try expectPlanOn(
+        test_support.unsorted,
+        .{ .quantize = .{
+            .sel = .{ .lanes = &.{"flash"} },
+            .grid = .{ .div = 4 },
+            .dur_too = true,
+        } },
+        \\[
+        \\{"op":"set_keyword","root":3,"path":[0],"key":"dur","value":{"$num":[1,"q"]}},
+        \\{"op":"remove_positional","root":3,"path":[],"index":1},
+        \\{"op":"insert_positional","root":3,"path":[],"index":0,"value":{"$form":"note","at":{"$num":[0,"bar"]},"dur":{"$num":[1,"q"]},"key":38}}
+        \\]
+        \\
+    ,
+        want,
+    );
+}
+
+test "ops: a conducted document is spelled under its conductor's own meter" {
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.conducted);
+    defer fx.deinit();
+
+    // The file says `[3 4]`, so its bars are three quarter notes: the cue
+    // at `1bar` is 3q and three quarters later is bar 2. Under the
+    // placeholder a conducted document would otherwise get, the same tick
+    // is a bar and a half and spells `6q`.
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try fx.loaded.map.spell(&w, 6 * TPQ);
+    try testing.expectEqualStrings("2bar", w.buffered());
+
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{ .retime = .{
+        .sel = .{ .kinds = .{ .cue = true } },
+        .delta = 3 * TPQ,
+    } });
+    defer p.deinit();
+
+    var applied = try apply.apply(gpa, fx.source, &p);
+    defer applied.deinit();
+    try testing.expect(!applied.diags.hasErrors());
+    try testing.expect(std.mem.indexOf(u8, applied.text, "(cue :name \"two\" :at 2bar)") != null);
+}
+
+test "ops: stretch counts the positions that rounded, and not its own growth" {
+    // A tick that is not divisible by two cannot survive 3/2: one
+    // position rounds (half to even, so 1t lands on 2t) and the range's
+    // own growth is exact, which is not a position and is not counted.
+    const source: [:0]const u8 =
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name flash
+        \\  (note :at 1t :dur 1t :key 36))
+        \\
+    ;
+    const want =
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name flash
+        \\  (note :at 2t :dur 1t :key 36))
+        \\
+    ;
+    try expectPlanOn(
+        source,
+        .{ .stretch = .{ .from = 0, .to = 4 * TPQ, .p = 3, .q = 2 } },
+        \\[
+        \\{"op":"set_keyword","root":3,"path":[0],"key":"at","value":{"$num":[2,"t"]}}
+        \\]
+        \\
+    ,
+        want,
+    );
+
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, source);
+    defer fx.deinit();
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .stretch = .{ .from = 0, .to = 4 * TPQ, .p = 3, .q = 2 },
+    });
+    defer p.deinit();
+    try testing.expectEqual(@as(u32, 1), p.summary.inexact);
+    try testing.expectEqual(Diag.Severity.warning, p.findDiag(.edit_inexact).?.severity);
+}
+
+test "ops: insert a cue, and duplicate one" {
+    try expectEdit(
+        .{ .insert = .{ .what = .{ .cue = .{ .name = "the lift", .at = 32 * TPQ } } } },
+        \\[
+        \\{"op":"insert_root","index":6,"value":{"$form":"cue","name":"the lift","at":{"$num":[8,"bar"]}}}
+        \\]
+        \\
+    ,
+        &.{.{
+            .from = "\n(lane :name flash :target flash",
+            .to = "\n(cue :name \"the lift\" :at 8bar)\n\n(lane :name flash :target flash",
+        }},
+    );
+
+    try expectEdit(
+        .{ .duplicate = .{ .sel = .{ .kinds = .{ .cue = true } }, .delta = 16 * TPQ } },
+        \\[
+        \\{"op":"insert_root","index":6,"value":{"$form":"cue","name":"the drop","at":{"$num":[8,"bar"]}}}
+        \\]
+        \\
+    ,
+        &.{.{
+            .from = "\n(lane :name flash :target flash",
+            .to = "\n(cue :name \"the drop\" :at 8bar)\n\n(lane :name flash :target flash",
+        }},
+    );
+}
+
+test "ops: rename a section, and rename a target no pacer form declares" {
+    try expectEdit(
+        .{ .rename = .{ .what = .section, .from = "intro", .to = "opening" } },
+        \\[
+        \\{"op":"set_keyword","root":4,"path":[],"key":"name","value":{"$sym":"opening"}}
+        \\]
+        \\
+    ,
+        &.{.{
+            .from = "(section :name intro :at 0bar :dur 4bar)",
+            .to = "(section :name opening :at 0bar :dur 4bar)",
+        }},
+    );
+
+    try expectEdit(
+        .{ .rename = .{ .what = .target, .from = "flash", .to = "strobe" } },
+        \\[
+        \\{"op":"set_keyword","root":6,"path":[],"key":"target","value":{"$sym":"strobe"}}
+        \\]
+        \\
+    ,
+        &.{.{
+            .from = "(lane :name flash :target flash",
+            .to = "(lane :name flash :target strobe",
+        }},
+    );
 }

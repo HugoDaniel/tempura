@@ -199,6 +199,77 @@ pub fn contentEnd(doc: *const Doc.Doc) i64 {
     return end;
 }
 
+/// The map a `Doc` resolves its positions against — `Result.map`, from
+/// the finished value alone.
+///
+/// The document layer owns the map. `fromSource` builds one while it
+/// walks and stores it on the result; a consumer that holds a `Doc` and
+/// wants the same answer calls this rather than re-deriving, because
+/// "the same answer" is the whole point: the edit engine spells a
+/// position with it, the exporters measure with it, and two copies of
+/// plan 02's `:length` rule would be two documents.
+///
+/// It reproduces `finalMap` exactly:
+///
+///   * the CONDUCTOR's tables when the document names one and holds its
+///     inline dump (plan 03's rules 2 and 3, through `smfConductor` /
+///     `itConductor`);
+///   * plan 03's placeholder — 500 000 microseconds per quarter note in
+///     `[4 4]` — when it names one and carries no dump and no points of
+///     its own, so a conducted document is never told it needs a point
+///     at tick 0;
+///   * otherwise the document's own `(tempo-point …)` and
+///     `(meter-point …)`;
+///   * `:length`, or `contentEnd` — the anchor's own end included —
+///     rounded UP to a bar by a probe derive.
+///
+/// The conductor's own diagnostics are dropped: a caller holding a `Doc`
+/// has already been handed them by the load that produced it, and a map
+/// is not the place to hear them twice.
+///
+/// Caller releases with `map.deinit()`.
+pub fn mapOf(gpa: Allocator, doc: *const Doc.Doc) Error!TimeMap.TimeMap {
+    var cond: ?Conductor = null;
+    defer if (cond) |*c| c.deinit();
+    if (doc.conductor) |id| conducted: {
+        const anchor = doc.anchorById(id) orelse break :conducted;
+        for (doc.midi) |*tier| {
+            if (std.mem.eql(u8, tier.anchor, id)) {
+                cond = try smfConductor(gpa, &tier.sequence, anchor.span);
+                break :conducted;
+            }
+        }
+        for (doc.it) |*tier| {
+            if (std.mem.eql(u8, tier.anchor, id)) {
+                cond = try itConductor(gpa, &tier.module, anchor.span);
+                break :conducted;
+            }
+        }
+    }
+
+    const seeded_tempo = [_]Doc.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
+    const seeded_meter = [_]Doc.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
+    const tempo: []const Doc.TempoPoint = if (cond) |c|
+        c.tempo
+    else if (doc.conductor != null and doc.tempo.len == 0) &seeded_tempo else doc.tempo;
+    const meter: []const Doc.MeterPoint = if (cond) |c|
+        c.meter
+    else if (doc.conductor != null and doc.meter.len == 0) &seeded_meter else doc.meter;
+
+    const length = doc.length orelse len: {
+        const content = @max(contentEnd(doc), if (cond) |c| c.end else 0);
+        if (content <= 0) break :len 0;
+        var probe = try TimeMap.derive(gpa, tempo, meter, content, doc.end);
+        defer probe.deinit();
+        const bars = probe.map.bars;
+        break :len if (bars.len == 0) content else bars[bars.len - 1];
+    };
+
+    var final = try TimeMap.derive(gpa, tempo, meter, length, doc.end);
+    final.diags.deinit();
+    return final.map;
+}
+
 // ---------------------------------------------------------------------
 // The walk
 // ---------------------------------------------------------------------
@@ -2765,6 +2836,50 @@ test "fromSjon: an SMF conductor's tempo is honoured on any track, and its meter
     try testing.expectEqual(@as(f64, 400_000), res.map.segments[1].us);
     // …and the file's `[3 4]` is what `1bar` means in the document.
     try testing.expectEqual(@as(i64, 3 * Grid.TPQ), res.doc.cues[0].at);
+}
+
+test "fromSjon.mapOf: the map a Doc answers with is the map its load stored" {
+    // One document, two ways to the same map: the walk builds one while
+    // it resolves, and a consumer holding only the value asks for it
+    // again. They agree segment for segment, bar for bar — including the
+    // CONDUCTOR branch, where the tables are the file's and not the
+    // document's, and including `:length`'s default, where the anchor's
+    // own end is half the rule.
+    const gpa = testing.allocator;
+    for ([_][:0]const u8{
+        conducted_smf,
+        \\(timeline :title "native")
+        \\(tempo-point :at 0q :qpm 125)
+        \\(meter-point :at 0bar :sig [3 4])
+        \\(lane :name flash (note :at 0q :dur 1q :key 36))
+        ,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\(cue :name "one" :at 1bar)
+        ,
+    }) |source| {
+        var res = try load(gpa, source, null);
+        defer res.deinit();
+
+        var again = try mapOf(gpa, &res.doc);
+        defer again.deinit();
+
+        try testing.expectEqual(res.map.length, again.length);
+        try testing.expectEqual(res.map.end, again.end);
+        try testing.expectEqual(res.map.integral, again.integral);
+        try testing.expectEqual(res.map.segments.len, again.segments.len);
+        for (res.map.segments, again.segments) |a, b| {
+            try testing.expectEqual(a.tick, b.tick);
+            try testing.expectEqual(a.us, b.us);
+        }
+        try testing.expectEqual(res.map.meters.len, again.meters.len);
+        for (res.map.meters, again.meters) |a, b| {
+            try testing.expectEqual(a.tick, b.tick);
+            try testing.expectEqual(a.n, b.n);
+            try testing.expectEqual(a.d, b.d);
+        }
+        try testing.expectEqualSlices(i64, res.map.bars, again.bars);
+    }
 }
 
 test "fromSjon: a file with no tempo or meter event conducts at 120 in [4 4]" {

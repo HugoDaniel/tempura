@@ -63,6 +63,16 @@ const Window = struct {
     }
 };
 
+/// How far one line of `grid` is from the next, in the bar `tick` falls
+/// in — a bar's own length, a beat's, or a subdivision of a whole note.
+///
+/// Public because a nudge counts in these steps and a quantize snaps to
+/// the lines they put down: one function, so the two cannot disagree
+/// about how long a step is.
+pub fn stepOf(map: *const TimeMap.TimeMap, tick: i64, grid: Grid) i64 {
+    return windowOf(map, tick, grid).step;
+}
+
 fn windowOf(map: *const TimeMap.TimeMap, tick: i64, grid: Grid) Window {
     const b = map.barOf(tick);
     const beat_len = Grid_.beatTicks(b.meter.d);
