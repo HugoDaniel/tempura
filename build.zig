@@ -199,6 +199,46 @@ pub fn build(b: *std.Build) void {
     const fixtures_step = b.step("fixtures", "Regenerate the corpus's committed binary fixtures");
     fixtures_step.dependOn(&run_fixtures.step);
 
+    // `zig build landing` — the pacer landing proof's fixtures.
+    //
+    // Rooted the way `-Dtest-root` is, and for the same reason: the
+    // generator needs `src/export/`, whose files `@import("../time/…")`,
+    // so the module root has to sit one level ABOVE the aggregator. A
+    // module rooted at `src/export/export.zig` would make `src/export/`
+    // the module path and every `..` import "outside module path".
+    //
+    // The fixtures are WRITTEN into `npm/tempura/test/fixtures` and the
+    // node suite reads them there; `-- --full` writes the exhaustive
+    // two-bar sweep instead of the sampled one.
+    const landing_root = blk: {
+        const wf = b.addWriteFiles();
+        _ = wf.addCopyDirectory(b.path("src"), ".", .{});
+        break :blk wf.add(
+            "_export_root.zig",
+            "pub const exporter = @import(\"export/export.zig\");\n",
+        );
+    };
+    const landing_src_mod = b.createModule(.{
+        .root_source_file = landing_root,
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "sjon", .module = sjon_mod }},
+    });
+    addSchemas(b, landing_src_mod);
+    const landing_mod = b.createModule(.{
+        .root_source_file = b.path("tools/gen_landing.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "tempura_export", .module = landing_src_mod }},
+    });
+    const landing_exe = b.addExecutable(.{ .name = "gen-landing", .root_module = landing_mod });
+    const run_landing = b.addRunArtifact(landing_exe);
+    run_landing.addDirectoryArg(b.path("npm/tempura/test/fixtures"));
+    if (b.args) |args| run_landing.addArgs(args);
+    run_landing.has_side_effects = true;
+    const landing_step = b.step("landing", "Regenerate npm/tempura/test/fixtures for the pacer landing proof");
+    landing_step.dependOn(&run_landing.step);
+
     // `zig build cli` — the native `tempura` multi-tool. Built against the
     // PUBLIC `tempura` module rather than the sources, deliberately: the
     // CLI is a CONSUMER, so going through `@import("tempura")` makes
@@ -224,10 +264,62 @@ pub fn build(b: *std.Build) void {
     cli_step.dependOn(&install_cli.step);
 
     // `zig build run -- dump song.mid` — the CLI without the install path.
+    //
+    // The CLI's exit code is a VERDICT ON THE DOCUMENT, not on the CLI:
+    // `1` means it has diagnostics, `2` that the invocation was wrong.
+    // Ideally the build runner would forward both without calling the
+    // build failed, and Zig 0.16 has no way to say that: `expectExitCode`
+    // takes ONE `u8`, and `.check` — the only `stdio` mode that tolerates
+    // a non-zero exit with no `expect_term` — sends stdout to `.ignore`
+    // (`std/Build/Step/Run.zig`), which would throw the artifact away.
+    // So this stays `inherit`: every byte the CLI writes reaches the
+    // terminal, and after it the runner adds its own "exited with error
+    // code N" line. `has_side_effects` is explicit because it is
+    // load-bearing — it is what makes the streams inherit rather than be
+    // ignored, and what stops the step being cached away.
     const run_cli = b.addRunArtifact(cli_exe);
+    run_cli.has_side_effects = true;
     if (b.args) |args| run_cli.addArgs(args);
     const run_step = b.step("run", "Run the tempura CLI (args after `--`)");
     run_step.dependOn(&run_cli.step);
+
+    // The CLI's tests are their OWN root. `src/root.zig`'s `test {}` block
+    // cannot reach them: these files import the `tempura` MODULE, which
+    // inside the core test binary would resolve to a second, distinct
+    // instance. `src/cli/Cli.zig` plays root.zig's role one level down,
+    // and `zig build test` runs both roots.
+    const cli_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/Cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &cli_imports,
+    });
+    // The CLI tests read repo fixtures (`corpus/…`, `src/cli/testdata/…`)
+    // through the same absolute repo root the core tests use, so they do
+    // not depend on where `zig build` was invoked from.
+    cli_test_mod.addImport("build_options", build_options_mod);
+    const cli_tests = b.addTest(.{ .root_module = cli_test_mod });
+    const run_cli_tests = b.addRunArtifact(cli_tests);
+    test_step.dependOn(&run_cli_tests.step);
+
+    // The binary-level golden: run the freshly built CLI over pinned
+    // corpus fixtures and diff the committed output. The in-process tests
+    // check shape and rules one assertion at a time; this checks the WHOLE
+    // output — exit code, stdout and stderr — in one reviewable diff, and
+    // catches a reshuffle nothing happened to assert. Same
+    // check-by-default / `--update`-to-write shape as the other scripts,
+    // so the gate compares what the verb produces.
+    const cli_golden_check = b.addSystemCommand(&.{"tools/cli_golden.sh"});
+    cli_golden_check.setCwd(b.path("."));
+    cli_golden_check.addArtifactArg(cli_exe);
+
+    const cli_golden_update = b.addSystemCommand(&.{"tools/cli_golden.sh"});
+    cli_golden_update.setCwd(b.path("."));
+    cli_golden_update.addArtifactArg(cli_exe);
+    cli_golden_update.addArg("--update");
+    cli_golden_update.has_side_effects = true;
+    const cli_golden_step = b.step("cli-golden", "Regenerate the CLI goldens (review the diff)");
+    cli_golden_step.dependOn(&cli_golden_update.step);
 
     // `zig build fuzz` — never-panic harnesses over the byte-eating and
     // arbitrary-input entrypoints. A SEPARATE target so `verify` stays
@@ -264,10 +356,38 @@ pub fn build(b: *std.Build) void {
     const run_corpus_verify = b.addRunArtifact(corpus_runner);
     run_corpus_verify.addDirectoryArg(b.path("corpus"));
     run_corpus_verify.has_side_effects = true;
-    const verify_step = b.step("verify", "test + native corpus + the pacer-schema drift check + the generated-docs drift check");
+    const verify_step = b.step("verify", "test + the CLI goldens + native corpus + the pacer-schema drift check + the generated-docs drift check");
     verify_step.dependOn(&run_tests.step);
+    verify_step.dependOn(&run_cli_tests.step);
+    verify_step.dependOn(&cli_golden_check.step);
     verify_step.dependOn(&run_corpus_verify.step);
     verify_step.dependOn(&pacer_drift.step);
+
+    // …and the landing proof, through the REAL `pacer.wasm` (pacer's
+    // `node_test` shape). tempura's own tests cannot catch its model of
+    // pacer's `mul + floor` drifting from pacer's own, so this leg is
+    // where a printed position is actually read back by the driver. Skip
+    // with a printed reason when `node` is not on PATH: a Zig-only
+    // checkout still gets the rest of the gate.
+    if (b.findProgram(&.{"node"}, &.{})) |_| {
+        // The fixtures are DERIVED, so the gate regenerates them first
+        // and reads what this tree produces rather than what someone
+        // left behind (pacer wires `node_test` to `install_wasm` the
+        // same way). `npm/tempura` still needs its one `file:` dev
+        // dependency installed and `pacer.wasm` copied beside it —
+        // `npm install && npm run build:wasm && npm run build:wasm-copy`
+        // there, once.
+        const node_test = b.addSystemCommand(&.{ "node", "--test" });
+        node_test.setCwd(b.path("npm/tempura"));
+        node_test.has_side_effects = true;
+        node_test.step.dependOn(&run_landing.step);
+        verify_step.dependOn(&node_test.step);
+    } else |_| {
+        std.debug.print(
+            "verify: `node` is not on PATH — skipping the npm/tempura pacer landing test\n",
+            .{},
+        );
+    }
 
     // `zig build audit-diagnostics` — assert every `Diag.Code` variant is
     // exercised by name in some `test {}` body (corpus goldens carry

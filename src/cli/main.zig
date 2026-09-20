@@ -3,31 +3,70 @@
 //! The binary is built against the PUBLIC `tempura` module, not the
 //! sources: it is a consumer like any host, so a surface it needs and
 //! `src/root.zig` does not export fails the `cli` build (build.zig says
-//! why). Verb dispatch, argument parsing and rendering will live behind a
-//! `run(gpa, io, argv, stdout, stderr) !u8` seam in `src/cli/Cli.zig`
-//! (pacer's arrangement) so the in-source tests drive the code the binary
-//! runs; nothing is implemented yet.
+//! why).
 //!
-//! Channels, once verbs exist: artifacts to stdout or `-o`, diagnostics
-//! and usage to stderr, `NO_COLOR` honoured. Exit codes are SJON's —
-//! 0 ok, 1 diagnostics, 2 usage, 3 internal — because a tempura document
-//! IS an SJON document and the two binaries sit in the same pipelines.
+//! Thin dispatcher: build the stdio writers, read the two facts about the
+//! process that a verb must not go looking for itself (`NO_COLOR`, and
+//! whether stderr is a terminal), collect argv off the process arena,
+//! hand everything to `Cli.run`. Every behavioural concern — argument
+//! parsing, source loading, rendering, exit policy — lives in `Cli.zig`,
+//! so the in-source tests drive the same code the binary runs.
+//!
+//! The one thing that cannot live behind that seam is the outermost
+//! catch: `run` returns `!u8`, and anything it propagates would otherwise
+//! reach the Zig runtime, which prints a trace and exits 1 — the same
+//! code as "your document has diagnostics".
+//!
+//! `writerStreaming`, not `writer`, on both channels: `File.writer`
+//! defaults to POSITIONAL writing, which starts at offset 0. That is
+//! right for a file this process opened and wrong for one the shell
+//! handed us, and `{ echo A; tempura dump s.mid; } > f` would write over
+//! the `A` (SJON hit exactly this and its `main.zig` records it).
 
 const std = @import("std");
-const tempura = @import("tempura");
+const Cli = @import("Cli.zig");
+const Diags = @import("Diags.zig");
 
-/// The verb set of plan 10, "The `tempura` CLI". `timing` is deliberately
-/// absent: it existed for the studio's timing provider, and pstudio is not
-/// a host (ruling of 2026-09-20), so the payload has no consumer.
-const usage = "usage: tempura <dump|build|validate|inspect|timeline|export-score|export|inline|edit|at|check-residue> [options]\n";
+fn reportInternal(stderr: *std.Io.Writer, err: anyerror) u8 {
+    // `catch {}` with no fallback: this IS the fallback. If stderr is
+    // itself the failing channel there is nowhere left to report, and the
+    // exit code has to carry the whole signal.
+    stderr.print("tempura: internal error: {s}\n", .{@errorName(err)}) catch {};
+    return Cli.Exit.internal;
+}
 
 pub fn main(init: std.process.Init) u8 {
+    // A dump of a large `.it` is megabytes of text; a big stdout buffer
+    // keeps that one write rather than thousands.
+    var stdout_buf: [64 * 1024]u8 = undefined;
+    var stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writerStreaming(init.io, &stdout_buf);
+
     var stderr_buf: [4096]u8 = undefined;
     var stderr_file = std.Io.File.stderr();
-    var stderr_writer = stderr_file.writer(init.io, &stderr_buf);
+    var stderr_writer = stderr_file.writerStreaming(init.io, &stderr_buf);
     const stderr = &stderr_writer.interface;
 
-    stderr.print("tempura {s}: no verb is implemented yet (P108)\n{s}", .{ tempura.version, usage }) catch return 3;
-    stderr.flush() catch return 3;
-    return 2;
+    // Built BEFORE argv is collected, so even an OOM in `toSlice` has
+    // somewhere to be reported.
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch |err|
+        return reportInternal(stderr, err);
+
+    // Colour is a property of the channel the diagnostics ride on, which
+    // is stderr. A failed TTY probe degrades to "not a terminal", which
+    // is the safe default (no escapes in a log file).
+    const is_tty = stderr_file.isTty(init.io) catch false;
+    const no_color = init.minimal.environ.containsUnempty(init.gpa, "NO_COLOR") catch false;
+
+    var code = Cli.run(init.gpa, init.io, args, &stdout_writer.interface, stderr, .{
+        .color = Diags.colorEnabled(no_color, is_tty),
+    }) catch |err| reportInternal(stderr, err);
+
+    // A failed stdout flush means the user never received the artifact
+    // the exit code is describing — that outranks whatever `run` decided.
+    stdout_writer.interface.flush() catch |err| {
+        code = reportInternal(stderr, err);
+    };
+    stderr.flush() catch return Cli.Exit.internal;
+    return code;
 }

@@ -1,0 +1,15 @@
+; An anchor by reference whose file is not beside the document, and
+; nothing else: the resolver `validate` builds is pointed at THIS
+; directory, so the read really happens and really fails —
+; `anchor_unavailable`, with the span of the `(anchor …)` form that asked
+; for it.
+;
+; The timeline is deliberately NATIVE (its own tempo and meter, no
+; `:conductor`), so the only thing this fixture can fail on is the
+; anchor.
+(timeline :length 1bar)
+
+(anchor :id song :kind smf :file "absent.mid" :size 42 :sha256 "9f2a00000000000000000000000000000000000000000000000000000000abcd")
+
+(tempo-point :at 0q :us 500000)
+(meter-point :at 0bar :sig [4 4])

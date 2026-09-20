@@ -1,0 +1,18 @@
+; A document with one defect of each half of `validate`'s contract, so
+; the CLI's rendering is pinned against a real report and not a mock:
+;
+;   - `lane_duplicate`, a HOST check (`doc/checks.zig`): two lanes may
+;     not share a name, and the manifest cannot say so because uniqueness
+;     is not a shape.
+;   - a `:key` past 127, which the MANIFEST refuses and which therefore
+;     arrives as `sjon_diagnostic` — the other producer, carried through
+;     verbatim with SJON's own text and span.
+(timeline :title "two defects" :length 2bar)
+
+(tempo-point :at 0q :us 500000)
+(meter-point :at 0bar :sig [4 4])
+
+(lane :name pulse :kind notes :target pulse
+  (note :at 0bar :dur 1q :key 36 :vel 100))
+(lane :name pulse :kind notes :target other
+  (note :at 1bar :dur 1q :key 200 :vel 100))
