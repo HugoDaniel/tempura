@@ -1,9 +1,746 @@
-; The hosted `(module …)` core tier — the Impulse Tracker vocabulary with
-; its 08-25 amendments (P99, plan 02; the it set's 02).
+; The hosted `it/` tier — the Impulse Tracker vocabulary (P99, plan 02;
+; the it set's 02 with its 2026-08-25 amendments).
 ;
-; STUB. Embedded through the `it_schema` build import. Owner-of-record
-; note: this manifest restates the it set's, whose repo (batida) does not
-; exist yet; when it does, one owner is picked per manifest (plan 01,
-; "Two sibling repos, one owner per file").
+; One `(module …)` root holding the song-level forms, the instruments, the
+; samples and the patterns. Every form mirrors a real IT concept with
+; ITTECH.TXT provenance; omission means the IT default, so a minimal
+; document is tiny; and bulk bytes ride `(bin :at :len)` refs against the
+; anchor's file rather than living in the text.
+;
+; Adopted from the 2026-08-25 amendments: hex integers on `(bin …)`
+; offsets and the created-with / compatible-with pair (1); slot-locals for
+; `row`, `ev`, `node`, `range`, `ch`, `macro`, `vibrato`, `data` — and for
+; `notemap` and the three envelopes, which are as generic and as
+; instrument-only (2); positional counts, so "at most 25 nodes" is
+; `positional_too_many` at the node that crosses the ceiling rather than
+; prose (3); `:requires` for the keys that are inert alone — `:loop-mode`,
+; `:sustain-mode`, a MIDI `:program` / `:bank`, a `(range …)`'s
+; `:transpose` (5); and the numeric refinements with the byte-width
+; caveat — `:repr u32` / `u16` where they fit and plain integer bounds for
+; every byte-wide field, `(unit-shape :reject true)` throughout (6).
+; `scalar-or-ref` on `:ins` is adopted with its reference half UNCHECKED
+; (7's cross-ref needs a symbol `:name` on `(instrument …)`, which the
+; it set parks at T1 and its own examples spell as a string), so `:ins 2`
+; and `:ins bass` both validate and the writer emits the integer.
+; Recorded and not adopted: variants (4) — no enum here gates a key yet —
+; and PatternQuery authoring (8).
+;
+; `source`, `timing` and `options` are GLOBAL here where the it set's
+; amendment 2 makes them slot-locals of `module`. That is not a
+; disagreement about how generic the names are; it is what tempura's own
+; spelling needs. A dump inside a timeline document writes its heads
+; QUALIFIED — `(it/module … (it/timing …) (it/orders …))` — and a
+; qualified head bypasses locals by design, resolving global-only
+; (`portable-manifest-v1.md` §5.2). The leaf forms stay local because
+; tempura's own example spells them bare: `(row 0 (ev 3 "C-5" …))`,
+; `(data :bits 16 … (bin …))`. `(bin …)` is global, as the amendment
+; says, because it appears under both `data` and `pattern`.
+;
+; One key is tempura's and is not in the it set's manifest: `:raw` on
+; `(instrument …)` and `(sample …)`, an opaque-body spelling
+; (plan 06, "The binary model"). tempura materialises the TIMING subset —
+; header fields, orders, patterns, message — and keeps instruments and
+; samples as opaque records with their names and a `(bin …)` per body, so
+; a batida dump validates here while a document that spells an instrument
+; field tempura did not materialise is `it_field_not_materialized` at
+; build. The key is filed to the it set as an ask.
+;
+; Owner of record: this manifest restates the it set's, whose repo
+; (batida) does not exist yet; when it does, one owner is picked per
+; manifest (plan 01, "Two sibling repos, one owner per file").
+;
+; No `:version`, for the reason `schema/tempura.sjon` declares none.
 
-(plugin :name it)
+(plugin :name it
+  :description "An Impulse Tracker module as a document: the header, the channel defaults, the order list, the message, the instruments and samples (opaque bodies with their names), and the patterns as sparse rows of cells."
+
+  ; =====================================================================
+  ; Identifiers and counts
+  ; =====================================================================
+
+  (value-kind :name pattern-id
+    :description "A pattern number, 0..199 — the order list's entries and a (pattern …)'s own id."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 199 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name order-symbol
+    :description "An order-list entry that is not a pattern."
+    :underlying symbol
+    :members (member-set
+      (member :name skip :description "254, shown as +++: play nothing and move on.")
+      (member :name end :description "255, shown as ---: the end of the song. A trailing one is implicit and not written.")))
+
+  (value-kind :name order-entry
+    :description "One order-list entry: a pattern number, or `skip` / `end`."
+    :underlying union
+    :union (union-shape :alternatives [pattern-id order-symbol]))
+
+  (value-kind :name instrument-id
+    :description "An instrument number, 1..99."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 99 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name ins-ref
+    :description "An instrument: its number, or a bare symbol naming one. The writer always emits the number; the symbol half is authoring comfort and is not checked against the module's instruments here (the it set parks the cross-ref at T1, since it would need a symbol :name on (instrument …) and its own examples spell that as a string)."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base instrument-id))
+
+  (value-kind :name sample-id
+    :description "A sample number, 1..99."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 99 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name channel-number
+    :description "A channel, 1..64, counted from 1 as IT's own display does."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 64 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name rows-count
+    :description "A pattern's row count. IT writes 32..200; 1..1024 is accepted on read with a diagnostic."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 1024 :integer true)
+    :unit (unit-shape :reject true))
+
+  ; =====================================================================
+  ; Header scalars
+  ; =====================================================================
+
+  (value-kind :name speed-value
+    :description "Ticks per row (IT's IS). 6 is the default; 0 on disk reads as 6."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 255 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name tempo-value
+    :description "Initial tempo in IT's own units (its IT field), 32..255 in practice. A lower value is playable and warned about rather than refused."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 255 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name highlight-component
+    :description "One of the row-highlight pair: rows per beat, then rows per measure."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 255 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name highlight-pair
+    :description "The editor's row highlight as [minor major] — rows per beat and per measure. It is also where an IT conductor's default meter comes from."
+    :underlying vector
+    :vector (vector-shape :len 2 :element highlight-component))
+
+  (value-kind :name it-byte
+    :description "A byte-wide header scalar, 0..255. There is no u8 repr tag, so byte-wide fields carry plain integer bounds."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 255 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name it-vol
+    :description "A volume, 0..64 — IT's own range."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 64 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name it-pan
+    :description "A pan position, 0..64 — 0 hard left, 32 centre, 64 hard right."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 64 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name it-level
+    :description "A global / mix / separation level, 0..128."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 128 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name version-word
+    :description "A created-with (Cwt/v) or compatible-with (Cmwt) version word, read and written in hex: 0x0214, 0x0200."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 65535 :integer true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type u16))
+
+  ; =====================================================================
+  ; Cells
+  ; =====================================================================
+
+  (value-kind :name note-name
+    :description "A note as IT's editor shows it: \"C-0\" through \"B-9\", sharps spelled with #. Three characters exactly; the pitch is checked at build."
+    :underlying string
+    :string-bounds (string-bounds :min-len 3 :max-len 3))
+
+  (value-kind :name note-symbol
+    :description "A note-column entry that is not a pitch."
+    :underlying symbol
+    :members (member-set
+      (member :name off :description "255 — note off.")
+      (member :name cut :description "254 — note cut.")
+      (member :name fade :description "246 — note fade.")))
+
+  (value-kind :name note-cell
+    :description "A note column: a pitch name, or off / cut / fade."
+    :underlying union
+    :union (union-shape :alternatives [note-name note-symbol]))
+
+  (value-kind :name ev-cell
+    :description "A cell's positional children: the channel first, then the note when there is one."
+    :underlying union
+    :union (union-shape :alternatives [channel-number note-name note-symbol]))
+
+  (value-kind :name volcol-number
+    :description "A volume-column value, 0..64 — set the volume."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 64 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name volcol-code
+    :description "A volume-column command, spelled with the letter IT's editor shows: \"a4\" fine volume up, \"b4\" fine down, \"c4\" slide up, \"d4\" slide down, \"e4\" pitch slide down, \"f4\" up, \"g4\" tone portamento, \"h4\" vibrato depth, \"p32\" pan. (IT.TXT and the display code are the source; SUMMARY.TXT lists A/C and B/D swapped.)"
+    :underlying string
+    :string-bounds (string-bounds :min-len 2 :max-len 3))
+
+  (value-kind :name volcol
+    :description "A volume column: a number that sets the volume, or a letter command."
+    :underlying union
+    :union (union-shape :alternatives [volcol-number volcol-code]))
+
+  (value-kind :name fx-string
+    :description "The effect column: one letter A..Z and two hex digits, as IT shows it — \"D0F\", \"SB1\", \"T80\". One effect column, as in IT; the letter and its sub-command are range-checked at build, with warnings rather than errors for params IT would still play."
+    :underlying string
+    :string-bounds (string-bounds :min-len 3 :max-len 3))
+
+  ; =====================================================================
+  ; Instrument enums and shapes
+  ; =====================================================================
+
+  (value-kind :name nna-kind
+    :description "New Note Action: what happens to the sounding voice when a new note arrives on the channel."
+    :underlying symbol
+    :members (member-set
+      (member :name cut :description "Stop it immediately.")
+      (member :name continue :description "Let it run.")
+      (member :name off :description "Release it (note off).")
+      (member :name fade :description "Fade it out at :fadeout.")))
+
+  (value-kind :name dct-kind
+    :description "Duplicate Check Type: what counts as a duplicate of the new note."
+    :underlying symbol
+    :members (member-set
+      (member :name off :description "Nothing; never duplicate-check.")
+      (member :name note :description "The same note.")
+      (member :name sample :description "The same sample.")
+      (member :name instrument :description "The same instrument.")))
+
+  (value-kind :name dca-kind
+    :description "Duplicate Check Action: what to do with the duplicate the check found."
+    :underlying symbol
+    :members (member-set
+      (member :name cut :description "Stop it immediately.")
+      (member :name off :description "Release it (note off).")
+      (member :name fade :description "Fade it out.")))
+
+  (value-kind :name fadeout-value
+    :description "Fade-out rate. ITTECH documents 0..128; the disk byte holds 0..255 and a higher value is warned about rather than refused."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 255 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name pitch-pan-component
+    :description "One of the pitch-pan pair: the separation (-32..32), then the centre note (0..119)."
+    :underlying number
+    :numeric (numeric-bounds :min -32 :max 119 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name pitch-pan-pair
+    :description "Pitch-to-pan as [separation centre-note]."
+    :underlying vector
+    :vector (vector-shape :len 2 :element pitch-pan-component))
+
+  (value-kind :name swing-component
+    :description "One of the random-variation pair: volume swing as a percentage (0..100), then pan swing (0..64)."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 100 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name swing-pair
+    :description "Random variation as [volume-swing pan-swing]."
+    :underlying vector
+    :vector (vector-shape :len 2 :element swing-component))
+
+  ; `nil` is NOT expressible as a union alternative in manifest v1: a
+  ; `(union-shape :alternatives …)` takes a `type-list`, whose elements
+  ; are `type-ref` symbols, and `nil` lexes as the nil LITERAL rather than
+  ; a symbol. So every slot IT spells "a number or nil" — this pair, a
+  ; sample's `:pan`, a MIDI `:program` and `:bank` — types its element as
+  ; `any` and says the range in prose. Filed to SJON as an ask; the arity
+  ; check survives here, which is the half worth keeping.
+  (value-kind :name filter-pair
+    :description "The instrument's default filter as [cutoff resonance]. Each is 0..127, or nil to leave it alone; the range is checked at build, since a nil alternative is not expressible in a manifest."
+    :underlying vector
+    :vector (vector-shape :len 2 :element any))
+
+  (value-kind :name transpose-value
+    :description "Semitones a notemap range shifts its sample by."
+    :underlying number
+    :numeric (numeric-bounds :min -120 :max 120 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name midi-out-channel
+    :description "The MIDI channel an instrument plays out on, 1..16."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 16 :integer true)
+    :unit (unit-shape :reject true))
+
+  ; =====================================================================
+  ; Envelopes
+  ; =====================================================================
+
+  (value-kind :name node-index
+    :description "An index into an envelope's node list, 0..24."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 24 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name node-index-pair
+    :description "A loop or sustain span as [begin end], both node indices."
+    :underlying vector
+    :vector (vector-shape :len 2 :element node-index))
+
+  (value-kind :name env-node-field
+    :description "One of a node's two positional numbers: the tick (0..9999, strictly increasing across a node list — a relation between children, so it stays a build check) and the value (volume 0..64, pan and pitch -32..32)."
+    :underlying number
+    :numeric (numeric-bounds :min -32 :max 9999 :integer true)
+    :unit (unit-shape :reject true))
+
+  ; =====================================================================
+  ; Samples
+  ; =====================================================================
+
+  (value-kind :name c5-rate
+    :description "The sample rate middle C plays back at, in Hz. A 32-bit field."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 4294967295 :integer true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type u32))
+
+  (value-kind :name loop-point
+    :description "A loop boundary, in frames. A 32-bit field."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 4294967295 :integer true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type u32))
+
+  (value-kind :name loop-pair
+    :description "A loop as [begin end], in frames."
+    :underlying vector
+    :vector (vector-shape :len 2 :element loop-point))
+
+  (value-kind :name loop-kind
+    :description "How a loop plays."
+    :underlying symbol
+    :members (member-set
+      (member :name forward :description "Begin to end, then back to begin.")
+      (member :name pingpong :description "Begin to end, then end to begin.")))
+
+  (value-kind :name wave-kind
+    :description "An auto-vibrato waveform."
+    :underlying symbol
+    :members (member-set
+      (member :name sine)
+      (member :name ramp-down)
+      (member :name square)
+      (member :name random)))
+
+  (value-kind :name vibrato-field
+    :description "One of auto-vibrato's three numbers: speed, depth (0..64 each) and rate (0..255)."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 255 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name enc-kind
+    :description "How the STORED sample bytes are encoded. A (bin …) ref keeps whatever the anchor holds; the writer re-encodes only when policy says to."
+    :underlying symbol
+    :members (member-set
+      (member :name pcm :description "Signed PCM — the default.")
+      (member :name pcm-unsigned :description "Unsigned PCM.")
+      (member :name pcm-delta :description "Delta-coded PCM.")
+      (member :name it214 :description "IT 2.14 compression.")
+      (member :name it215 :description "IT 2.15 compression.")))
+
+  (value-kind :name sample-bits
+    :description "Bits per sample frame: 8 or 16."
+    :underlying number
+    :numeric (numeric-bounds :min 8 :max 16 :integer true :multiple-of 8)
+    :unit (unit-shape :reject true))
+
+  ; =====================================================================
+  ; Binary regions
+  ; =====================================================================
+
+  (value-kind :name bin-offset
+    :description "A byte offset into the anchor's file. Written in hex — (bin :at 0x8728 …) reads next to a hex dump."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 4294967295 :integer true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type u32))
+
+  (value-kind :name bin-length
+    :description "A region's length in bytes, from :at."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 4294967295 :integer true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type u32))
+
+  (value-kind :name foreign-tag
+    :description "A trailing chunk's four-character tag, e.g. \"STPM\"."
+    :underlying string
+    :string-bounds (string-bounds :min-len 4 :max-len 4))
+
+  (value-kind :name macro-field
+    :description "A MIDI macro's two positional values: its name, then its 32-character macro string."
+    :underlying union
+    :union (union-shape :alternatives [macro-name macro-string]))
+
+  (value-kind :name macro-name
+    :description "A MIDI macro's slot name, e.g. sf0 or z80."
+    :underlying symbol)
+
+  (value-kind :name macro-string
+    :description "A MIDI macro body: up to 32 ASCII characters in MIDI.TXT's macro language."
+    :underlying string)
+
+  ; =====================================================================
+  ; Positional slots
+  ; =====================================================================
+
+  (value-kind :name module-section
+    :description "A module's children: the file's own identity, the header sections, and the instruments, samples and patterns."
+    :underlying form
+    :heads (head-set
+      (head :name source :max 1 :description "The file this module was read from.")
+      (head :name timing :max 1 :description "Initial speed, tempo and row highlight.")
+      (head :name options :max 1 :description "The header flags and scalars.")
+      (head :name channels :max 1 :description "Per-channel pan and volume defaults.")
+      (head :name orders :max 1 :description "The order list.")
+      (head :name message :max 1 :description "The song message.")
+      (head :name midi :max 1 :description "The MIDI macro configuration.")
+      (head :name instrument :description "One instrument.")
+      (head :name sample :description "One sample.")
+      (head :name pattern :description "One pattern.")
+      (head :name foreign :description "A preserved trailing chunk.")
+      (head :name edit-history :max 1 :description "The preserved edit-history block.")))
+
+  (value-kind :name channel-section
+    :description "The channel defaults a (channels …) lists. Unlisted channels get pan 32 and volume 64."
+    :underlying form
+    :heads (head-set :names [ch]))
+
+  (value-kind :name envelope-section
+    :description "An envelope's nodes. At most 25, which is the format's own ceiling; the 26th is positional_too_many, reported at the node to delete."
+    :underlying form
+    :heads (head-set
+      (head :name node :max 25 :description "One envelope node: (node tick value).")))
+
+  (value-kind :name notemap-section
+    :description "A notemap's explicit ranges, when the whole-range :sample shorthand is not enough."
+    :underlying form
+    :heads (head-set :names [range]))
+
+  (value-kind :name midi-section
+    :description "The MIDI macro slots."
+    :underlying form
+    :heads (head-set :names [macro]))
+
+  (value-kind :name bin-section
+    :description "One (bin …) reference into the anchor's file."
+    :underlying form
+    :heads (head-set
+      (head :name bin :min 1 :max 1 :description "The region's offset and length, or the file holding it.")))
+
+  (value-kind :name bin-ref
+    :description "A (bin …) reference, as the value of a key."
+    :underlying form
+    :heads (head-set :names [bin]))
+
+  ; =====================================================================
+  ; Forms
+  ; =====================================================================
+
+  (form :name module
+    :description "An Impulse Tracker module. Everything below it is optional: omission means the IT default, so the smallest module is a title and an order list."
+    :positional module-section
+    (key :name title :type string :optional true
+      :description "The song name — the header's 26-byte field."))
+
+  (form :name source
+    :description "The file this module was read from, and the identity every (bin …) offset is meaningful against. Inside a timeline document the (anchor …) says the same thing; the two must agree (anchor_conflict)."
+    (key :name file :type string
+      :description "Path to the .it file.")
+    (key :name size :type bin-length :optional true
+      :description "The file's length in bytes.")
+    (key :name sha256 :type string :optional true
+      :description "Hex digest of the file's bytes."))
+
+  (form :name timing
+    :description "The module's starting time: the initial speed and tempo, and the editor's row highlight."
+    (key :name speed :type speed-value :optional true
+      :description "Ticks per row at the start. Default 6.")
+    (key :name tempo :type tempo-value :optional true
+      :description "Tempo at the start. Default 125.")
+    (key :name highlight :type highlight-pair :optional true
+      :description "Row highlight as [minor major] — rows per beat and per measure."))
+
+  (form :name options
+    :description "The header's flags and scalar fields, one key each. Every key has IT's own default, so an absent (options …) is a stereo, instrument-mode, linear-slides module — the modern common case."
+    (key :name stereo :type boolean :optional true :default true
+      :description "Stereo output.")
+    (key :name vol0-optimizations :type boolean :optional true :default false
+      :description "Stop channels whose volume has been 0 for some rows.")
+    (key :name instruments :type boolean :optional true :default true
+      :description "Instrument mode rather than sample mode.")
+    (key :name linear-slides :type boolean :optional true :default true
+      :description "Linear rather than Amiga frequency slides.")
+    (key :name old-effects :type boolean :optional true :default false
+      :description "IT 1.x effect behaviour.")
+    (key :name compat-gxx :type boolean :optional true :default false
+      :description "Link G (tone portamento) memory with E and F.")
+    (key :name midi-pitch :type boolean :optional true :default false
+      :description "Use MIDI pitch controller.")
+    (key :name embedded-midi :type boolean :optional true :default false
+      :description "The file carries its own MIDI configuration block.")
+    (key :name global-vol :type it-level :optional true :default 128
+      :description "Global volume, 0..128.")
+    (key :name mix-vol :type it-level :optional true :default 48
+      :description "Mixing volume, 0..128.")
+    (key :name pan-separation :type it-level :optional true :default 128
+      :description "Stereo separation, 0..128.")
+    (key :name pitch-wheel-depth :type it-byte :optional true :default 0
+      :description "Pitch-wheel depth in semitones.")
+    (key :name cwtv :type version-word :optional true
+      :description "Created with tracker version (Cwt/v), in hex: 0x0214.")
+    (key :name cmwt :type version-word :optional true
+      :description "Compatible with tracker version (Cmwt), in hex: 0x0200. Below 0x0200 marks old-format instruments."))
+
+  (form :name channels
+    :description "Per-channel pan and volume defaults. Only the channels that differ from the default need listing."
+    :positional channel-section
+    (form :name ch
+      :description "One channel's defaults. The channel number is positional."
+      :positional channel-number
+      (key :name pan :type it-pan :optional true :default 32
+        :description "Pan position, 0..64.")
+      (key :name vol :type it-vol :optional true :default 64
+        :description "Channel volume, 0..64.")
+      (key :name muted :type boolean :optional true :default false
+        :description "Muted — pan bit 7. Effects on the channel still process.")
+      (key :name surround :type boolean :optional true :default false
+        :description "Surround — pan value 100.")))
+
+  (form :name orders
+    :description "The order list: which pattern plays when, positionally. A trailing `end` is implicit and is not written."
+    :positional order-entry)
+
+  (form :name message
+    :description "The song message, positionally — one string, CR-separated as IT stores it."
+    :positional string)
+
+  (form :name midi
+    :description "The MIDI macro configuration. Omitted, the module uses IT's own default macros (the filter pair F0F000z and F0F001z)."
+    :positional midi-section
+    (form :name macro
+      :description "One macro slot: its name, then its body."
+      :positional macro-field))
+
+  (form :name instrument
+    :description "One instrument: the voice rules, the note-to-sample map and the three envelopes. tempura keeps instruments OPAQUE — it writes the name and a :raw body and re-emits the bytes — so a document that spells a field tempura did not materialise is it_field_not_materialized at build until --full exists. The instrument number is positional."
+    :positional any
+    (key :name name :type string :optional true
+      :description "The instrument's name — the 26-byte field.")
+    (key :name raw :type bin-ref :optional true
+      :description "tempura's opaque body: the instrument's 554 bytes as a (bin …) into the anchor's file, re-emitted verbatim. Not part of the it set's own manifest.")
+    (key :name nna :type nna-kind :optional true :default cut
+      :description "New Note Action.")
+    (key :name dct :type dct-kind :optional true :default off
+      :description "Duplicate Check Type.")
+    (key :name dca :type dca-kind :optional true :default cut
+      :description "Duplicate Check Action.")
+    (key :name fadeout :type fadeout-value :optional true :default 0
+      :description "Fade-out rate for an NNA of fade.")
+    (key :name global-vol :type it-byte :optional true :default 128
+      :description "Instrument global volume.")
+    (key :name pan :type it-pan :optional true
+      :description "Pan override, 0..64. Absent means \"do not override\".")
+    (key :name pitch-pan :type pitch-pan-pair :optional true
+      :description "Pitch-to-pan as [separation centre-note].")
+    (key :name swing :type swing-pair :optional true
+      :description "Random variation as [volume-swing pan-swing].")
+    (key :name filter :type filter-pair :optional true
+      :description "Default filter as [cutoff resonance], either nil.")
+    ; `:type form` rather than a head-set kind: a key that carries inline
+    ; slot-local forms must be `.form`-typed, and the local IS the
+    ; narrowing — a bare `(midi-out …)` resolves to the body below,
+    ; anything else falls through to the global catalog and is unknown.
+    (key :name midi :type form :optional true
+      :description "Where this instrument plays out over MIDI."
+      (form :name midi-out
+        :description "An instrument's MIDI output routing."
+        (key :name channel :type midi-out-channel :optional true
+          :description "Output channel, 1..16.")
+        (key :name program :type any :optional true :requires [channel]
+          :description "Program to select, or nil for none. Typed `any` because a nil alternative is not expressible in a manifest. Meaningless without a channel.")
+        (key :name bank :type any :optional true :requires [channel]
+          :description "Bank to select, or nil for none. Typed `any` for the same reason. Meaningless without a channel.")))
+
+    (form :name notemap
+      :description "The note-to-sample map, compiled to IT's 120-pair keyboard table. Either the whole-range :sample shorthand, or explicit (range …) children."
+      :positional notemap-section
+      (key :name sample :type sample-id :optional true
+        :description "One sample for the whole range.")
+      (form :name range
+        :description "One span of the keyboard mapped to one sample. The two note names are positional: first, last."
+        :positional note-name
+        (key :name sample :type sample-id :optional true
+          :description "The sample this span plays.")
+        (key :name transpose :type transpose-value :optional true :requires [sample]
+          :description "Semitones to shift it by. Meaningless without a sample.")))
+
+    (form :name vol-env
+      :description "The volume envelope. Node values are 0..64."
+      :positional envelope-section
+      (key :name off :type boolean :optional true :default false
+        :description "The envelope is present but disabled.")
+      (key :name loop :type node-index-pair :optional true
+        :description "Loop span as [begin end] node indices.")
+      (key :name sustain :type node-index-pair :optional true
+        :description "Sustain span as [begin end] node indices.")
+      (key :name carry :type boolean :optional true :default false
+        :description "Carry the envelope position across a new note.")
+      (form :name node
+        :description "One envelope node: (node tick value)."
+        :positional env-node-field))
+
+    (form :name pan-env
+      :description "The pan envelope. Node values are -32..32."
+      :positional envelope-section
+      (key :name off :type boolean :optional true :default false
+        :description "The envelope is present but disabled.")
+      (key :name loop :type node-index-pair :optional true
+        :description "Loop span as [begin end] node indices.")
+      (key :name sustain :type node-index-pair :optional true
+        :description "Sustain span as [begin end] node indices.")
+      (key :name carry :type boolean :optional true :default false
+        :description "Carry the envelope position across a new note.")
+      (form :name node
+        :description "One envelope node: (node tick value)."
+        :positional env-node-field))
+
+    (form :name pitch-env
+      :description "The pitch envelope — or the filter envelope, when :filter is set. Node values are -32..32."
+      :positional envelope-section
+      (key :name off :type boolean :optional true :default false
+        :description "The envelope is present but disabled.")
+      (key :name loop :type node-index-pair :optional true
+        :description "Loop span as [begin end] node indices.")
+      (key :name sustain :type node-index-pair :optional true
+        :description "Sustain span as [begin end] node indices.")
+      (key :name carry :type boolean :optional true :default false
+        :description "Carry the envelope position across a new note.")
+      (key :name filter :type boolean :optional true :default false
+        :description "Drive the filter cutoff instead of the pitch — the envelope flag byte's bit 7.")
+      (form :name node
+        :description "One envelope node: (node tick value)."
+        :positional env-node-field)))
+
+  (form :name sample
+    :description "One sample: its playback parameters and its body. tempura keeps sample headers and data OPAQUE — a :raw header region and a (data …) whose extent it computed — and never decodes anything. The sample number is positional."
+    :positional any
+    (key :name name :type string :optional true
+      :description "The sample's name — the 26-byte field.")
+    (key :name raw :type bin-ref :optional true
+      :description "tempura's opaque body: the sample's 80-byte header as a (bin …) into the anchor's file, re-emitted verbatim. Not part of the it set's own manifest.")
+    (key :name c5 :type c5-rate :optional true :default 8363
+      :description "The rate middle C plays at, in Hz.")
+    (key :name vol :type it-vol :optional true :default 64
+      :description "Default volume, 0..64.")
+    (key :name global-vol :type it-vol :optional true :default 64
+      :description "Sample global volume, 0..64.")
+    (key :name pan :type any :optional true
+      :description "Pan override, 0..64, or nil for pan off (the DfP bit clear). Typed `any` because a nil alternative is not expressible in a manifest; the range is checked at build.")
+    (key :name loop :type loop-pair :optional true
+      :description "Loop span as [begin end], in frames.")
+    (key :name loop-mode :type loop-kind :optional true :requires [loop]
+      :description "How the loop plays. A loop mode with no loop means nothing, hence :requires.")
+    (key :name sustain-loop :type loop-pair :optional true
+      :description "Sustain loop span as [begin end], in frames.")
+    (key :name sustain-mode :type loop-kind :optional true :requires [sustain-loop]
+      :description "How the sustain loop plays.")
+    (key :name vibrato :type form :optional true
+      :description "Auto-vibrato."
+      (form :name vibrato
+        :description "The sample's auto-vibrato."
+        (key :name speed :type vibrato-field :optional true :default 0
+          :description "Vibrato speed.")
+        (key :name depth :type vibrato-field :optional true :default 0
+          :description "Vibrato depth.")
+        (key :name rate :type vibrato-field :optional true :default 0
+          :description "How fast the depth ramps in.")
+        (key :name wave :type wave-kind :optional true :default sine
+          :description "Vibrato waveform.")))
+
+    (form :name data
+      :description "The sample's body: how the stored bytes are encoded, and where they are."
+      :positional bin-section
+      (key :name bits :type sample-bits :optional true :default 8
+        :description "Bits per frame: 8 or 16.")
+      (key :name enc :type enc-kind :optional true :default pcm
+        :description "How the stored bytes are encoded.")
+      (key :name stereo :type boolean :optional true :default false
+        :description "Split-stereo layout: the left block then the right. Read, and written only with --stereo-samples."))
+
+    (form :name wav
+      :description "A .wav file to ingest at build time in place of a (data …): its PCM and its sampler-chunk loop points."
+      (key :name file :type string
+        :description "Path to the .wav file.")))
+
+  (form :name pattern
+    :description "One pattern, row-major and sparse: only rows with content appear, and only cells with content per row. The pattern number is positional. A (bin …) child instead of rows is the skeleton dump — packed data by reference, which --patterns=bin produces."
+    :positional any
+    (key :name rows :type rows-count :optional true :default 64
+      :description "How many rows the pattern has.")
+    (form :name row
+      :description "One row: its index, positionally, then its cells."
+      :positional any
+      (form :name ev
+        :description "One cell: the channel, then the note when there is one, then the columns that carry something."
+        :positional ev-cell
+        (key :name ins :type ins-ref :optional true
+          :description "The instrument: its number, or a symbol naming one.")
+        (key :name vol :type volcol :optional true
+          :description "The volume column: a number 0..64, or a letter command.")
+        (key :name fx :type fx-string :optional true
+          :description "The effect column: a letter and two hex digits."))))
+
+  (form :name foreign
+    :description "A trailing chunk tempura did not write and does not understand, preserved byte for byte under --preserve-foreign. tempura's own TMPU chunk is never shown as foreign."
+    :positional bin-section
+    (key :name tag :type foreign-tag
+      :description "The chunk's four-character tag."))
+
+  (form :name edit-history
+    :description "The preserved edit-history block, kept under --preserve-history."
+    :positional bin-section)
+
+  (form :name bin
+    :description "A region of the anchor's file, by reference. Global rather than slot-local because it appears under (data …), under (pattern …), under :raw and under the preserved chunks, and one declaration in one place is the point. Bounds are checked against the anchor's :size before the offset is honoured."
+    (key :name at :type bin-offset :optional true
+      :description "Byte offset into the anchor's file, written in hex. Exclusive with :file.")
+    (key :name len :type bin-length :optional true :requires [at]
+      :description "The region's length from :at. Meaningless without an offset.")
+    (key :name file :type string :optional true
+      :description "A separate file holding the region instead. Exclusive with :at.")
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [at])
+      (alt :keys [file])))
+)

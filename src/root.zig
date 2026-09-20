@@ -29,8 +29,13 @@ pub const version = "0.1.0";
 /// arena-backed collector every producer fills.
 pub const Diag = @import("Diag.zig");
 
+/// The timeline vocabulary, preloaded: the four composed manifests every
+/// document is validated against, and the harness bundle beside them.
+pub const Schema = @import("Schema.zig");
+
 test {
     _ = Diag;
+    _ = Schema;
 }
 
 test "version: src/root.zig and build.zig.zon spell the same version" {

@@ -1,11 +1,101 @@
-; The golden-corpus harness vocabulary — the shape of a case's input
-; manifest (P107, plan 09; pacer's `schema/pacer-corpus.sjon` idiom).
+; The golden-corpus harness vocabulary — the shape of a case's
+; `times.sjon` (P107, plan 09, "The golden corpus"; pacer's
+; `schema/pacer-corpus.sjon` idiom).
 ;
-; STUB. Embedded through the `corpus_schema` build import and preloaded
-; once per walk by `src/corpus_runner.zig`. It is NEVER composed with the
-; timeline vocabulary into one bundle, and stays out of `sjon-project.sjon`
-; for the reason pacer's does: one project file means one composed
-; vocabulary, and a head declared twice is `ambiguous_form` in both file
-; kinds.
+; A harness file is NOT a timeline document: it is an ordered script of
+; queries and verbs the runner replays against the case's `doc.sjon`,
+; `song.mid` or `song.it`. `src/corpus_runner.zig` embeds this manifest
+; via the `corpus_schema` build import and PRELOADS it once for the whole
+; walk, exactly as `src/Schema.zig` preloads the timeline vocabulary — two
+; disjoint vocabularies, two bundles, NEVER composed into one. Both
+; declare a `timing` form (the it tier's header section, and the verb that
+; echoes an IT conductor's walk), so a shared schema would make every
+; unqualified `(timing …)` `ambiguous_form` in timeline documents AND in
+; harness files. One project, one vocabulary; the harness files trade
+; editor support for the document's, which is why this manifest is
+; deliberately absent from `sjon-project.sjon`.
+;
+; What lives HERE is SHAPE. What stays in the runner is everything a
+; schema cannot see: document order (the script runs top to bottom), the
+; WIDTH of every hex bit pattern (16 digits for an f64), which verbs a
+; case's fixtures make meaningful, and every tolerance. The seconds are
+; strings on purpose, pacer's reasoning verbatim: `sjon fmt` rewrites a
+; hex LITERAL to decimal, so `0x3FE0000000000000` in a harness file is one
+; formatter pass from destruction, while a string is inert under it and
+; carries its own width.
+;
+; No `:version`, for the reason `schema/tempura.sjon` declares none.
 
-(plugin :name tempura-corpus)
+(plugin :name tempura-corpus
+  :description "The golden corpus's harness vocabulary: the ordered script of queries and verbs a case replays — positions, snaps, edit plans, the score export, the timing walk, the built file and the re-dump."
+
+  ; ---- value kinds ----
+
+  (value-kind :name f64-bits
+    :description "A seconds value as a raw f64 bit pattern, 16 hex digits: \"3FE0000000000000\" is 0.5. A string, not a literal: it survives `sjon fmt`, carries its own width, and lets a case pin a tie, a NaN or an infinity without a float parser in the loop. The runner checks the width."
+    :underlying string)
+
+  (value-kind :name tick-value
+    :description "A position in tempura ticks (TPQ = 46126080 per quarter note), 0..2^53. Past MAX_TICK is a tick_overflow diagnostic, which is itself a thing a case pins — so the ceiling here is the grid's, and the refusal is the runner's to observe."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 9007199254740992 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name snap-grid
+    :description "A snap subdivision, spelled as the studio spells it: \"1/16\", \"1/12\", \"1bar\". A string rather than a position, because a subdivision is a ratio and not a point."
+    :underlying string)
+
+  (value-kind :name swing-amount
+    :description "How far a snap grid's odd lines are pushed late, 0..1 of the subdivision. Narrowed to f32 where it is applied."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 1)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type f32))
+
+  (value-kind :name build-kind
+    :description "Which file a (build …) writes."
+    :underlying symbol
+    :members (member-set
+      (member :name smf :description "A Standard MIDI File.")
+      (member :name it :description "An Impulse Tracker module.")))
+
+  (value-kind :name plan-op
+    :description "Which edit operation to plan. Deliberately an unconstrained symbol: the operation set is the edit engine's and is enumerated there, so an unknown one is a runner diagnostic naming the case rather than a schema error in a file nobody edits by hand."
+    :underlying symbol)
+
+  ; ---- the script, executed in document order ----
+
+  (form :name at
+    :description "One Playhead.at per positional seconds value: the tick, bar, beat, sub-tick, the sections in force and the surrounding cues, after the end-behaviour wrap. May repeat and interleave with the other script forms."
+    :positional f64-bits)
+
+  (form :name snap
+    :description "One Playhead.snap per positional tick: the nearest grid line under the meter in force, with the tie broken downwards."
+    :positional tick-value
+    (key :name grid :type snap-grid
+      :description "The subdivision to snap to.")
+    (key :name swing :type swing-amount :optional true :default 0
+      :description "How far the odd grid lines are pushed late."))
+
+  (form :name plan
+    :description "Plan one edit operation and render its actions as text, so a change in ordering is a diff rather than a surprise. Plans only — the corpus never applies an edit it did not print first."
+    :positional plan-op
+    (key :name args :type any :optional true :walk-opaque true
+      :description "The operation's arguments, in the edit engine's own vocabulary. Opaque to this schema: the engine checks them, with spans."))
+
+  (form :name export-score
+    :description "Export the case's document as a pacer score and render the text's hash and its first lines. Takes no rows — the whole document is the input."
+    (key :name lines :type tick-value :optional true :default 12
+      :description "How many leading lines of the exported score to render beside the hash."))
+
+  (form :name timing
+    :description "Echo the derived TimeMap: the tempo segments, the meter and bar tables, the sections and cues in ticks, the per-lane onsets, the length and the loop point. For an IT conductor it also echoes the timing walk's (order, row) -> tick map. Takes no rows."
+    (key :name segments :type tick-value :optional true
+      :description "Cap on how many tempo segments to render, for a case whose walk produces thousands. Absent means all of them."))
+
+  (form :name build
+    :description "Build the case's document into a file of the given kind and render the bytes' hash. Same document must give the same bytes on x86_64, aarch64 and wasm32 — that is what the hash is for."
+    :positional build-kind)
+
+  (form :name dump
+    :description "Re-dump the case's document and render its timeline tier, so a read-write round trip is a diff. Takes no rows."))

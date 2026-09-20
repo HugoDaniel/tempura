@@ -1,9 +1,373 @@
-; The hosted `(smf …)` core tier — the SMF vocabulary, core forms only
-; (P99, plan 02; the midi set's 02).
+; The hosted `midi/` tier — the Standard MIDI File vocabulary, CORE TIER
+; ONLY (P99, plan 02; the midi set's 02, "The file document, core tier").
 ;
-; STUB. Embedded through the `midi_schema` build import. Owner-of-record
-; note: this manifest restates the midi set's, whose repo (midivia) does
-; not exist yet; when it does, one owner is picked per manifest (plan 01,
-; "Two sibling repos, one owner per file").
+; One `(smf …)` header, one `(mtrk …)` per track in file order, and one
+; form per event, named as RP-001 names it in kebab-case. A `.mid` dumped
+; into a timeline document is the midi set's dump, form for form, so a
+; tool that reads one reads the other.
+;
+; What is NOT here, deliberately: midivia's LIVE tier — the `note` verb
+; and the `midi-input` / `midi-output` / `midi-clock` map forms. `note` is
+; the head tempura's timeline event already claims (plan 02, "The `note`
+; collision with midivia"), and the maps describe a running session rather
+; than a file. A `(midi/smf …)` written by hand here uses `note-on` /
+; `note-off`, and `(note …)` inside a `(lane …)` is the sugar.
+;
+; Every event head is a SLOT-LOCAL of `(mtrk …)`: an event exists only
+; inside a track, so `marker`, `lyric` and `meta` are not global heads
+; anyone else has to avoid. The two global heads are `smf` and `mtrk`.
+; Both spellings work — `(mtrk (marker …))` bare, and `(midi/mtrk
+; (marker …))` with the root qualified, which is how a dump rides inside a
+; timeline document.
+;
+; Owner of record: this manifest restates the midi set's, whose repo
+; (midivia) does not exist yet; when it does, one owner is picked per
+; manifest (plan 01, "Two sibling repos, one owner per file") and this
+; copy either becomes the copy or is replaced by the sibling's.
+;
+; No `:version`, for the reason `schema/tempura.sjon` declares none.
 
-(plugin :name midi)
+(plugin :name midi
+  :description "A Standard MIDI File as a document: the header, the tracks in file order, and one form per event with RP-001's own names. Core tier only — midivia's live tier (the `note` verb and the port maps) is not hosted here."
+
+  ; =====================================================================
+  ; Value kinds
+  ; =====================================================================
+
+  (value-kind :name smf-format
+    :description "SMF format: 0 = one track holding everything, 1 = several tracks played together, 2 = independent sequences."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 2 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name smf-division
+    :description "Pulses per quarter note, 1..32767. A file read with SMPTE division dumps with the converted PPQ and a comment saying what it was."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 32767 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name smf-tick
+    :description "An ABSOLUTE tick within the track, never a delta — the writer re-derives deltas. Non-decreasing in document order (at_not_monotone)."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name smf-channel
+    :description "A MIDI channel, 1..16 in text as every display counts them (0..15 on the wire)."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 16 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name data7
+    :description "A 7-bit data byte, 0..127 — a key, a velocity, a controller number or value."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 127 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name bend14
+    :description "A pitch-bend value, 0..16383, centre 8192."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 16383 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name tempo-us
+    :description "Microseconds per quarter note, the FF 51 payload as a u24. Zero has no meaning and is refused."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 16777215 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name byte-field
+    :description "One unsigned byte of a fixed-layout meta payload, 0..255."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 255 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name word-field
+    :description "One unsigned 16-bit big-endian field, 0..65535."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 65535 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name meta-type
+    :description "A meta-event type byte for a type this vocabulary does not name, 0..127."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 127 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name sig-numerator
+    :description "A time signature's numerator (nn), 1..255."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 255 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name sig-denominator
+    :description "A time signature's denominator written as the number it is (4, 8, 16), not as RP-001's power-of-two exponent. A value that is not a power of two has no dd byte and is a diagnostic at build."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 128 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name key-accidentals
+    :description "A key signature's sf byte: -7 (seven flats) to 7 (seven sharps)."
+    :underlying number
+    :numeric (numeric-bounds :min -7 :max 7 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name key-mode
+    :description "A key signature's mi byte: 0 major, 1 minor."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 1 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name hex-bytes
+    :description "A byte payload as hex, two digits per byte, spaces optional: \"F0 7E 7F 09 01 F7\". Carried verbatim so rung 1 of the round-trip ladder holds without a rewriter."
+    :underlying string)
+
+  (value-kind :name meta-text
+    :description "A text payload's bytes read as UTF-8. When the bytes are not valid UTF-8 the event says :bytes instead, and the two are exclusive."
+    :underlying string)
+
+  (value-kind :name ease-lane
+    :description "Which controller surface an easing hint applies to."
+    :underlying symbol
+    :members (member-set
+      (member :name cc :description "A 7-bit controller — :num says which.")
+      (member :name cc14 :description "A 14-bit controller pair — :num says which MSB.")
+      (member :name bend :description "Pitch bend.")
+      (member :name pressure :description "Channel pressure.")))
+
+  ; The hint carries a NAME or one PARAMETERISED form, spelled as pacer's
+  ; score spells it, and never a (seq …) or a (chain …): the payload is 25
+  ; bytes and builds back byte-exact, which a nested combinator cannot do.
+  ; The name half is pacer's OWN member set — a cross-plugin kind
+  ; reference — so the two vocabularies cannot drift.
+  (value-kind :name hint-ease-form
+    :description "A parameterised easing form, as pacer declares it: (steps …), (cubic-bezier …) or (spring …). The combinators (seq …) and (chain …) are not hintable — the payload is fixed-width."
+    :underlying form
+    :heads (head-set :names [steps cubic-bezier spring]))
+
+  (value-kind :name hint-ease
+    :description "An easing hint: a pacer easing name, or one parameterised pacer easing form."
+    :underlying union
+    :union (union-shape :alternatives [pacer/ease-name hint-ease-form]))
+
+  (value-kind :name event-section
+    :description "The events a track may hold: the RP-001 channel messages, the system-exclusive pair, every named meta event, `meta` for a type this vocabulary does not name, and midivia's `ease-hint`. Each body is slot-local to (mtrk …), so none of these heads exists outside a track."
+    :underlying form
+    :heads (head-set :names [
+      note-on note-off poly-pressure control-change program-change
+      channel-pressure pitch-bend
+      sysex escape
+      sequence-number text-event copyright-notice sequence-name
+      instrument-name lyric marker cue-point program-name device-name
+      midi-channel-prefix midi-port end-of-track set-tempo smpte-offset
+      time-signature key-signature sequencer-specific meta
+      ease-hint]))
+
+  ; =====================================================================
+  ; Forms
+  ; =====================================================================
+
+  (form :name smf
+    :description "A Standard MIDI File's header chunk. Once, first; the tracks follow as (mtrk …) roots in file order."
+    (key :name format :type smf-format
+      :description "0, 1 or 2. The timeline derivation accepts 0 and 1 and refuses 2 (smf_format2): a format 2 file's tracks are not simultaneous.")
+    (key :name division :type smf-division
+      :description "Pulses per quarter note. SMPTE division is converted on read and never written."))
+
+  (form :name mtrk
+    :description "One track: events in file order, positional children only. Absolute ticks are non-decreasing within a track, and the last event must be an (end-of-track …)."
+    :positional event-section
+
+    ; ---- channel messages ------------------------------------------
+    (form :name note-on
+      :description "9n — a note starts. Velocity 0 is a note off on the wire and is stored as written; the bridge's note pairing interprets it."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name ch :type smf-channel :description "Channel, 1..16.")
+      (key :name key :type data7 :description "Key number, 0..127.")
+      (key :name vel :type data7 :description "Velocity, 0..127."))
+
+    (form :name note-off
+      :description "8n — a note ends."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name ch :type smf-channel :description "Channel, 1..16.")
+      (key :name key :type data7 :description "Key number, 0..127.")
+      (key :name vel :type data7 :description "Release velocity, 0..127."))
+
+    (form :name poly-pressure
+      :description "An — polyphonic key pressure: aftertouch on one key."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name ch :type smf-channel :description "Channel, 1..16.")
+      (key :name key :type data7 :description "Key number, 0..127.")
+      (key :name val :type data7 :description "Pressure, 0..127."))
+
+    (form :name control-change
+      :description "Bn — control change. Controllers 0..119 are continuous; 120..127 are the channel mode messages and are stored the same way."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name ch :type smf-channel :description "Channel, 1..16.")
+      (key :name num :type data7 :description "Controller number, 0..127.")
+      (key :name val :type data7 :description "Controller value, 0..127."))
+
+    (form :name program-change
+      :description "Cn — program change."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name ch :type smf-channel :description "Channel, 1..16.")
+      (key :name num :type data7 :description "Program number, 0..127."))
+
+    (form :name channel-pressure
+      :description "Dn — channel pressure: aftertouch across the channel."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name ch :type smf-channel :description "Channel, 1..16.")
+      (key :name val :type data7 :description "Pressure, 0..127."))
+
+    (form :name pitch-bend
+      :description "En — pitch bend, 14 bits, LSB first on the wire, centre 8192."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name ch :type smf-channel :description "Channel, 1..16.")
+      (key :name val :type bend14 :description "Bend value, 0..16383."))
+
+    ; ---- system exclusive ------------------------------------------
+    (form :name sysex
+      :description "F0 — a system-exclusive message. The bytes normally end with F7; a message may be split across escape continuations."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name data :type hex-bytes :description "The payload, verbatim, as hex."))
+
+    (form :name escape
+      :description "F7 — an escape / continuation event: arbitrary bytes embedded in the file."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name data :type hex-bytes :description "The payload, verbatim, as hex."))
+
+    ; ---- meta events ------------------------------------------------
+    (form :name sequence-number
+      :description "FF 00 — the sequence number, at tick 0."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name num :type word-field :description "Sequence number, 0..65535."))
+
+    (form :name text-event
+      :description "FF 01 — free text. Named `text-event` rather than `text`, which a sibling curve vocabulary is likely to claim."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name text :type meta-text :optional true :description "The payload as UTF-8. Exclusive with :bytes.")
+      (key :name bytes :type hex-bytes :optional true :description "The payload as hex, when the bytes are not valid UTF-8. Exclusive with :text.")
+      (exclusive-group :cardinality exactly-one (alt :keys [text]) (alt :keys [bytes])))
+
+    (form :name copyright-notice
+      :description "FF 02 — the copyright notice, conventionally first in the first track."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name text :type meta-text :optional true :description "The payload as UTF-8. Exclusive with :bytes.")
+      (key :name bytes :type hex-bytes :optional true :description "The payload as hex. Exclusive with :text.")
+      (exclusive-group :cardinality exactly-one (alt :keys [text]) (alt :keys [bytes])))
+
+    (form :name sequence-name
+      :description "FF 03 — the sequence or track name. A bound lane's default label."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name text :type meta-text :optional true :description "The payload as UTF-8. Exclusive with :bytes.")
+      (key :name bytes :type hex-bytes :optional true :description "The payload as hex. Exclusive with :text.")
+      (exclusive-group :cardinality exactly-one (alt :keys [text]) (alt :keys [bytes])))
+
+    (form :name instrument-name
+      :description "FF 04 — the instrument name."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name text :type meta-text :optional true :description "The payload as UTF-8. Exclusive with :bytes.")
+      (key :name bytes :type hex-bytes :optional true :description "The payload as hex. Exclusive with :text.")
+      (exclusive-group :cardinality exactly-one (alt :keys [text]) (alt :keys [bytes])))
+
+    (form :name lyric
+      :description "FF 05 — one syllable of lyric."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name text :type meta-text :optional true :description "The payload as UTF-8. Exclusive with :bytes.")
+      (key :name bytes :type hex-bytes :optional true :description "The payload as hex. Exclusive with :text.")
+      (exclusive-group :cardinality exactly-one (alt :keys [text]) (alt :keys [bytes])))
+
+    (form :name marker
+      :description "FF 06 — a marker. Dumps to a timeline (cue …)."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name text :type meta-text :optional true :description "The payload as UTF-8. Exclusive with :bytes.")
+      (key :name bytes :type hex-bytes :optional true :description "The payload as hex. Exclusive with :text.")
+      (exclusive-group :cardinality exactly-one (alt :keys [text]) (alt :keys [bytes])))
+
+    (form :name cue-point
+      :description "FF 07 — a cue point. Dumps to a timeline (cue …)."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name text :type meta-text :optional true :description "The payload as UTF-8. Exclusive with :bytes.")
+      (key :name bytes :type hex-bytes :optional true :description "The payload as hex. Exclusive with :text.")
+      (exclusive-group :cardinality exactly-one (alt :keys [text]) (alt :keys [bytes])))
+
+    (form :name program-name
+      :description "FF 08 — the program name (RP-019)."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name text :type meta-text :optional true :description "The payload as UTF-8. Exclusive with :bytes.")
+      (key :name bytes :type hex-bytes :optional true :description "The payload as hex. Exclusive with :text.")
+      (exclusive-group :cardinality exactly-one (alt :keys [text]) (alt :keys [bytes])))
+
+    (form :name device-name
+      :description "FF 09 — the device name (RP-019)."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name text :type meta-text :optional true :description "The payload as UTF-8. Exclusive with :bytes.")
+      (key :name bytes :type hex-bytes :optional true :description "The payload as hex. Exclusive with :text.")
+      (exclusive-group :cardinality exactly-one (alt :keys [text]) (alt :keys [bytes])))
+
+    (form :name midi-channel-prefix
+      :description "FF 20 — the channel subsequent meta events apply to."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name ch :type smf-channel :description "Channel, 1..16."))
+
+    (form :name midi-port
+      :description "FF 21 — the port subsequent events go to. Widespread, not in RP-001; read and written."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name port :type byte-field :description "Port number, 0..255."))
+
+    (form :name end-of-track
+      :description "FF 2F — required as the last event of every track. A missing one is end_of_track_missing; the writer always emits it."
+      (key :name at :type smf-tick :description "Absolute tick."))
+
+    (form :name set-tempo
+      :description "FF 51 — a tempo change. The SMF conductor's segment boundary."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name us :type tempo-us :description "Microseconds per quarter note."))
+
+    (form :name smpte-offset
+      :description "FF 54 — the SMPTE time the track starts at. Stored and written back; nothing reads it."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name hr :type byte-field :description "Hours byte, frame rate in its top bits.")
+      (key :name mn :type byte-field :description "Minutes.")
+      (key :name se :type byte-field :description "Seconds.")
+      (key :name fr :type byte-field :description "Frames.")
+      (key :name ff :type byte-field :description "Fractional frames, 1/100th."))
+
+    (form :name time-signature
+      :description "FF 58 — a time signature. The SMF conductor's meter."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name num :type sig-numerator :description "Beats per bar (nn).")
+      (key :name denom :type sig-denominator :description "Note value, written as the number it is: 4, 8, 16.")
+      (key :name clocks :type byte-field :optional true :default 24 :description "MIDI clocks per metronome click.")
+      (key :name thirty-seconds :type byte-field :optional true :default 8 :description "Notated 32nd notes per MIDI quarter note."))
+
+    (form :name key-signature
+      :description "FF 59 — a key signature."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name sf :type key-accidentals :description "Sharps (positive) or flats (negative), -7..7.")
+      (key :name mi :type key-mode :optional true :default 0 :description "0 major, 1 minor."))
+
+    (form :name sequencer-specific
+      :description "FF 7F — a vendor payload, stored verbatim. Two families are parsed instead of hexed: tempura's residue records and midivia's easing hint, which dumps as (ease-hint …)."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name data :type hex-bytes :description "The payload, verbatim, as hex."))
+
+    (form :name meta
+      :description "A meta event of a type this vocabulary does not name. Round-tripped verbatim."
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name type :type meta-type :description "The type byte, 0..127.")
+      (key :name data :type hex-bytes :description "The payload, verbatim, as hex."))
+
+    ; ---- the one typed sequencer-specific payload --------------------
+    (form :name ease-hint
+      :description "midivia's easing hint: the curve shape a controller lane was authored with, so a sampled automation lane reads back as a named easing instead of as steps. Builds back to its fixed-width payload byte-exact."
+      :discriminant lane
+      (key :name at :type smf-tick :description "Absolute tick.")
+      (key :name ch :type smf-channel :description "Channel, 1..16.")
+      (key :name lane :type ease-lane
+        :description "Which controller surface the hint applies to, and the discriminant that decides whether :num exists. Write it BEFORE :num.")
+      (key :name ease :type hint-ease
+        :description "The easing: a pacer easing name, or one parameterised pacer easing form.")
+      (variant :when [cc cc14]
+        (key :name num :type data7
+          :description "Which controller (the MSB, for a 14-bit pair). Only a cc or cc14 hint has one.")))))

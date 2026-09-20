@@ -1,0 +1,48 @@
+; A native timeline document — plan 02's own example, with the inline
+; `(it/module …)` dump and the `:conductor` left out so nothing here
+; depends on a file being read. The anchored twin (the same piece with the
+; module dumped inline and conducted by it) ships with the `fromSjon` /
+; `toSjon` work.
+;
+; Two lines the plan's example does not carry are required precisely
+; BECAUSE the conductor is gone: without one, a `(tempo-point …)` and a
+; `(meter-point …)` at tick 0 are the document's own time
+; (plan 02, "(timeline …)"; plan 03, "Three conductors").
+;
+; Read it top to bottom: the header, the file it is arranged around, the
+; windows and the points, the lanes — two bound to the anchor, four
+; native — the phrase two of those lanes place, and the pacer forms that
+; pass through `export-score` untouched.
+
+(timeline :title "impulsos" :length 128bar :end loop)
+
+(tempo-point :at 0q   :qpm 125)                      ; the document conducts itself
+(meter-point :at 0bar :sig [4 4])
+
+(anchor :id song :kind it :file "impulse-04.it" :size 1284403 :sha256 "9f2a…")
+
+(section :name intro :at 0bar :dur 16bar)            ; → pacer (scene …)
+(section :name drop  :at 16bar :dur 32bar)           ; windows may overlap
+(cue :name "bar 41" :at 40bar)                       ; a point: SMF marker; IT order comment
+
+(lane :name kick :kind notes :from song :channel 3 :target kick)                  ; bound: content is the module's
+(lane :name bass-vol :kind curve :from song :channel 5 :column vol :range [0 1])  ; bound: a tracker column as a curve
+
+(lane :name flash :kind notes :target flash                                       ; native: content lives here
+  (note :at 0q :dur 0.5q :key 36 :vel 110)
+  (note :at 1q :dur 0.5q :key "C4" :vel 90)
+  (clip :at 8bar :phrase fill :repeat 2))
+(lane :name glow :kind curve :target glow
+  (keyframe :at 0q :value 0.2 :ease hold)
+  (keyframe :at 4q :value 0.9 :ease in-cubic)
+  (keyframe :at 8q :value [0.1 0.2 0.3] :ease (spring :damping 0.5)))
+(lane :name hats  :kind query   :target hats  :query (euclid 3 8 1))              ; SJON PatternQuery, one cycle per bar
+(lane :name pulse :kind formula :target pulse :expr (sin (* beat 6.2832)))        ; pacer's expression environment
+
+(phrase :name fill :length 1bar
+  (lane :name flash
+    (note :at 0q   :dur 0.25q :key 38 :vel 100)
+    (note :at 0.5q :dur 0.25q :key 38 :vel 80)))
+
+(control :id glow-amt :type slider :min 0 :max 1 :value 0.5 :target glow-amt)     ; pacer's form, pass-through
+(target :name glow :arity 1)                                                      ; pacer's compose-mode declaration

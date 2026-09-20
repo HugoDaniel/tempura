@@ -14,10 +14,17 @@ comptime {
 /// wasm32-freestanding with no filesystem (pacer's `pacer_schema`
 /// precedent, one import per vocabulary).
 ///
-/// `corpus` adds the harness vocabulary, which is NEVER composed with the
-/// timeline one — two preloaded bundles, never a shared schema. Only the
-/// corpus runner and the test roots carry it.
-fn addSchemas(b: *std.Build, mod: *std.Build.Module, corpus: bool) void {
+/// All five reach every module, the harness vocabulary included:
+/// `src/Schema.zig` owns BOTH preloads (`load` composes the four timeline
+/// manifests, `loadCorpus` takes the harness one alone), and that module
+/// is part of the public `tempura` module as well as of the test root and
+/// the corpus runner. The rule the harness vocabulary actually carries is
+/// about COMPOSITION, not embedding — it is never aggregated with the
+/// timeline one, because both would declare heads the other has (pacer's
+/// `pacer-corpus.sjon` reasoning); two preloaded bundles, never a shared
+/// schema. Embedding it costs the wasm a couple of kilobytes and keeps
+/// `Schema.zig` compiling the same way from every root.
+fn addSchemas(b: *std.Build, mod: *std.Build.Module) void {
     mod.addAnonymousImport("tempura_schema", .{
         .root_source_file = b.path("schema/tempura.sjon"),
     });
@@ -30,7 +37,7 @@ fn addSchemas(b: *std.Build, mod: *std.Build.Module, corpus: bool) void {
     mod.addAnonymousImport("pacer_schema", .{
         .root_source_file = b.path("schema/pacer.sjon"),
     });
-    if (corpus) mod.addAnonymousImport("corpus_schema", .{
+    mod.addAnonymousImport("corpus_schema", .{
         .root_source_file = b.path("schema/tempura-corpus.sjon"),
     });
 }
@@ -55,7 +62,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     tempura_mod.addImport("sjon", sjon_mod);
-    addSchemas(b, tempura_mod, false);
+    addSchemas(b, tempura_mod);
 
     // The repo root, handed to test binaries as an absolute path: a
     // cwd-relative one would depend on where `zig build` was invoked
@@ -70,18 +77,34 @@ pub fn build(b: *std.Build) void {
     // discipline), and every part directory aggregates its own files the
     // same way in `src/<part>/<part>.zig`.
     //
-    // `-Dtest-root=src/time/time.zig` swaps the ROOT of that walk, so one
+    // `-Dtest-root=time/time.zig` swaps the ROOT of that walk, so one
     // subtree's tests run without editing `src/root.zig`. The module is
     // wired identically either way — sjon, build_options, every schema —
     // so a subtree sees exactly what the root sees and a passing subtree
     // run means the same thing as a passing whole run.
+    //
+    // The option value is a path RELATIVE TO `src/` (`time/time.zig`,
+    // `smf/smf.zig`, `Diag.zig`) and the root is a GENERATED file inside a
+    // copy of `src/`, not the aggregator itself. Rooting the module at
+    // `src/time/time.zig` would make `src/time/` the module path, and
+    // `Pos.zig`'s `@import("../Diag.zig")` is then "outside module path".
+    // Keeping the module root one level above every aggregator is what
+    // makes a subtree see exactly what the root sees. (`@import` needs a
+    // string LITERAL, so the aggregator's name cannot be a build option
+    // read at comptime; a comptime switch over an enum does not help
+    // either — Zig resolves imports in dead branches too.)
     const test_root = b.option(
         []const u8,
         "test-root",
-        "Test root source file (default src/root.zig) — run one subtree's tests",
-    ) orelse "src/root.zig";
+        "Test root, relative to src/ (e.g. time/time.zig) — run one subtree's tests",
+    );
+    const test_root_file: std.Build.LazyPath = if (test_root) |p| blk: {
+        const wf = b.addWriteFiles();
+        _ = wf.addCopyDirectory(b.path("src"), ".", .{});
+        break :blk wf.add("_test_root.zig", b.fmt("test {{ _ = @import(\"{s}\"); }}\n", .{p}));
+    } else b.path("src/root.zig");
     const test_mod = b.createModule(.{
-        .root_source_file = b.path(test_root),
+        .root_source_file = test_root_file,
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -89,10 +112,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "build_options", .module = build_options_mod },
         },
     });
-    addSchemas(b, test_mod, true);
+    addSchemas(b, test_mod);
     const tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("test", "Run unit tests (-Dtest-root=<path> for one subtree)");
+    const test_step = b.step("test", "Run unit tests (-Dtest-root=<path-relative-to-src> for one subtree)");
     test_step.dependOn(&run_tests.step);
 
     // `zig build wasm` — tempura.wasm, the browser / studio artifact. The
@@ -117,7 +140,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "sjon", .module = sjon_wasm_dep.module("sjon") },
         },
     });
-    addSchemas(b, wasm_mod, false);
+    addSchemas(b, wasm_mod);
     const wasm = b.addExecutable(.{
         .name = "tempura",
         .root_module = wasm_mod,
@@ -138,7 +161,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "sjon", .module = sjon_mod },
         },
     });
-    addSchemas(b, corpus_mod, true);
+    addSchemas(b, corpus_mod);
     const corpus_runner = b.addExecutable(.{
         .name = "corpus-runner",
         .root_module = corpus_mod,
@@ -193,7 +216,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "build_options", .module = build_options_mod },
         },
     });
-    addSchemas(b, fuzz_mod, true);
+    addSchemas(b, fuzz_mod);
     const fuzz_test = b.addTest(.{ .root_module = fuzz_mod });
     const run_fuzz = b.addRunArtifact(fuzz_test);
     const fuzz_step = b.step("fuzz", "Run never-panic fuzz harnesses");
@@ -215,7 +238,7 @@ pub fn build(b: *std.Build) void {
     const run_corpus_verify = b.addRunArtifact(corpus_runner);
     run_corpus_verify.addDirectoryArg(b.path("corpus"));
     run_corpus_verify.has_side_effects = true;
-    const verify_step = b.step("verify", "test + native corpus + the pacer-schema drift check");
+    const verify_step = b.step("verify", "test + native corpus + the pacer-schema drift check + the generated-docs drift check");
     verify_step.dependOn(&run_tests.step);
     verify_step.dependOn(&run_corpus_verify.step);
     verify_step.dependOn(&pacer_drift.step);
@@ -229,9 +252,36 @@ pub fn build(b: *std.Build) void {
     const audit_diagnostics_step = b.step("audit-diagnostics", "Audit Diag.Code test coverage");
     audit_diagnostics_step.dependOn(&audit_diagnostics.step);
 
-    // TODO(P99/Task 6): `zig build docs` — regenerate
-    // `docs/timeline-language.md` from `schema/tempura.sjon`'s own
-    // `:description`s (pacer's `score-docs` verb: build SJON's CLI from
-    // the path dependency's source, render, and fold the drift leg into
-    // `verify` so a manifest edit that never reached the page fails).
+    // `zig build docs` — render `docs/timeline-language.md` from the
+    // manifest's own `:description`s, so the timeline language's prose has
+    // one source rather than two. SJON's CLI is not exposed as a
+    // dependency artifact (its build wires `sjon` to its own `cli` step,
+    // not to the install step), so tempura builds it from the
+    // dependency's source with the same recipe SJON uses — one module,
+    // one import. `plugin-exec = false` is what keeps it from wanting
+    // libwasmtime, exactly as the library module does.
+    const sjon_cli = b.addExecutable(.{
+        .name = "sjon",
+        .root_module = b.createModule(.{
+            .root_source_file = sjon_dep.path("src/cli/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "sjon", .module = sjon_mod }},
+        }),
+    });
+    const timeline_docs = b.addSystemCommand(&.{"tools/timeline_docs.sh"});
+    timeline_docs.setCwd(b.path("."));
+    timeline_docs.addArtifactArg(sjon_cli);
+    timeline_docs.addArg("--update");
+    timeline_docs.has_side_effects = true;
+    const docs_step = b.step("docs", "Regenerate docs/timeline-language.md from schema/tempura.sjon");
+    docs_step.dependOn(&timeline_docs.step);
+
+    // …and the CHECK leg of the same script, folded into `verify`: a
+    // manifest edit that never reached the page fails the gate. Both legs
+    // go through one render, so the gate compares what the verb produces.
+    const timeline_docs_check = b.addSystemCommand(&.{"tools/timeline_docs.sh"});
+    timeline_docs_check.setCwd(b.path("."));
+    timeline_docs_check.addArtifactArg(sjon_cli);
+    verify_step.dependOn(&timeline_docs_check.step);
 }

@@ -1,0 +1,59 @@
+; tempura — the SJON workspace project file.
+;
+; `sjon-lsp` discovers the nearest `sjon-project.sjon` at or above the file
+; being edited and composes its `:plugins` into ONE ambient schema
+; (`lsp/Handler.loadProject` -> `Schema.init(project.plugins)`). That is
+; what gives every example, every corpus document and every hand-written
+; dump diagnostics, hover (the manifests' own `:description`s), form-head
+; and key completion, and did-you-mean — with no `(use-plugin …)` line in
+; the documents themselves, which is right: tempura PRELOADS its manifests
+; rather than resolving them by name (see `src/Schema.zig`).
+;
+; The four files listed here are the same four `build.zig` hands to
+; `@embedFile` as `tempura_schema` / `midi_schema` / `it_schema` /
+; `pacer_schema`. The two spellings are kept honest by a test in
+; `src/Schema.zig` that loads this project the way the language server
+; does and compares its composed vocabulary against the preloaded one,
+; head for head. A renamed manifest, a stale path or a typo'd project key
+; costs every document its editor support and breaks nothing that builds,
+; so it has to fail somewhere — it fails there.
+;
+; Order matters only for reading: the four share no head (plan 02,
+; "Collisions, checked"), so every bare head resolves whatever the order.
+; `./schema/pacer.sjon` is a VERBATIM copy of pacer's own manifest, which
+; is what makes a keyframe's `:ease` type-check against `pacer/ease-spec`
+; and any pacer form pass through a timeline document.
+;
+; NOT listed, deliberately:
+;
+;   `./schema/tempura-corpus.sjon` — a project file composes every plugin
+;   it names into ONE ambient schema, and both it and `./schema/it.sjon`
+;   declare a `timing` form: composing them would make every unqualified
+;   `(timing …)` `ambiguous_form` in documents AND in harness files. The
+;   corpus runner preloads it alone (pacer's `pacer-corpus.sjon` rule).
+;
+;   `./schema/tempura-catalog.sjon` — that file is self-describing: it
+;   carries its own one-form vocabulary inline, so `sjon check` reads it
+;   with no project wiring, and composing a documentation vocabulary into
+;   the authoring one would only put `(entry …)` in everybody's
+;   completions.
+;
+; No `:version`: the manifests declare none, for the reason their headers
+; give, and tempura's version lives in `build.zig.zon` and `src/root.zig`.
+;
+; `:documents` names the files that ARE timeline documents. It scopes the
+; `sjon` CLI's project-wide walk (`sjon check` with no file arguments);
+; the language server does not read it — that walk is every `**/*.sjon`
+; under the workspace root. One thing to know before running the CLI over
+; this list: it resolves a document's plugins from the document's own
+; `(use-plugin …)` directives rather than composing the project's
+; ambiently, so a timeline document — which writes none — reports
+; `unknown_form` there.
+(project :name tempura
+  :plugins [
+    "./schema/tempura.sjon"
+    "./schema/midi.sjon"
+    "./schema/it.sjon"
+    "./schema/pacer.sjon"
+  ]
+  :documents ["corpus/*/doc.sjon" "examples/*.sjon"])

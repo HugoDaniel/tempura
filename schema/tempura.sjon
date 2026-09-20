@@ -1,13 +1,487 @@
 ; tempura timeline schema — the `(timeline …)` vocabulary (P99, plan 02).
 ;
-; STUB. The forms land with P99; this file exists so the build graph is
-; whole: it is `@embedFile`'d through the `tempura_schema` build import and
-; will be PRELOADED once per host (pacer's `src/Schema.zig` idiom), so
-; validation works on wasm32-freestanding with no filesystem and every
-; diagnostic span is a document coordinate by construction.
+; The eight global heads (`timeline`, `anchor`, `tempo-point`,
+; `meter-point`, `section`, `cue`, `lane`, `phrase`) and the three
+; slot-locals under `(lane …)` (`note`, `keyframe`, `clip`). This is the
+; only ORIGINAL vocabulary in tempura's schema directory: `midi.sjon` and
+; `it.sjon` host the sibling sets' file vocabularies under their own
+; namespaces, and `pacer.sjon` is a verbatim copy of pacer's score
+; manifest — which is what lets a keyframe's `:ease` be typed by pacer's
+; own `pacer/ease-spec` and never drift from it (a cross-plugin kind
+; reference, `SJON/docs/LANGUAGE.md` §6.7).
+;
+; The four share no head (plan 02, "Collisions, checked"), so one
+; `sjon-project.sjon` composes them and every bare head resolves.
+;
+; Embedded through the `tempura_schema` build import and PRELOADED once
+; per host by `src/Schema.zig`, which hands the bundle to every
+; `validateDocument` through `HostOptions.preloaded`. So a timeline
+; document is validated with no filesystem (wasm32-freestanding included)
+; and every diagnostic span is a document coordinate by construction.
+;
+; What is HERE and what is a HOST check: this manifest says everything one
+; form can say about itself — types, ranges, units, required keys, which
+; keys a `:kind` admits, how many of a set may be present. Every rule that
+; is a relation BETWEEN forms stays in tempura's own diagnostics with its
+; own span: `timeline_duplicate`, `tempo_map_invalid`, `meter_off_bar`,
+; `conductor_conflict`, `anchor_mismatch`, `address_invalid`,
+; `bound_lane_has_content`, `note_overlap`, `clip_lane_missing`,
+; `phrase_lane_bound`, `clip_nested`, `position_negative`. A schema counts
+; and types; it does not know about document order or about the file an
+; anchor names.
+;
+; Positions are plan 03's: a number with a REQUIRED unit, so a position
+; reads as music (`16bar`, `2.5q`, `40960t`) and a bare number is a
+; validation error with a span rather than a silently guessed unit
+; (pacer's `time-pos` spelling, `schema/pacer.sjon`).
 ;
 ; No `:version` key, for pacer's reason: it exists to be pinned by a
-; `(use-plugin …)` a document never writes, and tempura's version lives in
+; `(use-plugin …)` a timeline document never writes — the schema is
+; preloaded, not resolved by name — and tempura's version lives in
 ; `build.zig.zon` and `src/root.zig`, kept in lockstep by test.
 
-(plugin :name tempura)
+(plugin :name tempura
+  :description "The timeline tier: one SJON document holding a piece's arrangement in musical time — its tempo and meter, its sections and cues, and the lanes that carry notes, curves, patterns and formulas, either natively or bound to a `.mid` / `.it` anchor."
+
+  ; =====================================================================
+  ; Positions and durations (plan 03, "Positions")
+  ; =====================================================================
+
+  (value-kind :name position
+    :description "A position or duration on the tick grid: a number carrying a REQUIRED unit — q (quarter notes), t (tempura ticks, TPQ = 46126080 per quarter), bar and b (bars and beats, counted from 0 through the meter map), or s (seconds, through the tempo map). A bare number is unit_required, never a guess. A duration (:dur, :length, :offset) is measured from its own form's :at, so an s duration resolves at that anchor. Negative positions are a tempura position_negative diagnostic, not a bound here."
+    :underlying number
+    :unit (unit-shape :required true :allowed [q t bar b s]))
+
+  (value-kind :name grid-position
+    :description "A position on the tempo and meter maps themselves: q, t, bar or b, never s. Seconds are derived FROM these maps, so a seconds position on the form that defines them is circular — pacer refuses it on (tempo :at …) for the same reason."
+    :underlying number
+    :unit (unit-shape :required true :allowed [q t bar b]))
+
+  ; =====================================================================
+  ; The timeline header
+  ; =====================================================================
+
+  (value-kind :name timeline-end
+    :description "What the playhead does past :length. Spelled and meant exactly as pacer's end-behavior, which is what the exported transport carries."
+    :underlying symbol
+    :members (member-set
+      (member :name loop :description "Wrap the playhead back to 0; seconds wrap first, then convert.")
+      (member :name hold :description "Clamp at :length; every lane holds its final value.")))
+
+  ; =====================================================================
+  ; Anchors — the files a document is arranged around
+  ; =====================================================================
+
+  (value-kind :name anchor-id
+    :description "An anchor's identifier, and the cross-ref target a :conductor or a bound lane's :from names. Unique per document."
+    :underlying symbol)
+
+  (value-kind :name anchor-ref
+    :description "Names an (anchor :id …) declared in this document. A name no anchor declares is not_cross_ref, naming the form it had to be declared by."
+    :underlying symbol
+    :cross-ref (cross-ref :target anchor :name-key id))
+
+  (value-kind :name anchor-kind
+    :description "Which file format an anchor points at. The kind decides which address keys a bound lane may carry — checked host-side as address_invalid, since the schema sees the lane and the anchor one at a time."
+    :underlying symbol
+    :members (member-set
+      (member :name smf :description "A Standard MIDI File: tracks of events on a PPQ grid.")
+      (member :name it :description "An Impulse Tracker module: an order list of patterns of rows.")))
+
+  (value-kind :name byte-size
+    :description "A file's length in bytes, as the anchor recorded it. Verified against the file with :sha256 before any (bin …) offset or bound lane is honoured (anchor_mismatch) — never a silent re-read."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :integer true)
+    :unit (unit-shape :reject true))
+
+  ; =====================================================================
+  ; Tempo and meter (plan 03, "Tempo" and "Meter")
+  ; =====================================================================
+
+  (value-kind :name us-per-quarter
+    :description "Microseconds per quarter note — the SMF set-tempo field, kept in its own spelling so a document imported from a .mid stays exact in text."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 16777215 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name qpm-value
+    :description "Quarter notes per minute. Fractional tempi are legal; the IT Txx range (32..255) sits inside this one, so a document imported from a .it says :qpm and stays exact."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 1000)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name sig-component
+    :description "One component of a time signature, integer 1..64. The numerator's real ceiling is 64 and the denominator's is the power-of-two set {1 2 4 8 16 32} — a vector types both its elements alike, so the denominator's shape is a tempura meter_map_invalid with the form's span."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 64 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name meter-sig
+    :description "A time signature as [beats-per-bar note-value], e.g. [4 4] or [7 8]. A bar is (4 n / d) quarters."
+    :underlying vector
+    :vector (vector-shape :len 2 :element sig-component))
+
+  ; =====================================================================
+  ; Names
+  ; =====================================================================
+
+  (value-kind :name section-name
+    :description "A section's identifier: the window's name, unique per document, and the name of the pacer (scene …) it exports to."
+    :underlying symbol)
+
+  (value-kind :name lane-name
+    :description "A lane's identifier, unique across the timeline's lanes. A clip places the phrase's lane of the same :name as the placing lane."
+    :underlying symbol)
+
+  (value-kind :name lane-target
+    :description "The pacer name this lane drives at export, resolved there against the host registries exactly as a pacer track's :target is. Defaults to the lane's own :name — a default this manifest cannot declare, since it copies another key."
+    :underlying symbol)
+
+  (value-kind :name phrase-name
+    :description "A phrase's identifier, and the cross-ref target a clip's :phrase names."
+    :underlying symbol)
+
+  (value-kind :name phrase-ref
+    :description "Names a (phrase :name …) declared in this document. A name no phrase declares is not_cross_ref."
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase :name-key name))
+
+  ; =====================================================================
+  ; Lane kinds and the binding address
+  ; =====================================================================
+
+  (value-kind :name lane-kind
+    :description "The discriminant: which keys a lane has, and what its content means. Write it BEFORE the keys it enables — a variant key ahead of its discriminant is unknown_key."
+    :underlying symbol
+    :members (member-set
+      (member :name notes :description "Note events: (note …) and (clip …) children, or a binding to an anchor's notes.")
+      (member :name curve :description "A value over time: (keyframe …) children, or a binding to a controller lane or a tracker column.")
+      (member :name query :description "A SJON PatternQuery, one cycle per bar.")
+      (member :name formula :description "A pacer expression, evaluated at export in pacer's own environment.")))
+
+  (value-kind :name track-index
+    :description "Which track of a bound SMF anchor this lane reads, 1-based in file order."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name midi-channel
+    :description "A MIDI channel, 1..16 as every display counts them (0..15 on the wire)."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 16 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name it-channel
+    :description "An Impulse Tracker channel, 1..64."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 64 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name cc-number
+    :description "A MIDI controller number, 0..127."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 127 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name cc-pair
+    :description "A 14-bit controller as [msb lsb] — two controller numbers read as one value."
+    :underlying vector
+    :vector (vector-shape :len 2 :element cc-number))
+
+  (value-kind :name cc-address
+    :description "A controller address: one number for a 7-bit controller, or an [msb lsb] pair for a 14-bit one."
+    :underlying union
+    :union (union-shape :alternatives [cc-number cc-pair]))
+
+  (value-kind :name curve-column
+    :description "Which Impulse Tracker column a bound curve lane reads."
+    :underlying symbol
+    :members (member-set
+      (member :name vol :description "The volume column, 0..64.")
+      (member :name pan :description "The pan column.")
+      (member :name fx :description "One effect letter's parameter — which letter is :fx.")))
+
+  (value-kind :name fx-letter
+    :description "An Impulse Tracker effect letter, A..Z — the effect whose parameter a bound :column fx lane reads."
+    :underlying string
+    :string-bounds (string-bounds :min-len 1 :max-len 1))
+
+  ; =====================================================================
+  ; Values
+  ; =====================================================================
+
+  (value-kind :name range-bound
+    :description "One end of a bound curve's output range. Narrowed to f32 at export, so it must fit that range."
+    :underlying number
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type f32))
+
+  (value-kind :name value-range
+    :description "The [lo hi] a bound curve's normalised value is scaled into at export."
+    :underlying vector
+    :vector (vector-shape :len 2 :element range-bound))
+
+  (value-kind :name key-scalar
+    :description "A unitless keyframe value. Narrowed to f32 at export, pacer's determinism seam, so it must fit that range."
+    :underlying number
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type f32))
+
+  (value-kind :name key-vector
+    :description "A 1-4 component keyframe value (vec2 / vec3 / vec4 targets). Arity is joined against the resolved target at export."
+    :underlying vector
+    :vector (vector-shape :min-len 1 :max-len 4 :element key-scalar))
+
+  (value-kind :name keyframe-value
+    :description "A keyframe's value: a scalar or a 1-4 component vector — pacer's own key-value shape."
+    :underlying union
+    :union (union-shape :alternatives [key-scalar key-vector]))
+
+  (value-kind :name note-key-number
+    :description "A MIDI key number, 0..127 (60 is middle C)."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 127 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name note-key-name
+    :description "A note name: \"C4\" is 60, sharps spelled # and flats b, the midi set's middle-C-is-C4 convention. The spelling is checked host-side so a typo names the octave it could not read."
+    :underlying string)
+
+  (value-kind :name note-key
+    :description "A key: the MIDI number, or the note name that reads better."
+    :underlying union
+    :union (union-shape :alternatives [note-key-number note-key-name]))
+
+  (value-kind :name velocity
+    :description "A note's on-velocity, 1..127. Zero is a note-off on the wire and is never written here. Reaches an f32 lane at export."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 127 :integer true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type f32))
+
+  (value-kind :name release-velocity
+    :description "A note's off-velocity, 0..127. MIDI rendering only — nothing else reads it."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 127 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name repeat-count
+    :description "How many times a clip plays its phrase, at least once."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name transpose-semitones
+    :description "Semitones a clip shifts the phrase's notes by; ten octaves each way is well past any key range. Notes only — a curve clip ignores it."
+    :underlying number
+    :numeric (numeric-bounds :min -120 :max 120 :integer true)
+    :unit (unit-shape :reject true))
+
+  ; =====================================================================
+  ; Positional slots
+  ; =====================================================================
+
+  (value-kind :name lane-content
+    :description "A lane's children: note events, keyframes, and clips of a phrase. Each body is declared LOCAL to (lane …), so none of these three heads exists anywhere else — which is what lets `note` be tempura's timeline event while midivia's `note` verb keeps its own meaning in its own set."
+    :underlying form
+    :heads (head-set :names [note keyframe clip]))
+
+  (value-kind :name phrase-section
+    :description "A phrase's children: one or more (lane …) forms with content only. A phrase with no lane places nothing."
+    :underlying form
+    :heads (head-set
+      (head :name lane :min 1 :description "A lane of the phrase, matched to the placing lane by :name.")))
+
+  ; =====================================================================
+  ; Forms
+  ; =====================================================================
+
+  (form :name timeline
+    :description "The document's header: what the piece is called, how long it is, what happens at the end, and which anchor conducts it. One per document, first — a second is a tempura timeline_duplicate with its own span, since a head-set counts a form's children and not a document's roots."
+    (key :name title :type string :optional true
+      :description "The piece's title. Prose, not an identifier.")
+    (key :name length :type position :optional true
+      :description "The piece's length. Omitted, it is the end of the last event or clip rounded up to a bar.")
+    (key :name end :type timeline-end :optional true :default hold
+      :description "What the playhead does past :length. Exported as pacer's transport :end.")
+    (key :name conductor :type anchor-ref :optional true
+      :description "The anchor whose tempo and meter conduct this document (plan 03, \"Three conductors\"). With one, the document's own (tempo-point …) and (meter-point …) forms are a conductor_conflict; without one, a tempo point and a meter point at tick 0 are required."))
+
+  (form :name anchor
+    :description "A file this document is arranged around — the it set's (source …) generalised to both formats. An anchor is BY REFERENCE when the document holds no dump for it and INLINE when a (midi/smf …) or (it/module …) root follows it; the pairing is positional and one dump per anchor."
+    (key :name id :type anchor-id
+      :description "This anchor's name, referenced by :conductor and by a bound lane's :from.")
+    (key :name kind :type anchor-kind
+      :description "Which format the file is.")
+    (key :name file :type string
+      :description "Path to the file, resolved relative to this document.")
+    (key :name size :type byte-size :optional true
+      :description "The file's length in bytes. Checked with :sha256 before any offset into the file is honoured; a disagreement is anchor_mismatch, never a silent re-read.")
+    (key :name sha256 :type string :optional true
+      :description "Hex digest of the file's bytes, checked with :size."))
+
+  (form :name tempo-point
+    :description "A tempo change: from :at onward the piece runs at this tempo, until the next tempo point or the end. Tempo is a step function — a source that slides yields one point per tick and coalescing happens at export. Strictly ascending in document order (tempo_map_invalid), and one at tick 0 is required when the document has no :conductor."
+    (key :name at :type grid-position
+      :description "Where the segment starts. Never in seconds: seconds are what this map defines.")
+    (key :name us :type us-per-quarter :optional true
+      :description "Microseconds per quarter note — an SMF file's own field. Exclusive with :qpm.")
+    (key :name qpm :type qpm-value :optional true
+      :description "Quarter notes per minute. Exclusive with :us.")
+    ; One tempo, spelled one way. The authored spelling is preserved by the
+    ; printer, so a document imported from a .mid stays in :us and one from
+    ; a .it stays in :qpm, and neither is round-tripped through the other.
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [us])
+      (alt :keys [qpm])))
+
+  (form :name meter-point
+    :description "A meter change. Each must sit on a bar line of the meter before it (meter_off_bar) — a meter change mid-bar is not a thing in any source format — and one at tick 0 is required when the document has no :conductor."
+    (key :name at :type grid-position
+      :description "Where the meter changes. Never in seconds.")
+    (key :name sig :type meter-sig
+      :description "The time signature from :at onward, as [n d]."))
+
+  (form :name section
+    :description "A named window on the timeline, exported as a pacer (scene …) of the same name. Sections may overlap; a (scene …) passing through under a name a section also uses is scene_duplicate."
+    (key :name name :type section-name
+      :description "The window's name, unique per document.")
+    (key :name at :type position
+      :description "Where the window opens.")
+    (key :name dur :type position
+      :description "How long the window lasts."))
+
+  (form :name cue
+    :description "A named point in time — never a window. SMF markers and cue points dump to cues; pacer gets a comment, since a point has no scene."
+    (key :name name :type string
+      :description "What the point is called. Prose: SMF marker text is arbitrary bytes.")
+    (key :name at :type position
+      :description "Where the point sits."))
+
+  (form :name lane
+    :description "One stream of content driving one pacer target. :kind is the discriminant and decides which keys exist and what the children mean. A lane is NATIVE when it carries content and BOUND when it names an anchor with :from — never both (bound_lane_has_content), and content has one home."
+    :discriminant kind
+    :positional lane-content
+
+    ; ---- the three slot-locals ----
+    ; Declared here rather than promoted to plugin-global heads: a note, a
+    ; keyframe and a clip exist only inside a lane, and `note` in
+    ; particular is a head midivia's live tier also claims. The head-set
+    ; above narrows the slot to exactly these three (the closed
+    ; positional-set recipe, `portable-manifest-v1.md` §5.2).
+    (form :name note
+      :description "A note event. Two notes on one key overlapping in one lane are note_overlap."
+      (key :name at :type position
+        :description "The onset.")
+      (key :name dur :type position
+        :description "How long the note sounds, measured from :at.")
+      (key :name key :type note-key
+        :description "Which key: the MIDI number, or the note name.")
+      (key :name vel :type velocity :optional true :default 100
+        :description "On-velocity.")
+      (key :name ch :type midi-channel :optional true
+        :description "MIDI channel for rendering. Defaults to the lane's :ch, or 1 — a default that copies another key, so it is not declared here.")
+      (key :name off-vel :type release-velocity :optional true
+        :description "Off-velocity. MIDI rendering only."))
+
+    (form :name keyframe
+      :description "A value reached exactly at :at, with the easing that shaped the segment ENDING here. Before the first keyframe the lane holds its first value; after the last, its last. A curve is NAMED, never drawn — pacer's rule, so there are no Theatre-style handles."
+      (key :name at :type position
+        :description "Where the value lands.")
+      (key :name value :type keyframe-value
+        :description "The value reached at :at: a scalar or a 1-4 component vector.")
+      (key :name ease :type pacer/ease-spec :optional true :default linear
+        :description "The easing over the segment ending at this keyframe: a pacer easing name (in-cubic, hold, …) or a pacer easing form ((spring …), (steps …), (cubic-bezier …), (seq …), (chain …)). Typed by pacer's OWN kind, so the two vocabularies cannot drift."))
+
+    (form :name clip
+      :description "A phrase placed on this lane. It places the phrase's lane of the same :name as this lane; a phrase with no such lane is clip_lane_missing."
+      (key :name at :type position
+        :description "Where the phrase starts.")
+      (key :name phrase :type phrase-ref
+        :description "Which phrase to place.")
+      (key :name repeat :type repeat-count :optional true :default 1
+        :description "How many times the phrase plays.")
+      (key :name offset :type position :optional true
+        :description "Where in the phrase playback begins. Defaults to 0 — a default this manifest cannot declare, because a :default literal is unit-free and dropping the unit off a position would be exactly the silent guess the position kind exists to refuse (pacer says the same of a trigger's :offset).")
+      (key :name length :type position :optional true
+        :description "The playback window measured from :offset. Defaults to the phrase's length times :repeat minus :offset; content past the window is not placed, which is what a split clip's left half needs.")
+      (key :name transpose :type transpose-semitones :optional true :default 0
+        :description "Semitones to shift the placed notes by. Notes only."))
+
+    ; ---- keys every lane has ----
+    (key :name name :type lane-name
+      :description "This lane's name, unique across the timeline's lanes.")
+    (key :name kind :type lane-kind :optional true :default notes
+      :description "What this lane carries, and the discriminant that gates the keys below. Write it BEFORE them.")
+    (key :name target :type lane-target :optional true
+      :description "The pacer name this lane drives at export. Defaults to :name.")
+    ; ---- the binding address ----
+    ; Common rather than per-variant because a key lives in exactly one
+    ; place and these four are shared by the two content kinds. A `query`
+    ; or `formula` lane cannot bind at all — that is bound_kind_invalid,
+    ; a host check, because it is a relation between :kind and :from
+    ; rather than a shape either one has.
+    (key :name from :type anchor-ref :optional true
+      :description "The anchor this lane reads its content from. A lane with :from is BOUND: its content lives in the file, and children here are bound_lane_has_content. Only a notes or curve lane may bind.")
+    (key :name track :type track-index :optional true
+      :description "Which track of a bound SMF anchor, 1-based in file order.")
+    (key :name ch :type midi-channel :optional true
+      :description "Which MIDI channel of a bound SMF anchor, 1..16.")
+    (key :name channel :type it-channel :optional true
+      :description "Which channel of a bound Impulse Tracker anchor, 1..64.")
+
+    ; ---- notes ----
+    (variant :when notes
+      (key :name key :type note-key :optional true
+        :description "One key to read from a bound SMF anchor — a drum lane. Omitted, the lane takes every key on the address."))
+
+    ; ---- curve ----
+    (variant :when curve
+      (key :name range :type value-range :optional true
+        :description "The [lo hi] a bound curve's normalised value is scaled into at export.")
+      (key :name cc :type cc-address :optional true
+        :description "Read a controller of a bound SMF anchor: one number, or [msb lsb] for a 14-bit pair.")
+      (key :name bend :type boolean :optional true
+        :description "Read the pitch bend of a bound SMF anchor.")
+      (key :name pressure :type boolean :optional true
+        :description "Read the channel pressure of a bound SMF anchor.")
+      (key :name velocity :type boolean :optional true
+        :description "Read note velocities of a bound SMF anchor as a curve.")
+      (key :name column :type curve-column :optional true
+        :description "Which column of a bound Impulse Tracker anchor to read.")
+      (key :name fx :type fx-letter :optional true :requires [column]
+        :description "Which effect letter's parameter to read. Meaningless without :column fx, hence :requires — an :fx alone is dependent_key_missing rather than a silent no-op.")
+      ; At-most-one rather than exactly-one: a NATIVE curve lane carries
+      ; keyframes and addresses nothing, and a bound IT lane addresses a
+      ; column instead. What a count can see is that these four name four
+      ; different surfaces on one MIDI channel, and a lane reads one.
+      (exclusive-group :cardinality at-most-one
+        (alt :keys [cc])
+        (alt :keys [bend])
+        (alt :keys [pressure])
+        (alt :keys [velocity])))
+
+    ; ---- query ----
+    ; :walk-opaque — the validator never descends into the query. Its
+    ; interior is SJON's PatternQuery vocabulary (euclid, fastcat, pure,
+    ; …), checked by compiling it at build time with spans on failure,
+    ; not by this schema.
+    (variant :when query
+      (key :name query :type any :walk-opaque true
+        :description "A SJON PatternQuery, one cycle per bar. Compiled at build; a query that will not compile carries its own span."))
+
+    ; ---- formula ----
+    ; :walk-opaque — same discipline: the interior is pacer's expression
+    ; vocabulary, checked against pacer's environment names at build.
+    (variant :when formula
+      (key :name expr :type any :walk-opaque true
+        :description "A pacer expression, evaluated at export with the time environment bound (t, tick, beat, bar, cycle, phase, bpm, dur) plus every (control …) id.")))
+
+  (form :name phrase
+    :description "A reusable fragment: lanes with content, placed by a (clip …). A phrase's lanes carry content only — :from inside one is phrase_lane_bound, a clip inside one is clip_nested, and :target is ignored (the placing lane's target applies)."
+    :positional phrase-section
+    (key :name name :type phrase-name
+      :description "This phrase's name, referenced by a clip's :phrase.")
+    (key :name length :type position
+      :description "The phrase's length. A clip that repeats places one copy per :length."))
+)

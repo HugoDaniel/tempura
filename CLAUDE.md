@@ -82,16 +82,23 @@ test {
 
 `src/root.zig` imports ONE file per part (the aggregator) and lists it in its own
 `test {}` block, so `zig build test` from the root discovers every inline test in
-the repo. `zig build test -Dtest-root=src/time/time.zig` runs one subtree instead,
+the repo. `zig build test -Dtest-root=time/time.zig` runs one subtree instead,
 with the same imports the root gets (`sjon`, `build_options`, the schema
 anonymous imports) — a subtree that is green there is green for the same reason it
 is green at the root.
+
+The path is **relative to `src/`** (`time/time.zig`, `smf/smf.zig`, `Diag.zig`),
+and `build.zig` roots the test module at a generated `_test_root.zig` inside a
+copy of `src/` rather than at the aggregator itself. Rooting it at
+`src/time/time.zig` would make `src/time/` the module path and every
+`@import("../Diag.zig")` "outside module path"; the module root has to stay one
+level above the aggregators for a subtree to see what the root sees.
 
 ## Build verbs
 
 | Command | Purpose |
 |---|---|
-| `zig build test` | all inline tests (root.zig forces submodule discovery); `-Dtest-root=<path>` for one subtree |
+| `zig build test` | all inline tests (root.zig forces submodule discovery); `-Dtest-root=<path-relative-to-src>` for one subtree |
 | `zig build verify` | the whole gate: test + native corpus + the pacer-schema drift check |
 | `zig build corpus` | the native golden gate; `-- --update` regenerates, diff reviewed |
 | `zig build fuzz` | never-panic harnesses, separate from `verify` so the gate stays fast |
@@ -99,10 +106,9 @@ is green at the root.
 | `zig build wasm` | `tempura.wasm` (wasm32-freestanding, ReleaseSmall, `rdynamic`) |
 | `zig build cli` | the native `tempura` binary, built against the PUBLIC module |
 | `zig build run -- <args>` | the CLI without the install path |
+| `zig build docs` | regenerate `docs/timeline-language.md` from `schema/tempura.sjon`'s own `:description`s; `verify` diffs it |
 
-`zig build conform` (the oracle matrix, plan 09) and `zig build docs` (regenerate
-`docs/timeline-language.md` from `schema/tempura.sjon`) are planned and not wired
-yet; `build.zig` carries the TODO.
+`zig build conform` (the oracle matrix, plan 09) is planned and not wired yet.
 
 ## The schema directory
 
@@ -112,8 +118,18 @@ yet; `build.zig` carries the TODO.
 `tempura_schema` / `midi_schema` / `it_schema` / `corpus_schema` build imports and
 PRELOADED once per host (pacer's `Schema.zig` arrangement), so validation works on
 wasm32-freestanding with no filesystem and every diagnostic span is a document
-coordinate by construction. The harness vocabulary is never composed with the
-timeline one — two bundles, never a shared schema.
+coordinate by construction. `src/Schema.zig` owns both preloads: `load` composes
+the four timeline manifests into one bundle, `loadCorpus` takes the harness one
+ALONE. The harness vocabulary is never composed with the timeline one — both
+declare a `timing` form, so a shared schema would make every unqualified
+`(timing …)` `ambiguous_form` in documents and in harness files alike. Two
+bundles, never a shared schema.
+
+`sjon-project.sjon` composes the same four for `sjon-lsp` and the `sjon` CLI, and
+a test in `src/Schema.zig` compares its vocabulary against the preloaded one head
+for head. `schema/tempura-catalog.sjon` is the provenance catalog — one entry per
+tempura form, covered both ways by test — and is self-describing rather than
+listed anywhere, so it needs no build import and no project entry.
 
 **`schema/pacer.sjon` is a VERBATIM copy** of `../pacer/schema/pacer.sjon` — pacer
 0.2.0, commit `63cd0ed`, copied 2026-09-20. Nothing in it may be edited, not even

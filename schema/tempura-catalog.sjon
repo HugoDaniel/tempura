@@ -1,0 +1,98 @@
+; The timeline vocabulary's provenance catalog (P99, plan 02).
+;
+; One `(entry …)` per form `schema/tempura.sjon` declares — the eight
+; global heads and the three slot-locals under `(lane …)` — saying where
+; the concept comes from. tempura invents no semantics: every form is
+; Theatre's data model, RP-001's meta events, ITTECH's order list and
+; pattern rows, or pacer's form of the same meaning, renamed only when the
+; shorter name was already taken (plan 02, "Collisions, checked").
+;
+; A test in `src/schema_tests.zig` checks the two files cover each other
+; BOTH ways: a form with no entry has no provenance, and an entry naming
+; no form is a rename nobody finished. It is the discipline the sibling
+; sets keep (`batida/schema/it-catalog.sjon`,
+; `midivia/schema/midi-catalog.sjon`).
+;
+; The file is SELF-DESCRIBING: it carries its own one-form vocabulary as
+; an inline `(plugin …)` declaration, so `sjon check` reads it with no
+; project wiring, and neither `sjon-project.sjon` nor `build.zig` needs a
+; sixth entry for a file that is documentation about documentation.
+
+(plugin :name tempura-catalog
+  :description "The provenance catalog for the tempura timeline vocabulary: one entry per form, naming the source the concept is taken from."
+
+  (value-kind :name form-name
+    :description "A form declared by `schema/tempura.sjon` — a global head, or one of the slot-locals under (lane …)."
+    :underlying symbol)
+
+  (value-kind :name origin
+    :description "Which body of prior art the form's meaning is taken from."
+    :underlying symbol
+    :members (member-set
+      (member :name theatre
+        :description "Theatre.js's data model (Apache-2.0, cited and never ported): sequences, tracks and keyframes.")
+      (member :name rp-001
+        :description "The MMA's Standard MIDI Files 1.0 (RP-001, 1996) and the MIDI 1.0 message table.")
+      (member :name ittech
+        :description "ITTECH.TXT and the Impulse Tracker file format: the order list, patterns, rows and the file's own identity.")
+      (member :name pacer
+        :description "pacer's score vocabulary — the form of the same meaning tempura exports to.")))
+
+  (form :name entry
+    :description "One form's provenance."
+    (key :name form :type form-name
+      :description "The form this entry is about.")
+    (key :name origin :type origin
+      :description "Where the concept comes from.")
+    (key :name source :type string
+      :description "The specific place in that source: a form, a meta-event type, a section.")
+    (key :name note :type string :optional true
+      :description "Why the name differs, or what tempura changed.")))
+
+; ---- the eight global heads --------------------------------------------
+
+(entry :form timeline :origin pacer
+  :source "(transport :bpm :meter :dur :end …)"
+  :note "The document header pacer calls a transport: length and end-behaviour, with :end spelled exactly as pacer's end-behavior. Tempo and meter are NOT here — they are their own forms, because tempura's may change over the piece and may come from a conducting file.")
+
+(entry :form anchor :origin ittech
+  :source "the it set's (source :file :size :sha256 …), ITTECH.TXT's header identity"
+  :note "Generalised to both formats: an anchor names a .mid or a .it, and its size and digest are what make every (bin …) offset meaningful. Named `anchor` rather than `source` or `binary` — `source` is the it set's own head and `binary` is likely in a data vocabulary.")
+
+(entry :form tempo-point :origin rp-001
+  :source "meta event FF 51, Set Tempo (microseconds per quarter note)"
+  :note "Named `tempo-point` rather than `tempo`: pacer already declares `(tempo …)`. :us is RP-001's own field, :qpm the tracker and DAW spelling, and the authored one is preserved.")
+
+(entry :form meter-point :origin rp-001
+  :source "meta event FF 58, Time Signature (nn dd cc bb)"
+  :note "Named `meter-point` for symmetry with `tempo-point`. RP-001's clocks-per-click and 32nds-per-quarter belong to the midi/ tier, not here.")
+
+(entry :form section :origin pacer
+  :source "(scene :name :at :dur …)"
+  :note "The same window, exported to a pacer scene of the same name. Named `section` because `scene` is pacer's head and a pass-through score may carry one.")
+
+(entry :form cue :origin rp-001
+  :source "meta events FF 06 Marker and FF 07 Cue Point"
+  :note "A point, never a window. Named `cue` rather than `mark` or `marker`: `mark` is animader's and `marker` is the midi set's event head.")
+
+(entry :form lane :origin theatre
+  :source "Theatre's sequence tracks — one object property animated over a sequence"
+  :note "Exports to pacer's (track …). Named `lane` because `track` is both pacer's head and the midi set's; :kind is the discriminant Theatre's typed props imply and pacer's (control :type …) precedent spells.")
+
+(entry :form phrase :origin ittech
+  :source "the pattern: a fixed-length fragment the order list places, over and over"
+  :note "Generalised from a tracker pattern to a fragment of lanes, so a phrase is the reusable unit both a tracker and a DAW have. Named `phrase` because `pattern` is the it set's head and `clip` is the placement, not the fragment.")
+
+; ---- the three slot-locals under (lane …) ------------------------------
+
+(entry :form note :origin rp-001
+  :source "the 9n note-on / 8n note-off pair"
+  :note "The timeline's sugar for the pair, with :dur instead of a second event. Deliberately the same head midivia's live tier uses for its own verb: a project loading both qualifies one (midi/note), which is why tempura's hosted midi manifest omits the verb entirely.")
+
+(entry :form keyframe :origin theatre
+  :source "Theatre's keyframe type: a value at a position with an easing to it"
+  :note "pacer's (key …) shape, and :ease is typed by pacer's OWN pacer/ease-spec kind so the two cannot drift. No Theatre-style bezier handles: a curve is named, never drawn, which is pacer's rule. Named `keyframe` because `key` is pacer's slot-local and `point` belongs to geometry.")
+
+(entry :form clip :origin ittech
+  :source "the order list entry: a pattern id placed at a position in the song"
+  :note "Generalised to place a phrase with a repeat count, an offset and a window, so a split clip's left half is expressible. :transpose is the tracker's own instrument-level transpose applied to placed notes.")
