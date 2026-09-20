@@ -8,14 +8,21 @@
 ; reader keeps the cell, drops the command and says so
 ; (`it_command_unknown`).
 ;
-; No `(roundtrip)`: those five commands read as NO effect, so writing the
-; module back produces a legitimately SHORTER stream. Rung 1 is a gate on
-; files the canonical writer produced from a module it can read back, and
-; this file is authored to fail that premise. The mask cache and the
-; volume column round-trip under `it-minimal` and `it-passthrough`.
+; This is one of the corpus's two NON-CANONICAL fixtures, and it is here
+; for rung 2. Those five commands read as NO effect, so writing the
+; module back produces a legitimately SHORTER stream and `(rung1 :ok
+; false)` is the expected, PINNED fact — rung 1 is a gate on files the
+; canonical writer produced from a module it can read back, and this file
+; is authored to fail that premise. Rung 2 is what the case asserts: the
+; header, the orders, every pattern cell and every pass-through region
+; survive the round trip, so what the writer dropped is exactly the five
+; commands the reader had already dropped and nothing else. A golden is
+; reviewed, not obeyed: byte-equality of this whole text with
+; `expected.sjon` is the gate.
 ;
-; `(write)` is what stands in for it: the normalised module written back,
-; hashed — so the mask cache, every volume byte and the five dropped
-; commands are all pinned by a number that moves if any of them does.
+; `(write)` beside it hashes the normalised module, so the mask cache,
+; every volume byte and the five dropped commands are pinned by a number
+; that moves if any of them does.
 (read)
+(roundtrip)
 (write)

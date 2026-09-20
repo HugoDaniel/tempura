@@ -14,7 +14,11 @@
 //! Every fixture goes through a `Builder` and the canonical writer, so
 //! the committed bytes are a layout tempura itself produces and rung 1
 //! (`write(read(bytes)) == bytes`) holds on them. Two exceptions, each
-//! deliberate and each carrying `(read)` alone in its harness:
+//! deliberate: they are the corpus's FOREIGN fixtures, the ones rung 2
+//! exists for (plan 09), so each carries `(read)`, `(roundtrip)` and
+//! `(write)`, and its golden pins `(rung1 :ok false)` as the fact it is
+//! — the writer normalised the file, on purpose — beside a rung 2 that
+//! has something to prove:
 //!
 //!   - `smf-smpte`: the canonical writer's division is ALWAYS pulses per
 //!     quarter (plan 05), so the two division bytes of an otherwise
@@ -288,9 +292,10 @@ fn itMinimal(gpa: Allocator) ![]u8 {
 /// column, and the command bytes 27–31, which sit inside ITTECH's range
 /// and name no effect.
 ///
-/// It carries `(read)` alone: those five commands read as NO effect, so
-/// the rewrite is legitimately shorter than the original and rung 1 is
-/// not a property of this file (see the module header).
+/// One of the two FOREIGN fixtures: those five commands read as NO
+/// effect, so the rewrite is legitimately shorter than the original and
+/// its golden pins `(rung1 :ok false)` beside the rung 2 that asserts
+/// everything else survived (see the module header).
 fn itPatternsMasks(gpa: Allocator) ![]u8 {
     var b: itf.Builder = .init(gpa);
     errdefer b.deinit();

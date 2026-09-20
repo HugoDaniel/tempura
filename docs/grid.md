@@ -82,8 +82,11 @@ would be circular.
 
 **Two roundings, and they never meet.** A literal rounds — `q`, `bar` and `b` convert
 with one multiply and one round to nearest, ties to even, so a literal always names
-the nearest tick. A clock value floors — `s` goes through the tempo map's integer path,
-which floors, as pacer's does. Each rounding lives in exactly one function.
+the nearest tick. A clock value floors — `s` resolves through the tempo map's
+`tick(seconds)`, which floors to the last tick begun. Both of the map's paths floor:
+the f64 one, and the exact-integer one a conductor whose tempo points are all `:us`
+takes. Each rounding lives in exactly one function, and an `s` literal never reaches
+the rounding one.
 
 ## The printer's rule
 
@@ -102,5 +105,7 @@ the printer is constrained.
 ## Where this is gated
 
 `zig build corpus` — the golden corpus under `corpus/`. Every case pins its input by
-hash and its answers byte for byte, and the same goldens are re-derived from
-`tempura.wasm`, which is where native-versus-wasm equality is asserted.
+hash and its answers byte for byte. The same goldens **will be** re-derived from
+`tempura.wasm` at E3 (the wasm half of the corpus, Task 18); that second comparison is
+where native-versus-wasm equality gets asserted, and until it lands the native runner is
+the only side reading these files.

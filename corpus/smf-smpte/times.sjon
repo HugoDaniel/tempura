@@ -4,15 +4,21 @@
 ; subframes / 2` makes that a 500-pulse grid, and the file's `set-tempo`
 ; is kept and recorded as ignored (`smpte_tempo_ignored`, plan 03).
 ;
-; No `(roundtrip)`: the canonical writer's division is ALWAYS pulses per
+; This is one of the corpus's two NON-CANONICAL fixtures, and it is here
+; for rung 2. The canonical writer's division is ALWAYS pulses per
 ; quarter (plan 05, "The canonical writer"), so `write(read(bytes))`
-; deliberately differs from these bytes in exactly the two division bytes
-; — rung 1 is a gate on files the writer produced, and this one is
-; authored to be one it never would. What a round trip WOULD preserve
-; here, event for event, is gated by the canonical cases beside it.
+; differs from these bytes in exactly the two division bytes and
+; `(rung1 :ok false)` is the expected, PINNED fact — rung 1 is a gate on
+; files the writer produced, and this file is authored to be one it never
+; would. Rung 2 is what the case asserts: every event comes back with its
+; tick, its kind and its payload after the file has been round-tripped
+; onto the grid its division converted to, which is plan 09's rung for a
+; foreign file. A golden is reviewed, not obeyed: the `:ok false` here is
+; read as "the writer normalised it, on purpose", and the byte-equality
+; of this whole text with `expected.sjon` is the gate.
 ;
-; `(write)` is what stands in for it: the canonical writer's output for
-; this file, hashed — the SMPTE file written back onto the 500-pulse grid
-; its division converted to, which is the rule plan 05 states.
+; `(write)` beside it hashes that normalised output, so a change in what
+; the writer makes of a SMPTE file moves a number rather than a verdict.
 (read)
+(roundtrip)
 (write)

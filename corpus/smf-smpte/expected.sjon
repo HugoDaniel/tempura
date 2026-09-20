@@ -3,4 +3,7 @@
 (read
   (smf :format 0 :division 500 :smpte [25 40] :tracks 1 :events 5 :running-status 0 :foreign 0)
   (diag :code 26 :severity info :start 32 :end 38 :message "a SMPTE file's tempo event is kept and not believed"))
+(roundtrip
+  (rung1 :ok false :sha256 "0860099247485a216979cd2211ef887d6ef141a4994d8e01e9ddeac58731ccd9")
+  (rung2 :ok true))
 (write :format0 false :sha256 "0860099247485a216979cd2211ef887d6ef141a4994d8e01e9ddeac58731ccd9" :bytes 50 :tracks 1 :events 5)

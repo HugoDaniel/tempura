@@ -12,9 +12,10 @@
 //!
 //! `zig build corpus -- --update` regenerates the goldens; the diff is
 //! reviewed, and a golden is never hand-edited. This runner is the
-//! AUTHORITY for that text: the wasm half re-derives the same bytes and
-//! compares against the same goldens, which is where native-vs-wasm
-//! equality is asserted (pacer's rule verbatim).
+//! AUTHORITY for that text: at E3 the wasm half re-derives the same
+//! bytes and compares against these same goldens, and that second
+//! comparison is where native-vs-wasm equality gets asserted (pacer's
+//! rule verbatim). Until it lands, this is the only side reading them.
 //!
 //! ## The harness
 //!
@@ -65,22 +66,28 @@
 //!       (onset :ch 0 :tick 0 :note 60)
 //!       (total :ticks 24 :loop-row 0))
 //!
-//! Diagnostics carry the NUMERIC code (the ordinal is the wire, and
-//! `zig build audit-diagnostics` is what keeps a code's NAME in a test),
-//! the severity, the span into the bytes that were read, and the message
-//! verbatim. A row map echoes at most 4096 rows and 4096 onsets and then
-//! says how many it left out, so a runaway case cannot produce a golden
-//! nobody can read.
+//! Diagnostics carry the NUMERIC code, never the name: `Diag.Code`'s
+//! ordinal is the wire (it rides the `'TPDG'` blob and the CLI's JSON),
+//! and it is APPEND-ONLY from E3 — so a code appended at the end never
+//! disturbs a golden, while a reorder would move every one of them at
+//! once and say so loudly here. The names stay covered by `zig build
+//! audit-diagnostics`, which refuses a code no test spells out. A
+//! diagnostic also carries its severity, its span into the bytes that
+//! were read, and its message verbatim. A row map echoes at most 4096
+//! rows and 4096 onsets and then says how many it left out, so a runaway
+//! case cannot produce a golden nobody can read.
 //!
 //! `(rung1 :ok true)` is `write(read(bytes)) == bytes` and holds for
 //! every file tempura's own canonical writer produced; `(rung2 :ok true)`
 //! is `read(write(read(bytes)))` equal to `read(bytes)` event for event
 //! (`.mid`) or field for field with every pass-through region byte-equal
-//! (`.it`). A case whose fixture is deliberately NOT canonical — a SMPTE
-//! division the writer never spells, a command byte no IT effect names —
-//! carries `(read)` and `(write)` instead, and says why in its
-//! `times.sjon`: the hash of what the writer DOES make of it pins the
-//! normalisation that rung 1 cannot.
+//! (`.it`). A FOREIGN fixture — one this writer would never have
+//! produced, a SMPTE division it never spells or a command byte no IT
+//! effect names — is what rung 2 is FOR (plan 09), and its golden pins
+//! `(rung1 :ok false)` beside it. That flag is a recorded fact, not a
+//! failed gate: the verdict is byte-equality with the golden, and the
+//! case's own `times.sjon` says why the writer normalised the file.
+//! `(write)` beside them hashes what it normalised it to.
 //!
 //! Per-case defects (a missing file, a malformed harness, a directive the
 //! fixture cannot answer) fail the case and the run continues —
@@ -977,6 +984,12 @@ const Mismatch = struct {
 /// Null when the two texts are byte-equal. Otherwise the first line that
 /// differs, with `null` on the side that ended first — enough to see a
 /// changed hash or a missing row without dumping whole files.
+///
+/// The walk always finds that line: splitting on `\n` is injective, so
+/// two texts with the same sequence of lines are the same text, and the
+/// equality above already returned for those. A golden that differs only
+/// in its final newline differs at the line AFTER the shorter one's last
+/// (`null` against `""`), which the test below pins.
 fn firstDifference(expected: []const u8, actual: []const u8) ?Mismatch {
     if (std.mem.eql(u8, expected, actual)) return null;
     var exp_lines = std.mem.splitScalar(u8, expected, '\n');
@@ -985,21 +998,16 @@ fn firstDifference(expected: []const u8, actual: []const u8) ?Mismatch {
     while (true) : (line += 1) {
         const e = exp_lines.next();
         const ac = act_lines.next();
-        if (e == null and ac == null) {
-            // Line-identical but not byte-identical: the difference is
-            // in the line terminators themselves.
-            return .{ .line = 0, .expected = null, .actual = null };
-        }
+        // Both exhausted would mean line-identical texts, which the
+        // byte equality above ruled out — an internal invariant, not a
+        // condition of the input.
+        std.debug.assert(e != null or ac != null);
         if (e != null and ac != null and std.mem.eql(u8, e.?, ac.?)) continue;
         return .{ .line = line, .expected = e, .actual = ac };
     }
 }
 
 fn reportMismatch(out: *Io.Writer, name: []const u8, diff: Mismatch) !void {
-    if (diff.line == 0) {
-        try out.print("corpus: {s}: MISMATCH (line-identical; byte difference)\n", .{name});
-        return;
-    }
     try out.print("corpus: {s}: MISMATCH at line {d}\n  expected: {s}\n  actual:   {s}\n", .{
         name,
         diff.line,
@@ -1154,10 +1162,14 @@ test "corpus verdict: byte-equal is silence, and a difference names the first li
     try t_.expectEqualStrings("", short.expected.?);
     try t_.expectEqualStrings("(b)", short.actual.?);
 
-    // Line 0 is the report's "line-identical, byte difference" arm: it
-    // cannot be reached by a line difference, only by a terminator one.
-    const trailing = firstDifference("(a)", "(a)\n");
-    try t_.expect(trailing != null);
+    // A missing final newline — the one difference that is not visible
+    // in any line's text. It shows up as the line PAST the shorter
+    // text's last: nothing on one side, an empty line on the other, and
+    // the report spells the nothing `<end of file>`.
+    const trailing = firstDifference("(a)", "(a)\n").?;
+    try t_.expectEqual(@as(usize, 2), trailing.line);
+    try t_.expectEqual(@as(?[]const u8, null), trailing.expected);
+    try t_.expectEqualStrings("", trailing.actual.?);
 }
 
 /// A case rendered the way `runCase` renders it, into the test's arena.

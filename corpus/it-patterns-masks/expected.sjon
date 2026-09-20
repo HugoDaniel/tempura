@@ -7,4 +7,7 @@
   (diag :code 48 :severity warning :start 266 :end 268 :message "command byte 29 names no IT effect; read as no effect")
   (diag :code 48 :severity warning :start 273 :end 275 :message "command byte 30 names no IT effect; read as no effect")
   (diag :code 48 :severity warning :start 278 :end 280 :message "command byte 31 names no IT effect; read as no effect"))
+(roundtrip
+  (rung1 :ok false :sha256 "a5732e375d77745f001e093a66edcad4ed4b6f5eb2b10ea0c44816644ecd4c1b")
+  (rung2 :ok true))
 (write :sha256 "a5732e375d77745f001e093a66edcad4ed4b6f5eb2b10ea0c44816644ecd4c1b" :bytes 278 :orders 2 :patterns 1 :samples 0)
