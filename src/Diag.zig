@@ -154,6 +154,11 @@ pub const Diagnostic = struct {
     message: []const u8,
 };
 
+/// This module's error set. Collecting a diagnostic can only fail the way
+/// any allocation fails — a defective document is never an error here, it
+/// IS the diagnostic (the SJON discipline, `CLAUDE.md`).
+pub const Error = error{OutOfMemory};
+
 /// The collector every producer fills: arena-backed, so a caller frees a
 /// whole report in one call and no message outlives its list.
 ///
@@ -184,7 +189,7 @@ pub const List = struct {
         span: Span,
         comptime fmt: []const u8,
         args: anytype,
-    ) std.mem.Allocator.Error!void {
+    ) Error!void {
         const a = self.arena.allocator();
         const message = try std.fmt.allocPrint(a, fmt, args);
         try self.entries.append(a, .{
@@ -220,6 +225,96 @@ pub const List = struct {
     }
 };
 
+/// Every variant in ordinal order, pinned by NAME — the table the test
+/// below walks. Append here in the same edit that appends to `Code`.
+///
+/// Deliberately a container-level const and NOT a literal inside a test
+/// body: `tools/audit_diagnostic_coverage.sh` reads test bodies to find
+/// out which codes a test names, and a table of all of them inside one
+/// would hand every code its coverage for free — the audit would never
+/// be able to fail again.
+const code_order = [_]Code{
+    .unit_required,
+    .position_not_integer,
+    .position_negative,
+    .tick_overflow,
+    .tempo_map_invalid,
+    .meter_map_invalid,
+    .meter_off_bar,
+    .conductor_conflict,
+    .timeline_duplicate,
+    .anchor_missing,
+    .anchor_dump_duplicate,
+    .anchor_conflict,
+    .anchor_mismatch,
+    .anchor_unavailable,
+    .address_invalid,
+    .bound_lane_has_content,
+    .bound_kind_invalid,
+    .note_overlap,
+    .clip_lane_missing,
+    .clip_nested,
+    .phrase_lane_bound,
+    .passthrough_conducts,
+    .scene_duplicate,
+    .passthrough_preferred_native,
+    .it_field_not_materialized,
+    .division_inexact,
+    .smpte_tempo_ignored,
+    .smf_format2,
+    .smf_bad_header,
+    .smf_ntrks_mismatch,
+    .smf_chunk_truncated,
+    .smf_track_truncated,
+    .smf_unknown_chunk,
+    .smf_riff_unwrapped,
+    .smf_running_status_across_meta,
+    .smf_set_tempo_zero,
+    .vlq_too_long,
+    .at_not_monotone,
+    .end_of_track_missing,
+    .end_of_track_early,
+    .ppq_rescale_inexact,
+    .note_retrigger,
+    .ease_hint_mismatch,
+    .it_bad_magic,
+    .it_truncated,
+    .it_count_exceeds_spec,
+    .it_history_flag_without_block,
+    .it_pattern_rows_out_of_range,
+    .it_command_unknown,
+    .it_pattern_too_large,
+    .it_sample_extent_truncated,
+    .it_parapointer_out_of_range,
+    .it_message_encoding_lossy,
+    .it_no_instrument,
+    .walk_runaway,
+    .residue_only,
+    .residue_stale,
+    .residue_version,
+    .residue_newer_kept,
+    .residue_corrupt,
+    .residue_partial,
+    .residue_tail_truncated,
+    .edit_target_bound,
+    .edit_would_duplicate,
+    .edit_overlap,
+    .edit_off_bar,
+    .edit_pattern_shared,
+    .edit_range_empty,
+    .edit_inexact,
+    .edit_readonly_passthrough,
+    .export_bpm_out_of_range,
+    .export_meter_unsupported,
+    .render_inexact,
+    .render_cc_missing,
+    .render_format_promoted,
+    .render_channels_exhausted,
+    .render_polyphony_exceeded,
+    .tempo_inexact,
+    .build_cross_kind,
+};
+
 test "Diag.Code: ordinals are dense and unique — the wire contract" {
     const fields = @typeInfo(Code).@"enum".fields;
     try testing.expect(fields.len > 0);
@@ -244,93 +339,11 @@ test "Diag.Code: ordinals are dense and unique — the wire contract" {
 test "Diag.Code: every code is pinned by name to its ordinal" {
     // The append-only surface, spelled out: a code's ORDINAL is what
     // crosses the wire (`'TPDG'`), so a reorder, a removal or a rename is
-    // a breaking change and has to fail here. Listing every variant by
-    // name is also what `tools/audit_diagnostic_coverage.sh` demands — a
-    // new code with no test lands red.
-    const all = [_]Code{
-        .unit_required,
-        .position_not_integer,
-        .position_negative,
-        .tick_overflow,
-        .tempo_map_invalid,
-        .meter_map_invalid,
-        .meter_off_bar,
-        .conductor_conflict,
-        .timeline_duplicate,
-        .anchor_missing,
-        .anchor_dump_duplicate,
-        .anchor_conflict,
-        .anchor_mismatch,
-        .anchor_unavailable,
-        .address_invalid,
-        .bound_lane_has_content,
-        .bound_kind_invalid,
-        .note_overlap,
-        .clip_lane_missing,
-        .clip_nested,
-        .phrase_lane_bound,
-        .passthrough_conducts,
-        .scene_duplicate,
-        .passthrough_preferred_native,
-        .it_field_not_materialized,
-        .division_inexact,
-        .smpte_tempo_ignored,
-        .smf_format2,
-        .smf_bad_header,
-        .smf_ntrks_mismatch,
-        .smf_chunk_truncated,
-        .smf_track_truncated,
-        .smf_unknown_chunk,
-        .smf_riff_unwrapped,
-        .smf_running_status_across_meta,
-        .smf_set_tempo_zero,
-        .vlq_too_long,
-        .at_not_monotone,
-        .end_of_track_missing,
-        .end_of_track_early,
-        .ppq_rescale_inexact,
-        .note_retrigger,
-        .ease_hint_mismatch,
-        .it_bad_magic,
-        .it_truncated,
-        .it_count_exceeds_spec,
-        .it_history_flag_without_block,
-        .it_pattern_rows_out_of_range,
-        .it_command_unknown,
-        .it_pattern_too_large,
-        .it_sample_extent_truncated,
-        .it_parapointer_out_of_range,
-        .it_message_encoding_lossy,
-        .it_no_instrument,
-        .walk_runaway,
-        .residue_only,
-        .residue_stale,
-        .residue_version,
-        .residue_newer_kept,
-        .residue_corrupt,
-        .residue_partial,
-        .residue_tail_truncated,
-        .edit_target_bound,
-        .edit_would_duplicate,
-        .edit_overlap,
-        .edit_off_bar,
-        .edit_pattern_shared,
-        .edit_range_empty,
-        .edit_inexact,
-        .edit_readonly_passthrough,
-        .export_bpm_out_of_range,
-        .export_meter_unsupported,
-        .render_inexact,
-        .render_cc_missing,
-        .render_format_promoted,
-        .render_channels_exhausted,
-        .render_polyphony_exceeded,
-        .tempo_inexact,
-        .build_cross_kind,
-    };
-
-    try testing.expectEqual(@typeInfo(Code).@"enum".fields.len, all.len);
-    for (all, 0..) |code, i| {
+    // a breaking change and has to fail here. The table it walks is
+    // `code_order`, a container-level const — see the note there for why
+    // it may not move into this body.
+    try testing.expectEqual(@typeInfo(Code).@"enum".fields.len, code_order.len);
+    for (code_order, 0..) |code, i| {
         try testing.expectEqual(i, @intFromEnum(code));
     }
 }
