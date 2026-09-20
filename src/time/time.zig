@@ -16,8 +16,16 @@ pub const Pos = @import("Pos.zig");
 /// The tempo and meter maps: seconds and bars over the grid.
 pub const TimeMap = @import("TimeMap.zig");
 
+/// `Doc` → `Derived`: the three conductors, the content in ticks.
+pub const derive = @import("derive.zig");
+
+/// The position queries an editor and a host ask over a `Derived`.
+pub const Playhead = @import("Playhead.zig");
+
 test {
     _ = Grid;
     _ = Pos;
     _ = TimeMap;
+    _ = derive;
+    _ = Playhead;
 }
