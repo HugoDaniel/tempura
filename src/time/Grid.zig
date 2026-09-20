@@ -13,9 +13,13 @@
 //! division that does not divide, and it is nearest-with-ties-to-even on
 //! exact integer ratios, never on floats.
 //!
-//! No `Error`: every function is total or optional — a division that does
-//! not divide is a `null`, which the caller turns into a
-//! `division_inexact` diagnostic with the span it owns.
+//! No `Error`, because none of this needs one: a division that does not
+//! divide is a `null` (`ticksPerSmfTick`, `pacerDivisor`), which the
+//! caller turns into a `division_inexact` diagnostic with the span it
+//! owns, and a position past the ceiling is a SATURATED value flagged
+//! `overflow` (`smfToTicks`), which the caller turns into
+//! `tick_overflow`. The two exceptions are `beatTicks` and `barTicks`,
+//! which carry a precondition on their denominator instead — see there.
 
 const std = @import("std");
 const testing = std.testing;
@@ -54,7 +58,15 @@ pub fn ticksPerSmfTick(ppq: u15) ?i64 {
 ///
 /// `exact` is per VALUE, not per division: the caller counts the events it
 /// actually rounded, and asks `ticksPerSmfTick` about the file's header.
-pub fn smfToTicks(smf_tick: i64, ppq: u15) struct { tick: i64, exact: bool } {
+///
+/// `overflow` says the position is past `MAX_TICK`, in which case `tick`
+/// is SATURATED at the ceiling (signed) and the caller raises
+/// `tick_overflow` — plan 03's rule that the ceiling is a diagnostic and
+/// never a wrap. The whole computation runs in `i128` and is narrowed only
+/// after that check, because the input is a file's: SMF deltas are 28-bit
+/// and a few hundred maximal ones at `division = 1` run past `i64` itself,
+/// which a byte-eating entry point must answer rather than trap on.
+pub fn smfToTicks(smf_tick: i64, ppq: u15) struct { tick: i64, exact: bool, overflow: bool = false } {
     if (ppq == 0) return .{ .tick = 0, .exact = false };
     const den: i128 = ppq;
     const num: i128 = @as(i128, smf_tick) * TPQ;
@@ -63,18 +75,27 @@ pub fn smfToTicks(smf_tick: i64, ppq: u15) struct { tick: i64, exact: bool } {
     // zero: 0 <= rem < den.
     const q = @divFloor(num, den);
     const rem = num - q * den;
-    if (rem == 0) return .{ .tick = @intCast(q), .exact = true };
+    const exact = rem == 0;
 
-    const twice = 2 * rem;
-    const up = if (twice > den)
-        true
-    else if (twice < den)
-        false
-    else
-        // The tie: half of a tick. Take whichever neighbour is even.
-        @rem(q, 2) != 0;
+    var nearest = q;
+    if (!exact) {
+        const twice = 2 * rem;
+        const up = if (twice > den)
+            true
+        else if (twice < den)
+            false
+        else
+            // The tie: half of a tick. Take whichever neighbour is even.
+            @rem(q, 2) != 0;
+        if (up) nearest = q + 1;
+    }
 
-    return .{ .tick = @intCast(if (up) q + 1 else q), .exact = false };
+    // The ceiling, tested while the value is still `i128`: a saturated
+    // position is not an exact one, whatever the division did.
+    if (nearest > MAX_TICK) return .{ .tick = MAX_TICK, .exact = false, .overflow = true };
+    if (nearest < -MAX_TICK) return .{ .tick = -MAX_TICK, .exact = false, .overflow = true };
+
+    return .{ .tick = @intCast(nearest), .exact = exact };
 }
 
 /// How many tempura ticks one PACER tick is worth under meter `[n d]`
@@ -103,11 +124,13 @@ pub fn pacerDivisor(n: u8, d: u8) ?i64 {
 
 /// One beat of a `[n d]` meter in ticks: `4 · TPQ / d` quarters' worth.
 ///
-/// `d` is the meter's denominator, which the schema bounds to 1..16 —
-/// every one of those, and every power of two an SMF's `dd` can spell in
-/// a `u8`, divides `4 · TPQ = 2^12 · 3^2 · 5 · 7 · 11 · 13` exactly. A `d`
-/// outside that domain (0, 17, …) is a caller bug rather than user input,
-/// and `@divExact` makes it loud instead of silently wrong.
+/// PRECONDITION: `d` divides `4 · TPQ = 2^12 · 3^2 · 5 · 7 · 11 · 13`.
+/// Every denominator tempura emits does — `{1, 2, 4, 8, 16, 32}`,
+/// `pacerDivisor`'s domain — as does every other value in pacer's own
+/// 1..16 bound and every power of two an SMF's `dd` can spell in a `u8`.
+/// A `d` outside that (0, 17, …) is a caller bug rather than user input:
+/// the meter map validates before it converts, and `@divExact` makes a
+/// violation loud instead of silently truncating a bar length.
 pub fn beatTicks(d: u8) i64 {
     return @divExact(4 * TPQ, @as(i64, d));
 }
@@ -176,6 +199,45 @@ test "Grid.smfToTicks: a division of 0 is not a division" {
     const nil = smfToTicks(480, 0);
     try testing.expectEqual(@as(i64, 0), nil.tick);
     try testing.expect(!nil.exact);
+}
+
+test "Grid.smfToTicks: past the ceiling saturates and says so, never panics" {
+    // The i128 product is narrowed to i64 only AFTER the grid ceiling is
+    // checked. A crafted `.mid` reaches this: SMF deltas are 28-bit, so
+    // about 750 maximal ones at `division = 1` put the running tick past
+    // i64 itself, and `src/fuzz.zig` will try. The answer is a saturated
+    // tick the caller can report as `tick_overflow`, never a trap.
+    //
+    // 480 PPQ, the last SMF tick under the ceiling and the first past it.
+    // (Nothing can land EXACTLY on MAX_TICK: that needs `TPQ / ppq` to be
+    // a power of two, and TPQ's odd part 45045 is larger than the biggest
+    // division SMF can spell, so no `ppq <= 32767` gives one.)
+    const last = smfToTicks(93_731_260_975, 480);
+    try testing.expectEqual(@as(i64, 9_007_199_254_653_600), last.tick);
+    try testing.expect(last.exact);
+    try testing.expect(!last.overflow);
+
+    const past = smfToTicks(93_731_260_976, 480);
+    try testing.expectEqual(MAX_TICK, past.tick);
+    try testing.expect(!past.exact);
+    try testing.expect(past.overflow);
+
+    // One maximal 28-bit delta at 1 PPQ is already past the ceiling.
+    const delta = smfToTicks((1 << 28) - 1, 1);
+    try testing.expectEqual(MAX_TICK, delta.tick);
+    try testing.expect(delta.overflow);
+
+    // And past i64 itself, both ways: the multiply is done in i128, so
+    // these saturate instead of trapping.
+    try testing.expectEqual(MAX_TICK, smfToTicks(std.math.maxInt(i64), 24).tick);
+    try testing.expect(smfToTicks(std.math.maxInt(i64), 24).overflow);
+    try testing.expectEqual(-MAX_TICK, smfToTicks(std.math.minInt(i64), 24).tick);
+    try testing.expect(smfToTicks(std.math.minInt(i64), 24).overflow);
+
+    // Everything an ordinary file holds leaves the flag alone.
+    try testing.expect(!smfToTicks(60, 480).overflow);
+    try testing.expect(!smfToTicks(1, 500).overflow);
+    try testing.expect(!smfToTicks(0, 0).overflow);
 }
 
 test "Grid: the IT row — one tick is TPQ/24, a row is speed ticks" {

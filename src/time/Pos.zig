@@ -64,6 +64,12 @@ pub const ParseResult = union(enum) {
 /// (`1e3q`) still reaches the number. Total: every input answers, and an
 /// unreadable one answers `unit_required`, which is the complaint a
 /// document actually gets from the schema's unit shape.
+///
+/// The number grammar is `std.fmt.parseFloat`'s, a SUPERSET of SJON's
+/// number token — `0x10t`, `1_000q` and `+1q` are read here and never
+/// reach here, because SJON's reader is the gate and refuses them first.
+/// This function is deliberately the permissive end: a position that got
+/// past the schema is one this file should read, not re-litigate.
 pub fn parse(text: []const u8) ParseResult {
     var split = text.len;
     while (split > 0 and std.ascii.isAlphabetic(text[split - 1])) split -= 1;
@@ -218,6 +224,9 @@ pub fn spell(writer: anytype, tick: i64, bar_line: ?i64) !void {
 pub fn spellAlloc(gpa: std.mem.Allocator, tick: i64, bar_line: ?i64) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
+    // An `Allocating` writer fails for exactly one reason, and `spell`
+    // itself cannot fail: the `WriteFailed` it can raise IS the failed
+    // allocation, so it is named as one here.
     spell(&aw.writer, tick, bar_line) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
@@ -271,6 +280,12 @@ test "Pos.parse: a negative position is position_negative" {
     // The sign is read before the integrality of `t`: one complaint, the
     // one a reader fixes first.
     try testing.expectEqual(Diag.Code.position_negative, parse("-1.5t").err);
+
+    // Negative ZERO is not a negative position: it is the origin, and it
+    // resolves to tick 0 like any other spelling of it.
+    try testing.expectEqual(Literal{ .value = -0.0, .unit = .q }, parse("-0q").ok);
+    try testing.expectEqual(@as(i64, 0), tickFromLiteral(parse("-0q").ok).tick);
+    try testing.expectEqual(@as(i64, 0), tickFromLiteral(parse("-0.0t").ok).tick);
 }
 
 test "Pos.parse: a fractional tick is position_not_integer" {
@@ -478,4 +493,27 @@ test "Pos.spell: a negative tick keeps its sign — the printer never lies" {
     try testing.expectEqualStrings("-9010t", try spelled(&buf, -9009 - 1, null));
     try testing.expectEqualStrings("-0.0001953125q", try spelled(&buf, -9009, null));
     try testing.expectEqualStrings("-2.5q", try spelled(&buf, -115_315_200, null));
+}
+
+test "Pos.spell: below 2^51 every 9009-multiple really does spell as a quarter" {
+    // The round-trip check in `spell` is a safety net, not a policy: in
+    // the range music lives in (2^51 ticks is 48 million quarter notes,
+    // about 6 700 hours at 120 qpm) the f64 seam carries a ten-digit
+    // decimal home every time, so the `q` branch must never fall back
+    // there. The error term is `tick · 2^-52`, so below 2^51 it cannot
+    // reach the half tick that would change the rounding.
+    var prng = std.Random.DefaultPrng.init(0x5120_9009);
+    const rand = prng.random();
+
+    var buf: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i < 5_000) : (i += 1) {
+        var k = rand.intRangeAtMost(i64, 0, 1 << 51);
+        k -= @rem(k, 9009);
+        const text = try spelled(&buf, k, null);
+        if (!std.mem.endsWith(u8, text, "q")) {
+            std.debug.print("tick {d} fell back to {s}\n", .{ k, text });
+            return error.TestQSpellingFellBack;
+        }
+    }
 }
