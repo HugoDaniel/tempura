@@ -23,7 +23,7 @@
 // and are regenerated, never hand-edited.
 
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -142,19 +142,58 @@ test('landing: a position one tick short is caught (the mutation the proof exist
   assert.equal(ok.evalTicks(252252)[0].value[2], 1);
 });
 
-test('scores: every golden skeleton loads clean through pacer.wasm', async () => {
-  const dir = new URL('./fixtures/scores/', import.meta.url);
-  const names = existsSync(fileURLToPath(dir)) ? readdirSync(fileURLToPath(dir)).sort() : [];
-  assert.ok(names.length > 0, 'no golden scores — run `zig build landing`');
+/**
+ * A score's own `(target …)` declarations, as host registries.
+ *
+ * pacer's compose mode merges declared targets with the host's, and a
+ * name the host also provides is host-authoritative — so handing back
+ * exactly what the score declares gives the driver a flat registry whose
+ * entries carry NAMES, which is what the landing assertion selects by.
+ */
+function registriesOf(text) {
+  const targets = [...text.matchAll(/\(target :name (\S+) :arity (\d+)\)/g)].map(([, name, arity]) => ({
+    name,
+    ncomp: Number(arity),
+  }));
+  assert.ok(targets.length > 0, 'a golden score declares no targets');
+  return [targets];
+}
 
-  for (const name of names) {
-    const text = readFileSync(new URL(name, dir), 'utf8');
-    // Compose mode: the scores carry their own `(target …)` declarations,
-    // so they compile standalone with no host registries (pacer
-    // `docs/score-language.md`, "(target …)").
-    const driver = await Pacer.load(wasmModule, text, { registries: [] });
+test('scores: every golden skeleton loads clean through pacer.wasm', async () => {
+  assert.ok(Array.isArray(landing.scores) && landing.scores.length > 0, 'no golden scores — run `zig build landing`');
+
+  for (const { file } of landing.scores) {
+    const text = readFileSync(new URL(`./fixtures/scores/${file}`, import.meta.url), 'utf8');
+    const driver = await Pacer.load(wasmModule, text, { registries: registriesOf(text) });
     const errors = driver.diagnostics.filter((d) => d.severity === 'error');
-    assert.deepEqual(errors, [], `${name} did not load clean`);
-    assert.equal(driver.ok, true, `${name}: ok is false`);
+    assert.deepEqual(errors, [], `${file} did not load clean`);
+    assert.equal(driver.ok, true, `${file}: ok is false`);
   }
+});
+
+test('scores: every golden trigger lands on the tick the exporter claims', async () => {
+  // The other half of the position proof, on real emissions rather than
+  // on probes — and the only place `slide-seconds.pacer` is checked at
+  // all, since its positions are SECONDS and ride pacer's degenerate
+  // `ticks_per_second` path instead of `ticks_per_beat`.
+  let checked = 0;
+  for (const { file, landings } of landing.scores) {
+    const text = readFileSync(new URL(`./fixtures/scores/${file}`, import.meta.url), 'utf8');
+    const driver = await Pacer.load(wasmModule, text, { registries: registriesOf(text) });
+    assert.equal(driver.ok, true, `${file}: ok is false`);
+
+    for (const { target, ticks } of landings) {
+      for (const tick of ticks) {
+        const write = driver.evalTicks(tick).find((e) => e.name === target);
+        assert.ok(write, `${file}: ${target} never fired at tick ${tick}`);
+        assert.equal(
+          write.value[2],
+          1,
+          `${file}: ${target} did not land on tick ${tick} (gate ${write.value[2]}, beats-since ${write.value[3]})`,
+        );
+        checked++;
+      }
+    }
+  }
+  assert.ok(checked > 0, 'no trigger landings to check');
 });

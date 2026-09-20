@@ -1,0 +1,9 @@
+; exported from slide.sjon (conductor: none, 1 lanes, 2 sections) by tempura 0.1.0
+; positions: 8 rounded (max 0.000002323676451619101b), durations: 3 rounded (max 0.0000024411306722936927b); onsets: 0 aggregated
+; warning: 600 tempo segments is past pacer's 512 even within 0.01 bpm; the score drops its tempo table and prints every position in seconds
+(transport :bpm 60 :meter [4 4] :dur 2.12089s :end hold)
+(scene :name one :at 0s :dur 1.56391s)
+(scene :name two :at 1.56391s :dur 0.55698s)
+(trigger :target hit :at [0s 0.68462s 1.07606s 1.35137s 1.56391s 1.737063s 1.88317s 2.009541s])
+(target :name hit :arity 4)
+(target :name hit-vel :arity 1)

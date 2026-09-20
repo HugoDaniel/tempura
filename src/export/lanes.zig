@@ -113,12 +113,16 @@ pub const Curve = struct {
 };
 
 /// Onsets → a trigger's `:at` list: convert, then aggregate.
+///
+/// The `Mapper` is what converts, so this works the same whether the
+/// score is in beats or in the 512-segment fallback's seconds — and in
+/// both the aggregation happens AFTER the conversion, because that is
+/// where two distinct tempura ticks can become one pacer tick and pacer
+/// refuses an `:at` list that is not strictly ascending.
 pub fn triggers(
     gpa: Allocator,
     onsets: []const derive.Onset,
-    n: u8,
-    d: u8,
-    counter: *pos.Counter,
+    mapper: *pos.Mapper,
 ) Error!Trigger {
     var ticks: std.ArrayList(i64) = .empty;
     errdefer ticks.deinit(gpa);
@@ -129,8 +133,8 @@ pub fn triggers(
 
     var aggregated: u32 = 0;
     for (onsets) |o| {
-        const tick = counter.convert(@max(o.tick, 0), n, d);
-        // `derive` sorted the onsets by tick, and the conversion is
+        const tick = mapper.position(o.tick);
+        // `derive` sorted the onsets by tick and both conversions are
         // monotone, so an equal tick can only be the one just appended.
         if (ticks.items.len != 0 and ticks.items[ticks.items.len - 1] == tick) {
             aggregated +|= 1;
@@ -155,10 +159,8 @@ pub fn curve(
     lane: *const doc.Lane,
     index: *const derive.LaneIndex,
     hints: []const EaseHint,
-    n: u8,
-    d: u8,
+    mapper: *pos.Mapper,
     opts: CurveOptions,
-    counter: *pos.Counter,
     diags: *Diag.List,
 ) Error!Curve {
     const source_steps: u32 = @intCast(index.steps.len);
@@ -168,7 +170,7 @@ pub fn curve(
     if (!index.bound) {
         const keys = try gpa.alloc(simplify.Key, index.steps.len);
         for (index.steps, keys) |src, *dst| dst.* = .{
-            .tick = counter.convert(@max(src.tick, 0), n, d),
+            .tick = mapper.position(src.tick),
             .value = src.value,
             .ncomp = src.ncomp,
             .ease = src.ease_src,
@@ -182,7 +184,7 @@ pub fn curve(
     const raw = try gpa.alloc(simplify.Key, index.steps.len);
     defer gpa.free(raw);
     for (index.steps, raw) |src, *dst| dst.* = .{
-        .tick = counter.convert(@max(src.tick, 0), n, d),
+        .tick = mapper.position(src.tick),
         .value = scaled(src.value, src.ncomp, lane.range),
         .ncomp = src.ncomp,
         .ease = ease_name,
@@ -209,7 +211,7 @@ pub fn curve(
         while (next < spans.len and spans[next].start < at) next += 1;
         const span: ?Span = if (next < spans.len) spans[next] else null;
         const gap_end = if (span) |sp| sp.start else raw.len;
-        if (gap_end > at) try appendBudgeted(gpa, &out, raw[at..gap_end], mode, opts.eps, n);
+        if (gap_end > at) try appendBudgeted(gpa, &out, raw[at..gap_end], mode, opts.eps, mapper);
         if (span) |sp| {
             try out.append(gpa, raw[sp.start]);
             var last = raw[sp.end];
@@ -335,9 +337,9 @@ fn appendBudgeted(
     run: []const simplify.Key,
     mode: simplify.Mode,
     eps: f32,
-    n: u8,
+    mapper: *const pos.Mapper,
 ) Error!void {
-    const kept = try simplify.budget(gpa, run, mode, eps, pos.ticksPerBeat(n));
+    const kept = try simplify.budget(gpa, run, mode, eps, pos.ticksPerBeat(mapper.beatsPerBar()));
     defer gpa.free(kept);
     for (kept) |key| {
         if (out.items.len != 0 and out.items[out.items.len - 1].tick == key.tick) continue;
@@ -423,15 +425,15 @@ test "lanes.triggers: a chord aggregates to one onset carrying the loudest veloc
         onset(0, 60, 96),
         onset(q, 48, 64),
     };
-    var counter: pos.Counter = .{};
+    var mapper: pos.Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } };
 
-    var got = try triggers(gpa, &onsets, 4, 4, &counter);
+    var got = try triggers(gpa, &onsets, &mapper);
     defer got.deinit(gpa);
 
     try testing.expectEqualSlices(i64, &.{ 0, 180_180 }, got.ticks);
     try testing.expectEqualSlices(u7, &.{ 110, 64 }, got.vel);
     try testing.expectEqual(@as(u32, 2), got.aggregated);
-    try testing.expectEqual(@as(u32, 0), counter.rounded);
+    try testing.expectEqual(@as(u32, 0), mapper.counter.rounded);
 }
 
 test "lanes.triggers: two near onsets that round onto one pacer tick become one event" {
@@ -440,15 +442,15 @@ test "lanes.triggers: two near onsets that round onto one pacer tick become one 
     // (`Compile.zig`, `trigger_invalid`), so the merge happens AFTER the
     // conversion — two ticks 100 apart share a pacer tick at divisor 256.
     const onsets = [_]derive.Onset{ onset(512, 60, 80), onset(570, 62, 99) };
-    var counter: pos.Counter = .{};
+    var mapper: pos.Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } };
 
-    var got = try triggers(gpa, &onsets, 4, 4, &counter);
+    var got = try triggers(gpa, &onsets, &mapper);
     defer got.deinit(gpa);
 
     try testing.expectEqualSlices(i64, &.{2}, got.ticks);
     try testing.expectEqualSlices(u7, &.{99}, got.vel);
     try testing.expectEqual(@as(u32, 1), got.aggregated);
-    try testing.expectEqual(@as(u32, 1), counter.rounded);
+    try testing.expectEqual(@as(u32, 1), mapper.counter.rounded);
 }
 
 test "lanes.curve: a bound lane's steps are hold keys, or linear with ease_linear" {
@@ -462,16 +464,16 @@ test "lanes.curve: a bound lane's steps are hold keys, or linear with ease_linea
         .onsets = &.{},
         .steps = @constCast(&steps),
     };
-    var counter: pos.Counter = .{};
+    var mapper: pos.Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } };
     var diags: Diag.List = .init(gpa);
     defer diags.deinit();
 
-    var held = try curve(gpa, &lane, &index, &.{}, 4, 4, .{}, &counter, &diags);
+    var held = try curve(gpa, &lane, &index, &.{}, &mapper, .{}, &diags);
     defer held.deinit(gpa);
     try testing.expectEqual(@as(usize, 3), held.keys.len);
     for (held.keys) |key| try testing.expectEqualStrings("hold", key.ease);
 
-    var ramped = try curve(gpa, &lane, &index, &.{}, 4, 4, .{ .ease_linear = true }, &counter, &diags);
+    var ramped = try curve(gpa, &lane, &index, &.{}, &mapper, .{ .ease_linear = true }, &diags);
     defer ramped.deinit(gpa);
     // A straight ramp under `linear` is exactly the RDP's easy case.
     try testing.expectEqual(@as(usize, 2), ramped.keys.len);
@@ -490,11 +492,11 @@ test "lanes.curve: :range scales a bound lane's normalised value" {
         .onsets = &.{},
         .steps = @constCast(&steps),
     };
-    var counter: pos.Counter = .{};
+    var mapper: pos.Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } };
     var diags: Diag.List = .init(gpa);
     defer diags.deinit();
 
-    var got = try curve(gpa, &lane, &index, &.{}, 4, 4, .{}, &counter, &diags);
+    var got = try curve(gpa, &lane, &index, &.{}, &mapper, .{}, &diags);
     defer got.deinit(gpa);
     try testing.expectEqual(@as(usize, 3), got.keys.len);
     try testing.expectEqual(@as(f32, 200), got.keys[0].value[0]);
@@ -522,11 +524,11 @@ test "lanes.curve: native keyframes are untouched, each with its :ease verbatim"
         .onsets = &.{},
         .steps = @constCast(&steps),
     };
-    var counter: pos.Counter = .{};
+    var mapper: pos.Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } };
     var diags: Diag.List = .init(gpa);
     defer diags.deinit();
 
-    var got = try curve(gpa, &lane, &index, &.{}, 4, 4, .{}, &counter, &diags);
+    var got = try curve(gpa, &lane, &index, &.{}, &mapper, .{}, &diags);
     defer got.deinit(gpa);
 
     try testing.expectEqual(@as(usize, 4), got.keys.len);
@@ -558,11 +560,11 @@ test "lanes.curve: a verified ease hint collapses its segment to two keys" {
         .steps = &raw,
     };
     const hints = [_]EaseHint{.{ .lane = "glow", .from = 0, .to = 2 * q, .ease = "in-cubic" }};
-    var counter: pos.Counter = .{};
+    var mapper: pos.Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } };
     var diags: Diag.List = .init(gpa);
     defer diags.deinit();
 
-    var got = try curve(gpa, &lane, &index, &hints, 4, 4, .{}, &counter, &diags);
+    var got = try curve(gpa, &lane, &index, &hints, &mapper, .{}, &diags);
     defer got.deinit(gpa);
 
     try testing.expectEqual(@as(usize, 2), got.keys.len);
@@ -593,11 +595,11 @@ test "lanes.curve: a hint the steps do not follow is dropped with ease_hint_mism
         .steps = &raw,
     };
     const hints = [_]EaseHint{.{ .lane = "glow", .from = 0, .to = 2 * q, .ease = "in-cubic" }};
-    var counter: pos.Counter = .{};
+    var mapper: pos.Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } };
     var diags: Diag.List = .init(gpa);
     defer diags.deinit();
 
-    var got = try curve(gpa, &lane, &index, &hints, 4, 4, .{}, &counter, &diags);
+    var got = try curve(gpa, &lane, &index, &hints, &mapper, .{}, &diags);
     defer got.deinit(gpa);
 
     try testing.expectEqual(@as(usize, 1), diags.count(.ease_hint_mismatch));
@@ -627,11 +629,11 @@ test "lanes.curve: an easing tempura cannot evaluate exactly is never silently t
     // 00 forbids libm in a value path — so the hint is dropped rather
     // than trusted.
     const hints = [_]EaseHint{.{ .lane = "glow", .from = 0, .to = 2 * q, .ease = "in-sine" }};
-    var counter: pos.Counter = .{};
+    var mapper: pos.Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } };
     var diags: Diag.List = .init(gpa);
     defer diags.deinit();
 
-    var got = try curve(gpa, &lane, &index, &hints, 4, 4, .{}, &counter, &diags);
+    var got = try curve(gpa, &lane, &index, &hints, &mapper, .{}, &diags);
     defer got.deinit(gpa);
     try testing.expectEqual(@as(usize, 1), diags.count(.ease_hint_mismatch));
     for (got.keys) |key| try testing.expect(!std.mem.eql(u8, "in-sine", key.ease));
@@ -665,11 +667,11 @@ test "lanes.curve: two hints, decided once each — the good one collapses, the 
         // A hint for a lane this is not: never looked at.
         .{ .lane = "other", .from = 0, .to = 2 * q, .ease = "in-quad" },
     };
-    var counter: pos.Counter = .{};
+    var mapper: pos.Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } };
     var diags: Diag.List = .init(gpa);
     defer diags.deinit();
 
-    var got = try curve(gpa, &lane, &index, &hints, 4, 4, .{}, &counter, &diags);
+    var got = try curve(gpa, &lane, &index, &hints, &mapper, .{}, &diags);
     defer got.deinit(gpa);
 
     // Exactly ONE complaint, however many times the walk passes the
@@ -698,11 +700,11 @@ test "lanes.curve: no_hints ignores every hint, verified or not" {
         .steps = &raw,
     };
     const hints = [_]EaseHint{.{ .lane = "glow", .from = 0, .to = 2 * q, .ease = "in-cubic" }};
-    var counter: pos.Counter = .{};
+    var mapper: pos.Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } };
     var diags: Diag.List = .init(gpa);
     defer diags.deinit();
 
-    var got = try curve(gpa, &lane, &index, &hints, 4, 4, .{ .no_hints = true }, &counter, &diags);
+    var got = try curve(gpa, &lane, &index, &hints, &mapper, .{ .no_hints = true }, &diags);
     defer got.deinit(gpa);
     try testing.expectEqual(@as(usize, 0), diags.items().len);
     for (got.keys) |key| try testing.expectEqualStrings("hold", key.ease);

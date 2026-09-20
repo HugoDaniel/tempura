@@ -1,5 +1,5 @@
 ; exported from smf.sjon (conductor: impulse.mid, 2 lanes, 0 sections) by tempura 0.1.0
-; positions: 0 rounded (max 0b); onsets: 0 aggregated
+; positions: 0 rounded (max 0b), durations: 0 rounded (max 0b); onsets: 0 aggregated
 ; curve keys: 5 → 5 within eps 0.007874016
 (transport :bpm 125 :meter [4 4] :dur 2bar :end hold)
 (tempo :at 1b :bpm 150)

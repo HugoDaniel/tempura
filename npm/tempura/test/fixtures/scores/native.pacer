@@ -1,5 +1,5 @@
 ; exported from native.sjon (conductor: none, 4 lanes, 2 sections) by tempura 0.1.0
-; positions: 0 rounded (max 0b); onsets: 1 aggregated
+; positions: 0 rounded (max 0b), durations: 0 rounded (max 0b); onsets: 1 aggregated
 (transport :bpm 125 :meter [4 4] :dur 4bar :end loop)
 ; cue "the drop" — bar 2
 (scene :name intro :at 0bar :dur 2bar)

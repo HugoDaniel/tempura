@@ -214,6 +214,68 @@ pub fn itConducted(gpa: Allocator) !Fixture {
     return .{ .doc = d, .derived = derived };
 }
 
+/// A document the 512-segment fallback fires on: 600 tempo points a
+/// whole beat-per-minute apart over two bars, so nothing coalesces
+/// within `--tempo-eps` and the score has to print its positions in
+/// SECONDS (plan 08, "Transport and tempo"; the it set's 09 fallback).
+///
+/// The tempo really moves — 60 quarter notes a minute up to 659 — so
+/// the two bars are not the same length in seconds and a `:dur`
+/// measured from tick 0 would be visibly wrong. Two sections and a
+/// notes lane on the quarters give the emitted score something to get
+/// right, and the `(target …)` roots let it load standalone.
+pub fn slideConducted(gpa: Allocator) !Fixture {
+    var d: doc.Doc = .empty(gpa);
+    errdefer d.deinit();
+    const a = d.arena.allocator();
+
+    const points = try a.alloc(doc.TempoPoint, 600);
+    for (points, 0..) |*t, i| t.* = .{
+        .tick = @as(i64, @intCast(i)) * @divExact(q, 64),
+        .tempo = .{ .qpm = 60 + @as(f64, @floatFromInt(i)) },
+    };
+    d.tempo = points;
+    const meter = try a.alloc(doc.MeterPoint, 1);
+    meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
+    d.meter = meter;
+    d.length = 2 * bar;
+
+    const sections = try a.alloc(doc.Section, 2);
+    sections[0] = .{ .name = "one", .at = 0, .dur = bar, .span = .{ .start = 0, .end = 1 } };
+    sections[1] = .{ .name = "two", .at = bar, .dur = bar, .span = .{ .start = 0, .end = 1 } };
+    d.sections = sections;
+
+    const notes = try a.alloc(doc.Note, 8);
+    for (notes, 0..) |*n, i| n.* = .{
+        .at = @as(i64, @intCast(i)) * q,
+        .dur = @divExact(q, 2),
+        .key = 36,
+        .vel = 100,
+        .ch = 0,
+        .off_vel = null,
+        .span = .{ .start = 0, .end = 1 },
+    };
+    const lanes = try a.alloc(doc.Lane, 1);
+    lanes[0] = .{
+        .name = "hit",
+        .kind = .notes,
+        .target = "hit",
+        .range = null,
+        .binding = null,
+        .notes = notes,
+        .keyframes = &.{},
+        .clips = &.{},
+        .query_src = null,
+        .expr_src = null,
+        .span = .{ .start = 0, .end = 1 },
+    };
+    d.lanes = lanes;
+    d.passthrough = try targets(a, &.{ "hit 4", "hit-vel 1" });
+
+    const derived = try derive.derive(gpa, &d);
+    return .{ .doc = d, .derived = derived };
+}
+
 // ---- the small builders ----
 
 fn anchor(a: Allocator, kind: doc.AnchorKind, file: []const u8) ![]doc.Anchor {

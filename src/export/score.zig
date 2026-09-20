@@ -65,7 +65,6 @@ const time = @import("../time/time.zig");
 const lanes = @import("lanes.zig");
 const pos = @import("pos.zig");
 const simplify = @import("simplify.zig");
-const support = @import("test_support.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -122,6 +121,17 @@ pub const Options = struct {
     version: []const u8 = "0.1.0",
 };
 
+/// One trigger the score emitted, and the pacer ticks its events land
+/// on — what the node landing proof reads back through `pacer.wasm`.
+///
+/// The exporter is the only thing that knows these: the beat mode gets
+/// them off the lattice and the seconds mode off the tempo map, and a
+/// test that recomputed them would be checking its own arithmetic.
+pub const Landing = struct {
+    target: []const u8,
+    ticks: []const i64,
+};
+
 /// The score, the report, and what the conversion cost.
 pub const Result = struct {
     /// The emitted text. Owned by `arena`.
@@ -135,6 +145,8 @@ pub const Result = struct {
     meter: [2]u8,
     /// Whether the 512 fallback fired and every position is in seconds.
     seconds_mode: bool,
+    /// Every `(trigger …)` emitted, with the ticks its events claim.
+    landings: []const Landing,
     arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *Result) void {
@@ -163,7 +175,6 @@ pub fn exportScore(
     const a = arena.allocator();
 
     var e: Emitter = .{
-        .gpa = gpa,
         .a = a,
         .doc = d,
         .derived = derived,
@@ -197,10 +208,11 @@ pub fn exportScore(
     return .{
         .text = out.written(),
         .diags = diags,
-        .counter = e.counter,
+        .counter = e.mapper.counter,
         .aggregated = e.aggregated,
         .meter = .{ e.n, e.d },
         .seconds_mode = e.seconds_mode,
+        .landings = try e.landings.toOwnedSlice(a),
         .arena = arena,
     };
 }
@@ -211,7 +223,6 @@ pub fn exportScore(
 const TempoForm = struct { tick: i64, bpm: f64 };
 
 const Emitter = struct {
-    gpa: Allocator,
     a: Allocator,
     doc: *const doc.Doc,
     derived: *const derive.Derived,
@@ -223,8 +234,6 @@ const Emitter = struct {
     /// The meter actually emitted.
     n: u8 = 4,
     d: u8 = 4,
-    /// `256 n / d`, the tempura ticks in one pacer tick.
-    divisor: i64 = 256,
 
     /// The coalesced tempo table, segment 0 excluded.
     tempo: []TempoForm = &.{},
@@ -232,7 +241,11 @@ const Emitter = struct {
     bpm: f64 = 120,
     seconds_mode: bool = false,
 
-    counter: pos.Counter = .{},
+    /// The one converter-and-speller; `planTempo` swaps its mode when
+    /// the 512 fallback fires, and nothing else in here knows the
+    /// difference.
+    mapper: pos.Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } },
+    landings: std.ArrayList(Landing) = .empty,
     aggregated: u32 = 0,
     keys_before: u32 = 0,
     keys_after: u32 = 0,
@@ -257,7 +270,7 @@ const Emitter = struct {
                 .{ first.n, first.d },
             );
         }
-        self.divisor = Grid.pacerDivisor(self.n, self.d).?;
+        self.mapper = .{ .mode = .{ .beats = .{ .n = self.n, .d = self.d } } };
 
         if (self.map.meters.len > 1) {
             const next = self.map.meters[1];
@@ -290,6 +303,18 @@ const Emitter = struct {
             self.a.free(kept);
             self.tempo = &.{};
             self.seconds_mode = true;
+            // pacer reads an `s` literal against `ticks_per_second`,
+            // which a score with no `(tempo …)` form derives once from
+            // the transport's own `:bpm` — so that is the rate every
+            // position from here is spelled against.
+            self.mapper = .{
+                .mode = .{ .seconds = .{
+                    .n = self.n,
+                    .tps = pos.ticksPerSecond(self.bpm, self.n),
+                    .map = self.map,
+                } },
+                .counter = self.mapper.counter,
+            };
             try self.diags.add(
                 .export_tempo_budget,
                 .warning,
@@ -349,9 +374,12 @@ const Emitter = struct {
             self.doc.sections.len,
             self.opts.version,
         });
-        try pr(w, "; positions: {d} rounded (max {d}b); onsets: {d} aggregated\n", .{
-            self.counter.rounded,
-            self.counter.max_err_beats,
+        const c = self.mapper.counter;
+        try pr(w, "; positions: {d} rounded (max {d}b), durations: {d} rounded (max {d}b); onsets: {d} aggregated\n", .{
+            c.rounded,
+            c.max_err_beats,
+            c.durations_rounded,
+            c.max_dur_err_beats,
             self.aggregated,
         });
         if (self.budgeted) try pr(w, "; curve keys: {d} → {d} within eps {d}\n", .{
@@ -375,7 +403,7 @@ const Emitter = struct {
         try pr(w, "(transport :bpm ", .{});
         try bpmText(w, self.bpm);
         try pr(w, " :meter [{d} {d}] :dur ", .{ self.n, self.d });
-        try self.position(w, self.map.length);
+        try self.duration(w, 0, self.map.length);
         try pr(w, " :end {t})\n", .{self.map.end});
     }
 
@@ -406,7 +434,7 @@ const Emitter = struct {
             try pr(w, " :at ", .{});
             try self.position(w, s.at);
             try pr(w, " :dur ", .{});
-            try self.position(w, s.dur);
+            try self.duration(w, s.at, s.dur);
             try pr(w, ")\n", .{});
         }
     }
@@ -429,12 +457,18 @@ const Emitter = struct {
     }
 
     fn triggerForm(self: *Emitter, w: *Io.Writer, lane: *const doc.Lane, index: *const derive.LaneIndex) Error!void {
-        var t = try lanes.triggers(self.a, index.onsets, self.n, self.d, &self.counter);
+        var t = try lanes.triggers(self.a, index.onsets, &self.mapper);
         defer t.deinit(self.a);
         // pacer refuses an empty `:at` list (`trigger_invalid`), so a
         // lane with nothing on it is a lane with no form.
         if (t.ticks.len == 0) return;
         self.aggregated +|= t.aggregated;
+        // The proof's half of the emission: what the node suite reads
+        // back through the real driver.
+        try self.landings.append(self.a, .{
+            .target = lane.target,
+            .ticks = try self.a.dupe(i64, t.ticks),
+        });
 
         if (t.ticks.len > MAX_ONSETS) try self.diags.add(
             .export_onset_budget,
@@ -462,11 +496,11 @@ const Emitter = struct {
     }
 
     fn trackForm(self: *Emitter, w: *Io.Writer, lane: *const doc.Lane, index: *const derive.LaneIndex) Error!void {
-        var c = try lanes.curve(self.a, lane, index, self.hints, self.n, self.d, .{
+        var c = try lanes.curve(self.a, lane, index, self.hints, &self.mapper, .{
             .eps = self.opts.eps,
             .ease_linear = self.opts.ease_linear,
             .no_hints = self.opts.no_hints,
-        }, &self.counter, self.diags);
+        }, self.diags);
         defer c.deinit(self.a);
         if (c.keys.len == 0) return;
 
@@ -528,21 +562,24 @@ const Emitter = struct {
 
     // ---- positions ----
 
-    /// A TEMPURA tick, printed: onto pacer's lattice (counted), then
-    /// spelled.
+    /// A TEMPURA tick, printed: onto pacer's grid (counted), then
+    /// spelled in this score's unit.
     fn position(self: *Emitter, w: *Io.Writer, tick: i64) Error!void {
-        return self.pacerPosition(w, self.counter.convert(@max(tick, 0), self.n, self.d));
+        return self.pacerPosition(w, self.mapper.position(tick));
     }
 
-    /// A PACER tick, printed — the unit depends on whether the 512
-    /// fallback fired.
+    /// A DURATION, printed: the span of `[at, at + dur)` on pacer's
+    /// grid, then spelled. Never the span of `[0, dur)` — under a tempo
+    /// map those differ, and the seconds fallback exists precisely
+    /// because the tempo is not constant.
+    fn duration(self: *Emitter, w: *Io.Writer, at: i64, dur: i64) Error!void {
+        return self.pacerPosition(w, self.mapper.durationTicks(at, dur));
+    }
+
+    /// A PACER tick, printed — beats and bars, or the fallback's
+    /// seconds, whichever mode `mapper` is in.
     fn pacerPosition(self: *Emitter, w: *Io.Writer, tick: i64) Error!void {
-        if (self.seconds_mode) {
-            const secs = self.map.secondsFromTick(tick *| self.divisor);
-            pos.spellSeconds(w, secs) catch return error.OutOfMemory;
-            return;
-        }
-        pos.spellBeats(w, tick, self.n) catch return error.OutOfMemory;
+        self.mapper.spell(w, tick) catch return error.OutOfMemory;
     }
 
     // ---- spans and small joins ----
@@ -611,6 +648,12 @@ fn pr(w: *Io.Writer, comptime fmt: []const u8, args: anytype) Error!void {
 }
 
 // ---- tests ----
+//
+// `test_support` is imported HERE and not beside the other imports: the
+// exporter consumes a `Doc` and a `Derived`, and the fixtures that build
+// those out of a `Sequence` / a `Module` are the tests' business alone.
+
+const support = @import("test_support.zig");
 
 const q = Grid.TPQ;
 const bar = 4 * Grid.TPQ;
@@ -625,7 +668,7 @@ test "score.exportScore: the native golden — plan 08's shape, line for line" {
 
     try testing.expectEqualStrings(
         \\; exported from native.sjon (conductor: none, 4 lanes, 2 sections) by tempura 0.1.0
-        \\; positions: 0 rounded (max 0b); onsets: 1 aggregated
+        \\; positions: 0 rounded (max 0b), durations: 0 rounded (max 0b); onsets: 1 aggregated
         \\(transport :bpm 125 :meter [4 4] :dur 4bar :end loop)
         \\; cue "the drop" — bar 2
         \\(scene :name intro :at 0bar :dur 2bar)
@@ -680,7 +723,7 @@ test "score.exportScore: an SMF-conducted document names its conductor and takes
 
     try testing.expectEqualStrings(
         \\; exported from smf.sjon (conductor: impulse.mid, 2 lanes, 0 sections) by tempura 0.1.0
-        \\; positions: 0 rounded (max 0b); onsets: 0 aggregated
+        \\; positions: 0 rounded (max 0b), durations: 0 rounded (max 0b); onsets: 0 aggregated
         \\; curve keys: 5 → 5 within eps 0.007874016
         \\(transport :bpm 125 :meter [4 4] :dur 2bar :end hold)
         \\(tempo :at 1b :bpm 150)
@@ -758,6 +801,47 @@ test "score.exportScore: past 512 segments, tempo_eps coalesces — and failing 
     try testing.expectEqual(@as(usize, 0), std.mem.count(u8, seconds.text, "(tempo :at"));
     try testing.expectEqual(@as(usize, 1), seconds.diags.count(.export_tempo_budget));
     try testing.expect(std.mem.indexOf(u8, seconds.text, "(trigger :target hit :at [0s ") != null);
+
+    // Every `s` position floors back onto the tick the exporter claims,
+    // through pacer's degenerate seconds path — the same property the
+    // beat positions have, checked here in pacer's op order and through
+    // the real `pacer.wasm` by the node landing proof.
+    const tps = pos.ticksPerSecond(pos.pacerBpm(100, 4), 4);
+    try testing.expectEqual(@as(usize, 1), seconds.landings.len);
+    for (seconds.landings[0].ticks, 0..) |tick, i| {
+        const text = try nthPosition(seconds.text, "(trigger :target hit :at [", i);
+        try testing.expect(std.mem.endsWith(u8, text, "s"));
+        const secs = try std.fmt.parseFloat(f64, text[0 .. text.len - 1]);
+        try testing.expectEqual(tick, pos.pacerFloor(secs, tps));
+    }
+    // …and they are strictly ascending, which is what keeps pacer from
+    // refusing the list (`trigger_invalid`).
+    for (seconds.landings[0].ticks[1..], seconds.landings[0].ticks[0 .. seconds.landings[0].ticks.len - 1]) |next, prev|
+        try testing.expect(next > prev);
+}
+
+test "score.exportScore: in seconds mode a scene's :dur is its OWN span, not the seconds from zero" {
+    const gpa = testing.allocator;
+    // The 512 fallback over a tempo that doubles at bar 1: a scene on
+    // the second bar lasts half as long in seconds as one on the first,
+    // and a `:dur` measured from tick 0 would print the first's.
+    var fx = try support.slideConducted(gpa);
+    defer fx.deinit();
+
+    var out = try exportScore(gpa, &fx.doc, &fx.derived, &.{}, .{});
+    defer out.deinit();
+    try testing.expect(out.seconds_mode);
+
+    const one = try nthValue(out.text, "(scene :name one :at ", 1);
+    const two = try nthValue(out.text, "(scene :name two :at ", 1);
+    try testing.expect(!std.mem.eql(u8, one, two));
+    // The second window is the shorter one: the piece is accelerating.
+    const one_secs = try std.fmt.parseFloat(f64, one[0 .. one.len - 1]);
+    const two_secs = try std.fmt.parseFloat(f64, two[0 .. two.len - 1]);
+    try testing.expect(two_secs < one_secs);
+    // And `:at` of the second scene is where the first one ends.
+    const two_at = try nthValue(out.text, "(scene :name two :at ", 0);
+    try testing.expectEqualStrings(one, two_at[0..two_at.len]);
 }
 
 test "score.exportScore: a meter pacer cannot carry falls back to [4 4] over quarters" {
@@ -961,6 +1045,38 @@ fn synthetic(
 
     const derived = try derive.derive(gpa, &d);
     return .{ .doc = d, .derived = derived };
+}
+
+/// The `i`-th whitespace-separated token of the list that follows
+/// `prefix` in `text`.
+fn nthPosition(text: []const u8, prefix: []const u8, i: usize) ![]const u8 {
+    const at = std.mem.indexOf(u8, text, prefix) orelse return error.PrefixNotFound;
+    var rest = text[at + prefix.len ..];
+    rest = rest[0 .. std.mem.indexOfScalar(u8, rest, ']') orelse rest.len];
+    var it = std.mem.tokenizeScalar(u8, rest, ' ');
+    var seen: usize = 0;
+    while (it.next()) |tok| : (seen += 1) {
+        if (seen == i) return tok;
+    }
+    return error.PositionNotFound;
+}
+
+/// The `i`-th whitespace-separated token after `prefix` on its line —
+/// `nthValue(text, "(scene :name two :at ", 1)` is that scene's `:dur`
+/// value, two tokens on (`:dur` itself is token 1... hence the `:dur `
+/// skip below).
+fn nthValue(text: []const u8, prefix: []const u8, i: usize) ![]const u8 {
+    const at = std.mem.indexOf(u8, text, prefix) orelse return error.PrefixNotFound;
+    var rest = text[at + prefix.len ..];
+    rest = rest[0 .. std.mem.indexOfScalar(u8, rest, ')') orelse rest.len];
+    var it = std.mem.tokenizeScalar(u8, rest, ' ');
+    var seen: usize = 0;
+    while (it.next()) |tok| {
+        if (std.mem.eql(u8, tok, ":dur")) continue;
+        if (seen == i) return tok;
+        seen += 1;
+    }
+    return error.ValueNotFound;
 }
 
 /// `count` tempo segments, `step` bpm apart — the per-tick slide plan 08

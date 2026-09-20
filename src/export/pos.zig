@@ -9,23 +9,30 @@
 //!    it, and then the pacer tick is `k / (256 n / d)`. Everything else
 //!    takes the nearest, ties down, and is COUNTED (`Counter`).
 //!
-//! 2. **Back into text.** pacer reads a `b` literal with one
-//!    `mul + floor` (`pacer/src/TimeMap.zig`): `tpb = PPC / n`, an exact
-//!    integer computed once, then `ticks = floor(beats · f64(tpb))`. A
-//!    shortest-ROUND-TRIP decimal of the beat value is not safe — `1.4 ·
-//!    180180` is `252251.999…` in f64 and floors one tick short — so a
-//!    position prints as the **shortest decimal `D` with
-//!    `floor(f64(D) · f64(tpb)) == T`**, that is the shortest decimal in
-//!    `[T / tpb, (T + 1) / tpb)`, searched over 0..17 fractional digits
-//!    and checked HERE in pacer's own op order. `std.fmt.parseFloat` is
-//!    the decimal→f64 conversion because it is the one SJON's parser
-//!    performs on a number literal (`SJON/src/Parser.zig`), so the check
-//!    and the read agree by construction.
+//! 2. **Back into text.** pacer reads a position literal with one
+//!    `mul + floor` (`pacer/src/TimeMap.zig`): a `b` literal against
+//!    `tpb = PPC / n`, an `s` literal against `ticks_per_second`, each an
+//!    exact value computed once. A shortest-ROUND-TRIP decimal of the
+//!    value is not safe — `1.4 · 180180` is `252251.999…` in f64 and
+//!    floors one tick short — so a position prints as the **shortest
+//!    decimal `D` with `floor(f64(D) · rate) == T`**, searched over
+//!    0..17 fractional digits and checked HERE in pacer's own op order.
+//!    `std.fmt.parseFloat` is the decimal→f64 conversion because it is
+//!    the one SJON's parser performs on a number literal
+//!    (`SJON/src/Parser.zig`), so the check and the read agree by
+//!    construction. One search serves both units: `spellBeats` passes
+//!    `tpb`, `spellSeconds` passes `tps`.
 //!
 //! 3. **Beats versus quarters.** pacer's beat is `1 / n` of a bar, a
 //!    `4 / d` note, and tempura's tempo is per quarter — so `:bpm =
 //!    qpm · d / 4` and pacer's two bounds (`bpm-value` 1..1000,
 //!    `meter-component` 1..16) are checked before anything is emitted.
+//!
+//! `Mapper` is where a caller meets all three: it holds the mode a score
+//! is in (beats, or the 512-segment fallback's seconds), converts a
+//! tempura tick to a pacer tick, converts a DURATION as the span of
+//! `[at, at + dur)` rather than of `[0, dur)`, spells either, and keeps
+//! the two rounding tallies the header comment prints.
 //!
 //! Determinism: integer arithmetic in `i128` for every candidate, one
 //! `f64` multiply and one `@floor` for every check, no libm anywhere.
@@ -39,21 +46,14 @@ const testing = std.testing;
 const time = @import("../time/time.zig");
 
 const Grid = time.Grid;
+const Map = time.TimeMap.TimeMap;
 
 /// The longest fraction a position may carry. f64 holds about 17
 /// significant decimal digits, so nothing past this can name a tick the
 /// shorter spellings missed.
 pub const MAX_FRAC_DIGITS: usize = 17;
 
-/// How many decimals with a given digit count are tried before the
-/// search widens. The floor interval `[T / tpb, (T + 1) / tpb)` is
-/// narrower than one unit in the last place for every digit count that
-/// matters, so the first candidate at or just below its floor is
-/// normally the answer; the extra tries cover the case where f64
-/// rounding carries a shorter decimal UP onto the tick.
-const max_candidates: usize = 4;
-
-/// Enough for `-9223372036854775808.` + 17 digits.
+/// Enough for `9223372036854775808.` + 17 digits.
 pub const spell_buf_len: usize = 48;
 
 /// pacer's ticks per beat under `[n d]`: `PPC / n`, exact for every
@@ -63,6 +63,19 @@ pub const spell_buf_len: usize = 48;
 pub fn ticksPerBeat(n: u8) i64 {
     std.debug.assert(n >= 1 and n <= 16);
     return @divExact(Grid.PPC, @as(i64, n));
+}
+
+/// pacer's `ticks_per_second` for a score with NO tempo table:
+/// `(bpm · f64(tpb)) / 60.0`, `pacer/src/TimeMap.zig`'s `init` op order,
+/// computed once. That is the rate the 512-segment fallback's `s`
+/// positions are read back through, because a score carrying no
+/// `(tempo …)` form takes pacer's degenerate path
+/// (`tickFromSeconds`: `if (segments.len <= 1) return mulFloor(seconds,
+/// ticks_per_second)`), and its seconds DURATIONS take the same one
+/// (`pacer/src/Compile.zig`: `if (map.segments.len <= 1 or anchor == 0)
+/// break :blk map.tickFromSeconds(value)`).
+pub fn ticksPerSecond(bpm: f64, n: u8) f64 {
+    return (bpm * @as(f64, @floatFromInt(ticksPerBeat(n)))) / 60.0;
 }
 
 /// Whether `[n d]` is a meter pacer can carry: both components in
@@ -90,9 +103,9 @@ pub fn pacerBpm(qpm: f64, d: u8) f64 {
 /// (`pacer/src/TimeMap.zig`'s `mulFloor`). Saturates at the grid
 /// ceiling instead of trapping, because a candidate decimal is allowed
 /// to be absurd — it simply will not match.
-pub fn pacerFloor(value: f64, rate: i64) i64 {
-    if (!std.math.isFinite(value)) return Grid.MAX_TICK;
-    const product = value * @as(f64, @floatFromInt(rate));
+pub fn pacerFloor(value: f64, rate: f64) i64 {
+    if (!std.math.isFinite(value) or !std.math.isFinite(rate)) return Grid.MAX_TICK;
+    const product = value * rate;
     if (!std.math.isFinite(product)) return Grid.MAX_TICK;
     const floored = @floor(product);
     const ceiling: f64 = @floatFromInt(Grid.MAX_TICK);
@@ -116,31 +129,160 @@ pub fn pacerTick(tick: i64, n: u8, d: u8) struct { tick: i64, exact: bool } {
     return .{ .tick = if (2 * rem > divisor) q + 1 else q, .exact = false };
 }
 
-/// The tally plan 08's header comment prints: how many positions left
-/// the lattice and by how much, in pacer beats.
+/// The tally plan 08's header comment prints. Positions and DURATIONS
+/// are counted apart: a position that left the lattice moves an event,
+/// a duration that left it changes how long a window lasts, and a
+/// person reading the header wants to know which happened.
 pub const Counter = struct {
     rounded: u32 = 0,
     max_err_beats: f64 = 0,
+    durations_rounded: u32 = 0,
+    max_dur_err_beats: f64 = 0,
 
-    /// Convert one tempura tick and record what it cost.
+    /// Convert one tempura tick onto the lattice and record what it
+    /// cost. The beats-mode position path; `Mapper` owns the other.
     pub fn convert(self: *Counter, tick: i64, n: u8, d: u8) i64 {
         const res = pacerTick(tick, n, d);
-        if (!res.exact) {
-            self.rounded +|= 1;
-            const divisor = Grid.pacerDivisor(n, d).?;
-            const off = @abs(tick - res.tick * divisor);
-            // One pacer beat is `Grid.beatTicks(d)` tempura ticks —
-            // `256 · PPC / d`, the same number `divisor · tpb` gives.
-            const err = @as(f64, @floatFromInt(off)) /
-                @as(f64, @floatFromInt(Grid.beatTicks(d)));
-            if (err > self.max_err_beats) self.max_err_beats = err;
-        }
+        if (!res.exact) self.notePosition(errorInBeats(tick - res.tick * Grid.pacerDivisor(n, d).?, d));
         return res.tick;
+    }
+
+    /// Record a position that missed its tick by `err` pacer beats.
+    pub fn notePosition(self: *Counter, err: f64) void {
+        self.rounded +|= 1;
+        if (err > self.max_err_beats) self.max_err_beats = err;
+    }
+
+    /// Record a duration that missed its span by `err` pacer beats.
+    pub fn noteDuration(self: *Counter, err: f64) void {
+        self.durations_rounded +|= 1;
+        if (err > self.max_dur_err_beats) self.max_dur_err_beats = err;
     }
 };
 
-/// Print `pacer_tick` as a pacer position: `Nbar` on a bar line, else
-/// the shortest decimal that floors back onto it, with the `b` unit.
+/// `off` tempura ticks as a fraction of one pacer beat. One pacer beat
+/// is `Grid.beatTicks(d)` tempura ticks — `256 · PPC / d`, the same
+/// number `divisor · tpb` gives.
+fn errorInBeats(off: i64, d: u8) f64 {
+    return @as(f64, @floatFromInt(@abs(off))) / @as(f64, @floatFromInt(Grid.beatTicks(d)));
+}
+
+// ---- the mapper: one door for every position a score prints ----
+
+/// Which grid a score's positions ride, and how they print.
+pub const Mode = union(enum) {
+    /// pacer's lattice under `[n d]`, printed in beats and bars.
+    beats: struct { n: u8, d: u8 },
+    /// The wall clock, printed in seconds — the 512-segment fallback.
+    /// The score then carries NO `(tempo …)` form, so pacer's
+    /// seconds→ticks takes its degenerate one-`mul`-one-`floor` path
+    /// against `tps` and an `s` position lands on a tick exactly the way
+    /// a `b` position does. `n` is still the emitted meter's, because
+    /// `tps` is derived from `tpb = PPC / n`.
+    seconds: struct { n: u8, tps: f64, map: *const Map },
+};
+
+/// The one place a tempura tick becomes a pacer tick and a pacer tick
+/// becomes text.
+///
+/// Every caller goes through it, so a score in the seconds fallback
+/// converts, aggregates and prints by exactly the same rules as a score
+/// in beats — and both modes' roundings land in one `Counter`.
+pub const Mapper = struct {
+    mode: Mode,
+    counter: Counter = .{},
+
+    /// The meter's numerator, whichever mode this is.
+    pub fn beatsPerBar(self: *const Mapper) u8 {
+        return switch (self.mode) {
+            .beats => |b| b.n,
+            .seconds => |s| s.n,
+        };
+    }
+
+    /// A POSITION: the pacer tick this tempura tick lands on, counted.
+    pub fn position(self: *Mapper, tick: i64) i64 {
+        switch (self.mode) {
+            .beats => |b| return self.counter.convert(@max(tick, 0), b.n, b.d),
+            .seconds => |s| {
+                const want = self.wallTicks(tick);
+                const landed = nearest(want);
+                if (want != @as(f64, @floatFromInt(landed)))
+                    self.counter.notePosition(@abs(want - @as(f64, @floatFromInt(landed))) /
+                        @as(f64, @floatFromInt(ticksPerBeat(s.n))));
+                return landed;
+            },
+        }
+    }
+
+    /// A DURATION: how many pacer ticks the window `[at, at + dur)`
+    /// spans, counted apart from positions.
+    ///
+    /// The span, not the length measured from zero. Under a tempo map
+    /// those differ — seconds mode exists precisely because the tempo is
+    /// not constant, so "the seconds elapsed over the first `dur` ticks"
+    /// is not the length of a window that starts at `at`. The op order
+    /// is fixed: convert both ends, subtract once.
+    pub fn durationTicks(self: *Mapper, at: i64, dur: i64) i64 {
+        const from = @max(at, 0);
+        const to = from +| @max(dur, 0);
+        const a = self.rawPosition(from);
+        const b = self.rawPosition(to);
+        const span = b - a;
+        switch (self.mode) {
+            .beats => |m| {
+                const divisor = Grid.pacerDivisor(m.n, m.d).?;
+                const off = (to - from) - span * divisor;
+                if (off != 0) self.counter.noteDuration(errorInBeats(off, m.d));
+            },
+            .seconds => |m| {
+                const want = self.wallTicks(to) - self.wallTicks(from);
+                const got: f64 = @floatFromInt(span);
+                if (want != got) self.counter.noteDuration(@abs(want - got) /
+                    @as(f64, @floatFromInt(ticksPerBeat(m.n))));
+            },
+        }
+        return span;
+    }
+
+    /// Print a pacer tick in this score's unit.
+    pub fn spell(self: *const Mapper, writer: anytype, pacer_tick: i64) !void {
+        return switch (self.mode) {
+            .beats => |b| spellBeats(writer, pacer_tick, b.n),
+            .seconds => |s| spellSeconds(writer, pacer_tick, s.tps),
+        };
+    }
+
+    /// The same conversion as `position`, without touching the counter —
+    /// what `durationTicks` reads its two ends through, so a window's
+    /// ends are not counted twice.
+    fn rawPosition(self: *const Mapper, tick: i64) i64 {
+        return switch (self.mode) {
+            .beats => |b| pacerTick(@max(tick, 0), b.n, b.d).tick,
+            .seconds => nearest(self.wallTicks(tick)),
+        };
+    }
+
+    /// Where a tempura tick sits on pacer's grid in the seconds mode:
+    /// the document's own clock, times pacer's constant tick rate.
+    fn wallTicks(self: *const Mapper, tick: i64) f64 {
+        const s = self.mode.seconds;
+        return s.map.secondsFromTick(@max(tick, 0)) * s.tps;
+    }
+};
+
+/// Nearest integer, ties DOWN — the tie rule `pacerTick` uses, so the
+/// two modes round the same way.
+fn nearest(x: f64) i64 {
+    if (!std.math.isFinite(x)) return 0;
+    const lo = @floor(x);
+    return pacerFloor(if (x - lo > 0.5) lo + 1 else lo, 1.0);
+}
+
+// ---- spelling ----
+
+/// Print `pacer_tick` as a pacer position in beats: `Nbar` on a bar
+/// line, else the shortest decimal that floors back onto it, with `b`.
 ///
 /// A bar is `PPC` ticks whatever the meter is (pacer's `tickFromBars`),
 /// so the bar spelling needs no meter and is exact for every integer.
@@ -149,25 +291,26 @@ pub fn spellBeats(writer: anytype, pacer_tick: i64, n: u8) !void {
     if (@rem(pacer_tick, Grid.PPC) == 0)
         return writer.print("{d}bar", .{@divExact(pacer_tick, Grid.PPC)});
 
-    const tpb = ticksPerBeat(n);
+    const tpb: f64 = @floatFromInt(ticksPerBeat(n));
     var buf: [spell_buf_len]u8 = undefined;
     if (shortestFloor(&buf, pacer_tick, tpb)) |text|
         return writer.print("{s}b", .{text});
-
-    // Unreachable for every tick a document can hold: the search only
-    // runs out of digits where f64's significand runs out, past 10^17
-    // beats. Printing the shortest round-trip of the exact ratio keeps
-    // the text readable and one tick is the worst it can be off.
-    return writer.print("{d}b", .{
-        @as(f64, @floatFromInt(pacer_tick)) / @as(f64, @floatFromInt(tpb)),
-    });
+    return writer.print("{d}b", .{@as(f64, @floatFromInt(pacer_tick)) / tpb});
 }
 
-/// Print `secs` as a pacer `s` position — the 512-segment fallback's
-/// unit (plan 08, "Transport and tempo"), where the score carries no
-/// tempo table and every position is wall-clock.
-pub fn spellSeconds(writer: anytype, secs: f64) !void {
-    return writer.print("{d}s", .{secs});
+/// Print `pacer_tick` as a pacer position in seconds — the 512-segment
+/// fallback's unit (plan 08, "Transport and tempo"), under the SAME
+/// floor-interval rule beats take, against `tps` instead of `tpb`.
+///
+/// Without it two adjacent pacer ticks (about 2.8 µs apart at 120 bpm
+/// in `[4 4]`) could print decimals that floor onto one tick, and pacer
+/// refuses an `:at` list that is not strictly ascending.
+pub fn spellSeconds(writer: anytype, pacer_tick: i64, tps: f64) !void {
+    std.debug.assert(pacer_tick >= 0);
+    var buf: [spell_buf_len]u8 = undefined;
+    if (shortestFloor(&buf, pacer_tick, tps)) |text|
+        return writer.print("{s}s", .{text});
+    return writer.print("{d}s", .{@as(f64, @floatFromInt(pacer_tick)) / tps});
 }
 
 /// Print `qpm · d / 4` as the shortest decimal that reads back as that
@@ -193,34 +336,60 @@ pub fn spellBpm(writer: anytype, qpm: f64, d: u8) !void {
 /// The shortest decimal `D` with `pacerFloor(D, rate) == target`, or
 /// null when 0..`MAX_FRAC_DIGITS` fractional digits hold none.
 ///
-/// Candidates are generated by EXACT integer arithmetic — `m / 10^k`
-/// for `m` from `floor(target · 10^k / rate)` (one step below the
-/// interval, so a decimal f64 rounds up onto the tick is not missed) up
-/// to one past `(target + 1) · 10^k / rate` — and each is decided by
-/// the f64 check alone. Digit counts ascend, so the first hit IS the
-/// shortest.
-fn shortestFloor(buf: []u8, target: i64, rate: i64) ?[]const u8 {
-    std.debug.assert(target >= 0 and rate > 0);
-    const t: i128 = target;
-    const r: i128 = rate;
+/// `pacerFloor(·, rate)` is monotone non-decreasing: a correctly-rounded
+/// decimal→f64 conversion, one multiply and one floor each are. So for
+/// every digit count `k` there is exactly ONE candidate worth checking —
+/// `g(k)`, the smallest `m` with `pacerFloor(m / 10^k, rate) >= target`.
+/// Anything smaller floors below the target; anything larger floors at
+/// least as high as `g(k)` does, so if `g(k)` overshoots, no `k`-digit
+/// decimal lands.
+///
+/// And `g` walks cheaply: `(g(k) − 1) / 10^k` is below the target and
+/// `g(k) / 10^k` is at or above it, so `g(k+1)` lies in
+/// `(10 · (g(k) − 1), 10 · g(k)]` — ten candidates, scanned in order.
+/// Driving the search by `pacerFloor` itself is what makes it exact:
+/// f64's own rounding is part of the answer rather than something a
+/// candidate generator has to predict. It also makes one search serve
+/// both units, since only `rate` differs.
+fn shortestFloor(buf: []u8, target: i64, rate: f64) ?[]const u8 {
+    std.debug.assert(target >= 0);
+    if (!std.math.isFinite(rate) or rate <= 0) return null;
+
+    var m = firstAtOrAbove(target, rate);
     var k: usize = 0;
-    while (k <= MAX_FRAC_DIGITS) : (k += 1) {
-        const scale: i128 = pow10(k);
-        var m: i128 = @max(@divFloor(t * scale, r), 0);
-        // One past the interval: the smallest `m` with
-        // `m / 10^k >= (target + 1) / rate`.
-        const stop: i128 = @divFloor((t + 1) * scale + r - 1, r);
-        var tries: usize = 0;
-        while (m <= stop and tries < max_candidates) : ({
-            m += 1;
-            tries += 1;
-        }) {
-            const text = fixed(buf, m, k);
-            const v = std.fmt.parseFloat(f64, text) catch continue;
-            if (pacerFloor(v, rate) == target) return text;
-        }
+    while (true) : (k += 1) {
+        const text = fixed(buf, m, k);
+        if (pacerFloor(parse(text), rate) == target) return text;
+        if (k == MAX_FRAC_DIGITS) return null;
+        // Widen by one digit: the answer is in `(10·(m − 1), 10·m]`.
+        const top = 10 * m;
+        var next = @max(10 * (m - 1) + 1, 0);
+        while (next < top and pacerFloor(parse(fixed(buf, next, k + 1)), rate) < target) next += 1;
+        m = next;
     }
-    return null;
+}
+
+/// The smallest whole number whose `mul + floor` reaches `target` — the
+/// search's `g(0)`. The quotient names it to within a step or two, and
+/// the walk closes the gap against `pacerFloor` itself.
+fn firstAtOrAbove(target: i64, rate: f64) i128 {
+    if (target <= 0) return 0;
+    const quotient = @as(f64, @floatFromInt(target)) / rate;
+    var m: i128 = if (std.math.isFinite(quotient) and quotient > 0)
+        @intFromFloat(@min(@ceil(quotient), @as(f64, @floatFromInt(Grid.MAX_TICK))))
+    else
+        0;
+    var steps: usize = 0;
+    while (m > 0 and pacerFloor(@floatFromInt(m - 1), rate) >= target and steps < 64) : (steps += 1) m -= 1;
+    steps = 0;
+    while (pacerFloor(@floatFromInt(m), rate) < target and steps < 64) : (steps += 1) m += 1;
+    return m;
+}
+
+/// A decimal this module formatted always parses; an infinity for the
+/// unreachable case simply fails every comparison.
+fn parse(text: []const u8) f64 {
+    return std.fmt.parseFloat(f64, text) catch std.math.inf(f64);
 }
 
 /// `10^k`, for `k <= MAX_FRAC_DIGITS`.
@@ -289,11 +458,11 @@ test "pos.spellBeats: the floor-interval rule on a triplet, a quintuplet, a 16th
 
     // …and the naive spelling really is one tick short, which is why the
     // rule exists at all.
-    try testing.expectEqual(@as(i64, 252_251), pacerFloor(1.4, 180_180));
+    try testing.expectEqual(@as(i64, 252_251), pacerFloor(1.4, 180_180.0));
 
     // A triplet: `0.3333333333333333` STANDS (plan 08's words) — it does
     // land on the tick — but it is not the SHORTEST decimal that does.
-    try testing.expectEqual(@as(i64, 60_060), pacerFloor(0.3333333333333333, 180_180));
+    try testing.expectEqual(@as(i64, 60_060), pacerFloor(0.3333333333333333, 180_180.0));
     try testing.expectEqualStrings("0.333334b", try spellSlice(&buf, 60_060, 4));
 
     // A 32nd rounded onto the lattice (22 522) spells back as `0.125b`:
@@ -322,10 +491,10 @@ test "pos.spellBeats: every pacer tick in two bars of [4 4] and [7 8] lands on i
             const text = try spellSlice(&buf, t, n);
             if (std.mem.endsWith(u8, text, "bar")) {
                 const bars = try std.fmt.parseFloat(f64, text[0 .. text.len - 3]);
-                try testing.expectEqual(t, pacerFloor(bars, Grid.PPC));
+                try testing.expectEqual(t, pacerFloor(bars, @floatFromInt(Grid.PPC)));
             } else {
                 const beats = try std.fmt.parseFloat(f64, text[0 .. text.len - 1]);
-                try testing.expectEqual(t, pacerFloor(beats, @intFromFloat(tpb)));
+                try testing.expectEqual(t, pacerFloor(beats, tpb));
             }
         }
     }
@@ -384,6 +553,91 @@ test "pos.inBpmRange: pacer's bpm-value bound is 1..1000" {
     try testing.expect(!inBpmRange(0.5));
     // Plan 08's example: `:qpm 600` in `[12 8]` is 1 200 pacer bpm.
     try testing.expect(!inBpmRange(pacerBpm(600, 8)));
+}
+
+test "pos.spellSeconds: the floor-interval rule against pacer's seconds -> ticks" {
+    // 120 bpm in [4 4]: `tps = (120 · 180180) / 60 = 360360` ticks a
+    // second, pacer's own `init` op order.
+    const tps = ticksPerSecond(120, 4);
+    try testing.expectEqual(@as(f64, 360_360), tps);
+
+    var buf: [64]u8 = undefined;
+    // A whole second, and a tick that a naive shortest-round-trip would
+    // print short: every printed decimal floors back onto its own tick.
+    for ([_]i64{ 0, 1, 2, 3, 360_360, 360_361, 252_252, 720_719, 1_441_440 }) |t| {
+        var w = std.Io.Writer.fixed(&buf);
+        try spellSeconds(&w, t, tps);
+        const text = w.buffered();
+        try testing.expect(std.mem.endsWith(u8, text, "s"));
+        const secs = try std.fmt.parseFloat(f64, text[0 .. text.len - 1]);
+        try testing.expectEqual(t, pacerFloor(secs, tps));
+    }
+
+    // Adjacent ticks get DISTINCT, ascending spellings — without that,
+    // two events 2.8 µs apart would floor onto one tick and pacer would
+    // refuse the `:at` list (`trigger_invalid`).
+    var a_buf: [64]u8 = undefined;
+    var b_buf: [64]u8 = undefined;
+    var wa = std.Io.Writer.fixed(&a_buf);
+    var wb = std.Io.Writer.fixed(&b_buf);
+    try spellSeconds(&wa, 1000, tps);
+    try spellSeconds(&wb, 1001, tps);
+    try testing.expect(!std.mem.eql(u8, wa.buffered(), wb.buffered()));
+}
+
+test "pos.Mapper: a duration is the span of [at, at+dur), not the seconds over [0, dur)" {
+    const gpa = testing.allocator;
+    // Two bars of [4 4]: the first at 60 quarter notes a minute, the
+    // second at 240. A window over the SECOND bar lasts a quarter of
+    // what a window of the same tick length over the first one does, and
+    // a duration measured from tick 0 would report the first.
+    var res = try time.TimeMap.derive(gpa, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 60 } },
+        .{ .tick = 4 * Grid.TPQ, .tempo = .{ .qpm = 240 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 8 * Grid.TPQ, .hold);
+    defer res.diags.deinit();
+    defer res.map.deinit();
+
+    const tps = ticksPerSecond(120, 4);
+    var m: Mapper = .{ .mode = .{ .seconds = .{ .n = 4, .tps = tps, .map = &res.map } } };
+
+    // Bar 0 is four quarters at 60 qpm = 4 s; bar 1 is four at 240 = 1 s.
+    const bar = 4 * Grid.TPQ;
+    const first = m.durationTicks(0, bar);
+    const second = m.durationTicks(bar, bar);
+    try testing.expectEqual(@as(i64, @intFromFloat(4.0 * tps)), first);
+    try testing.expectEqual(@as(i64, @intFromFloat(1.0 * tps)), second);
+    // …and the bug this pins: measured from zero, the second window
+    // would report the first window's four seconds.
+    try testing.expect(second != first);
+    try testing.expectEqual(first, m.durationTicks(0, bar));
+}
+
+test "pos.Mapper: beats mode converts, spells and counts durations apart from positions" {
+    var m: Mapper = .{ .mode = .{ .beats = .{ .n = 4, .d = 4 } } };
+
+    // On the lattice: nothing counted, either way.
+    try testing.expectEqual(@as(i64, 180_180), m.position(Grid.TPQ));
+    try testing.expectEqual(@as(i64, 180_180), m.durationTicks(Grid.TPQ, Grid.TPQ));
+    try testing.expectEqual(@as(u32, 0), m.counter.rounded);
+    try testing.expectEqual(@as(u32, 0), m.counter.durations_rounded);
+
+    // A 32nd off the lattice counts as a POSITION rounding…
+    _ = m.position(@divExact(Grid.TPQ, 8));
+    try testing.expectEqual(@as(u32, 1), m.counter.rounded);
+    try testing.expectEqual(@as(u32, 0), m.counter.durations_rounded);
+
+    // …and a window whose span leaves the lattice counts as a DURATION
+    // one, on its own tally.
+    _ = m.durationTicks(0, @divExact(Grid.TPQ, 8));
+    try testing.expectEqual(@as(u32, 1), m.counter.rounded);
+    try testing.expectEqual(@as(u32, 1), m.counter.durations_rounded);
+    try testing.expect(m.counter.max_dur_err_beats > 0);
+
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try m.spell(&w, 180_180);
+    try testing.expectEqualStrings("1b", w.buffered());
 }
 
 // ---- test helpers ----

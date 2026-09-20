@@ -207,9 +207,12 @@ pub fn build(b: *std.Build) void {
     // module rooted at `src/export/export.zig` would make `src/export/`
     // the module path and every `..` import "outside module path".
     //
-    // The fixtures are WRITTEN into `npm/tempura/test/fixtures` and the
-    // node suite reads them there; `-- --full` writes the exhaustive
-    // two-bar sweep instead of the sampled one.
+    // `landing` REGENERATES `npm/tempura/test/fixtures` (`-- --full` for
+    // the exhaustive two-bar sweep instead of the sampled one) and
+    // `verify` runs the same tool with `--check`, which renders the same
+    // bytes and compares them without writing: a gate that rewrote the
+    // fixtures it is about to read would pass on anything (the two legs
+    // of `tools/timeline_docs.sh` over one render, same shape).
     const landing_root = blk: {
         const wf = b.addWriteFiles();
         _ = wf.addCopyDirectory(b.path("src"), ".", .{});
@@ -238,6 +241,10 @@ pub fn build(b: *std.Build) void {
     run_landing.has_side_effects = true;
     const landing_step = b.step("landing", "Regenerate npm/tempura/test/fixtures for the pacer landing proof");
     landing_step.dependOn(&run_landing.step);
+
+    const check_landing = b.addRunArtifact(landing_exe);
+    check_landing.addDirectoryArg(b.path("npm/tempura/test/fixtures"));
+    check_landing.addArg("--check");
 
     // `zig build cli` — the native `tempura` multi-tool. Built against the
     // PUBLIC `tempura` module rather than the sources, deliberately: the
@@ -370,18 +377,28 @@ pub fn build(b: *std.Build) void {
     // with a printed reason when `node` is not on PATH: a Zig-only
     // checkout still gets the rest of the gate.
     if (b.findProgram(&.{"node"}, &.{})) |_| {
-        // The fixtures are DERIVED, so the gate regenerates them first
-        // and reads what this tree produces rather than what someone
-        // left behind (pacer wires `node_test` to `install_wasm` the
-        // same way). `npm/tempura` still needs its one `file:` dev
-        // dependency installed and `pacer.wasm` copied beside it —
-        // `npm install && npm run build:wasm && npm run build:wasm-copy`
-        // there, once.
-        const node_test = b.addSystemCommand(&.{ "node", "--test" });
-        node_test.setCwd(b.path("npm/tempura"));
-        node_test.has_side_effects = true;
-        node_test.step.dependOn(&run_landing.step);
-        verify_step.dependOn(&node_test.step);
+        // The fixtures the suite reads are DERIVED, so the gate proves
+        // they match this tree (`--check`) rather than rewriting them.
+        verify_step.dependOn(&check_landing.step);
+
+        // `npm/tempura` needs its one `file:` dev dependency installed
+        // before `node --test` can import the pacer package. A fresh
+        // clone has not run `npm install` yet, and failing the whole
+        // gate on that would say nothing about the code — so the leg
+        // announces itself missing instead.
+        if (b.build_root.handle.access(b.graph.io, "npm/tempura/node_modules/pacer", .{})) |_| {
+            const node_test = b.addSystemCommand(&.{ "node", "--test" });
+            node_test.setCwd(b.path("npm/tempura"));
+            node_test.has_side_effects = true;
+            verify_step.dependOn(&node_test.step);
+        } else |_| {
+            std.debug.print(
+                "verify: npm/tempura/node_modules is missing — skipping the pacer landing test " ++
+                    "(run `cd npm/tempura && npm install`, and `cd ../pacer && zig build wasm` " ++
+                    "with pacer's `build:wasm-copy`)\n",
+                .{},
+            );
+        }
     } else |_| {
         std.debug.print(
             "verify: `node` is not on PATH — skipping the npm/tempura pacer landing test\n",
