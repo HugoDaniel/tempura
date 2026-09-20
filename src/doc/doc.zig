@@ -36,6 +36,17 @@ pub const toSjon = @import("toSjon.zig");
 /// The rules plan 02 states over the finished value.
 pub const checks = @import("checks.zig");
 
+/// The `midi/` bridge: a `Sequence` ⇄ the hosted SMF vocabulary, note
+/// pairing and controller steps for a bound lane.
+pub const bridge_smf = @import("bridge_smf.zig");
+
+/// The `it/` bridge: a `Module` ⇄ the hosted Impulse Tracker
+/// vocabulary, and the bound-lane derivations over a `RowMap`.
+pub const bridge_it = @import("bridge_it.zig");
+
+/// The skeleton: the timeline tier a file with no residue derives.
+pub const skeleton = @import("skeleton.zig");
+
 // ---- the value ----
 
 /// The timeline as a value.
@@ -99,4 +110,7 @@ test {
     _ = checks;
     _ = fromSjon;
     _ = toSjon;
+    _ = bridge_smf;
+    _ = bridge_it;
+    _ = skeleton;
 }

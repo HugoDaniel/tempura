@@ -182,6 +182,28 @@ pub fn sceneNames(diags: *Diag.List, doc: *const Doc.Doc) Error!void {
     }
 }
 
+/// Two `(lane …)` forms sharing a `:name` (plan 02, "(lane …)":
+/// "`:name` symbol, unique across the timeline's lanes").
+///
+/// The name is what a `(clip …)` matches a phrase's lane by and what
+/// `:target` defaults to, so a second one makes both ambiguous. Reported
+/// at the SECOND lane's span — the first is the one that was already
+/// there. A phrase's lanes are a different namespace (one per placing
+/// lane name) and are not checked against these.
+pub fn laneNames(diags: *Diag.List, doc: *const Doc.Doc) Error!void {
+    for (doc.lanes, 0..) |lane, i| {
+        for (doc.lanes[i + 1 ..]) |other| {
+            if (std.mem.eql(u8, lane.name, other.name)) try diags.add(
+                .lane_duplicate,
+                .err,
+                other.span,
+                "a lane named {s} is already declared; a lane's name is unique across the timeline's lanes",
+                .{other.name},
+            );
+        }
+    }
+}
+
 /// The `:name` of a pass-through `(scene …)`, read out of its source
 /// text.
 ///
@@ -190,10 +212,22 @@ pub fn sceneNames(diags: *Diag.List, doc: *const Doc.Doc) Error!void {
 /// never edits them"). This reads the one token the rule has to compare
 /// and answers null when the text spells none, which is a name that
 /// cannot collide rather than a guess.
+///
+/// A QUOTED name is unquoted: pacer types a scene's `:name` as a string
+/// (`schema/pacer.sjon`), so `(scene :name "intro" …)` and
+/// `(section :name intro …)` are the same name and must collide. The
+/// unquoting is textual and deliberately shallow — an escape inside a
+/// scene name would not compare equal, which fails towards NOT reporting
+/// a collision rather than towards inventing one.
 fn sceneName(src: []const u8) ?[]const u8 {
     const at = std.mem.indexOf(u8, src, ":name") orelse return null;
     var i = at + ":name".len;
     while (i < src.len and (src[i] == ' ' or src[i] == '\t')) i += 1;
+    if (i < src.len and src[i] == '"') {
+        const start = i + 1;
+        const close = std.mem.indexOfScalarPos(u8, src, start, '"') orelse return null;
+        return if (close > start) src[start..close] else null;
+    }
     const start = i;
     while (i < src.len and !std.ascii.isWhitespace(src[i]) and src[i] != ')') i += 1;
     return if (i > start) src[start..i] else null;
@@ -317,4 +351,40 @@ test "checks.clipPlacement: the furthest tick a clip reaches" {
     phrase_lanes[0].name = "glow";
     _ = try clipPlacement(&diags, &doc);
     try testing.expectEqual(@as(usize, 1), diags.count(.clip_lane_missing));
+}
+
+test "checks.sceneName: a quoted name is the same name" {
+    // pacer types a scene's `:name` as a string, so the two spellings of
+    // one name have to collide.
+    try testing.expectEqualStrings("intro", sceneName("(scene :name \"intro\" :at 0b :dur 4b)").?);
+    try testing.expectEqualStrings("bar 41", sceneName("(scene :name \"bar 41\")").?);
+    try testing.expect(sceneName("(scene :name \"\")") == null);
+    try testing.expect(sceneName("(scene :name \"unterminated)") == null);
+}
+
+test "checks.laneNames: the second lane of a name is lane_duplicate" {
+    const gpa = testing.allocator;
+    var diags: Diag.List = .init(gpa);
+    defer diags.deinit();
+
+    var doc: Doc.Doc = .empty(gpa);
+    defer doc.deinit();
+
+    var lanes = [_]Doc.Lane{ lanesOf(&.{}), lanesOf(&.{}), lanesOf(&.{}) };
+    lanes[0].name = "flash";
+    lanes[1].name = "glow";
+    lanes[2].name = "flash";
+    lanes[2].span = .{ .start = 77, .end = 99 };
+    doc.lanes = &lanes;
+
+    try laneNames(&diags, &doc);
+    try testing.expectEqual(@as(usize, 1), diags.count(.lane_duplicate));
+    // Reported at the SECOND one: the first is the lane that was there.
+    try testing.expectEqual(@as(u32, 77), diags.items()[0].span.start);
+
+    lanes[2].name = "pulse";
+    var clean: Diag.List = .init(gpa);
+    defer clean.deinit();
+    try laneNames(&clean, &doc);
+    try testing.expectEqual(@as(usize, 0), clean.count(.lane_duplicate));
 }

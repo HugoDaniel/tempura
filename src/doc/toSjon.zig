@@ -14,9 +14,15 @@
 //! **Positions go through `map.spell`**, which is plan 03's frozen rule:
 //! `Nbar` on a bar line, else `Nq` when the tick has an exact short
 //! decimal in quarters, else `Nt`. Quantised material reads as music and
-//! triplets read as ticks. A DURATION is spelled by the same rule — the
-//! bridge resolves `:dur` and `:offset` from the origin, so the spelling
-//! and the reading are inverse and the round trip is an identity.
+//! triplets read as ticks.
+//!
+//! **A DURATION goes through `map.spellDuration` with its own `:at`**,
+//! because plan 03 measures one from the form's own `:at` and a bar is
+//! not the same length everywhere: `Nbar` when both ends sit on bar
+//! lines (the honest count of bars between them), else the delta's own
+//! `Nq` / `Nt`. That is exactly the set of spellings the bridge's
+//! `durationTicks` inverts from the same anchor, which is what keeps the
+//! round trip an identity across a meter change.
 //!
 //! **A default is not printed.** `:end hold`, `:vel 100`, `:repeat 1`,
 //! `:transpose 0`, `:ease linear`, `:offset 0` and a `:target` equal to
@@ -36,13 +42,13 @@
 const std = @import("std");
 const sjon = @import("sjon");
 
-const Diag = @import("../Diag.zig");
-const Grid = @import("../time/Grid.zig");
-const Pos = @import("../time/Pos.zig");
 const Schema = @import("../Schema.zig");
 const TimeMap = @import("../time/TimeMap.zig");
 const Doc = @import("Value.zig");
+const bridge_it = @import("bridge_it.zig");
+const bridge_smf = @import("bridge_smf.zig");
 const fromSjon = @import("fromSjon.zig");
+const skeleton = @import("skeleton.zig");
 
 const testing = std.testing;
 
@@ -56,9 +62,7 @@ pub const Options = struct {
     /// midivia's full manifest, whose `note` verb collides with
     /// tempura's (plan 02, "The `note` collision with midivia").
     ///
-    /// It governs the two file tiers and nothing else, and both are
-    /// EMPTY in this task — so it changes no byte yet, and is declared
-    /// now so the anchored half does not change this signature.
+    /// It governs the two file tiers and nothing else.
     qualify: bool = true,
 };
 
@@ -110,7 +114,13 @@ const Printer = struct {
         try self.raw(")\n");
 
         try self.group(d.anchors.len > 0);
-        for (d.anchors) |a| try self.anchor(a);
+        for (d.anchors) |a| {
+            try self.anchor(a);
+            // An inline dump follows the anchor it pairs with, because
+            // the pairing IS positional (plan 02, "(anchor …)"): the
+            // print has to read back as the same document.
+            try self.tiers(a.id);
+        }
 
         try self.group(d.tempo.len > 0 or d.meter.len > 0);
         for (d.tempo) |t| try self.tempoPoint(t);
@@ -139,6 +149,32 @@ const Printer = struct {
             }
             try self.raw(pt.text);
             try self.raw("\n");
+        }
+    }
+
+    /// The inline dump paired with `id`, qualified, printed straight
+    /// after its anchor.
+    fn tiers(self: *Printer, id: Doc.AnchorId) Error!void {
+        for (self.doc.midi) |*tier| {
+            if (!std.mem.eql(u8, tier.anchor, id)) continue;
+            const text = try bridge_smf.sequenceToForms(
+                self.gpa,
+                &tier.sequence,
+                null,
+                .{ .qualify = self.opts.qualify },
+            );
+            defer self.gpa.free(text);
+            try self.raw(text);
+        }
+        for (self.doc.it) |*tier| {
+            if (!std.mem.eql(u8, tier.anchor, id)) continue;
+            const text = try bridge_it.moduleToForms(
+                self.gpa,
+                &tier.module,
+                .{ .qualify = self.opts.qualify },
+            );
+            defer self.gpa.free(text);
+            try self.raw(text);
         }
     }
 
@@ -200,7 +236,7 @@ const Printer = struct {
         try self.raw(" :at ");
         try self.pos(s.at);
         try self.raw(" :dur ");
-        try self.pos(s.dur);
+        try self.dur(s.dur, s.at);
         try self.raw(")\n");
     }
 
@@ -361,7 +397,7 @@ const Printer = struct {
         try self.raw("(note :at ");
         try self.pos(c.at);
         try self.raw(" :dur ");
-        try self.pos(c.dur);
+        try self.dur(c.dur, c.at);
         try self.raw(" :key ");
         try self.int(c.key);
         if (c.vel != 100) {
@@ -409,13 +445,16 @@ const Printer = struct {
             try self.raw(" :repeat ");
             try self.int(c.repeat);
         }
+        // Both are durations anchored at this clip's own `:at`, the
+        // tick the phrase-local time starts at on this timeline — the
+        // same anchor the bridge resolved them from.
         if (c.offset != 0) {
             try self.raw(" :offset ");
-            try self.pos(c.offset);
+            try self.dur(c.offset, c.at);
         }
         if (c.length) |len| {
             try self.raw(" :length ");
-            try self.pos(len);
+            try self.dur(len, c.at);
         }
         if (c.transpose != 0) {
             try self.raw(" :transpose ");
@@ -448,6 +487,16 @@ const Printer = struct {
         // failure a fixed writer has is a full buffer, which this one
         // cannot reach.
         self.map.spell(&w, tick) catch unreachable;
+        return self.raw(w.buffered());
+    }
+
+    /// A duration measured from `at`, by the same rule (plan 03's, via
+    /// `TimeMap.spellDuration`). Never `map.spell`: a tick count that
+    /// happens to be a bar line at the ORIGIN is not a bar from here.
+    fn dur(self: *Printer, ticks: i64, at: i64) Error!void {
+        var buf: [64]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        self.map.spellDuration(&w, ticks, at) catch unreachable;
         return self.raw(w.buffered());
     }
 
@@ -571,20 +620,17 @@ test "toSjon: examples/native.sjon loads clean and prints every form it holds" {
     }
 }
 
-test "toSjon: the print reads back as the same document, field for field" {
-    const gpa = testing.allocator;
-    const source = try readExample(gpa);
-    defer gpa.free(source);
-
-    var schema = try Schema.load(gpa);
-    defer schema.deinit();
-    var fx = try loaded(gpa, &schema, source);
+/// The property of plan 02 phase 3: `fromSource(print(d)) ≡ d`, and the
+/// print of THAT is the same bytes — the canonical text is a fixed
+/// point, not merely something equivalent.
+fn expectRoundTrip(gpa: std.mem.Allocator, schema: *const Schema, source: [:0]const u8) !void {
+    var fx = try loaded(gpa, schema, source);
     defer fx.deinit(gpa);
 
     const reread = try gpa.dupeZ(u8, fx.text);
     defer gpa.free(reread);
 
-    var again = try fromSjon.fromSource(gpa, &schema, reread, null);
+    var again = try fromSjon.fromSource(gpa, schema, reread, null);
     defer again.deinit();
     if (again.diags.items().len != 0) {
         for (again.diags.items()) |d| std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
@@ -598,11 +644,86 @@ test "toSjon: the print reads back as the same document, field for field" {
     }
     try testing.expectEqual(fx.res.map.length, again.map.length);
 
-    // …and printing it again is the same bytes: the canonical text is a
-    // fixed point, not merely equivalent.
     const twice = try print(gpa, &again.doc, &again.map, .{});
     defer gpa.free(twice);
     try testing.expectEqualStrings(fx.text, twice);
+}
+
+test "toSjon: the print reads back as the same document, field for field" {
+    const gpa = testing.allocator;
+    const source = try readExample(gpa);
+    defer gpa.free(source);
+
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    try expectRoundTrip(gpa, &schema, source);
+}
+
+test "toSjon: a non-canonical spelling round-trips through its normalised one" {
+    // `512q` is 128 bars of [4 4], and the printer spells a bar line as a
+    // bar. The AUTHORED spelling is therefore not what comes back —
+    // which is the printer's rule doing its job (plan 03: "only the
+    // printer is constrained") — and the property is about the document,
+    // not about the typing. Every position here is written in a unit the
+    // printer would not have chosen.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    const source: [:0]const u8 =
+        \\(timeline :title "off the canon" :length 512q :end loop)
+        \\(tempo-point :at 0t :qpm 125)
+        \\(meter-point :at 0q :sig [4 4])
+        \\(section :name intro :at 0b :dur 64q)
+        \\(cue :name "bar 41" :at 160b)
+        \\(lane :name flash :kind notes
+        \\  (note :at 0t :dur 46126080t :key "C4" :vel 100)
+        \\  (clip :at 32b :phrase fill :repeat 2 :offset 0q))
+        \\(phrase :name fill :length 4q
+        \\  (lane :name flash
+        \\    (note :at 0b :dur 1b :key 38)))
+    ;
+    try expectRoundTrip(gpa, &schema, source);
+
+    // And the normalisation really happened: the tick is the same, the
+    // spelling is the printer's.
+    var fx = try loaded(gpa, &schema, source);
+    defer fx.deinit(gpa);
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":length 128bar") != null);
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":length 512q") == null);
+    // `:dur 64q` at bar 0 is sixteen bars, and prints as the bar count.
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":at 0bar :dur 16bar") != null);
+}
+
+test "toSjon: a duration is spelled from its own :at, across a meter change" {
+    // The printer's half of plan 03's "measured from the form's own
+    // `:at`": bars 0-1 are [3 4] and bar 2 on is [4 4], so the SAME four
+    // quarters are `1bar` from bar 2 and are not a bar at all from bar 0.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    const source: [:0]const u8 =
+        \\(timeline :length 8bar)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [3 4])
+        \\(meter-point :at 2bar :sig [4 4])
+        \\(section :name a :at 0bar :dur 1bar)
+        \\(section :name b :at 2bar :dur 1bar)
+        \\(section :name c :at 1bar :dur 2bar)
+        \\(lane :name flash :kind notes
+        \\  (note :at 2bar :dur 4q :key 36))
+    ;
+    var fx = try loaded(gpa, &schema, source);
+    defer fx.deinit(gpa);
+
+    try testing.expect(std.mem.indexOf(u8, fx.text, "(section :name a :at 0bar :dur 1bar)") != null);
+    try testing.expect(std.mem.indexOf(u8, fx.text, "(section :name b :at 2bar :dur 1bar)") != null);
+    try testing.expect(std.mem.indexOf(u8, fx.text, "(section :name c :at 1bar :dur 2bar)") != null);
+    // Four quarters from bar 2 IS a bar there, and the printer says so.
+    try testing.expect(std.mem.indexOf(u8, fx.text, "(note :at 2bar :dur 1bar :key 36)") != null);
+
+    try expectRoundTrip(gpa, &schema, source);
 }
 
 test "toSjon: positions print by the rule — Nbar on a bar line, Nq when it terminates, else Nt" {
@@ -764,4 +885,111 @@ test "toSjon: the golden — plan 02's own example, canonically spelled" {
         \\(target :name glow :arity 1)
     ++ "\n";
     try testing.expectEqualStrings(golden, fx.text);
+}
+
+// ---------------------------------------------------------------------
+// The anchored half: an inline dump prints after the anchor it pairs with
+// ---------------------------------------------------------------------
+
+/// A document arranged around a `.it`, with the module dumped inline and
+/// conducting it — plan 02's own example, with an anchor that carries
+/// its dump rather than pointing away at a file nobody can read here.
+const anchored_it =
+    \\(timeline :title "impulsos" :conductor song)
+    \\
+    \\(anchor :id song :kind it :file "impulse-04.it")
+    \\(it/module :title "impulse 04"
+    \\  (it/timing :speed 6 :tempo 125 :highlight [4 16])
+    \\  (it/orders 0 1 end)
+    \\  (it/pattern 0 :rows 8
+    \\    (row 0 (ev 3 "C-5" :ins 2 :vol 64) (ev 5 :vol 40))
+    \\    (row 4 (ev 3 off) (ev 5 :vol 12)))
+    \\  (it/pattern 1 :rows 8))
+    \\
+    \\(cue :name "bar two" :at 1bar)
+    \\
+    \\(lane :name kick :kind notes :from song :channel 3)
+    \\(lane :name bass-vol :kind curve :from song :channel 5 :column vol :range [0 1])
+    \\
+;
+
+test "toSjon: an inline dump prints straight after its anchor, qualified" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var fx = try loaded(gpa, &schema, anchored_it);
+    defer fx.deinit(gpa);
+
+    const anchor_at = std.mem.indexOf(u8, fx.text, "(anchor :id song").?;
+    const dump_at = std.mem.indexOf(u8, fx.text, "(it/module").?;
+    const cue_at = std.mem.indexOf(u8, fx.text, "(cue :name").?;
+    // The pairing is positional, so the print has to keep it: the dump
+    // sits between its anchor and everything that follows.
+    try testing.expect(anchor_at < dump_at);
+    try testing.expect(dump_at < cue_at);
+    // Qualified, which is what a reader needs to see which tier a form
+    // belongs to inside a timeline document (plan 05, "The midi/ bridge").
+    try testing.expect(std.mem.indexOf(u8, fx.text, "(it/pattern 0 :rows 8") != null);
+}
+
+test "toSjon: an anchored document round-trips, tier and all" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    try expectRoundTrip(gpa, &schema, anchored_it);
+}
+
+test "toSjon: an anchored document with a (midi/smf …) dump round-trips too" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    try expectRoundTrip(gpa, &schema,
+        \\(timeline :conductor song)
+        \\
+        \\(anchor :id song :kind smf :file "drums.mid")
+        \\(midi/smf :format 1 :division 480)
+        \\(midi/mtrk
+        \\  (sequence-name :at 0 :text "conductor")
+        \\  (set-tempo :at 0 :us 500000)
+        \\  (end-of-track :at 1920))
+        \\(midi/mtrk
+        \\  (note-on :at 0 :ch 10 :key 36 :vel 110)
+        \\  (note-off :at 120 :ch 10 :key 36 :vel 0)
+        \\  (end-of-track :at 1920))
+        \\
+        \\(lane :name kick :kind notes :from song :track 2 :ch 10)
+        \\
+    );
+}
+
+test "toSjon: the skeleton of an anchored document names the lanes rule 1 owes it" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    // The document as a `.it` dumps to it before reconciliation: an
+    // anchor, its module, and no timeline content at all.
+    var res = try fromSjon.fromSource(gpa, &schema,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind it :file "x.it")
+        \\(it/module
+        \\  (it/orders 0 end)
+        \\  (it/pattern 0 :rows 4
+        \\    (row 0 (ev 3 "C-5" :ins 1 :vol 64) (ev 5 :vol 0))
+        \\    (row 2 (ev 3 off) (ev 5 :vol 64))))
+    , null);
+    defer res.deinit();
+    try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+
+    var sk = try skeleton.derive(gpa, &res.doc, .{});
+    defer sk.deinit();
+    try testing.expectEqualStrings("song", sk.conductor.?);
+    try testing.expectEqual(@as(usize, 2), sk.lanes.len);
+    try testing.expectEqualStrings("ch3", sk.lanes[0].name);
+    try testing.expectEqualStrings("ch5-vol", sk.lanes[1].name);
+    try testing.expectEqualStrings(
+        "; skeleton: derived, no residue found",
+        skeleton.header_comment,
+    );
 }

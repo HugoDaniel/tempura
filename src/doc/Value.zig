@@ -315,18 +315,26 @@ pub const Doc = struct {
         return null;
     }
 
-    /// Field-for-field equality, SPANS EXCLUDED.
+    /// Field-for-field equality, SPANS AND `length_lit` EXCLUDED.
     ///
     /// The round-trip property of plan 02 phase 3 compares a document
     /// against the one its own printing reads back, and those are two
     /// different texts: a span names a byte range in the source it was
     /// read from, so comparing spans would compare the two texts'
-    /// layouts rather than the two documents. Everything else — every
-    /// tick, every name, every authored spelling — is compared.
+    /// layouts rather than the two documents.
+    ///
+    /// `length_lit` is excluded for the same reason from the other end.
+    /// It is the spelling the AUTHOR used, and the canonical printer is
+    /// supposed to normalise a spelling — `:length 512q` prints `128bar`
+    /// under `[4 4]`, which is the printer's rule doing its job (plan 03:
+    /// "A hand-written document may use any unit anywhere; only the
+    /// printer is constrained"). The tick it resolved to is what the two
+    /// documents have to agree on, and `length` carries that.
+    /// `length_lit` rides along for the edit engine and for a host that
+    /// wants to show what was typed; nothing downstream compares it.
     pub fn eql(a: *const Doc, b: *const Doc) bool {
         if (!optStrEql(a.title, b.title)) return false;
         if (!optEql(i64, a.length, b.length)) return false;
-        if (!litEql(a.length_lit, b.length_lit)) return false;
         if (a.end != b.end) return false;
         if (!optStrEql(a.conductor, b.conductor)) return false;
 
@@ -459,11 +467,6 @@ fn optStrEql(a: ?[]const u8, b: ?[]const u8) bool {
     return std.mem.eql(u8, a.?, b.?);
 }
 
-fn litEql(a: ?Pos.Literal, b: ?Pos.Literal) bool {
-    if (a == null or b == null) return a == null and b == null;
-    return a.?.unit == b.?.unit and a.?.value == b.?.value;
-}
-
 test "Doc: an empty document owns an arena and frees it" {
     var d: Doc = .empty(testing.allocator);
     defer d.deinit();
@@ -506,12 +509,17 @@ test "Doc.eql: ignores spans and notices every other field" {
     b.title = "impulsos";
     try testing.expect(a.eql(&b));
 
+    // `length_lit` is informational: the printer normalises a spelling,
+    // so two documents that resolved to the same tick are the same
+    // document however their `:length` was typed.
+    a.length = 4096;
+    b.length = 4096;
     a.length_lit = .{ .value = 128, .unit = .bar };
-    try testing.expect(!a.eql(&b));
-    b.length_lit = .{ .value = 128, .unit = .q };
-    try testing.expect(!a.eql(&b));
-    b.length_lit = .{ .value = 128, .unit = .bar };
+    b.length_lit = .{ .value = 512, .unit = .q };
     try testing.expect(a.eql(&b));
+    // The TICK is what they have to agree on.
+    b.length = 4097;
+    try testing.expect(!a.eql(&b));
 }
 
 test "Doc.anchorById / phraseByName: the two joins the bridge and the printer need" {

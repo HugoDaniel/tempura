@@ -52,7 +52,11 @@ const Schema = @import("../Schema.zig");
 const TimeMap = @import("../time/TimeMap.zig");
 const Doc = @import("Value.zig");
 const Resolver = @import("Resolver.zig");
+const bridge_it = @import("bridge_it.zig");
+const bridge_smf = @import("bridge_smf.zig");
 const checks = @import("checks.zig");
+const itf = @import("../itf/itf.zig");
+const smf = @import("../smf/smf.zig");
 
 const Ast = sjon.Ast;
 const NodeIndex = Ast.NodeIndex;
@@ -197,8 +201,22 @@ const Root = enum {
     lane,
     phrase,
     smf_dump,
+    /// A `(midi/mtrk …)` root: part of the dump the `(midi/smf …)`
+    /// before it opened, never a dump of its own. An SMF dump is SEVERAL
+    /// roots — the header and one per track — which is the one place the
+    /// two tiers differ in shape (an `(it/module …)` holds everything).
+    smf_track,
     it_dump,
     passthrough,
+};
+
+/// One inline dump, as the partition found it: the anchor it follows,
+/// what it is, and the roots it spans inside the walk's flat root list.
+const Dump = struct {
+    anchor: u32,
+    kind: Doc.AnchorKind,
+    start: u32,
+    len: u32,
 };
 
 /// Head text to `Root`, for the eight heads plan 02 declares. Everything
@@ -241,6 +259,15 @@ const Ctx = struct {
     /// `:length` default rule.
     max_end: i64 = 0,
 
+    /// The CONDUCTOR's tables, built out of the inline tier the
+    /// `(timeline :conductor …)` names (plan 03, "Three conductors").
+    /// `cond_live` is what says they were built at all: a conducted
+    /// document whose anchor carries no dump has nothing to read and
+    /// falls back to the placeholder in `derive`.
+    cond_tempo: []Doc.TempoPoint = &.{},
+    cond_meter: []Doc.MeterPoint = &.{},
+    cond_live: bool = false,
+
     fn emit(
         self: *Ctx,
         code: Diag.Code,
@@ -273,6 +300,7 @@ const Ctx = struct {
         // bare one resolves to the single manifest that declares it —
         // the four share no head (plan 02, "Collisions, checked").
         if (std.mem.eql(u8, hdr.head, "smf") and nsIs(ns, "midi")) return .smf_dump;
+        if (std.mem.eql(u8, hdr.head, "mtrk") and nsIs(ns, "midi")) return .smf_track;
         if (std.mem.eql(u8, hdr.head, "module") and nsIs(ns, "it")) return .it_dump;
         if (ns) |n| {
             if (!std.mem.eql(u8, n, "tempura")) return .passthrough;
@@ -287,33 +315,55 @@ const Ctx = struct {
         var doc: Doc.Doc = .{ .arena = undefined };
 
         // ---- the roots, partitioned in document order ----
+        //
+        // These ten are SCRATCH — node indices the walk sorts itself by,
+        // thrown away before it returns. They come from the gpa and are
+        // freed here rather than from the document's arena, which frees
+        // nothing until the document itself dies: a walk's bookkeeping
+        // has no business outliving the walk.
         var timelines: std.ArrayList(NodeIndex) = .empty;
+        defer timelines.deinit(self.gpa);
         var anchor_forms: std.ArrayList(NodeIndex) = .empty;
+        defer anchor_forms.deinit(self.gpa);
         var tempo_forms: std.ArrayList(NodeIndex) = .empty;
+        defer tempo_forms.deinit(self.gpa);
         var meter_forms: std.ArrayList(NodeIndex) = .empty;
+        defer meter_forms.deinit(self.gpa);
         var section_forms: std.ArrayList(NodeIndex) = .empty;
+        defer section_forms.deinit(self.gpa);
         var cue_forms: std.ArrayList(NodeIndex) = .empty;
+        defer cue_forms.deinit(self.gpa);
         var lane_forms: std.ArrayList(NodeIndex) = .empty;
+        defer lane_forms.deinit(self.gpa);
         var phrase_forms: std.ArrayList(NodeIndex) = .empty;
+        defer phrase_forms.deinit(self.gpa);
         var passthrough_forms: std.ArrayList(NodeIndex) = .empty;
+        defer passthrough_forms.deinit(self.gpa);
         // How many inline dumps paired with each anchor, by position.
         var dumps_per_anchor: std.ArrayList(u32) = .empty;
+        defer dumps_per_anchor.deinit(self.gpa);
+        // The inline dumps themselves: one entry per dump, each naming
+        // the anchor it follows and its own roots inside `dump_roots`.
+        var dumps: std.ArrayList(Dump) = .empty;
+        defer dumps.deinit(self.gpa);
+        var dump_roots: std.ArrayList(NodeIndex) = .empty;
+        defer dump_roots.deinit(self.gpa);
 
         for (forest) |idx| {
             const what = self.classify(idx) orelse continue;
             switch (what) {
-                .timeline => try timelines.append(self.a, idx),
+                .timeline => try timelines.append(self.gpa, idx),
                 .anchor => {
-                    try anchor_forms.append(self.a, idx);
-                    try dumps_per_anchor.append(self.a, 0);
+                    try anchor_forms.append(self.gpa, idx);
+                    try dumps_per_anchor.append(self.gpa, 0);
                 },
-                .tempo_point => try tempo_forms.append(self.a, idx),
-                .meter_point => try meter_forms.append(self.a, idx),
-                .section => try section_forms.append(self.a, idx),
-                .cue => try cue_forms.append(self.a, idx),
-                .lane => try lane_forms.append(self.a, idx),
-                .phrase => try phrase_forms.append(self.a, idx),
-                .passthrough => try passthrough_forms.append(self.a, idx),
+                .tempo_point => try tempo_forms.append(self.gpa, idx),
+                .meter_point => try meter_forms.append(self.gpa, idx),
+                .section => try section_forms.append(self.gpa, idx),
+                .cue => try cue_forms.append(self.gpa, idx),
+                .lane => try lane_forms.append(self.gpa, idx),
+                .phrase => try phrase_forms.append(self.gpa, idx),
+                .passthrough => try passthrough_forms.append(self.gpa, idx),
                 .smf_dump, .it_dump => {
                     // Positional pairing (plan 02, "(anchor …)"): a dump
                     // belongs to the anchor it FOLLOWS, one per anchor.
@@ -333,7 +383,33 @@ const Ctx = struct {
                             "the anchor this dump follows already has one; the pairing is positional and one dump per anchor",
                             .{},
                         );
+                        try dumps.append(self.gpa, .{
+                            .anchor = @intCast(dumps_per_anchor.items.len - 1),
+                            .kind = if (what == .smf_dump) .smf else .it,
+                            .start = @intCast(dump_roots.items.len),
+                            .len = 1,
+                        });
+                        try dump_roots.append(self.gpa, idx);
                     }
+                },
+                .smf_track => {
+                    // A track belongs to the header before it. One with
+                    // no header belongs to nothing, which is the same
+                    // complaint an orphan dump gets.
+                    const open: ?*Dump = if (dumps.items.len == 0) null else blk: {
+                        const last = &dumps.items[dumps.items.len - 1];
+                        break :blk if (last.kind == .smf and
+                            last.start + last.len == dump_roots.items.len) last else null;
+                    };
+                    if (open) |dump| {
+                        dump.len += 1;
+                        try dump_roots.append(self.gpa, idx);
+                    } else try self.emit(
+                        .anchor_missing,
+                        self.tree.spanOf(idx),
+                        "a (midi/mtrk …) with no (midi/smf …) before it belongs to no dump",
+                        .{},
+                    );
                 },
             }
         }
@@ -384,12 +460,22 @@ const Ctx = struct {
             }
         }
 
+        // ---- the anchors and the dumps they pair with ----
+        //
+        // Both come BEFORE the provisional map, and neither needs one:
+        // an anchor has no position on it and a dump's `:at` is its
+        // file's own tick, never the document's grid. The map, on the
+        // other hand, may need THEM — a conducted document's tempo and
+        // meter come out of the tier (plan 03, "Three conductors").
+        doc.anchors = try self.readAnchors(anchor_forms.items, dumps_per_anchor.items);
+        try self.readTiers(&doc, dumps.items, dump_roots.items, anchor_forms.items);
+        try self.conductorTables(&doc);
+
         // ---- the provisional map, and everything that resolves on it ----
         var provisional = try self.derive(0);
         self.setMap(provisional.intoMap());
         defer self.dropMap();
 
-        doc.anchors = try self.readAnchors(anchor_forms.items, dumps_per_anchor.items);
         doc.sections = try self.readSections(section_forms.items);
         doc.cues = try self.readCues(cue_forms.items);
         doc.phrases = try self.readPhrases(phrase_forms.items);
@@ -409,6 +495,7 @@ const Ctx = struct {
         // rule ("the end of the last event OR CLIP"), so the check hands
         // back the furthest tick it saw.
         self.max_end = @max(self.max_end, try checks.clipPlacement(self.diags, &doc));
+        try checks.laneNames(self.diags, &doc);
         try checks.sceneNames(self.diags, &doc);
         return doc;
     }
@@ -450,10 +537,15 @@ const Ctx = struct {
     fn derive(self: *Ctx, length: i64) Error!Derived {
         const seeded_tempo = [_]Doc.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
         const seeded_meter = [_]Doc.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
-        const tempo: []const Doc.TempoPoint =
-            if (self.conductor != null and self.tempo.len == 0) &seeded_tempo else self.tempo;
-        const meter: []const Doc.MeterPoint =
-            if (self.conductor != null and self.meter.len == 0) &seeded_meter else self.meter;
+        // The CONDUCTOR's tables win when there are any: an anchored
+        // document's positions resolve against the file's own time, not
+        // against the placeholder a conductorless one is seeded with.
+        const tempo: []const Doc.TempoPoint = if (self.cond_live)
+            self.cond_tempo
+        else if (self.conductor != null and self.tempo.len == 0) &seeded_tempo else self.tempo;
+        const meter: []const Doc.MeterPoint = if (self.cond_live)
+            self.cond_meter
+        else if (self.conductor != null and self.meter.len == 0) &seeded_meter else self.meter;
 
         const res = try TimeMap.derive(self.gpa, tempo, meter, length, self.end);
         return .{ .map = res.map, .diags = res.diags };
@@ -621,6 +713,157 @@ const Ctx = struct {
         return out.toOwnedSlice(self.a);
     }
 
+    // ---- the inline tiers ---------------------------------------------
+
+    /// Read each inline dump into its tier, paired with the anchor it
+    /// follows (plan 02, "(anchor …)": the pairing is positional).
+    ///
+    /// Both bridges take a TREE and hand back a value with its own
+    /// report, which is forwarded here with the document's spans intact
+    /// — the dump was validated as part of this document, so its spans
+    /// already are document coordinates.
+    fn readTiers(
+        self: *Ctx,
+        doc: *Doc.Doc,
+        dumps: []const Dump,
+        dump_roots: []const NodeIndex,
+        anchor_forms: []const NodeIndex,
+    ) Error!void {
+        var midi: std.ArrayList(Doc.SmfTier) = .empty;
+        var it: std.ArrayList(Doc.ItTier) = .empty;
+        // A tier owns a GPA-backed arena of its own, which the document's
+        // arena would not free: on the one failure a walk has, the tiers
+        // read so far are released here.
+        errdefer {
+            for (midi.items) |*t| t.sequence.deinit();
+            for (it.items) |*t| t.module.deinit();
+        }
+
+        for (dumps) |dump| {
+            if (dump.anchor >= anchor_forms.len) continue;
+            const anchor_form = anchor_forms[dump.anchor];
+            const anchor_id = if (kvNode(self.tree, self.tree.formHeader(anchor_form).children, "id")) |n|
+                try self.symbol(n)
+            else
+                continue;
+            const roots = dump_roots[dump.start..][0..dump.len];
+
+            switch (dump.kind) {
+                .smf => {
+                    var read = try bridge_smf.formsToSequence(self.gpa, self.tree, roots);
+                    defer read.diags.deinit();
+                    errdefer read.sequence.deinit();
+                    for (read.diags.items()) |d| {
+                        try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
+                    }
+                    try midi.append(self.a, .{ .anchor = anchor_id, .sequence = read.sequence });
+                },
+                .it => {
+                    var read = try bridge_it.formsToModule(
+                        self.gpa,
+                        self.tree,
+                        roots,
+                        self.anchorBytes(doc, anchor_id),
+                    );
+                    defer read.diags.deinit();
+                    errdefer read.module.deinit();
+                    for (read.diags.items()) |d| {
+                        try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
+                    }
+                    try self.sourceAgrees(doc, anchor_id, read.source);
+                    try it.append(self.a, .{ .anchor = anchor_id, .module = read.module });
+                },
+            }
+        }
+
+        doc.midi = try midi.toOwnedSlice(self.a);
+        doc.it = try it.toOwnedSlice(self.a);
+    }
+
+    /// The anchor's bytes, VERIFIED, or null.
+    ///
+    /// An inline `(it/module …)` still points at the anchor's file for
+    /// every opaque region it keeps (it 03, "The anchor"), and those
+    /// offsets "are only meaningful against this exact file". So the
+    /// verification is done here rather than left to `checks.anchorBytes`,
+    /// which deliberately asks nothing of a filesystem for an anchor
+    /// whose dump is inline. Unverifiable is the same as unavailable: the
+    /// bridge is handed nothing and honours no offset against it.
+    fn anchorBytes(self: *const Ctx, doc: *const Doc.Doc, id: Doc.AnchorId) ?[]const u8 {
+        const anchor = doc.anchorById(id) orelse return null;
+        const r = self.resolver orelse return null;
+        const bytes = r.read(anchor.file) orelse return null;
+        const size = anchor.size orelse return null;
+        const digest = anchor.sha256 orelse return null;
+        return if (Resolver.verify(bytes, size, digest)) bytes else null;
+    }
+
+    /// A hosted `(it/source …)` inside an inline module "is accepted when
+    /// it agrees with the anchor and `anchor_conflict` when it does not"
+    /// (plan 02, "(anchor …)"). Only the fields BOTH state are compared:
+    /// a dump that omits one claims nothing about it.
+    fn sourceAgrees(self: *Ctx, doc: *const Doc.Doc, id: Doc.AnchorId, source: ?bridge_it.Source) Error!void {
+        const said = source orelse return;
+        const anchor = doc.anchorById(id) orelse return;
+
+        const disagreement: ?[]const u8 = blk: {
+            if (said.file.len > 0 and anchor.file.len > 0 and
+                !std.mem.eql(u8, said.file, anchor.file)) break :blk "file";
+            if (said.size != null and anchor.size != null and
+                said.size.? != anchor.size.?) break :blk "size";
+            if (said.sha256) |a| if (anchor.sha256_src) |b| {
+                if (!std.mem.eql(u8, a, b)) break :blk "sha256";
+            };
+            break :blk null;
+        };
+        if (disagreement) |what| try self.diags.add(
+            .anchor_conflict,
+            .err,
+            said.span,
+            "this module's own (source …) names a different :{s} than the (anchor :id {s} …) it is paired with",
+            .{ what, id },
+        );
+    }
+
+    // ---- the conductor ------------------------------------------------
+
+    /// Build the conductor's tempo and meter tables out of the tier the
+    /// `(timeline :conductor …)` names (plan 03, "Three conductors",
+    /// rules 2 and 3).
+    ///
+    /// Nothing happens without BOTH a conductor and an inline dump for
+    /// it: a by-reference anchor's file is not read here, and the
+    /// document keeps the placeholder `derive` seeds it with.
+    fn conductorTables(self: *Ctx, doc: *const Doc.Doc) Error!void {
+        const id = self.conductor orelse return;
+        const anchor = doc.anchorById(id) orelse return;
+
+        var built: Conductor = built: {
+            for (doc.midi) |*tier| {
+                if (std.mem.eql(u8, tier.anchor, id)) {
+                    break :built try smfConductor(self.gpa, &tier.sequence, anchor.span);
+                }
+            }
+            for (doc.it) |*tier| {
+                if (std.mem.eql(u8, tier.anchor, id)) {
+                    break :built try itConductor(self.gpa, &tier.module, anchor.span);
+                }
+            }
+            return;
+        };
+        defer built.deinit();
+
+        for (built.diags.items()) |d| {
+            try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
+        }
+        // Into the DOCUMENT's arena: the tables outlive the derivation
+        // that made them, because every position in the document
+        // resolves against them.
+        self.cond_tempo = try self.a.dupe(Doc.TempoPoint, built.tempo);
+        self.cond_meter = try self.a.dupe(Doc.MeterPoint, built.meter);
+        self.cond_live = true;
+    }
+
     // ---- sections and cues --------------------------------------------
 
     fn readSections(self: *Ctx, forms: []const NodeIndex) Error![]Doc.Section {
@@ -743,7 +986,7 @@ const Ctx = struct {
                         .{kind},
                     );
                 } else {
-                    lane.binding = try self.readBinding(form, node, d);
+                    lane.binding = try self.readBinding(form, node, kind, d);
                 }
             } else {
                 try self.emit(
@@ -801,7 +1044,13 @@ const Ctx = struct {
     /// `address_invalid`) — the one thing the schema cannot see, because
     /// it validates the lane and the anchor one at a time. An anchor no
     /// form declares is SJON's `not_cross_ref` and nothing is added.
-    fn readBinding(self: *Ctx, form: NodeIndex, from: NodeIndex, doc: *const Doc.Doc) Error!?Doc.Binding {
+    fn readBinding(
+        self: *Ctx,
+        form: NodeIndex,
+        from: NodeIndex,
+        lane_kind: Doc.LaneKind,
+        doc: *const Doc.Doc,
+    ) Error!?Doc.Binding {
         const tree = self.tree;
         const children = tree.formHeader(form).children;
         const span = tree.spanOf(form);
@@ -847,6 +1096,23 @@ const Ctx = struct {
                     curve = .pressure;
                 } else if (boolAt(tree, children, "velocity")) {
                     curve = .velocity;
+                }
+                // The manifest's exclusive group is AT-MOST-ONE by
+                // design, because a native curve lane carries keyframes
+                // and addresses nothing. The at-least-one half only
+                // holds once the lane is bound and the anchor's kind is
+                // known, which is two forms and therefore host-side: a
+                // bound SMF curve lane reads exactly one of the four
+                // surfaces on its channel, and a lane that names none
+                // has no content to read.
+                if (lane_kind == .curve and curve == null) {
+                    try self.emit(
+                        .address_invalid,
+                        span,
+                        "a curve lane bound to the SMF anchor \"{s}\" reads one of :cc, :bend, :pressure or :velocity",
+                        .{id},
+                    );
+                    return null;
                 }
                 return .{ .anchor = anchor.id, .address = .{ .smf = .{
                     .track = castU16(readNumber(tree, track_node.?)),
@@ -958,12 +1224,17 @@ const Ctx = struct {
         const phrase_node = kvNode(tree, children, "phrase") orelse return null;
         const at = (try self.resolve(at_node)) orelse return null;
 
+        // `:offset` is a position INTO the phrase and `:length` the
+        // window measured from it, so both are durations and both are
+        // anchored at this clip's own `:at` — the tick the phrase-local
+        // time starts at on this timeline. The printer spells them with
+        // the same anchor, which is what makes them read back exactly.
         const offset: i64 = if (kvNode(tree, children, "offset")) |n|
-            (try self.resolve(n)) orelse 0
+            (try self.duration(n, at)) orelse 0
         else
             0;
         const length: ?i64 = if (kvNode(tree, children, "length")) |n|
-            try self.resolve(n)
+            try self.duration(n, at)
         else
             null;
 
@@ -987,6 +1258,10 @@ const Ctx = struct {
             const children = tree.formHeader(form).children;
             const span = tree.spanOf(form);
             const name_node = kvNode(tree, children, "name") orelse continue;
+            // A phrase's `:length` is the one duration with no `:at` to
+            // be measured from — the fragment starts where it starts, at
+            // phrase-local tick 0 — so it resolves from the origin, which
+            // is what anchoring it at 0 would give anyway.
             const length: i64 = if (kvNode(tree, children, "length")) |n|
                 (try self.resolve(n)) orelse 0
             else
@@ -1075,26 +1350,40 @@ const Ctx = struct {
         }
     }
 
-    /// A DURATION — `:dur`, `:offset`, a clip's `:length` — which plan 03
-    /// measures from the form's own `:at`.
+    /// A DURATION — `:dur`, `:offset`, a clip's `:length` — measured
+    /// from the form's own `:at` (plan 03, "Positions").
     ///
-    /// `q`, `t`, `bar` and `b` are counted from the ORIGIN: under one
-    /// meter that is the same answer as counting from `at`, and it is
-    /// the answer the printer inverts (a duration tick spells back as
-    /// `Nbar` exactly when `Nbar` resolves to it, which is what makes
-    /// the round trip an identity). An `s` duration is genuinely
-    /// anchored — wall-clock from `at` through the tempo map, pacer's own
-    /// rule for a scene-relative position.
+    /// All five units go through `TimeMap.durationTicks`, which owns the
+    /// anchoring: a `bar` lands in the bar it reaches rather than in the
+    /// bar the origin's meter would have made it, a `b` is its beat
+    /// twin, an `s` is wall-clock from `at`, and `q` / `t` are grid
+    /// units that no anchor can change. Under one meter every answer is
+    /// bit for bit the one the unanchored reader gives.
+    ///
+    /// The printer inverts exactly this, through
+    /// `TimeMap.spellDuration` with the same `at`, which is what keeps
+    /// the round trip an identity across a meter change.
     fn duration(self: *Ctx, node: NodeIndex, at: i64) Error!?i64 {
-        const lit = literalOf(self.tree, node) orelse return self.resolve(node);
-        if (lit.unit != .s) return self.resolve(node);
-
-        const from = self.map.secondsFromTick(at);
-        const abs = self.map.tickFromSeconds(from + lit.value) catch {
-            try self.emit(.tick_overflow, self.tree.spanOf(node), "this duration runs past the grid", .{});
+        const lit = literalOf(self.tree, node) orelse {
+            try self.emit(
+                .unit_required,
+                self.tree.spanOf(node),
+                "a duration needs a unit: q, t, bar, b or s",
+                .{},
+            );
             return null;
         };
-        return abs - at;
+        const answer = self.map.durationTicks(lit, at) catch {
+            try self.emit(.tick_overflow, self.tree.spanOf(node), "this duration is not a span of the grid", .{});
+            return null;
+        };
+        switch (answer) {
+            .tick => |t| return t,
+            .err => |code| {
+                try self.emit(code, self.tree.spanOf(node), "this duration is not a span of the grid", .{});
+                return null;
+            },
+        }
     }
 
     /// `:key`: the MIDI number, or the note name that reads better
@@ -1104,15 +1393,11 @@ const Ctx = struct {
         if (self.tree.tagOf(node) != .string) return castU7(readNumber(self.tree, node));
         const spelling = self.tree.stringText(node);
         return parseNoteName(spelling) orelse {
-            // The frozen `Diag.Code` has no note-name variant, and this
-            // task appends two codes, neither of them that. The
-            // complaint therefore rides on the code this vocabulary
-            // already gives an unreadable literal in a typed slot —
-            // `Pos.parse` answers `unit_required` for `"1.2.3q"` for the
-            // same reason — and the message names the spelling it could
-            // not read. `note_key_invalid` is what the next append owes.
+            // The manifest types the slot as a string and says the
+            // spelling is checked host-side, so this is the rule's home
+            // and the message names the spelling it could not read.
             try self.emit(
-                .unit_required,
+                .note_key_invalid,
                 self.tree.spanOf(node),
                 "\"{s}\" is not a note name: a letter A-G, any number of # or b, then the octave",
                 .{spelling},
@@ -1160,6 +1445,206 @@ const Ctx = struct {
 // ---------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------
+// The two file conductors (plan 03, "Three conductors", rules 2 and 3)
+// ---------------------------------------------------------------------
+
+/// A conductor's tables as a file states them, and what was odd about
+/// the file. Arena-backed: `deinit` frees both tables and the report.
+///
+/// Public because a conductor is not only a document's: `tempura dump`
+/// reads bytes into a `Sequence` or a `Module` and needs the same tables
+/// with no `(timeline …)` anywhere in sight — which is also the only way
+/// a SMPTE division ever reaches rule 2, since a dump carries the
+/// CONVERTED PPQ and never the SMPTE word (plan 05, "Chunks").
+pub const Conductor = struct {
+    tempo: []Doc.TempoPoint,
+    meter: []Doc.MeterPoint,
+    diags: Diag.List,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn deinit(self: *Conductor) void {
+        self.diags.deinit();
+        self.arena.deinit();
+    }
+};
+
+/// Rule 2: every `set-tempo` in EVERY track merged by tick, each `us` as
+/// written, and `time-signature` likewise with `nn` and `2^dd` as
+/// `[n d]`. Equal ticks keep file order and the last wins. SMF tick `k`
+/// becomes `k · TPQ / PPQ`, exact or nearest with `division_inexact`
+/// counted once for the whole dump.
+///
+/// A SMPTE file is ONE segment at 120 quarter notes per minute over the
+/// converted PPQ — its ticks are wall-clock by definition and that
+/// segment reproduces every one of them exactly — and its own tempo
+/// events are kept in the dump and ignored for timing.
+///
+/// `span` is what every diagnostic carries: the anchor's, for a
+/// document, and the caller's choice otherwise.
+pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) Error!Conductor {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena.deinit();
+    var diags: Diag.List = .init(gpa);
+    errdefer diags.deinit();
+    const a = arena.allocator();
+
+    if (seq.format == 2) try diags.add(
+        .smf_format2,
+        .err,
+        span,
+        "a format 2 file's tracks are independent sequences, not simultaneous ones, so it conducts nothing",
+        .{},
+    );
+
+    const ppq = seq.division.pulsesPerQuarter();
+    const smpte = seq.division == .smpte;
+    if (Grid.ticksPerSmfTick(ppq) == null) try diags.add(
+        .division_inexact,
+        .warning,
+        span,
+        "division {d} does not divide the grid, so every tick of this file lands on its nearest one",
+        .{ppq},
+    );
+
+    var tempo: std.ArrayList(Doc.TempoPoint) = .empty;
+    var meter: std.ArrayList(Doc.MeterPoint) = .empty;
+    var ignored: usize = 0;
+
+    for (seq.tracks) |track| {
+        for (track.events) |e| switch (e.kind) {
+            .set_tempo => {
+                if (smpte) {
+                    ignored += 1;
+                    continue;
+                }
+                // Zero microseconds a quarter has no meaning and the
+                // reader already said so with its own span.
+                if (e.payload.tempo == 0) continue;
+                try tempo.append(a, .{
+                    .tick = Grid.smfToTicks(e.at, ppq).tick,
+                    .tempo = .{ .us = e.payload.tempo },
+                    .span = span,
+                });
+            },
+            .time_signature => {
+                const t = e.payload.time_sig;
+                try meter.append(a, .{
+                    .tick = Grid.smfToTicks(e.at, ppq).tick,
+                    .n = t.nn,
+                    // RP-001 writes the denominator as its power of two.
+                    // Past `2^7` there is no byte to hold it, and past
+                    // `32` no meter tempura admits — which `TimeMap`
+                    // says with `meter_map_invalid` rather than this
+                    // clamping the file into a lie.
+                    .d = if (t.dd < 8) @as(u8, 1) << @intCast(t.dd) else 0,
+                    .span = span,
+                });
+            },
+            else => {},
+        };
+    }
+
+    if (ignored > 0) try diags.add(
+        .smpte_tempo_ignored,
+        .warning,
+        span,
+        "{d} set-tempo event(s) of a SMPTE file are kept in the dump and not believed: SMPTE ticks are wall-clock",
+        .{ignored},
+    );
+    // 500 000 microseconds a quarter IS 120 quarter notes per minute,
+    // and an integer, so the one SMPTE segment keeps plan 03's integer
+    // path.
+    if (smpte) try tempo.append(a, .{ .tick = 0, .tempo = .{ .us = 500_000 }, .span = span });
+
+    return .{
+        .tempo = try seedTempo(a, try mergeByTick(a, Doc.TempoPoint, tempo.items), span),
+        .meter = try seedMeter(a, try mergeByTick(a, Doc.MeterPoint, meter.items), span),
+        .diags = diags,
+        .arena = arena,
+    };
+}
+
+/// Rule 3: the timing walk. One segment per tempo change, in IT ticks
+/// scaled by `Grid.IT_TICK`, and `qpm` IS the IT tempo (the
+/// 24-ticks-per-quarter convention, plan 06). Bars come from the
+/// module's highlight `[minor major]` as one `[major / minor, 4]` meter
+/// point at tick 0, and `[4 4]` when the module states none.
+pub fn itConductor(gpa: Allocator, module: *const itf.Module, span: Diag.Span) Error!Conductor {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena.deinit();
+    var diags: Diag.List = .init(gpa);
+    errdefer diags.deinit();
+    const a = arena.allocator();
+
+    var rowmap = try itf.walk.derive(gpa, module, .{});
+    defer rowmap.deinit();
+    for (rowmap.diags.items()) |d| {
+        try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
+    }
+
+    var tempo: std.ArrayList(Doc.TempoPoint) = .empty;
+    for (rowmap.segments) |seg| try tempo.append(a, .{
+        .tick = seg.start_tick * Grid.IT_TICK,
+        .tempo = .{ .qpm = @floatFromInt(seg.tempo) },
+        .span = span,
+    });
+
+    const h = module.header;
+    const stated = (h.special & itf.model.special.highlight) != 0 and h.highlight_minor > 0;
+    const beats: u16 = if (stated) h.highlight_major / h.highlight_minor else 0;
+    // A highlight that does not divide into a meter tempura admits says
+    // nothing about bars, and `[4 4]` is what every tracker shows.
+    const n: u8 = if (beats >= 1 and beats <= 64) @intCast(beats) else 4;
+
+    return .{
+        .tempo = try seedTempo(a, try mergeByTick(a, Doc.TempoPoint, tempo.items), span),
+        .meter = try a.dupe(Doc.MeterPoint, &[_]Doc.MeterPoint{.{ .tick = 0, .n = n, .d = 4, .span = span }}),
+        .diags = diags,
+        .arena = arena,
+    };
+}
+
+/// Merge conductor points by tick — STABLE, so equal ticks keep the
+/// order the tracks were read in, and the LAST of them wins (plan 03,
+/// "Three conductors", rule 2).
+fn mergeByTick(a: Allocator, comptime T: type, points: []T) Error![]T {
+    const Order = struct {
+        fn before(_: void, x: T, y: T) bool {
+            return x.tick < y.tick;
+        }
+    };
+    std.mem.sort(T, points, {}, Order.before);
+
+    var out: std.ArrayList(T) = .empty;
+    for (points, 0..) |p, i| {
+        if (i + 1 < points.len and points[i + 1].tick == p.tick) continue;
+        try out.append(a, p);
+    }
+    return out.toOwnedSlice(a);
+}
+
+/// A conductor's table starts at tick 0 or it is not a map. A file with
+/// no tempo event before its first note is playing at SMF's own default,
+/// 120 quarter notes per minute, and saying so is not a guess.
+fn seedTempo(a: Allocator, points: []Doc.TempoPoint, span: Diag.Span) Error![]Doc.TempoPoint {
+    if (points.len > 0 and points[0].tick == 0) return points;
+    const out = try a.alloc(Doc.TempoPoint, points.len + 1);
+    out[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 }, .span = span };
+    @memcpy(out[1..], points);
+    return out;
+}
+
+/// The same for the meter: a file with no time signature is in `[4 4]`,
+/// which is what every sequencer shows it as.
+fn seedMeter(a: Allocator, points: []Doc.MeterPoint, span: Diag.Span) Error![]Doc.MeterPoint {
+    if (points.len > 0 and points[0].tick == 0) return points;
+    const out = try a.alloc(Doc.MeterPoint, points.len + 1);
+    out[0] = .{ .tick = 0, .n = 4, .d = 4, .span = span };
+    @memcpy(out[1..], points);
+    return out;
+}
 
 /// A head is this tier's when it is unqualified or carries the tier's
 /// own namespace.
@@ -1216,9 +1701,14 @@ fn castU7(v: ?f64) u7 {
     return if (x >= 0 and x <= 127) @intFromFloat(x) else 0;
 }
 
+/// A `:track` that will not read answers 0 like every other narrowing
+/// reader here, not 1: the manifest bounds `:track` to 1 and up, so 0 is
+/// outside its domain and cannot be mistaken for the first track of the
+/// file. (`wireChannel` is the one that answers 0 meaningfully — 0 is
+/// channel 1 on the wire, the manifest's own floor.)
 fn castU16(v: ?f64) u16 {
-    const x = v orelse return 1;
-    return if (x >= 0 and x <= 65535) @intFromFloat(x) else 1;
+    const x = v orelse return 0;
+    return if (x >= 0 and x <= 65535) @intFromFloat(x) else 0;
 }
 
 fn castU32(v: ?f64) u32 {
@@ -1404,8 +1894,10 @@ test "fromSjon: the positional pairing marks an anchor as carrying a dump" {
     try testing.expectEqual(@as(usize, 0), res.diags.count(.anchor_dump_duplicate));
     try testing.expect(res.doc.anchorById("one").?.inline_dump);
     try testing.expect(!res.doc.anchorById("two").?.inline_dump);
-    // The tiers stay EMPTY here: reading a dump is the anchored half's.
-    try testing.expectEqual(@as(usize, 0), res.doc.it.len);
+    // …and the dump is READ into the tier the anchor names — one tier,
+    // paired with the anchor it follows and not with the one after it.
+    try testing.expectEqual(@as(usize, 1), res.doc.it.len);
+    try testing.expectEqualStrings("one", res.doc.it[0].anchor);
     try testing.expectEqual(@as(usize, 0), res.doc.midi.len);
 }
 
@@ -1542,6 +2034,16 @@ test "fromSjon: two sections of one name are scene_duplicate too" {
     , .scene_duplicate);
 }
 
+test "fromSjon: a quoted pacer scene name is the same name as a section's" {
+    // pacer types a scene's `:name` as a string, so the two spellings of
+    // one name collide and the export would emit two scenes called the
+    // same thing.
+    try expectCode(preamble ++
+        \\(section :name intro :at 0bar :dur 16bar)
+        \\(scene :name "intro" :at 0b :dur 4b)
+    , .scene_duplicate);
+}
+
 test "fromSjon: a scene under a name no section uses passes through in peace" {
     try expectClean(preamble ++
         \\(section :name intro :at 0bar :dur 16bar)
@@ -1566,11 +2068,95 @@ test "fromSjon: seconds on a tempo or meter point is unit_required" {
     , .unit_required);
 }
 
-test "fromSjon: a note name that will not read is reported with its spelling" {
+test "fromSjon: a note name that will not read is note_key_invalid" {
+    // The manifest types `:key`'s string arm and says the spelling is
+    // checked host-side, so the code is tempura's own and the message
+    // names the octave it could not read.
     try expectCode(preamble ++
         \\(lane :name flash :kind notes
         \\  (note :at 0q :dur 1q :key "H9"))
-    , .unit_required);
+    , .note_key_invalid);
+}
+
+test "fromSjon: two lanes of one name are lane_duplicate" {
+    try expectCode(preamble ++
+        \\(lane :name flash :kind notes)
+        \\(lane :name flash :kind curve)
+    , .lane_duplicate);
+    // A phrase's lane shares the placing lane's name by design, and is a
+    // different namespace.
+    try expectClean(preamble ++
+        \\(lane :name flash :kind notes
+        \\  (clip :at 0q :phrase fill))
+        \\(phrase :name fill :length 1bar
+        \\  (lane :name flash
+        \\    (note :at 0q :dur 1q :key 38)))
+    );
+}
+
+test "fromSjon: a bound SMF curve lane names one of the four surfaces" {
+    // The manifest's group is at-most-one (a NATIVE curve lane addresses
+    // nothing); the at-least-one half needs the anchor's kind and is
+    // therefore host-side.
+    try expectCode(preamble ++
+        \\(anchor :id file :kind smf :file "x.mid")
+        \\(lane :name mod :kind curve :from file :track 1 :ch 1)
+    , .address_invalid);
+    // With a surface it is fine, and a bound NOTES lane never needed one.
+    try expectClean(preamble ++
+        \\(anchor :id file :kind smf :file "x.mid")
+        \\(lane :name mod :kind curve :from file :track 1 :ch 1 :bend true)
+        \\(lane :name drum :kind notes :from file :track 1 :ch 10)
+    );
+}
+
+test "fromSjon: a duration is measured from its own :at, across a meter change" {
+    // Plan 03, "Positions": a duration is a position measured from the
+    // form's own `:at`. Bars 0 and 1 are [3 4]; bar 2 on is [4 4].
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var res = try fromSource(gpa, &schema,
+        \\(timeline)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [3 4])
+        \\(meter-point :at 2bar :sig [4 4])
+        \\(section :name intro :at 0bar :dur 1bar)
+        \\(section :name drop :at 2bar :dur 1bar)
+        \\(lane :name flash :kind notes
+        \\  (note :at 2bar :dur 1bar :key 36))
+    , null);
+    defer res.deinit();
+
+    try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+    // Three quarters in the first bar…
+    try testing.expectEqual(@as(i64, 3 * Grid.TPQ), res.doc.sections[0].dur);
+    // …and FOUR in the third, which counting from the origin got wrong.
+    try testing.expectEqual(@as(i64, 4 * Grid.TPQ), res.doc.sections[1].dur);
+    try testing.expectEqual(@as(i64, 4 * Grid.TPQ), res.doc.lanes[0].notes[0].dur);
+}
+
+test "fromSjon: an s duration is wall-clock from its own :at" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    // 120 quarter notes per minute to bar 1, then 240: a second is two
+    // quarters in the first segment and four in the second.
+    var res = try fromSource(gpa, &schema,
+        \\(timeline)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(tempo-point :at 4q :qpm 240)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(section :name a :at 0bar :dur 1s)
+        \\(section :name b :at 1bar :dur 1s)
+    , null);
+    defer res.deinit();
+
+    try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+    try testing.expectEqual(@as(i64, 2 * Grid.TPQ), res.doc.sections[0].dur);
+    try testing.expectEqual(@as(i64, 4 * Grid.TPQ), res.doc.sections[1].dur);
 }
 
 test "fromSjon: a position past the grid ceiling is tick_overflow" {
@@ -1967,4 +2553,355 @@ test "fromSjon: the slot-local defaults restated here are the manifest's" {
         }
     }
     try testing.expectEqual(@as(usize, 4), seen);
+}
+
+// ---------------------------------------------------------------------
+// The anchored half: the tiers, the conductors, the anchor's bytes
+// ---------------------------------------------------------------------
+
+/// Load `source` with a resolver and hand the whole result back. The
+/// anchored tests read the map and the tiers, not just the report.
+fn load(gpa: Allocator, source: [:0]const u8, resolver: ?Resolver.Resolver) !Result {
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    return fromSource(gpa, &schema, source, resolver);
+}
+
+/// A document conducted by an inline SMF dump whose tempo sits on the
+/// SECOND track and whose meter is `[3 4]` — so a `bar` position is
+/// three quarters and not four.
+const conducted_smf =
+    \\(timeline :conductor song)
+    \\(anchor :id song :kind smf :file "x.mid")
+    \\(midi/smf :format 1 :division 480)
+    \\(midi/mtrk
+    \\  (time-signature :at 0 :num 3 :denom 4 :clocks 24 :thirty-seconds 8)
+    \\  (end-of-track :at 1920))
+    \\(midi/mtrk
+    \\  (set-tempo :at 0 :us 500000)
+    \\  (set-tempo :at 960 :us 400000)
+    \\  (end-of-track :at 1920))
+    \\(cue :name "two" :at 1bar)
+;
+
+test "fromSjon: an inline (midi/smf …) reads into the tier its anchor names" {
+    const gpa = testing.allocator;
+    var res = try load(gpa, conducted_smf, null);
+    defer res.deinit();
+
+    for (res.diags.items()) |d| std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
+    try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+
+    try testing.expectEqual(@as(usize, 1), res.doc.midi.len);
+    try testing.expectEqualStrings("song", res.doc.midi[0].anchor);
+    // The header root and BOTH `(midi/mtrk …)` roots are one dump.
+    try testing.expectEqual(@as(usize, 2), res.doc.midi[0].sequence.tracks.len);
+    try testing.expect(res.doc.anchorById("song").?.inline_dump);
+}
+
+test "fromSjon: an SMF conductor's tempo is honoured on any track, and its meter rules bars" {
+    const gpa = testing.allocator;
+    var res = try load(gpa, conducted_smf, null);
+    defer res.deinit();
+
+    // Two segments, the second from the track that carries no meter:
+    // "tempo on any track is honoured" (plan 03, rule 2).
+    try testing.expectEqual(@as(usize, 2), res.map.segments.len);
+    try testing.expectEqual(@as(i64, 0), res.map.segments[0].tick);
+    try testing.expectEqual(@as(f64, 500_000), res.map.segments[0].us);
+    // 960 SMF ticks at 480 PPQ is two quarter notes.
+    try testing.expectEqual(@as(i64, 2 * Grid.TPQ), res.map.segments[1].tick);
+    try testing.expectEqual(@as(f64, 400_000), res.map.segments[1].us);
+    // …and the file's `[3 4]` is what `1bar` means in the document.
+    try testing.expectEqual(@as(i64, 3 * Grid.TPQ), res.doc.cues[0].at);
+}
+
+test "fromSjon: a file with no tempo or meter event conducts at 120 in [4 4]" {
+    const gpa = testing.allocator;
+    var res = try load(gpa,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\(midi/smf :format 1 :division 480)
+        \\(midi/mtrk (end-of-track :at 1920))
+        \\(cue :name "one" :at 1bar)
+    , null);
+    defer res.deinit();
+
+    try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+    try testing.expectEqual(@as(usize, 1), res.map.segments.len);
+    try testing.expectEqual(@as(f64, 500_000), res.map.segments[0].us);
+    try testing.expectEqual(@as(i64, 4 * Grid.TPQ), res.doc.cues[0].at);
+}
+
+test "fromSjon.smfConductor: SMPTE is one 120-qpm segment and its tempo events are ignored" {
+    const gpa = testing.allocator;
+
+    // A SMPTE division never survives a DUMP — the printer writes the
+    // converted PPQ (plan 05, "Chunks") — so the rule is reached with a
+    // sequence read from bytes, which is what `tempura dump` has.
+    var seq = seq: {
+        var b: smf.Builder = .init(gpa);
+        errdefer b.deinit();
+        b.format = 0;
+        b.division = .{ .smpte = .{ .fps = 25, .tpf = 40 } };
+        const t = try b.addTrack();
+        try b.addEvent(t, 0, .set_tempo, .{ .tempo = 400_000 });
+        try b.addEvent(t, 500, .set_tempo, .{ .tempo = 300_000 });
+        try b.addEvent(t, 1000, .end_of_track, .empty);
+        break :seq try b.finish();
+    };
+    defer seq.deinit();
+
+    var c = try smfConductor(gpa, &seq, .{ .start = 0, .end = 1 });
+    defer c.deinit();
+
+    try testing.expectEqual(@as(usize, 1), c.tempo.len);
+    try testing.expectEqual(@as(i64, 0), c.tempo[0].tick);
+    try testing.expectEqual(@as(u32, 500_000), c.tempo[0].tempo.us);
+    // Both of them, named once — and 25 × 40 / 2 is 500, which does not
+    // divide the grid, so the same dump says that too.
+    try testing.expectEqual(@as(usize, 1), c.diags.count(.smpte_tempo_ignored));
+    try testing.expectEqual(@as(usize, 1), c.diags.count(.division_inexact));
+    for (c.diags.items()) |d| {
+        if (d.code != .smpte_tempo_ignored) continue;
+        try testing.expect(std.mem.indexOf(u8, d.message, "2 set-tempo") != null);
+    }
+}
+
+test "fromSjon.smfConductor: an inexact division is named once, and format 2 conducts nothing" {
+    const gpa = testing.allocator;
+
+    var seq = seq: {
+        var b: smf.Builder = .init(gpa);
+        errdefer b.deinit();
+        b.format = 2;
+        // 500 does not divide TPQ (plan 03, "The grid").
+        b.division = .{ .ppq = 500 };
+        const t = try b.addTrack();
+        try b.addEvent(t, 0, .set_tempo, .{ .tempo = 500_000 });
+        try b.addEvent(t, 1, .set_tempo, .{ .tempo = 400_000 });
+        try b.addEvent(t, 2, .set_tempo, .{ .tempo = 300_000 });
+        try b.addEvent(t, 500, .end_of_track, .empty);
+        break :seq try b.finish();
+    };
+    defer seq.deinit();
+
+    var c = try smfConductor(gpa, &seq, .{ .start = 0, .end = 1 });
+    defer c.deinit();
+
+    // Once for the FILE, not once per event it rounded.
+    try testing.expectEqual(@as(usize, 1), c.diags.count(.division_inexact));
+    try testing.expectEqual(@as(usize, 1), c.diags.count(.smf_format2));
+    try testing.expectEqual(@as(usize, 3), c.tempo.len);
+}
+
+test "fromSjon.smfConductor: equal ticks keep file order and the last one wins" {
+    const gpa = testing.allocator;
+
+    var seq = seq: {
+        var b: smf.Builder = .init(gpa);
+        errdefer b.deinit();
+        b.division = .{ .ppq = 96 };
+        const one = try b.addTrack();
+        try b.addEvent(one, 0, .set_tempo, .{ .tempo = 500_000 });
+        try b.addEvent(one, 96, .end_of_track, .empty);
+        const two = try b.addTrack();
+        try b.addEvent(two, 0, .set_tempo, .{ .tempo = 400_000 });
+        try b.addEvent(two, 96, .end_of_track, .empty);
+        break :seq try b.finish();
+    };
+    defer seq.deinit();
+
+    var c = try smfConductor(gpa, &seq, .{ .start = 0, .end = 1 });
+    defer c.deinit();
+
+    try testing.expectEqual(@as(usize, 1), c.tempo.len);
+    try testing.expectEqual(@as(u32, 400_000), c.tempo[0].tempo.us);
+}
+
+test "fromSjon: an inline (it/module …) conducts through the timing walk" {
+    const gpa = testing.allocator;
+    var res = try load(gpa,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind it :file "x.it")
+        \\(it/module
+        \\  (it/timing :speed 6 :tempo 125 :highlight [4 16])
+        \\  (it/orders 0 end)
+        \\  (it/pattern 0 :rows 4 (row 2 (ev 1 :fx "T96"))))
+        \\(cue :name "row two" :at 12t)
+    , null);
+    defer res.deinit();
+
+    try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+    try testing.expectEqual(@as(usize, 1), res.doc.it.len);
+
+    // Two segments: the module's initial tempo, and the `T96` the walk
+    // reads at row 2 — twelve IT ticks in, `Grid.IT_TICK` apiece.
+    try testing.expectEqual(@as(usize, 2), res.map.segments.len);
+    try testing.expectEqual(@as(i64, 0), res.map.segments[0].tick);
+    try testing.expectEqual(@as(i64, 12 * Grid.IT_TICK), res.map.segments[1].tick);
+    // `qpm` IS the IT tempo: 125 then 0x96 = 150.
+    try testing.expectEqual(@as(f64, 60_000_000.0 / 125.0), res.map.segments[0].us);
+    try testing.expectEqual(@as(f64, 60_000_000.0 / 150.0), res.map.segments[1].us);
+    // …and the highlight [4 16] is four beats to a measure.
+    try testing.expectEqual(@as(u8, 4), res.map.meters[0].n);
+    try testing.expectEqual(@as(u8, 4), res.map.meters[0].d);
+}
+
+test "fromSjon.itConductor: the highlight is [major / minor 4], and [4 4] when there is none" {
+    const gpa = testing.allocator;
+
+    for ([_]struct { u8, u8, bool, u8 }{
+        // minor, major, stated, expected numerator
+        .{ 4, 16, true, 4 },
+        .{ 3, 12, true, 4 },
+        .{ 4, 12, true, 3 },
+        .{ 6, 42, true, 7 },
+        // Stated but meaningless, and not stated at all: `[4 4]`.
+        .{ 0, 16, true, 4 },
+        .{ 4, 16, false, 4 },
+    }) |row| {
+        var module = module: {
+            var b: itf.Builder = .init(gpa);
+            errdefer b.deinit();
+            b.module.header.highlight_minor = row[0];
+            b.module.header.highlight_major = row[1];
+            if (row[2]) {
+                b.module.header.special |= itf.model.special.highlight;
+            } else b.module.header.special &= ~itf.model.special.highlight;
+            _ = try b.addPattern(4);
+            try b.addOrder(0);
+            break :module b.finish();
+        };
+        defer module.deinit();
+
+        var c = try itConductor(gpa, &module, .{ .start = 0, .end = 1 });
+        defer c.deinit();
+        try testing.expectEqual(@as(usize, 1), c.meter.len);
+        try testing.expectEqual(row[3], c.meter[0].n);
+        try testing.expectEqual(@as(u8, 4), c.meter[0].d);
+    }
+}
+
+test "fromSjon: an anchor whose bytes do not match its :sha256 is anchor_mismatch" {
+    const gpa = testing.allocator;
+
+    const bytes = "MThd not really";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    var right: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&right, "{x}", .{&digest}) catch unreachable;
+
+    const store: Resolver.Memory = .{ .entries = &.{.{ .path = "x.mid", .bytes = bytes }} };
+
+    // The truth first: the same bytes, the right size and the right
+    // digest, and the anchor resolves in silence.
+    {
+        const source = try std.fmt.allocPrintSentinel(gpa,
+            \\(timeline)
+            \\(tempo-point :at 0q :qpm 120)
+            \\(meter-point :at 0bar :sig [4 4])
+            \\(anchor :id song :kind smf :file "x.mid" :size {d} :sha256 "{s}")
+        , .{ bytes.len, right }, 0);
+        defer gpa.free(source);
+
+        var res = try load(gpa, source, Resolver.memory(&store));
+        defer res.deinit();
+        try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+        try testing.expect(res.doc.anchorById("song").?.resolved);
+    }
+
+    // …and one wrong digit is a refusal, never a silent re-read.
+    {
+        var wrong = right;
+        wrong[0] = if (wrong[0] == '0') '1' else '0';
+        const source = try std.fmt.allocPrintSentinel(gpa,
+            \\(timeline)
+            \\(tempo-point :at 0q :qpm 120)
+            \\(meter-point :at 0bar :sig [4 4])
+            \\(anchor :id song :kind smf :file "x.mid" :size {d} :sha256 "{s}")
+        , .{ bytes.len, wrong }, 0);
+        defer gpa.free(source);
+
+        var res = try load(gpa, source, Resolver.memory(&store));
+        defer res.deinit();
+        try testing.expectEqual(@as(usize, 1), res.diags.count(.anchor_mismatch));
+        try testing.expect(!res.doc.anchorById("song").?.resolved);
+    }
+}
+
+test "fromSjon: a module's own (it/source …) that disagrees with the anchor is anchor_conflict" {
+    try expectCode(
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind it :file "acid.it" :size 1284403)
+        \\(it/module (it/source :file "other.it" :size 1284403))
+    , .anchor_conflict);
+    // …and one that agrees is simply accepted.
+    try expectClean(
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind it :file "acid.it" :size 1284403)
+        \\(it/module (it/source :file "acid.it" :size 1284403))
+    );
+}
+
+test "fromSjon: a bound lane over an inline tier resolves its notes" {
+    const gpa = testing.allocator;
+    var res = try load(gpa,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind it :file "x.it")
+        \\(it/module
+        \\  (it/orders 0 end)
+        \\  (it/pattern 0 :rows 4
+        \\    (row 0 (ev 3 "C-5" :ins 1 :vol 32))
+        \\    (row 2 (ev 3 off))))
+        \\(lane :name kick :kind notes :from song :channel 3 :target kick)
+    , null);
+    defer res.deinit();
+
+    try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+
+    // The lane is BOUND: no content of its own, an address into the tier.
+    const lane = res.doc.lanes[0];
+    try testing.expectEqual(@as(usize, 0), lane.notes.len);
+    try testing.expectEqual(@as(u6, 2), lane.binding.?.address.it.channel);
+
+    // …and the tier answers it, through the walk that conducts it.
+    var rowmap = try itf.walk.derive(gpa, &res.doc.it[0].module, .{});
+    defer rowmap.deinit();
+    const notes = try bridge_it.boundNotes(gpa, &res.doc.it[0].module, &rowmap, lane.binding.?.address.it.channel);
+    defer gpa.free(notes);
+
+    try testing.expectEqual(@as(usize, 1), notes.len);
+    try testing.expectEqual(@as(u7, 60), notes[0].key);
+    // `round(32 · 127 / 64)` is 64, and the `off` two rows on ends it.
+    try testing.expectEqual(@as(u7, 64), notes[0].vel);
+    try testing.expectEqual(@as(i64, 0), notes[0].at);
+    try testing.expectEqual(@as(i64, 12), notes[0].dur);
+}
+
+test "fromSjon: an inline module's (bin …) is checked against the anchor's verified bytes" {
+    const gpa = testing.allocator;
+
+    const bytes = "IMPM" ++ [_]u8{0} ** 60;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    var hex: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    const store: Resolver.Memory = .{ .entries = &.{.{ .path = "x.it", .bytes = bytes }} };
+
+    // 64 bytes of anchor: a region ending at 64 fits, one ending at 65
+    // does not — and an offset is meaningful only against this exact
+    // file (it 03, "The anchor").
+    for ([_]struct { u32, usize }{ .{ 0x20, 0 }, .{ 0x21, 1 } }) |row| {
+        const source = try std.fmt.allocPrintSentinel(gpa,
+            \\(timeline :conductor song)
+            \\(anchor :id song :kind it :file "x.it" :size {d} :sha256 "{s}")
+            \\(it/module (it/instrument 1 :name "bass" :raw (bin :at 0x20 :len 0x{X})))
+        , .{ bytes.len, hex, row[0] }, 0);
+        defer gpa.free(source);
+
+        var res = try load(gpa, source, Resolver.memory(&store));
+        defer res.deinit();
+        try testing.expectEqual(row[1], res.diags.count(.it_parapointer_out_of_range));
+    }
 }
