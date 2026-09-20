@@ -46,6 +46,13 @@ pub const MeterPoint = struct {
 /// What happens at `:length` (plan 03, "Tempo", loop and hold).
 pub const End = enum { loop, hold };
 
+/// A resolved position: the tick, or the diagnostic the document earned.
+/// `durationTicks` answers in this shape.
+pub const Resolved = union(enum) {
+    tick: i64,
+    err: Diag.Code,
+};
+
 /// One derived tempo segment.
 pub const Segment = struct {
     tick: i64,
@@ -307,6 +314,98 @@ pub const TimeMap = struct {
         }
     }
 
+    /// A DURATION literal — `:dur`, `:offset`, a clip's `:length` —
+    /// measured from the form's own `:at` (plan 03, "Positions":
+    /// "Durations are positions measured from the form's own `:at`").
+    ///
+    /// The difference from `tickFromLiteral` is only ever visible across
+    /// a meter change: under one meter `1bar` is one bar's worth of
+    /// ticks wherever it starts, and this returns exactly that, bit for
+    /// bit. At a `[3 4]` → `[4 4]` change on bar 2, `:at 2bar :dur 1bar`
+    /// is the fourth bar's FOUR quarters and not the first three's three.
+    ///
+    ///   * `q` and `t` are grid units and carry no anchor at all;
+    ///   * `bar` lands on `barAt(at) + k` and answers the distance to it,
+    ///     the fraction scaled by the LANDING bar's length;
+    ///   * `b` is the beat twin, over the cumulative beat count;
+    ///   * `s` is wall-clock from `at`, through the one clock seam.
+    ///
+    /// Both roundings stay where plan 03 put them: a fraction goes
+    /// through `Pos.tickFromQuarters` (half to even) and seconds through
+    /// `tickFromSeconds` (floor).
+    ///
+    /// A duration is never negative, and the one spelling that could ask
+    /// for one — a whole-bar or whole-beat count from an anchor that
+    /// sits INSIDE a bar, whose landing line is therefore behind it — is
+    /// answered as 0 rather than as a distance backwards.
+    pub fn durationTicks(self: *const TimeMap, lit: Pos.Literal, at: i64) Error!Resolved {
+        if (!std.math.isFinite(lit.value)) return error.NonFiniteTime;
+        if (lit.value < 0) return .{ .err = .position_negative };
+        const anchor = @max(at, 0);
+        const ceiling: f64 = @floatFromInt(Grid.MAX_TICK);
+
+        switch (lit.unit) {
+            // Grid units: a quarter is a quarter wherever it starts, so
+            // there is nothing for an anchor to change.
+            .q, .t => return switch (try self.tickFromLiteral(lit)) {
+                .tick => |t| .{ .tick = t },
+                .err => |c| .{ .err = c },
+            },
+            .s => {
+                const abs = self.tickFromSeconds(self.secondsFromTick(anchor) + lit.value) catch |e| switch (e) {
+                    error.TickOverflow => return .{ .err = .tick_overflow },
+                    error.NonFiniteTime => return e,
+                };
+                return .{ .tick = abs - anchor };
+            },
+            .bar => {
+                const whole = @trunc(lit.value);
+                if (whole > ceiling) return .{ .err = .tick_overflow };
+                const landing = self.barAt(anchor) + @as(i64, @intFromFloat(whole));
+                const start = self.barStartRaw(landing);
+                const seg = self.meters[self.meterOfBar(landing)];
+                // A bar of `[n d]` is 4n/d quarters — exact in f64 for
+                // every meter the map holds (`d` is a power of two).
+                const bar_quarters = 4.0 * @as(f64, @floatFromInt(seg.n)) / @as(f64, @floatFromInt(seg.d));
+                const into = Pos.tickFromQuarters((lit.value - whole) * bar_quarters) catch
+                    return .{ .err = .tick_overflow };
+                return .{ .tick = capped(@max(0, start + into - anchor)) catch return .{ .err = .tick_overflow } };
+            },
+            .b => {
+                const whole = @trunc(lit.value);
+                if (whole > ceiling) return .{ .err = .tick_overflow };
+                const landing = self.beatAt(anchor) + @as(i64, @intFromFloat(whole));
+                const start = self.beatStartRaw(landing);
+                const seg = self.meters[self.meterOfBeat(landing)];
+                // A beat of `[n d]` is 4/d quarters.
+                const beat_quarters = 4.0 / @as(f64, @floatFromInt(seg.d));
+                const into = Pos.tickFromQuarters((lit.value - whole) * beat_quarters) catch
+                    return .{ .err = .tick_overflow };
+                return .{ .tick = capped(@max(0, start + into - anchor)) catch return .{ .err = .tick_overflow } };
+            },
+        }
+    }
+
+    /// The canonical spelling of a DURATION measured from `at`.
+    ///
+    /// `Nbar` when BOTH ends sit on bar lines — the honest count of bars
+    /// between them, whatever meters they cross — and otherwise the
+    /// delta's own `Nq` / `Nt` by `Pos.spell`'s rule. That is exactly the
+    /// set of spellings `durationTicks` inverts: a `bar` duration read
+    /// back from a bar-line anchor lands on the same tick, and a `q` or a
+    /// `t` one carries no anchor at all. The property
+    /// `durationTicks(parse(spellDuration(d, at)), at) == d` is pinned by
+    /// the test below, across a meter change.
+    pub fn spellDuration(self: *const TimeMap, writer: anytype, dur: i64, at: i64) !void {
+        if (dur >= 0 and at >= 0) {
+            if (self.isBarLine(at)) |from| {
+                const end = at +| dur;
+                if (self.isBarLine(end)) |to| return writer.print("{d}bar", .{to - from});
+            }
+        }
+        return Pos.spell(writer, dur, null);
+    }
+
     /// The canonical text of the map: one line per tempo segment, one
     /// per meter segment, then the bar table's shape and the length.
     ///
@@ -360,6 +459,27 @@ pub const TimeMap = struct {
         const seg = self.meters[self.meterOfBar(bar)];
         return @as(i128, seg.tick) +
             @as(i128, bar - seg.first_bar) * Grid.barTicks(seg.n, seg.d);
+    }
+
+    /// The beat `tick` falls in, counted from 0 across the meter map —
+    /// the `b` twin of `barAt`, and exact past the bar table because the
+    /// meter in force carries on.
+    fn beatAt(self: *const TimeMap, tick: i64) i64 {
+        const t = @max(tick, 0);
+        const seg = self.meters[self.meterOfTick(t)];
+        return seg.beats_before + @divFloor(t - seg.tick, Grid.beatTicks(seg.d));
+    }
+
+    /// Where beat `beat` starts, in `i128` — the `b` twin of
+    /// `barStartRaw`: the meter table carries the cumulative beat count
+    /// at each segment's first bar, so the count names bar `m` and beat
+    /// `k` inside it directly.
+    fn beatStartRaw(self: *const TimeMap, beat: i64) i128 {
+        const seg = self.meters[self.meterOfBeat(beat)];
+        const delta = beat - seg.beats_before;
+        const n: i64 = seg.n;
+        return self.barStartRaw(seg.first_bar + @divFloor(delta, n)) +
+            @as(i128, @mod(delta, n)) * Grid.beatTicks(seg.d);
     }
 
     /// The last meter segment starting at or before `tick` — the
@@ -1392,4 +1512,205 @@ test "TimeMap.derive: a tempo point at tick 0 that names no tempo still leaves a
     try testing.expectEqual(@as(usize, 2), not_numbers.diags.count(.tempo_map_invalid));
     try testing.expectEqual(@as(usize, 1), not_numbers.map.segments.len);
     try testing.expectEqual(@as(f64, 500_000), not_numbers.map.segments[0].us);
+}
+
+// ---------------------------------------------------------------------
+// Durations: measured from the form's own `:at` (plan 03, "Positions")
+// ---------------------------------------------------------------------
+
+/// A `[3 4]` map that turns `[4 4]` on bar 2 — the smallest fixture in
+/// which a duration's anchor is visible at all.
+fn threeThenFour(gpa: std.mem.Allocator) error{OutOfMemory}!Result {
+    return derive(gpa, &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }}, &.{
+        .{ .tick = 0, .n = 3, .d = 4 },
+        .{ .tick = 6 * Grid.TPQ, .n = 4, .d = 4 },
+    }, 24 * Grid.TPQ, .hold);
+}
+
+test "TimeMap.durationTicks: a bar is the bar it lands in, not the bar at the origin" {
+    var r = try threeThenFour(testing.allocator);
+    defer r.deinit();
+    const map = &r.map;
+
+    // Bars 0 and 1 are `[3 4]` (three quarters); bar 2 on is `[4 4]`.
+    // `:at 0bar :dur 1bar` is three quarters…
+    try testing.expectEqual(@as(i64, 3 * Grid.TPQ), (try map.durationTicks(.{ .value = 1, .unit = .bar }, 0)).tick);
+    // …and `:at 2bar :dur 1bar` is FOUR, which counting from the origin
+    // would have got wrong (it would have answered the first bar's three).
+    try testing.expectEqual(
+        @as(i64, 4 * Grid.TPQ),
+        (try map.durationTicks(.{ .value = 1, .unit = .bar }, 6 * Grid.TPQ)).tick,
+    );
+    // Two bars across the change, from bar 1: three plus four.
+    try testing.expectEqual(
+        @as(i64, 7 * Grid.TPQ),
+        (try map.durationTicks(.{ .value = 2, .unit = .bar }, 3 * Grid.TPQ)).tick,
+    );
+    // A fraction scales by the LANDING bar's length: half of bar 3's four
+    // quarters, measured from bar 2.
+    try testing.expectEqual(
+        @as(i64, 6 * Grid.TPQ),
+        (try map.durationTicks(.{ .value = 1.5, .unit = .bar }, 6 * Grid.TPQ)).tick,
+    );
+}
+
+test "TimeMap.durationTicks: the beat twin, over the cumulative beat count" {
+    var r = try threeThenFour(testing.allocator);
+    defer r.deinit();
+    const map = &r.map;
+
+    // Every beat here is a quarter, so a beat count is a quarter count —
+    // what changes across the meter is which BAR a beat belongs to, and
+    // `b` never asks.
+    try testing.expectEqual(@as(i64, Grid.TPQ), (try map.durationTicks(.{ .value = 1, .unit = .b }, 0)).tick);
+    try testing.expectEqual(
+        @as(i64, 4 * Grid.TPQ),
+        (try map.durationTicks(.{ .value = 4, .unit = .b }, 6 * Grid.TPQ)).tick,
+    );
+    // Half a beat.
+    try testing.expectEqual(
+        @as(i64, @divExact(Grid.TPQ, 2)),
+        (try map.durationTicks(.{ .value = 0.5, .unit = .b }, 3 * Grid.TPQ)).tick,
+    );
+}
+
+test "TimeMap.durationTicks: q and t carry no anchor, and s is wall-clock from it" {
+    var r = try threeThenFour(testing.allocator);
+    defer r.deinit();
+    const map = &r.map;
+
+    // A quarter is a quarter wherever it starts: the two answers are the
+    // same value the unanchored reader gives.
+    for ([_]i64{ 0, 3 * Grid.TPQ, 6 * Grid.TPQ }) |at| {
+        try testing.expectEqual(
+            @as(i64, @divExact(5 * Grid.TPQ, 2)),
+            (try map.durationTicks(.{ .value = 2.5, .unit = .q }, at)).tick,
+        );
+        try testing.expectEqual(@as(i64, 9009), (try map.durationTicks(.{ .value = 9009, .unit = .t }, at)).tick);
+    }
+    // 120 quarter notes per minute: one second is two quarters, from
+    // anywhere on this one-segment tempo map.
+    try testing.expectEqual(
+        @as(i64, 2 * Grid.TPQ),
+        (try map.durationTicks(.{ .value = 1, .unit = .s }, 6 * Grid.TPQ)).tick,
+    );
+}
+
+test "TimeMap.durationTicks: a duration is never negative, and the document's rules still hold" {
+    var r = try threeThenFour(testing.allocator);
+    defer r.deinit();
+    const map = &r.map;
+
+    // `0bar` from inside a bar names the line BEHIND the anchor; a
+    // duration does not run backwards, so the answer is no time at all.
+    try testing.expectEqual(@as(i64, 0), (try map.durationTicks(.{ .value = 0, .unit = .bar }, Grid.TPQ)).tick);
+    try testing.expectEqual(@as(i64, 0), (try map.durationTicks(.{ .value = 0, .unit = .b }, 9009)).tick);
+
+    try testing.expectEqual(Diag.Code.position_negative, (try map.durationTicks(.{ .value = -1, .unit = .bar }, 0)).err);
+    try testing.expectEqual(Diag.Code.position_not_integer, (try map.durationTicks(.{ .value = 1.5, .unit = .t }, 0)).err);
+    try testing.expectEqual(Diag.Code.tick_overflow, (try map.durationTicks(.{ .value = 1e30, .unit = .bar }, 0)).err);
+}
+
+test "TimeMap.durationTicks: under ONE meter the anchor changes nothing, bit for bit" {
+    // The compatibility claim: every existing document reads the same.
+    var r = try derive(testing.allocator, &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }}, &.{
+        .{ .tick = 0, .n = 4, .d = 4 },
+    }, 64 * Grid.TPQ, .hold);
+    defer r.deinit();
+    const map = &r.map;
+
+    for ([_]f64{ 0, 1, 2, 16, 0.5, 2.25 }) |v| {
+        const unanchored = (try map.tickFromLiteral(.{ .value = v, .unit = .bar })).tick;
+        for ([_]i64{ 0, 4 * Grid.TPQ, 16 * Grid.TPQ }) |at| {
+            try testing.expectEqual(unanchored, (try map.durationTicks(.{ .value = v, .unit = .bar }, at)).tick);
+        }
+    }
+}
+
+test "TimeMap.spellDuration: Nbar between two bar lines, else the delta's own spelling" {
+    var r = try threeThenFour(testing.allocator);
+    defer r.deinit();
+    const map = &r.map;
+
+    var buf: [64]u8 = undefined;
+    const spelled = struct {
+        fn f(m: *const TimeMap, b: []u8, dur: i64, at: i64) ![]const u8 {
+            var w = std.Io.Writer.fixed(b);
+            try m.spellDuration(&w, dur, at);
+            return w.buffered();
+        }
+    }.f;
+
+    // One bar from bar 2 is four quarters and spells `1bar` — the tick
+    // count alone would have spelled it `4q`, which re-reads as four
+    // quarters wherever it lands and is only right by accident.
+    try testing.expectEqualStrings("1bar", try spelled(map, &buf, 4 * Grid.TPQ, 6 * Grid.TPQ));
+    try testing.expectEqualStrings("1bar", try spelled(map, &buf, 3 * Grid.TPQ, 0));
+    try testing.expectEqualStrings("2bar", try spelled(map, &buf, 7 * Grid.TPQ, 3 * Grid.TPQ));
+    // Neither end on a bar line, or only one: the delta, by `Pos.spell`.
+    try testing.expectEqualStrings("0.5q", try spelled(map, &buf, @divExact(Grid.TPQ, 2), 0));
+    try testing.expectEqualStrings("3q", try spelled(map, &buf, 3 * Grid.TPQ, Grid.TPQ));
+    try testing.expectEqualStrings("15375360t", try spelled(map, &buf, @divExact(Grid.TPQ, 3), 0));
+    // Zero is zero, at a bar line and off one.
+    try testing.expectEqualStrings("0bar", try spelled(map, &buf, 0, 0));
+    try testing.expectEqualStrings("0q", try spelled(map, &buf, 0, Grid.TPQ));
+}
+
+test "TimeMap: durationTicks(spellDuration(d, at), at) is d, across a meter change" {
+    // The property the two halves exist for: what the printer writes for
+    // a duration reads back as the same number of ticks FROM THE SAME
+    // `:at`. Every anchor on the fixture's grid, every duration to every
+    // later point on it, plus a sweep of off-grid pairs.
+    var r = try threeThenFour(testing.allocator);
+    defer r.deinit();
+    const map = &r.map;
+
+    var buf: [64]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(0x64_75_72_61_74);
+    const rand = prng.random();
+
+    var checked: usize = 0;
+    var bar_spellings: usize = 0;
+    var i: usize = 0;
+    while (i < 4_000) : (i += 1) {
+        // Half the draws land on bar lines at BOTH ends, so the `Nbar`
+        // branch is exercised as hard as the delta one; the pair is
+        // ordered rather than resampled, so every draw is a case.
+        const lo: i64 = if (i % 2 == 0)
+            map.barStart(rand.intRangeAtMost(i64, 0, 7)).?
+        else
+            rand.intRangeAtMost(i64, 0, 20 * Grid.TPQ);
+        const hi: i64 = if (i % 2 == 0)
+            map.barStart(rand.intRangeAtMost(i64, 0, 7)).?
+        else
+            rand.intRangeAtMost(i64, 0, 20 * Grid.TPQ);
+        const at = @min(lo, hi);
+        const dur = @max(lo, hi) - at;
+
+        var w = std.Io.Writer.fixed(&buf);
+        try map.spellDuration(&w, dur, at);
+        const text = w.buffered();
+        if (std.mem.endsWith(u8, text, "bar")) bar_spellings += 1;
+
+        const lit = switch (Pos.parse(text)) {
+            .ok => |l| l,
+            .err => |code| {
+                std.debug.print("duration {d} at {d} spelled {s}, which does not parse: {t}\n", .{ dur, at, text, code });
+                return error.TestSpellingDoesNotParse;
+            },
+        };
+        switch (try map.durationTicks(lit, at)) {
+            .tick => |got| if (got != dur) {
+                std.debug.print("duration {d} at {d} spelled {s}, which reads back as {d}\n", .{ dur, at, text, got });
+                return error.TestDurationRoundTripDrifted;
+            },
+            .err => |code| {
+                std.debug.print("duration {d} at {d} spelled {s}, which will not resolve: {t}\n", .{ dur, at, text, code });
+                return error.TestDurationWillNotResolve;
+            },
+        }
+        checked += 1;
+    }
+    try testing.expectEqual(@as(usize, 4_000), checked);
+    try testing.expect(bar_spellings > 1_500);
 }

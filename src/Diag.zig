@@ -141,6 +141,21 @@ pub const Code = enum(u16) {
     /// plan 02's "once, first". A head-set counts a form's children and
     /// not a document's roots, so both halves are host checks.
     timeline_missing,
+
+    /// A `(note :key …)` string that is not a note name: a letter A-G,
+    /// any number of `#` or `b`, then the octave (`"C4"` is 60, the midi
+    /// set's convention, midi 02). The manifest types the slot as a
+    /// string and says the spelling is checked host-side, so this is
+    /// where a typo names the octave it could not read (plan 02,
+    /// "(note …)").
+    note_key_invalid,
+
+    /// Two `(lane …)` forms share a `:name`. A lane's name is unique
+    /// across the timeline's lanes — it is what a `(clip …)` matches a
+    /// phrase's lane by, so a second one makes the match ambiguous
+    /// (plan 02, "(lane …)"). A form's own shape cannot see a sibling,
+    /// so this is a host check like `scene_duplicate` beside it.
+    lane_duplicate,
 };
 
 /// How much a diagnostic costs its caller. Orthogonal to `Code` — the
@@ -338,6 +353,8 @@ const code_order = [_]Code{
     .smf_status_invalid,
     .sjon_diagnostic,
     .timeline_missing,
+    .note_key_invalid,
+    .lane_duplicate,
 };
 
 test "Diag.Code: ordinals are dense and unique — the wire contract" {
