@@ -238,7 +238,11 @@ fn wanted(names: ?[]const []const u8, name: []const u8) bool {
     return false;
 }
 
-fn keyWanted(keys: ?[]const u7, key: u7) bool {
+/// Whether `key` survives a selection's key filter — null is every key.
+/// Public because `edit/ops_bound.zig` asks the same question of a
+/// bound lane's notes, which resolve outside this file, and two copies
+/// of one filter are two answers waiting to differ.
+pub fn keyWanted(keys: ?[]const u7, key: u7) bool {
     const list = keys orelse return true;
     for (list) |k| {
         if (k == key) return true;

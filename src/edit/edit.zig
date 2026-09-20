@@ -90,6 +90,13 @@
 //! {"op":"retime","sel":{"lanes":["lead"]},"delta":46126080,"allow-shared":true}
 //! ```
 //!
+//! `"allow-shared"` rides on `retime`, `remove` and `velocity`, and says
+//! the ask means EVERY occurrence of a bound Impulse Tracker cell whose
+//! pattern more than one order plays. Without it such an edit is
+//! `edit_pattern_shared` — a pattern is stored once and played many
+//! times, so a volume, a removal and a move inside it all change every
+//! place it sounds (plan 07, "Bound content, precisely").
+//!
 //! `"grid"` is `1/4`, `1/8`, `1/12`, `1/16`, `1/32`, `1bar` or `1b`.
 //! `"what"` on a rename is `lane`, `section`, `phrase`, `target` or
 //! `anchor`. An `insert` carries exactly one of `note`, `keyframe`,

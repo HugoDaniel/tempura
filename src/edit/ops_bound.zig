@@ -28,6 +28,13 @@
 //!     volume column, `resize` is `edit_inexact` (an IT note ends where
 //!     the next cell starts; there is no `:dur` to write), and the
 //!     effects on a moved cell travel with it.
+//!     Every one of those edits is refused with `edit_pattern_shared`
+//!     when the cell's pattern is played by more than one order —
+//!     plan 07's diagnostics table is about the CELL and not about the
+//!     operation that reached it, because a pattern is stored once and
+//!     played many times, so a volume, a removal and a retime inside the
+//!     pattern all change every occurrence. `:allow-shared` on the ask
+//!     says that is what it means.
 //!   * **`materialize`** copies an SMF lane's paired notes or controller
 //!     steps into native children AND takes the source events out of the
 //!     `(midi/mtrk …)`, because content has ONE home (plan 04). An IT
@@ -37,12 +44,20 @@
 //! **The residue is untouched.** It is recomputed at build (plan 04),
 //! and an edit that moved an event never rewrites it here.
 //!
-//! ## Two warts a host should know about
+//! ## Three things a host should know about
 //!
 //! A move that has to be a remove and an insert loses the moved form's
 //! comments — plan 07's own risk, since SJON's JSON bridge carries no
 //! trivia — and this file takes the same way out as `ops_native.zig`:
 //! the in-place `set_keyword` branch wherever the order allows.
+//!
+//! `moveEvents` here and `ops_native.moveInLane` run the SAME running model
+//! over different rows — a `(slot, at, final)` triple, who keeps its slot,
+//! then the removals and the inserts against what they left. They are not
+//! one function because what each writes differs (one `:at` integer here,
+//! `writesFor`'s whole override list there) and the extraction would need
+//! a callback per difference; the duplication is named here so a change to
+//! the rule is made in both.
 //!
 //! An `(ev …)` cell re-inserted somewhere else comes back spelled
 //! `(ev :ins 1 1 "E-5")` rather than `(ev 1 "E-5" :ins 1)`: SJON's JSON
@@ -125,11 +140,31 @@ pub fn planWith(
 /// bound content. Everything else answers null and is `ops_native`'s.
 fn selectionOf(op: Op.Op) ?Select.Select {
     return switch (op) {
-        .remove => |s| s,
+        .remove => |x| x.sel,
         .retime => |x| x.sel,
         .resize => |x| x.sel,
         .velocity => |x| x.sel,
         else => null,
+    };
+}
+
+/// The positional step a pattern's first ROW sits at, and a row's first
+/// CELL: step 0 is the form's own number — `(it/pattern 0 …)`,
+/// `(row 2 …)` — which is a positional child like any other. Derived
+/// once, because an off-by-one here addresses the wrong node rather than
+/// failing.
+const after_number: u32 = 1;
+
+/// Whether the ask says it means EVERY occurrence of a shared Impulse
+/// Tracker pattern's cell — plan 07's `:allow-shared`. An operation with
+/// no such key never does; `resize` is the one that cannot carry it,
+/// because it refuses whatever the pattern.
+fn allowsShared(op: Op.Op) bool {
+    return switch (op) {
+        .remove => |x| x.allow_shared,
+        .retime => |x| x.allow_shared,
+        .velocity => |x| x.allow_shared,
+        else => false,
     };
 }
 
@@ -485,7 +520,7 @@ const Ctx = struct {
             for (try self.pairs(evs, addr.ch, addr.key)) |pair| {
                 const at = Grid.smfToTicks(pair.at, ppq).tick;
                 if (!sel.covers(at)) continue;
-                if (!keyWanted(sel.keys, pair.key)) continue;
+                if (!Select.keyWanted(sel.keys, pair.key)) continue;
                 targets += 1;
                 switch (op) {
                     .remove => {
@@ -725,7 +760,7 @@ const Ctx = struct {
             const played = rowmap.rows[onset.row_index];
             const at = itToTicks(onset.tick) orelse continue;
             if (!sel.covers(at)) continue;
-            if (!keyWanted(sel.keys, @intCast(onset.cell.note))) continue;
+            if (!Select.keyWanted(sel.keys, @intCast(onset.cell.note))) continue;
 
             const pat = (try self.numbered(module, "pattern", played.pattern)) orelse continue;
             const row = (try self.numbered(pat.node, "row", played.row)) orelse continue;
@@ -785,6 +820,10 @@ const Ctx = struct {
             return;
         }
         self.b.summary.targets = @intCast(found.len);
+        // `resize` refuses whatever the pattern — there is no `:dur` to
+        // write — so the shared question never arises for it, and the
+        // useful answer is the one about the missing length.
+        if (op != .resize and try self.refuseShared(&rowmap, found, allowsShared(op))) return;
 
         switch (op) {
             // A cell's end is the next cell on the channel: there is no
@@ -801,6 +840,33 @@ const Ctx = struct {
             .retime => |x| try self.moveCells(root, &rowmap, found, x),
             else => unreachable,
         }
+    }
+
+    /// Refuse an edit to a cell in a pattern more than one ORDER plays.
+    ///
+    /// Plan 07's diagnostics table governs, and it is about the CELL and
+    /// not about which operation reached it: "an IT cell in a pattern
+    /// played more than once, without `:allow-shared`". Every edit to
+    /// such a cell — a retime inside the pattern, a volume, a removal —
+    /// changes every occurrence, because a pattern is stored once and
+    /// played many times. With `:allow-shared` that is what the ask
+    /// means and the plan proceeds.
+    ///
+    /// Answers whether it refused.
+    fn refuseShared(self: *Ctx, rowmap: *const walk.RowMap, cells_: []const Cell, allow: bool) Error!bool {
+        if (allow) return false;
+        for (cells_) |c| {
+            const plays = playCount(rowmap, c.pattern);
+            if (plays <= 1) continue;
+            try self.b.refuse(
+                .edit_pattern_shared,
+                c.span,
+                "this cell sits in a pattern {d} orders play; every occurrence would change, so the ask wants :allow-shared",
+                .{plays},
+            );
+            return true;
+        }
+        return false;
     }
 
     /// A cell's removal, and its row's when that was the last cell on it.
@@ -901,8 +967,11 @@ const Ctx = struct {
                 keep = false;
             }
 
+            // The SOURCE pattern was asked about before any of this
+            // (`refuseShared`); what is left is the pattern the cell
+            // lands IN, which the ask has not been shown yet.
             if (played.pattern != c.pattern and !x.allow_shared) {
-                const plays = @max(playCount(rowmap, c.pattern), playCount(rowmap, played.pattern));
+                const plays = playCount(rowmap, played.pattern);
                 if (plays > 1) {
                     try self.b.refuse(
                         .edit_pattern_shared,
@@ -972,9 +1041,17 @@ const Ctx = struct {
             try value.form(self.gpa, &json, self.tree, m.cell.node, if (m.keep) overrides[0..0] else overrides[0..1]);
 
             const pattern_site = try (Site{ .root = root, .path = &.{} }).child(arena, m.pattern_slot);
-            if (rows.find(m.row)) |r| {
+            if (rows.find(m.row)) |at| {
                 // The row is there and stays: the cell goes in beside
                 // the ones already on it, in channel order.
+                //
+                // Its slot is NOT the one the document gave it. Every
+                // `remove_positional` of this plan runs before any
+                // insert, so a row this plan emptied lower down the
+                // pattern has already taken its place with it — the
+                // slot is the row's place among the rows that SURVIVE,
+                // which is exactly what the sibling branch below counts.
+                const r = &rows.items.items[at];
                 var index: u32 = @intCast(r.channels.items.len);
                 for (r.channels.items, 0..) |c, n| {
                     if (c > @as(u32, m.cell.channel)) {
@@ -983,8 +1060,8 @@ const Ctx = struct {
                     }
                 }
                 try r.channels.insert(arena, index, m.cell.channel);
-                const row_site = try pattern_site.child(arena, r.slot.?);
-                try self.b.insertPositional(row_site, index + 1, json.items);
+                const row_site = try pattern_site.child(arena, rows.slotOf(at));
+                try self.b.insertPositional(row_site, after_number + index, json.items);
             } else {
                 // No row: one is created, holding this cell.
                 var index: u32 = @intCast(rows.items.items.len);
@@ -1004,7 +1081,7 @@ const Ctx = struct {
                 var channels: std.ArrayList(u32) = .empty;
                 try channels.append(arena, m.cell.channel);
                 try rows.items.insert(arena, index, .{ .number = m.row, .slot = null, .channels = channels });
-                try self.b.insertPositional(pattern_site, index + 1, try form.done());
+                try self.b.insertPositional(pattern_site, after_number + index, try form.done());
             }
         }
     }
@@ -1024,8 +1101,8 @@ const Ctx = struct {
             channels: std.ArrayList(u32),
         };
 
-        /// The row form `number` sits in — one the DOCUMENT holds, never
-        /// one this plan created.
+        /// Where in `items` the row form numbered `number` sits — one
+        /// the DOCUMENT holds, never one this plan created.
         ///
         /// A cell cannot be inserted into a row the same plan inserts:
         /// `apply` runs the inner container's inserts before the outer
@@ -1034,11 +1111,26 @@ const Ctx = struct {
         /// which reads the same — `bridge_it`'s reader writes each one's
         /// cells into the pattern by channel — and which the canonical
         /// printer folds back into one on the next full print.
-        fn find(self: *PatternRows, number: u16) ?*Row {
-            for (self.items.items) |*r| {
-                if (r.number == number and r.slot != null) return r;
+        fn find(self: *PatternRows, number: u16) ?usize {
+            for (self.items.items, 0..) |r, i| {
+                if (r.number == number and r.slot != null) return i;
             }
             return null;
+        }
+
+        /// The positional step entry `at` occupies when a cell insert
+        /// reaches it: past the pattern's own number, counting only the
+        /// rows the DOCUMENT holds that survive this plan.
+        ///
+        /// A row this plan creates is not counted, and it does not have
+        /// to be: `apply` runs a row's own inserts before the pattern's,
+        /// so no created row is in place yet when this slot is used.
+        fn slotOf(self: *const PatternRows, at: usize) u32 {
+            var slot: u32 = after_number;
+            for (self.items.items[0..at]) |r| {
+                if (r.slot != null) slot += 1;
+            }
+            return slot;
         }
     };
 
@@ -1254,14 +1346,6 @@ fn named(names: []const []const u8, name: []const u8) bool {
     return false;
 }
 
-fn keyWanted(keys: ?[]const u7, key: u7) bool {
-    const list = keys orelse return true;
-    for (list) |k| {
-        if (k == key) return true;
-    }
-    return false;
-}
-
 fn smfTier(d: *const doc.Doc, id: doc.AnchorId) ?*const doc.SmfTier {
     for (d.midi) |*t| {
         if (std.mem.eql(u8, t.anchor, id)) return t;
@@ -1456,6 +1540,41 @@ fn expectPlan(source: [:0]const u8, op: Op.Op, want_actions: []const u8, want_te
     try testing.expectEqualStrings(want_text, applied.text);
 }
 
+/// `expectEdit`, plus the diagnostic the plan carries BESIDE its actions
+/// and the count on its summary — a note is not a refusal, and a test
+/// that only read the actions would not see it.
+fn expectEditNoting(
+    source: [:0]const u8,
+    op: Op.Op,
+    want_actions: []const u8,
+    regions: []const Region,
+    code: Diag.Code,
+    inexact: u32,
+) !void {
+    const gpa = testing.allocator;
+    const want = try edited(gpa, source, regions);
+    defer gpa.free(want);
+
+    var fx = try test_support.Fixture.init(gpa, source);
+    defer fx.deinit();
+
+    var p = try plan(gpa, fx.doc_(), &fx.tree, op);
+    defer p.deinit();
+
+    const actions = try p.text(gpa);
+    defer gpa.free(actions);
+    try testing.expectEqualStrings(want_actions, actions);
+
+    try testing.expect(!p.summary.refused);
+    try testing.expectEqual(inexact, p.summary.inexact);
+    try testing.expectEqual(Diag.Severity.warning, p.findDiag(code).?.severity);
+
+    var applied = try apply.apply(gpa, fx.source, &p);
+    defer applied.deinit();
+    try testing.expect(!applied.diags.hasErrors());
+    try testing.expectEqualStrings(want, applied.text);
+}
+
 fn expectEdit(source: [:0]const u8, op: Op.Op, want_actions: []const u8, regions: []const Region) !void {
     const gpa = testing.allocator;
     const want = try edited(gpa, source, regions);
@@ -1581,7 +1700,7 @@ test "bound SMF: velocity writes the note-on's :vel and nothing else" {
 test "bound SMF: remove takes both events of the pair" {
     try expectEdit(
         test_support.bound_smf,
-        .{ .remove = .{ .lanes = &.{"kick"}, .kinds = .notes, .range = .{ 0, 1 } } },
+        .{ .remove = .{ .sel = .{ .lanes = &.{"kick"}, .kinds = .notes, .range = .{ 0, 1 } } } },
         \\[
         \\{"op":"remove_positional","root":3,"path":[],"index":2},
         \\{"op":"remove_positional","root":3,"path":[],"index":3}
@@ -1908,7 +2027,7 @@ test "bound IT: resize is edit_inexact — a cell ends where the next one starts
 test "bound IT: remove takes the cell, and the row it emptied with it" {
     try expectEdit(
         test_support.bound_it,
-        .{ .remove = .{ .lanes = &.{"lead"}, .kinds = .notes, .keys = &.{64} } },
+        .{ .remove = .{ .sel = .{ .lanes = &.{"lead"}, .kinds = .notes, .keys = &.{64} } } },
         \\[
         \\{"op":"remove_positional","root":2,"path":[2],"index":2}
         \\]
@@ -1926,5 +2045,203 @@ test "bound IT: materialize is parked — a channel's cells serve every order" {
         test_support.bound_it,
         .{ .materialize = .{ .lane = "lead" } },
         .edit_would_duplicate,
+    );
+}
+
+// ---- the fixes of review round 1 ----
+
+test "bound SMF: a retime off the file's own grid is rounded and counted" {
+    // A sixteenth at 480 PPQ is 120 pulses; half of one is not a pulse
+    // at all, so the onset lands on the nearest and the plan says how
+    // many positions it did that to.
+    try expectEditNoting(
+        test_support.bound_smf,
+        .{ .retime = .{
+            .sel = .{ .lanes = &.{"kick"}, .kinds = .notes, .range = .{ TPQ, TPQ + 1 } },
+            .delta = @divExact(TPQ, 320),
+        } },
+        \\[
+        \\{"op":"set_keyword","root":3,"path":[4],"key":"at","value":482},
+        \\{"op":"set_keyword","root":3,"path":[5],"key":"at","value":722}
+        \\]
+        \\
+    ,
+        &.{
+            .{
+                .from = "(note-on        :at 480  :ch 1 :key 38 :vel 90)",
+                .to = "(note-on        :at 482  :ch 1 :key 38 :vel 90)",
+            },
+            .{
+                .from = "(note-off       :at 720  :ch 1 :key 38 :vel 64)",
+                .to = "(note-off       :at 722  :ch 1 :key 38 :vel 64)",
+            },
+        },
+        .edit_inexact,
+        1,
+    );
+}
+
+test "bound SMF: materialize off the grid counts the positions it rounded" {
+    // 500 does not divide the grid, so SMF tick 1 has no tick of its own
+    // and the note lands on the nearest. The DURATION is exact — 250
+    // pulses is half a quarter note whatever the division — which is
+    // what makes the count about positions and not about lengths.
+    try expectEditNoting(
+        test_support.bound_smf_offgrid,
+        .{ .materialize = .{ .lane = "kick" } },
+        \\[
+        \\{"op":"insert_positional","root":4,"path":[],"index":0,"value":{"$form":"note","at":{"$num":[92252,"t"]},"dur":{"$num":[0.5,"q"]},"key":36,"vel":100,"off-vel":64}},
+        \\{"op":"remove_positional","root":3,"path":[],"index":1},
+        \\{"op":"remove_positional","root":3,"path":[],"index":2},
+        \\{"op":"remove_keyword","root":4,"path":[],"key":"from"},
+        \\{"op":"remove_keyword","root":4,"path":[],"key":"track"},
+        \\{"op":"remove_keyword","root":4,"path":[],"key":"ch"}
+        \\]
+        \\
+    ,
+        &.{
+            .{
+                .from = "  (note-on      :at 1   :ch 1 :key 36 :vel 100)\n  (note-off     :at 251 :ch 1 :key 36 :vel 64)\n",
+                .to = "",
+            },
+            .{
+                .from = "(lane :name kick :kind notes :from song :track 1 :ch 1)",
+                .to = "(lane :name kick :kind notes (note :at 92252t :dur 0.5q :key 36 :vel 100 :off-vel 64))",
+            },
+        },
+        .edit_inexact,
+        1,
+    );
+}
+
+test "bound: a surface no operation here reaches refuses rather than goes quiet" {
+    // A 14-bit controller is two events per value; `:velocity` is the
+    // notes' own velocities and not a stream; an Impulse Tracker column
+    // is part of the cells the notes live in. None of the three is
+    // editable here, and none of them silently plans nothing.
+    for ([_][]const u8{ "wide", "dynamics" }) |lane| {
+        try expectRefusal(
+            test_support.bound_smf,
+            .{ .retime = .{ .sel = .{ .lanes = &.{lane} }, .delta = TPQ } },
+            .edit_target_bound,
+        );
+        try expectRefusal(
+            test_support.bound_smf,
+            .{ .materialize = .{ .lane = lane } },
+            .edit_target_bound,
+        );
+    }
+
+    try expectRefusal(
+        test_support.bound_it,
+        .{ .retime = .{ .sel = .{ .lanes = &.{"loud"} }, .delta = TPQ } },
+        .edit_target_bound,
+    );
+    // An IT lane's materialize is PARKED before its surface is looked
+    // at, and the park is the truer answer: a channel's cells serve
+    // every order that plays their pattern, column and notes alike.
+    try expectRefusal(
+        test_support.bound_it,
+        .{ .materialize = .{ .lane = "loud" } },
+        .edit_would_duplicate,
+    );
+}
+
+test "bound IT: a cell moved into a surviving row takes the slot the removals left" {
+    // The source row is emptied and goes, so every row after it in the
+    // pattern moves up one — including the row the cell is landing in.
+    // An insert against the slot the DOCUMENT gave that row would name
+    // the wrong one.
+    try expectEdit(
+        test_support.bound_it_rows,
+        .{ .retime = .{
+            .sel = .{ .lanes = &.{"lead"}, .kinds = .notes, .keys = &.{60} },
+            .delta = 4 * TPQ,
+        } },
+        \\[
+        \\{"op":"remove_positional","root":2,"path":[2],"index":1},
+        \\{"op":"insert_positional","root":2,"path":[2,2],"index":1,"value":{"$form":"ev","ins":1,"$children":[1,"C-5"]}}
+        \\]
+        \\
+    ,
+        &.{
+            .{ .from = "\n    (row 0 (ev 1 \"C-5\" :ins 1))", .to = "" },
+            .{
+                .from = "(row 4 (ev 2 \"C-6\" :ins 1))",
+                .to = "(row 4 (ev :ins 1 1 \"C-5\") (ev 2 \"C-6\" :ins 1))",
+            },
+        },
+    );
+}
+
+test "bound IT: two rows removed beneath the target shift it twice" {
+    // Both of the lane's cells move: one into a row that survives, one
+    // into a row that has to be made, with two removals underneath them
+    // both. The surviving row's slot counts only the rows that are left,
+    // and the new row's index is counted the same way — the two branches
+    // agree or the plan is nonsense.
+    try expectEdit(
+        test_support.bound_it_rows,
+        .{ .retime = .{
+            .sel = .{ .lanes = &.{"lead"}, .kinds = .notes, .keys = &.{ 60, 64 } },
+            .delta = 4 * TPQ,
+        } },
+        \\[
+        \\{"op":"remove_positional","root":2,"path":[2],"index":1},
+        \\{"op":"remove_positional","root":2,"path":[2],"index":2},
+        \\{"op":"insert_positional","root":2,"path":[2,1],"index":1,"value":{"$form":"ev","ins":1,"$children":[1,"C-5"]}},
+        \\{"op":"insert_positional","root":2,"path":[2],"index":2,"value":{"$form":"row","$children":[5,{"$form":"ev","ins":1,"$children":[1,"E-5"]}]}}
+        \\]
+        \\
+    ,
+        &.{
+            .{ .from = "\n    (row 0 (ev 1 \"C-5\" :ins 1))", .to = "" },
+            .{ .from = "\n    (row 1 (ev 1 \"E-5\" :ins 1))", .to = "" },
+            .{
+                .from = "(row 4 (ev 2 \"C-6\" :ins 1))",
+                .to = "(row 4 (ev :ins 1 1 \"C-5\") (ev 2 \"C-6\" :ins 1))\n    (row 5 (ev :ins 1 1 \"E-5\"))",
+            },
+        },
+    );
+}
+
+test "bound IT: every edit to a cell in a shared pattern is edit_pattern_shared" {
+    // Plan 07's diagnostics table is about the CELL: the pattern is
+    // stored once and played twice, so a volume and a removal change
+    // both occurrences exactly as a retime would.
+    try expectRefusal(
+        test_support.bound_it_shared,
+        .{ .velocity = .{ .sel = .{ .lanes = &.{"lead"}, .kinds = .notes }, .vel = 100 } },
+        .edit_pattern_shared,
+    );
+    try expectRefusal(
+        test_support.bound_it_shared,
+        .{ .remove = .{ .sel = .{ .lanes = &.{"lead"}, .kinds = .notes } } },
+        .edit_pattern_shared,
+    );
+    try expectRefusal(
+        test_support.bound_it_shared,
+        .{ .retime = .{ .sel = .{ .lanes = &.{"lead"}, .kinds = .notes }, .delta = TPQ } },
+        .edit_pattern_shared,
+    );
+}
+
+test "bound IT: :allow-shared writes the volume, in both occurrences at once" {
+    try expectEdit(
+        test_support.bound_it_shared,
+        .{ .velocity = .{
+            .sel = .{ .lanes = &.{"lead"}, .kinds = .notes },
+            .vel = 100,
+            .allow_shared = true,
+        } },
+        \\[
+        \\{"op":"set_keyword","root":2,"path":[2,1,1],"key":"vol","value":50}
+        \\]
+        \\
+    ,
+        &.{.{
+            .from = "(row 0 (ev 1 \"C-5\" :ins 1))",
+            .to = "(row 0 (ev 1 \"C-5\" :ins 1 :vol 50))",
+        }},
     );
 }

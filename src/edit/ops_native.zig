@@ -112,7 +112,7 @@ const Ctx = struct {
     fn run(self: *Ctx, op: Op.Op) Error!void {
         switch (op) {
             .insert => |x| try self.insert(x),
-            .remove => |x| try self.remove(x),
+            .remove => |x| try self.remove(x.sel),
             .retime => |x| try self.retime(x),
             .revalue => |x| try self.revalue(x),
             .ease => |x| try self.ease(x),
@@ -1740,7 +1740,7 @@ test "ops: insert a note at the sorted index of its lane" {
 
 test "ops: remove takes its targets right to left and leaves the lane" {
     try expectEdit(
-        .{ .remove = .{ .lanes = &.{"flash"}, .kinds = .notes, .range = .{ 0, 2 * TPQ } } },
+        .{ .remove = .{ .sel = .{ .lanes = &.{"flash"}, .kinds = .notes, .range = .{ 0, 2 * TPQ } } } },
         \\[
         \\{"op":"remove_positional","root":6,"path":[],"index":0},
         \\{"op":"remove_positional","root":6,"path":[],"index":1}

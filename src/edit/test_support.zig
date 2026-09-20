@@ -239,6 +239,8 @@ pub const bound_smf: [:0]const u8 =
     \\
     \\(lane :name kick :kind notes :from song :track 1 :ch 1)
     \\(lane :name filter :kind curve :from song :track 1 :ch 1 :cc 74)
+    \\(lane :name wide :kind curve :from song :track 1 :ch 1 :cc [98 30])
+    \\(lane :name dynamics :kind curve :from song :track 1 :ch 1 :velocity true)
     \\
 ;
 
@@ -284,6 +286,69 @@ pub const bound_it: [:0]const u8 =
     \\  (it/pattern 1 :rows 4
     \\    (row 0 (ev 1 "G-5" :ins 1)))
     \\  (it/pattern 2 :rows 4))
+    \\
+    \\(lane :name lead :kind notes :from mod :channel 1)
+    \\(lane :name loud :kind curve :from mod :channel 1 :column vol)
+    \\
+;
+
+/// An inline `.mid` whose division does NOT divide the grid (500; plan
+/// 03, "The grid"), so its ticks land on their nearest one and an
+/// operation that reads them says `edit_inexact` with the count.
+///
+/// The note sits at SMF tick 1, which is the smallest position 500 PPQ
+/// cannot spell exactly, and lasts 250 pulses — half a quarter note on
+/// the nose, so only the ENDS round and the duration does not.
+pub const bound_smf_offgrid: [:0]const u8 =
+    \\(timeline :title "off-grid" :conductor song :length 1bar)
+    \\
+    \\(anchor :id song :kind smf :file "x.mid")
+    \\(midi/smf :format 0 :division 500)
+    \\(midi/mtrk
+    \\  (set-tempo    :at 0   :us 500000)
+    \\  (note-on      :at 1   :ch 1 :key 36 :vel 100)
+    \\  (note-off     :at 251 :ch 1 :key 36 :vel 64)
+    \\  (end-of-track :at 2000))
+    \\
+    \\(lane :name kick :kind notes :from song :track 1 :ch 1)
+    \\
+;
+
+/// An inline `.it` whose rows are spread out, for the one question a
+/// single-row pattern cannot ask: what a cell's row slot IS once the
+/// same plan has removed the rows below it.
+///
+/// Channel 1 carries two cells (rows 0 and 1) and row 4 carries a cell
+/// on channel 2 alone — so a move onto row 4 lands in a row that
+/// SURVIVES, after one or two rows beneath it have gone.
+pub const bound_it_rows: [:0]const u8 =
+    \\(timeline :title "rows" :conductor mod :length 2bar)
+    \\
+    \\(anchor :id mod :kind it :file "y.it")
+    \\(it/module :title "rows"
+    \\  (it/timing :speed 24 :tempo 125)
+    \\  (it/orders 0 end)
+    \\  (it/pattern 0 :rows 8
+    \\    (row 0 (ev 1 "C-5" :ins 1))
+    \\    (row 1 (ev 1 "E-5" :ins 1))
+    \\    (row 4 (ev 2 "C-6" :ins 1))))
+    \\
+    \\(lane :name lead :kind notes :from mod :channel 1)
+    \\
+;
+
+/// An inline `.it` whose one pattern is played TWICE, with a cell in it:
+/// every edit to that cell changes both occurrences, which is plan 07's
+/// `edit_pattern_shared` whatever the operation.
+pub const bound_it_shared: [:0]const u8 =
+    \\(timeline :title "shared" :conductor mod :length 2bar)
+    \\
+    \\(anchor :id mod :kind it :file "y.it")
+    \\(it/module :title "shared"
+    \\  (it/timing :speed 24 :tempo 125)
+    \\  (it/orders 0 0 end)
+    \\  (it/pattern 0 :rows 4
+    \\    (row 0 (ev 1 "C-5" :ins 1))))
     \\
     \\(lane :name lead :kind notes :from mod :channel 1)
     \\

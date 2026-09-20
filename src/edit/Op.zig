@@ -113,15 +113,22 @@ pub const Insert = struct {
     what: New,
 };
 
+/// What `remove` takes, and whether it means the occurrences a shared
+/// Impulse Tracker pattern has beside the one the selection reached.
+pub const Remove = struct {
+    sel: Select,
+    allow_shared: bool = false,
+};
+
 /// Where a selection moves to: by `delta`, or onto `to`. Exactly one;
 /// neither is a refusal, both is `delta`.
 pub const Retime = struct {
     sel: Select,
     delta: ?i64 = null,
     to: ?i64 = null,
-    /// Move a bound Impulse Tracker cell into (or out of) a pattern that
-    /// more than one order plays, knowing that every occurrence changes
-    /// — plan 07's `:allow-shared`. Without it such a move is
+    /// Edit a bound Impulse Tracker cell in — or into — a pattern that
+    /// more than one order plays, knowing that EVERY occurrence changes
+    /// — plan 07's `:allow-shared`. Without it such an edit is
     /// `edit_pattern_shared`. Nothing else reads it: a pattern is the
     /// only content in this vocabulary that is played more than once.
     allow_shared: bool = false,
@@ -147,7 +154,14 @@ pub const Resize = struct {
     repeat: ?u32 = null,
 };
 
-pub const Velocity = struct { sel: Select, vel: u7 };
+pub const Velocity = struct {
+    sel: Select,
+    vel: u7,
+    /// `Retime.allow_shared`, for the same reason: writing a bound IT
+    /// cell's volume column writes it for every order that plays the
+    /// pattern.
+    allow_shared: bool = false,
+};
 
 /// Split every selected clip at `at`.
 pub const Split = struct { sel: Select, at: i64 };
@@ -230,7 +244,7 @@ pub const Materialize = struct { lane: []const u8 };
 /// Every operation of plan 07's table that acts on native content.
 pub const Op = union(enum) {
     insert: Insert,
-    remove: Select,
+    remove: Remove,
     retime: Retime,
     revalue: Revalue,
     ease: Ease,
@@ -330,7 +344,10 @@ const Reader = struct {
         };
 
         if (eql(name, "insert")) return try self.insert(o);
-        if (eql(name, "remove")) return .{ .remove = try self.select(o.get("sel")) };
+        if (eql(name, "remove")) return .{ .remove = .{
+            .sel = try self.select(o.get("sel")),
+            .allow_shared = self.optBool(o.get("allow-shared")) orelse false,
+        } };
         if (eql(name, "retime")) {
             const sel = try self.select(o.get("sel"));
             const delta = self.optInt(o.get("delta"));
@@ -368,6 +385,7 @@ const Reader = struct {
         if (eql(name, "velocity")) return .{ .velocity = .{
             .sel = try self.select(o.get("sel")),
             .vel = @intCast(std.math.clamp(self.optInt(o.get("vel")) orelse 100, 1, 127)),
+            .allow_shared = self.optBool(o.get("allow-shared")) orelse false,
         } };
         if (eql(name, "split")) return .{ .split = .{
             .sel = try self.select(o.get("sel")),
@@ -776,7 +794,7 @@ test "Op.fromJson: a selection, and the three ops that only carry one" {
     );
     defer p.deinit();
 
-    const sel = p.op.?.remove;
+    const sel = p.op.?.remove.sel;
     try testing.expectEqual(@as(usize, 2), sel.lanes.?.len);
     try testing.expectEqualStrings("flash", sel.lanes.?[0]);
     try testing.expectEqualStrings("glow", sel.lanes.?[1]);
@@ -986,6 +1004,22 @@ test "Op.fromJson: the payload of every operation the CLI can spell" {
         );
         defer q.deinit();
         try testing.expect(q.op.?.retime.allow_shared);
+
+        // The same key on the other two edits a shared pattern's cell
+        // can take: plan 07's diagnostics table is about the CELL, not
+        // about which operation reached it.
+        var r = try parsed(
+            \\{"op":"remove","sel":{},"allow-shared":true}
+        );
+        defer r.deinit();
+        try testing.expect(r.op.?.remove.allow_shared);
+
+        var v = try parsed(
+            \\{"op":"velocity","sel":{},"vel":64,"allow-shared":true}
+        );
+        defer v.deinit();
+        try testing.expect(v.op.?.velocity.allow_shared);
+        try testing.expectEqual(@as(u7, 64), v.op.?.velocity.vel);
     }
 }
 
