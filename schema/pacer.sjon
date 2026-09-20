@@ -1,0 +1,384 @@
+; pacer score schema — the transport / target / track / key / scene /
+; trigger / control forms plus the easing combinators. The `:expr` and
+; `:pattern` value sources ride as track keys, `:emit` clock lanes as a
+; transport key.
+;
+; Single source of truth for what a pacer score may contain. It is
+; `@embedFile`'d via the `pacer_schema` build import (the pngine precedent,
+; `pngine/schema/pngine.sjon`) and PRELOADED once per host by
+; `src/Schema.zig`, which hands the bundle to every `sjon.validateDocument`
+; through `HostOptions.preloaded`. So the data forms below are validated
+; against this plugin with no filesystem (works on wasm32-freestanding),
+; and every diagnostic span is a score coordinate by construction — the
+; document is parsed on its own.
+;
+; No `:version`: the key exists to be pinned by a `(use-plugin …)` a score
+; never writes, and pacer's version lives in exactly three places
+; (package.json / build.zig.zon / src/root.zig), kept in lockstep by test.
+;
+; All score forms are now present: the compose-mode `(target …)`
+; declaration form (below) closed the last roadmapped omission.
+(plugin :name pacer
+
+  ; ---- numeric / time value kinds ----
+  ; Score positions are numbers with a REQUIRED unit so positions read
+  ; like a score: `4b` (beats), `2bar` (bars), `1.5s` (seconds). A bare
+  ; number in a position slot is a validation error with a span, not a
+  ; silently-guessed unit.
+  (value-kind :name time-pos
+    :description "Score position / duration: a number carrying a required unit — b (beats), bar (bars), or s (seconds)."
+    :underlying number
+    :unit (unit-shape :required true :allowed [b bar s]))
+
+  (value-kind :name bpm-value
+    :description "Tempo in beats per minute. Fractional tempi are legal (e.g. 128.5)."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 1000)
+    :unit (unit-shape :reject true))
+
+  ; PPC = 720720 subdivides exactly for 1..16, so a meter component in
+  ; that range keeps every beat on an exact integer tick.
+  (value-kind :name meter-component
+    :description "Time-signature component: integer 1..16 (the tick grid subdivides exactly in that range)."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 16 :integer true)
+    :unit (unit-shape :reject true))
+  (value-kind :name meter-pair
+    :description "Time signature as [beats-per-bar note-value], e.g. [4 4]."
+    :underlying vector
+    :vector (vector-shape :len 2 :element meter-component))
+
+  (value-kind :name end-behavior
+    :description "What the driver does when the playhead passes :dur."
+    :underlying symbol
+    :members (member-set
+      (member :name loop :description "Wrap the playhead back to 0 (requires :dur).")
+      (member :name hold :description "Clamp at :dur; tracks keep emitting their final values.")))
+
+  ; The element is an unconstrained symbol (not a member-set), so an
+  ; entry outside the emittable set surfaces as a pacer `transport_invalid`
+  ; diagnostic with a span on the offending name — not a schema type
+  ; error. Membership (beat/bar/phase/bpm/t), duplicates, and target
+  ; arity are all joined at compile.
+  (value-kind :name emit-lanes
+    :description "Built-in clock lanes: a list of reserved time names, each written every frame to the host target of the same name (before track writes)."
+    :underlying vector
+    :vector (vector-shape :element symbol))
+
+  ; ---- key values ----
+  ; :repr — the ONE place the f64→f32 truncation at emission is checked.
+  ; Range-only, which is exactly right: precision loss is the emitter's
+  ; accepted step (the determinism seam), but a value that does not FIT
+  ; would reach the write buffer as ±inf. A breach is repr_out_of_range
+  ; with a span, at compile, before the narrowing.
+  (value-kind :name plain-number
+    :description "Unitless number. Narrowed to f32 at write-buffer encode, so it must fit that range."
+    :underlying number
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type f32))
+  (value-kind :name vec-value
+    :description "Vector of 1-4 numbers (vec2/vec3/vec4 targets)."
+    :underlying vector
+    :vector (vector-shape :min-len 1 :max-len 4 :element plain-number))
+  (value-kind :name key-value
+    :description "Keyframe value: a scalar or a 1-4 component vector. Arity is joined against the resolved target at load."
+    :underlying union
+    :union (union-shape :alternatives [plain-number vec-value]))
+
+  ; ---- targets ----
+  ; Deliberately an unconstrained symbol: the animatable property space is
+  ; defined by the hosts at load() (pngine's uniform reflection table, the
+  ; audio engine's param registry), never enumerated here.
+  (value-kind :name target-name
+    :description "Target resolved at load() against the host registries (visual uniforms, audio params)."
+    :underlying symbol)
+
+  ; ---- compose-mode target declarations ----
+  ; A (target …) names an animatable property so a score compiles,
+  ; corpus-tests, and lints standalone (no host). At load the declarations
+  ; MERGE with the host registries; :name/:arity are schema-optional so a
+  ; missing one is a pacer target_decl_invalid (with a span), not a bare
+  ; SJON error — the scene/trigger discipline.
+  (value-kind :name target-arity
+    :description "Component count a declared target expects: integer 1..4."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 4 :integer true)
+    :unit (unit-shape :reject true))
+  (value-kind :name registry-index
+    :description "Host registry a declared-only target routes to: 0 = visual uniforms, 1 = audio params, …"
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 255 :integer true)
+    :unit (unit-shape :reject true))
+
+  ; ---- scenes ----
+  (value-kind :name scene-name
+    :description "Scene identifier: names a window [at, at+dur) on the transport grid. Unique per score; the studio timeline displays it and scene-local expr env keys off it."
+    :underlying symbol)
+
+  ; ---- triggers ----
+  ; Explicit event positions for a (trigger …): a vector of time-pos.
+  ; No min-len — an empty :at surfaces as a pacer trigger_invalid (with a
+  ; span), matching the scene :name/:at/:dur schema-optional discipline.
+  (value-kind :name time-pos-list
+    :description "Explicit event positions for a (trigger …): a vector of time-pos values (b/bar/s). Emptiness and ordering are joined at compile as trigger_invalid, not schema errors."
+    :underlying vector
+    :vector (vector-shape :element time-pos))
+
+  ; ---- controls ----
+  (value-kind :name control-id
+    :description "Expression-environment binding name for a control. Unique per score; the reserved time names (t, tick, beat, bar, cycle, phase, bpm, dur) are rejected at load."
+    :underlying symbol)
+  (value-kind :name control-type
+    :description "Editor widget hint. The driver carries it through drv_meta and never interprets it."
+    :underlying symbol
+    :members (member-set
+      (member :name slider)
+      (member :name xy)
+      (member :name color)))
+
+  ; ---- easing ----
+  ; An easing is a unit map e: [0,1] -> R with e(0)=0, e(1)=1; output may
+  ; leave [0,1] (overshoot) and the keyframe lerp is unclamped. The :ease
+  ; slot is a union: a bare symbol from the closed named set (sugar for a
+  ; one-stage program) or a combinator form compiled to a flat stage table.
+  (value-kind :name ease-name
+    :description "Named easing primitive."
+    :underlying symbol
+    :members (member-set
+      (member :name linear)
+      (member :name hold :description "Step at the segment end: e(u)=0 until u=1.")
+      (member :name smoothstep)
+      (member :name in-quad)
+      (member :name out-quad)
+      (member :name in-out-quad)
+      (member :name in-cubic)
+      (member :name out-cubic)
+      (member :name in-out-cubic)
+      (member :name in-quart)
+      (member :name out-quart)
+      (member :name in-out-quart)
+      (member :name in-sine)
+      (member :name out-sine)
+      (member :name in-out-sine)
+      (member :name in-expo)
+      (member :name out-expo)
+      (member :name in-out-expo)))
+  (value-kind :name ease-form
+    :description "Easing combinator form."
+    :underlying form
+    :heads (head-set :names [seq chain steps cubic-bezier spring]))
+  (value-kind :name ease-spec
+    :description "An easing: a named primitive or a combinator form."
+    :underlying union
+    :union (union-shape :alternatives [ease-name ease-form]))
+
+  (value-kind :name stage-weight
+    :description "Relative weight (normalized once at compile, fixed op order). Lands in the f32 program table."
+    :underlying number
+    :numeric (numeric-bounds :min 0)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type f32))
+  (value-kind :name step-count
+    :description "Stair-step count."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 64 :integer true)
+    :unit (unit-shape :reject true))
+  (value-kind :name jump-mode
+    :description "Which end of each stair tread jumps (CSS steps() semantics subset)."
+    :underlying symbol
+    :members (member-set
+      (member :name start)
+      (member :name end)))
+  (value-kind :name bezier-points
+    :description "CSS cubic-bezier control points [x1 y1 x2 y2]; x1/x2 must lie in [0,1] (checked at ease compile)."
+    :underlying vector
+    :vector (vector-shape :len 4 :element plain-number))
+  (value-kind :name damping-ratio
+    :description "Spring damping ratio in (0,1]: 1 = critically damped, lower = bouncier. Zero never settles and is rejected at ease compile."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 1)
+    :unit (unit-shape :reject true))
+  (value-kind :name period-count
+    :description "Spring oscillation count over the segment."
+    :underlying number
+    :numeric (numeric-bounds :min 0.5 :max 16)
+    :unit (unit-shape :reject true))
+
+  ; ---- positional head-sets ----
+  ; Each of these narrows a positional slot to a closed head set; the
+  ; bodies for `key` and `stage` are declared LOCAL to their parent form
+  ; (the §5.2 closed-positional-set recipe), so those two heads exist
+  ; nowhere but inside a (track …) / (seq …).
+  (value-kind :name key-section
+    :description "Keyframe children of (track …)."
+    :underlying form
+    :heads (head-set :names [key]))
+  (value-kind :name stage-section
+    :description "Stage children of (seq …)."
+    :underlying form
+    :heads (head-set :names [stage]))
+  (value-kind :name scene-section
+    :description "Track and trigger children of (scene …); both resolve their positions scene-relative."
+    :underlying form
+    :heads (head-set :names [track trigger]))
+
+  ; =====================================================================
+  ; Top-level forms
+  ; =====================================================================
+
+  (form :name target
+    :description "Compose-mode target declaration: names an animatable property so the score compiles, is corpus-tested, and lints standalone without a host. At load, declared targets MERGE with the host registries — a name the host also provides is host-authoritative (its arity must agree, else target_arity_mismatch; the declared :registry is ignored), and a declared-only name is appended to the join under its :registry. :name and :arity are schema-optional so a missing one — or a duplicate :name — surfaces as target_decl_invalid (with a span)."
+    (key :name name :type target-name :optional true
+      :description "Target identifier, joined by name against the host registries.")
+    (key :name arity :type target-arity :optional true
+      :description "Component count (1..4); must match the host's if the host also provides this name.")
+    (key :name registry :type registry-index :optional true :default 0
+      :description "Registry index for a declared-only target. Ignored for a name the host already provides (host-authoritative)."))
+
+  (form :name transport
+    :description "Global clock: tempo, meter, duration, end behavior. One per score."
+    (key :name bpm :type bpm-value
+      :description "Beats per minute.")
+    (key :name meter :type meter-pair :optional true :default [4 4]
+      :description "Time signature. One bar = one tick-grid cycle.")
+    (key :name dur :type time-pos :optional true
+      :description "Score length. Required when :end is loop.")
+    (key :name end :type end-behavior :optional true :default hold
+      :description "Playhead behavior past :dur.")
+    (key :name emit :type emit-lanes :optional true
+      :description "Reserved time names (beat, bar, phase, bpm, t) broadcast as write lanes, each resolved against the host registries by that exact name. Emitted lanes land before track writes, so an explicit (track …) on the same target overrides an emitted lane; controls still land last."))
+
+  ; A tempo change opens a new transport segment; segment 0 is the
+  ; transport's own :bpm at tick 0. Only the seconds↔ticks projection
+  ; moves — b/bar positions are exact integer ticks regardless of the
+  ; map. :at/:bpm are schema-optional so a missing key — like a
+  ; non-positive, seconds-unit, descending, or duplicate :at — surfaces
+  ; as a pacer tempo_map_invalid diagnostic (with a span), not a bare
+  ; SJON error (the scene/trigger discipline).
+  (form :name tempo
+    :description "A tempo change: from :at onward the transport runs at :bpm, until the next (tempo …) or the end of the score. One form per change, strictly ascending in document order."
+    (key :name at :type time-pos :optional true
+      :description "Segment start: > 0, b/bar units only (an s position would need the map being defined), strictly ascending across (tempo …) forms.")
+    (key :name bpm :type bpm-value :optional true
+      :description "Tempo in effect from :at onward. Fractional tempi are legal."))
+
+  (form :name scene
+    :description "A named window [at, at+dur) on the transport tick grid; child tracks and triggers resolve their positions scene-relative. Scenes may overlap and hand a target off by write order. :name/:at/:dur are schema-optional so a scene missing any surfaces as a pacer scene_invalid diagnostic (with a span), not a bare SJON missing-key error."
+    :positional scene-section
+    (key :name name :type scene-name :optional true
+      :description "Scene identifier; unique per score.")
+    (key :name at :type time-pos :optional true
+      :description "Window start on the transport grid; beats/bars convert exactly.")
+    (key :name dur :type time-pos :optional true
+      :description "Window length; the child tracks play over [at, at+dur)."))
+
+  (form :name track
+    :description "One animated target with exactly one value source: keyframe children interpolated with easing programs, XOR an :expr evaluated every frame, XOR a :pattern queried on the bar grid. Hosts receive final values and never interpolate."
+    :positional key-section
+    ; Slot-local: a keyframe is only ever a child of a track, so its body
+    ; is declared here rather than promoted to a plugin-global head.
+    (form :name key
+      :description "A keyframe. Before the first key a track holds its first value; after the last, its last."
+      (key :name at :type time-pos
+        :description "Position on the shared tick grid; beats/bars convert exactly, seconds via one documented mul+floor.")
+      (key :name value :type key-value
+        :description "Value reached exactly at :at.")
+      (key :name ease :type ease-spec :optional true :default linear
+        :description "Easing applied over the segment ENDING at this key."))
+    (key :name target :type target-name
+      :description "Resolved at load() against the ordered host registries; unresolved names are a load diagnostic, not a schema error.")
+    ; :walk-opaque — the validator never descends into the expression;
+    ; its interior is SJON Expr vocabulary, checked by the compile-time
+    ; dry-run at t=0 (spans on failure), not by this schema.
+    (key :name expr :type any :optional true :walk-opaque true
+      :description "Expression evaluated each frame with the time env bound (t, tick, beat, bar, cycle, phase, bpm, dur) plus every (control …) id. Must yield a finite number or an ncomp-component numeric vector. Exclusive with (key …) children and :pattern.")
+    ; :walk-opaque — same discipline as :expr: the interior is SJON
+    ; Pattern vocabulary (euclid, fastcat, pure, …), checked by the
+    ; compile-time dry-run (spans on failure), not by this schema.
+    (key :name pattern :type any :optional true :walk-opaque true
+      :description "Pattern queried each frame on the shared tick grid, 1 cycle = 1 bar. At tick T the hap active at T with the latest onset supplies the value; no active hap omits the write. Exclusive with (key …) children and :expr.")
+    ; at-most-one, not exactly-one: the THIRD source is (key …) children,
+    ; which a group counts nothing of. So keys-vs-:expr, keys-vs-:pattern
+    ; and "no source at all" stay pacer diagnostics (track_source_conflict
+    ; / track_empty); the one pairing a count can see lives here.
+    (exclusive-group :cardinality at-most-one
+      (alt :keys [expr])
+      (alt :keys [pattern])))
+
+  (form :name trigger
+    :description "An event lane. At each frame it finds the last scheduled event <= the playhead and writes (phase, count, gate, beats-since) lanes truncated to the target's ncomp. The schedule is EITHER periodic (:every, phased by optional :offset) XOR an explicit ascending :at list — both keys are schema-optional so a missing/duplicated source, a non-positive :every, or an empty/unsorted :at surface as a pacer trigger_invalid diagnostic (with a span), not a bare SJON error."
+    (key :name target :type target-name
+      :description "Resolved at load() against the ordered host registries, like a track's target.")
+    (key :name every :type time-pos :optional true
+      :description "Periodic interval between events; must be > 0 ticks. Exclusive with :at.")
+    (key :name offset :type time-pos :optional true :requires [every]
+      :description "Phase of the periodic schedule — event k lands at :offset + k*:every; defaults to 0. That default is the one this manifest cannot declare: a :default is unit-free, and dropping the unit off a time-pos would be silent — so it lives in Compile.zig. Meaningless without :every, hence :requires — an :offset beside an explicit :at is dependent_key_missing, not a silent no-op.")
+    (key :name at :type time-pos-list :optional true
+      :description "Explicit event positions, strictly ascending in time. Exclusive with :every.")
+    ; The source COUNT is the schema's: neither is required_one_of_missing,
+    ; both is mutually_exclusive_keys_present. What a count cannot see —
+    ; a non-positive :every, an empty / unsorted / tied :at — stays a pacer
+    ; trigger_invalid.
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [every])
+      (alt :keys [at])))
+
+  ; Discriminated on :type — the widget decides which keys EXIST. A range
+  ; is meaningful for a slider and an xy pad and meaningless for a colour
+  ; picker, so `:min`/`:max` live in the variant those two values select;
+  ; on a `color` control they are unknown_key rather than 'PACM' noise.
+  ; An omitted :type resolves through its `:default slider` (effective
+  ; axis D), so the common spelling `(control :id k :min 0 :max 1 :value
+  ; …)` keeps working — but an EXPLICIT :type must be written before the
+  ; range keys, since the validator selects the variant as it reaches the
+  ; discriminant kvpair.
+  (form :name control :discriminant type
+    :description "A pinned editor widget — pins ARE text. :value is the document authority: written to :target every frame while the control is idle, and bound under :id in every track expression. A live drv_setControl override wins until drv_clearControl returns authority to the document. Control writes land after track writes; consumers apply entries in order, so a pin outranks a track on the same target."
+    (key :name id :type control-id
+      :description "Binding name in the expression environment.")
+    (key :name type :type control-type :optional true :default slider
+      :description "Editor widget hint, and the discriminant: slider and xy carry :min/:max, color does not. Write it BEFORE :min/:max — a variant key ahead of its discriminant is unknown_key.")
+    (key :name target :type target-name :optional true
+      :description "Optional write target, resolved like a track's. Without one the control only feeds expressions (a virtual knob).")
+    (variant :when [slider xy]
+      (key :name min :type key-value :optional true
+        :description "Widget range floor — editor metadata; the driver never clamps. Arity must match :value.")
+      (key :name max :type key-value :optional true
+        :description "Widget range ceiling — editor metadata; the driver never clamps. Arity must match :value."))
+    (key :name value :type key-value
+      :description "Document value: scalar or 1-4 component vector. Its byte span rides in drv_meta so the editor can commit a drag back to text."))
+
+  ; ---- easing combinator forms ----
+  (form :name seq
+    :description "Stages concatenated in time and value acting as one easing: :t/:v weights are normalized at compile so the program still lands exactly on the key value."
+    :positional stage-section
+    ; Slot-local, like (track …)'s (key …): a stage exists only inside a seq.
+    (form :name stage
+      :description "One (seq …) stage."
+      (key :name ease :type ease-spec
+        :description "Easing shaping this stage (nesting depth is capped at compile).")
+      (key :name t :type stage-weight
+        :description "Relative time weight.")
+      (key :name v :type plain-number
+        :description "Relative value span; may be negative (the pull-back of a bounce).")))
+
+  (form :name chain
+    :description "Function composition: (chain E1 E2) evaluates E2(E1(u)). For shaping, e.g. quantizing a spring through steps."
+    :positional ease-spec)
+
+  (form :name steps
+    :description "Stair-step easing."
+    (key :name n :type step-count)
+    (key :name jump :type jump-mode :optional true :default end
+      :description "Which end of the tread jumps."))
+
+  (form :name cubic-bezier
+    :description "CSS cubic-bezier(): solved by fixed-count bisection (bit-exact, no epsilon early-exit)."
+    (key :name p :type bezier-points))
+
+  (form :name spring
+    :description "Closed-form damped cosine settling exactly on the key value at u=1."
+    (key :name damping :type damping-ratio)
+    (key :name periods :type period-count :optional true :default 3
+      :description "Oscillation count over the segment."))
+)

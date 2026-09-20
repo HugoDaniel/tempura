@@ -1,0 +1,9 @@
+; The hosted `(module …)` core tier — the Impulse Tracker vocabulary with
+; its 08-25 amendments (P99, plan 02; the it set's 02).
+;
+; STUB. Embedded through the `it_schema` build import. Owner-of-record
+; note: this manifest restates the it set's, whose repo (batida) does not
+; exist yet; when it does, one owner is picked per manifest (plan 01,
+; "Two sibling repos, one owner per file").
+
+(plugin :name it)

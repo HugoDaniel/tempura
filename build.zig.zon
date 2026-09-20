@@ -1,0 +1,22 @@
+.{
+    .fingerprint = 0xa26946ceadbdb1e8,
+    .name = .tempura,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // SJON: the substrate — parser, validator, `Expr`, the `Pattern`
+        // tick core, `Edit`. Path dependency on the sibling checkout,
+        // pacer's arrangement (`../pacer/build.zig.zon`), consumed with
+        // `plugin-exec = false` (see build.zig) so nothing links
+        // libwasmtime.
+        .sjon = .{
+            .path = "../SJON",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "schema",
+    },
+}

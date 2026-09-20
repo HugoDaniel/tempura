@@ -1,0 +1,11 @@
+; The golden-corpus harness vocabulary — the shape of a case's input
+; manifest (P107, plan 09; pacer's `schema/pacer-corpus.sjon` idiom).
+;
+; STUB. Embedded through the `corpus_schema` build import and preloaded
+; once per walk by `src/corpus_runner.zig`. It is NEVER composed with the
+; timeline vocabulary into one bundle, and stays out of `sjon-project.sjon`
+; for the reason pacer's does: one project file means one composed
+; vocabulary, and a head declared twice is `ambiguous_form` in both file
+; kinds.
+
+(plugin :name tempura-corpus)

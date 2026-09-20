@@ -1,0 +1,9 @@
+; The hosted `(smf …)` core tier — the SMF vocabulary, core forms only
+; (P99, plan 02; the midi set's 02).
+;
+; STUB. Embedded through the `midi_schema` build import. Owner-of-record
+; note: this manifest restates the midi set's, whose repo (midivia) does
+; not exist yet; when it does, one owner is picked per manifest (plan 01,
+; "Two sibling repos, one owner per file").
+
+(plugin :name midi)

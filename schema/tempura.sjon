@@ -1,0 +1,13 @@
+; tempura timeline schema — the `(timeline …)` vocabulary (P99, plan 02).
+;
+; STUB. The forms land with P99; this file exists so the build graph is
+; whole: it is `@embedFile`'d through the `tempura_schema` build import and
+; will be PRELOADED once per host (pacer's `src/Schema.zig` idiom), so
+; validation works on wasm32-freestanding with no filesystem and every
+; diagnostic span is a document coordinate by construction.
+;
+; No `:version` key, for pacer's reason: it exists to be pinned by a
+; `(use-plugin …)` a document never writes, and tempura's version lives in
+; `build.zig.zon` and `src/root.zig`, kept in lockstep by test.
+
+(plugin :name tempura)
