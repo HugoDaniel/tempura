@@ -119,6 +119,12 @@ pub const Retime = struct {
     sel: Select,
     delta: ?i64 = null,
     to: ?i64 = null,
+    /// Move a bound Impulse Tracker cell into (or out of) a pattern that
+    /// more than one order plays, knowing that every occurrence changes
+    /// — plan 07's `:allow-shared`. Without it such a move is
+    /// `edit_pattern_shared`. Nothing else reads it: a pattern is the
+    /// only content in this vocabulary that is played more than once.
+    allow_shared: bool = false,
 };
 
 pub const Revalue = struct {
@@ -216,6 +222,11 @@ pub const Bind = struct {
 
 pub const Unbind = struct { lane: []const u8 };
 
+/// Copy a bound lane's content into the document and take it out of the
+/// anchor's file — plan 07's `materialize`, which is plan 04's "one
+/// home" made into an operation.
+pub const Materialize = struct { lane: []const u8 };
+
 /// Every operation of plan 07's table that acts on native content.
 pub const Op = union(enum) {
     insert: Insert,
@@ -237,6 +248,7 @@ pub const Op = union(enum) {
     rename: Rename,
     bind: Bind,
     unbind: Unbind,
+    materialize: Materialize,
 };
 
 /// What `fromJson` answers: the operation, or the reasons it is not one.
@@ -327,7 +339,12 @@ const Reader = struct {
                 try self.fail("retime wants a \"delta\" or a \"to\", in ticks", .{});
                 return null;
             }
-            return .{ .retime = .{ .sel = sel, .delta = delta, .to = to } };
+            return .{ .retime = .{
+                .sel = sel,
+                .delta = delta,
+                .to = to,
+                .allow_shared = self.optBool(o.get("allow-shared")) orelse false,
+            } };
         }
         if (eql(name, "revalue")) {
             const got = self.components(o.get("value")) orelse {
@@ -458,6 +475,12 @@ const Reader = struct {
         if (eql(name, "unbind")) return .{ .unbind = .{
             .lane = try self.str(o.get("lane") orelse .null) orelse {
                 try self.fail("unbind wants a \"lane\"", .{});
+                return null;
+            },
+        } };
+        if (eql(name, "materialize")) return .{ .materialize = .{
+            .lane = try self.str(o.get("lane") orelse .null) orelse {
+                try self.fail("materialize wants a \"lane\"", .{});
                 return null;
             },
         } };
@@ -940,6 +963,29 @@ test "Op.fromJson: the payload of every operation the CLI can spell" {
         );
         defer p.deinit();
         try testing.expectEqualStrings("kick", p.op.?.unbind.lane);
+    }
+    {
+        var p = try parsed(
+            \\{"op":"materialize","lane":"kick"}
+        );
+        defer p.deinit();
+        try testing.expectEqualStrings("kick", p.op.?.materialize.lane);
+    }
+    {
+        // `:allow-shared` rides on a retime and defaults to off, which
+        // is what makes a shared-pattern move a refusal a host has to
+        // ask for again rather than one it never sees.
+        var p = try parsed(
+            \\{"op":"retime","sel":{},"delta":46126080}
+        );
+        defer p.deinit();
+        try testing.expect(!p.op.?.retime.allow_shared);
+
+        var q = try parsed(
+            \\{"op":"retime","sel":{},"delta":46126080,"allow-shared":true}
+        );
+        defer q.deinit();
+        try testing.expect(q.op.?.retime.allow_shared);
     }
 }
 

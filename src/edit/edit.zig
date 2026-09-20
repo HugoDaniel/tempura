@@ -38,6 +38,10 @@
 //!     it is reached, spliced with layout `.preserve`.
 //!   * `ops_native.zig` — every row of plan 07's table that acts on
 //!     content the document holds itself.
+//!   * `ops_bound.zig` — the front door, and the rows that act on
+//!     content an anchor's inline dump holds: the `(note-on, note-off)`
+//!     pairs and controller events of a `(midi/mtrk …)`, the `(ev …)`
+//!     cells of an `(it/pattern …)`, and `materialize`.
 //!   * `Snap.zig` / `ops_quantize.zig` — where the grid lines are, and
 //!     the two operations that move a selection onto them.
 //!   * `locate.zig` / `value.zig` — the two joins: a `Doc` node's span to
@@ -82,6 +86,8 @@
 //! {"op":"bind","lane":"pad","anchor":"song","track":1,"ch":2,"key":36}
 //! {"op":"bind","lane":"bass","anchor":"song","channel":5,"column":"vol"}
 //! {"op":"unbind","lane":"kick"}
+//! {"op":"materialize","lane":"kick"}
+//! {"op":"retime","sel":{"lanes":["lead"]},"delta":46126080,"allow-shared":true}
 //! ```
 //!
 //! `"grid"` is `1/4`, `1/8`, `1/12`, `1/16`, `1/32`, `1bar` or `1b`.
@@ -144,7 +150,7 @@ pub const plan = ops_bound.plan;
 /// `plan` for a caller that already holds the document's map — the one
 /// `doc.fromSource` returned. The map is the DOCUMENT LAYER's
 /// (`doc.fromSjon.mapOf`), and handing it in saves deriving it twice.
-pub const planWith = ops_native.planWith;
+pub const planWith = ops_bound.planWith;
 /// Apply a plan to a document's bytes, layout preserved.
 pub const apply = apply_file.apply;
 /// What `apply` returns.

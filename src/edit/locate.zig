@@ -46,6 +46,21 @@ pub const Site = struct {
         try out.append(gpa, ']');
     }
 
+    /// `self` with one more positional step, the path copied into `a`.
+    ///
+    /// The way an address is built where the `Doc` carries no span to
+    /// match on: an inline dump's events and cells are not `Doc` nodes
+    /// (a `Sequence` and a `Module` are values read OUT of the tree), so
+    /// `ops_bound` walks the tree's own positional children and descends
+    /// step by step — a `(midi/mtrk …)` root to its event, an
+    /// `(it/module …)` root to a pattern, a row and an `(ev …)` cell.
+    pub fn child(self: Site, a: std.mem.Allocator, index: u32) Error!Site {
+        const path = try a.alloc(u32, self.path.len + 1);
+        @memcpy(path[0..self.path.len], self.path);
+        path[self.path.len] = index;
+        return .{ .root = self.root, .path = path };
+    }
+
     /// Document order between two addresses: root, then path, a prefix
     /// before what extends it. The one total order every sequencing
     /// question here is asked in.
@@ -58,6 +73,30 @@ pub const Site = struct {
         return std.math.order(a.path.len, b.path.len);
     }
 };
+
+/// The positional children of a form, in order: element `i` is the node
+/// the path step `i` names.
+///
+/// Positional counting skips the keyword pairs, which is SJON's own rule
+/// (`Edit.nodeTable`'s `pushChildren`, §11.2) and the reason this cannot
+/// be `formHeader(form).children` with a filter at each call site: a
+/// `(row 2 (ev 1 …))` has the row NUMBER at step 0 and the cell at step
+/// 1, and an off-by-one there addresses the wrong node rather than
+/// failing.
+pub fn positional(
+    a: std.mem.Allocator,
+    tree: *const sjon.Ast.Tree,
+    form: sjon.Ast.NodeIndex,
+) Error![]const sjon.Ast.NodeIndex {
+    if (tree.tagOf(form) != .form) return &.{};
+    var out: std.ArrayList(sjon.Ast.NodeIndex) = .empty;
+    errdefer out.deinit(a);
+    for (tree.formHeader(form).children) |child| {
+        if (tree.tagOf(child) == .kvpair) continue;
+        try out.append(a, child);
+    }
+    return out.toOwnedSlice(a);
+}
 
 /// A node, its address, and the slot it occupies in whatever holds it.
 pub const Where = struct {
@@ -239,4 +278,39 @@ test "locate: Site.order is document order, a prefix before what extends it" {
     try testing.expectEqual(std.math.Order.lt, Site.order(c, d));
     try testing.expectEqual(std.math.Order.eq, Site.order(a, a));
     try testing.expectEqual(std.math.Order.gt, Site.order(c, b));
+}
+
+test "locate: a positional walk skips the keyword pairs, so a step is a step" {
+    const gpa = testing.allocator;
+    const source: [:0]const u8 =
+        \\(it/module :title "bound"
+        \\  (it/timing :speed 24)
+        \\  (it/pattern 0 :rows 4
+        \\    (row 2 (ev 1 "E-5" :ins 1))))
+        \\
+    ;
+    var tree = try sjon.parse(gpa, source);
+    defer tree.deinit();
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const module = tree.root[0];
+    const kids = try positional(a, &tree, module);
+    // `:title` is not a step: the timing form is step 0 and the pattern
+    // is step 1.
+    try testing.expectEqual(@as(usize, 2), kids.len);
+
+    const pattern = kids[1];
+    const rows = try positional(a, &tree, pattern);
+    // The pattern's NUMBER is step 0 and the row is step 1.
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    const cells = try positional(a, &tree, rows[1]);
+    try testing.expectEqual(@as(usize, 2), cells.len);
+    try testing.expectEqualStrings("ev", tree.formHeader(cells[1]).head);
+
+    const site = try (try (Site{ .root = 0, .path = &.{} }).child(a, 1)).child(a, 1);
+    const cell = try site.child(a, 1);
+    try testing.expectEqualSlices(u32, &.{ 1, 1, 1 }, cell.path);
 }

@@ -128,6 +128,11 @@ const Ctx = struct {
             .rename => |x| try self.rename(x),
             .bind => |x| try self.bind(x),
             .unbind => |x| try self.unbind(x),
+            // The one operation of plan 07's table that reads an
+            // anchor's events: `ops_bound` takes it before this file is
+            // reached, and a caller that came straight here is told so
+            // rather than handed a silent no-op.
+            .materialize => |x| try self.materializeElsewhere(x),
             // Both are a `retime` with a rule for where to, and the
             // rule is `ops_quantize`'s.
             .quantize => |x| try self.quantize(x),
@@ -1515,10 +1520,6 @@ const Ctx = struct {
 
     // ---- binding ----
 
-    /// The keys an address can put on a lane, in the order the schema
-    /// declares them — the set `unbind` takes off again.
-    const address_keys = [_][]const u8{ "track", "ch", "key", "cc", "bend", "pressure", "velocity", "channel", "column", "fx" };
-
     fn bind(self: *Ctx, x: Op.Bind) Error!void {
         const li = self.laneByName(x.lane) orelse {
             try self.b.refuse(.edit_range_empty, .{ .start = 0, .end = 0 }, "no lane is named {s}", .{x.lane});
@@ -1568,6 +1569,20 @@ const Ctx = struct {
         }
     }
 
+    /// `materialize` belongs to `ops_bound.zig`, which is the front
+    /// door every host comes through (`edit.plan`). This entry point
+    /// plans NATIVE content, and a lane's native content is exactly what
+    /// materialize does not have yet.
+    fn materializeElsewhere(self: *Ctx, x: Op.Materialize) Error!void {
+        const span = if (self.laneByName(x.lane)) |li| self.d.lanes[li].span else Diag.Span{ .start = 0, .end = 0 };
+        try self.b.refuse(
+            .sjon_diagnostic,
+            span,
+            "materialize reads an anchor's events; plan it through edit.plan, which routes it to ops_bound",
+            .{},
+        );
+    }
+
     fn unbind(self: *Ctx, x: Op.Unbind) Error!void {
         const li = self.laneByName(x.lane) orelse {
             try self.b.refuse(.edit_range_empty, .{ .start = 0, .end = 0 }, "no lane is named {s}", .{x.lane});
@@ -1597,6 +1612,12 @@ const Ctx = struct {
         }
     }
 };
+
+/// The keys an address can put on a lane, in the order the schema
+/// declares them — the set `unbind` takes off again, and the set
+/// `ops_bound.materialize` takes off with it. Shared so the two cannot
+/// drift apart into two answers about one lane.
+pub const address_keys = [_][]const u8{ "track", "ch", "key", "cc", "bend", "pressure", "velocity", "channel", "column", "fx" };
 
 fn bySlot(_: void, x: Child, y: Child) bool {
     return x.slot < y.slot;

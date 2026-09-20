@@ -51,6 +51,34 @@ pub const Fixture = struct {
         };
     }
 
+    /// Load `source` WITHOUT the clean-document assertion.
+    ///
+    /// For the two guards that only a defective document can reach: a
+    /// lane that carries its own content BESIDE a `:from` is
+    /// `bound_lane_has_content` at load, and `unbind` and `materialize`
+    /// refuse it with `edit_would_duplicate` — a plan is total over
+    /// whatever document a host hands it, including one it has already
+    /// complained about.
+    pub fn initUnchecked(gpa: std.mem.Allocator, source: [:0]const u8) !Fixture {
+        var schema = try Schema.load(gpa);
+        errdefer schema.deinit();
+
+        var loaded = try doc.fromSource(gpa, &schema, source, null);
+        errdefer loaded.deinit();
+
+        var tree = try sjon.parse(gpa, source);
+        errdefer tree.deinit();
+        if (tree.hasErrors()) return error.FixtureSourceHasErrors;
+
+        return .{
+            .gpa = gpa,
+            .source = source,
+            .schema = schema,
+            .loaded = loaded,
+            .tree = tree,
+        };
+    }
+
     pub fn deinit(self: *Fixture) void {
         self.tree.deinit();
         self.loaded.deinit();
@@ -176,5 +204,87 @@ pub const crossing: [:0]const u8 =
     \\(lane :name flash
     \\  (note :at 0.4q :dur 0.1q :key 36)
     \\  (note :at 0.6q :dur 0.1q :key 36))
+    \\
+;
+
+/// A document whose one anchor is an INLINE `.mid` — the shape every
+/// bound SMF operation is exercised against (plan 07, "Bound content,
+/// precisely").
+///
+/// One track at 480 PPQ with three notes on channel 1 and a controller
+/// the `filter` lane reads: a note whose neighbours leave it room to
+/// move in place, one that has to cross the controller and the third
+/// note to reach its destination, and two `(control-change …)` events so
+/// a curve lane has steps of its own. The comment above the downbeat is
+/// there to be watched: a move that keeps the sorted order keeps it, and
+/// one that does not takes it along (plan 07's risk note).
+pub const bound_smf: [:0]const u8 =
+    \\; bound — the SMF fixture
+    \\(timeline :title "bound" :conductor song :length 2bar)
+    \\
+    \\(anchor :id song :kind smf :file "x.mid")
+    \\(midi/smf :format 0 :division 480)
+    \\(midi/mtrk
+    \\  (set-tempo      :at 0    :us 500000)
+    \\  (control-change :at 0    :ch 1 :num 74 :val 10)
+    \\  ; the downbeat
+    \\  (note-on        :at 0    :ch 1 :key 36 :vel 100)
+    \\  (note-off       :at 240  :ch 1 :key 36 :vel 64)
+    \\  (note-on        :at 480  :ch 1 :key 38 :vel 90)
+    \\  (note-off       :at 720  :ch 1 :key 38 :vel 64)
+    \\  (control-change :at 960  :ch 1 :num 74 :val 100)
+    \\  (note-on        :at 960  :ch 1 :key 41 :vel 80)
+    \\  (note-off       :at 1200 :ch 1 :key 41 :vel 64)
+    \\  (end-of-track   :at 1920))
+    \\
+    \\(lane :name kick :kind notes :from song :track 1 :ch 1)
+    \\(lane :name filter :kind curve :from song :track 1 :ch 1 :cc 74)
+    \\
+;
+
+/// The SMF fixture with the binding and content plan 04 forbids on one
+/// lane. It does not validate — `bound_lane_has_content` — and it is
+/// loaded with `Fixture.initUnchecked`, because the two operations that
+/// refuse `edit_would_duplicate` are exactly the ones a valid document
+/// can never put the question to.
+pub const bound_smf_two_homes: [:0]const u8 =
+    \\(timeline :title "bound" :conductor song :length 2bar)
+    \\
+    \\(anchor :id song :kind smf :file "x.mid")
+    \\(midi/smf :format 0 :division 480)
+    \\(midi/mtrk
+    \\  (note-on      :at 0   :ch 1 :key 36 :vel 100)
+    \\  (note-off     :at 240 :ch 1 :key 36 :vel 64)
+    \\  (end-of-track :at 1920))
+    \\
+    \\(lane :name kick :kind notes :from song :track 1 :ch 1
+    \\  (note :at 0q :dur 0.5q :key 36 :vel 100))
+    \\
+;
+
+/// A document whose one anchor is an INLINE `.it`, with a SHARED
+/// pattern: the order list plays pattern 2 twice, so a cell moved into
+/// it sounds at both places — plan 07's `edit_pattern_shared`.
+///
+/// Speed 24 makes a row one quarter note exactly (24 IT ticks · 1 921 920
+/// = TPQ), so every position a test asks for is a round musical number.
+/// The first cell carries an effect, the second carries none: one has no
+/// room for the `SDx` a sub-row move needs and the other does.
+pub const bound_it: [:0]const u8 =
+    \\; bound — the IT fixture
+    \\(timeline :title "bound" :conductor mod :length 4bar)
+    \\
+    \\(anchor :id mod :kind it :file "x.it")
+    \\(it/module :title "bound"
+    \\  (it/timing :speed 24 :tempo 125)
+    \\  (it/orders 0 1 2 2 end)
+    \\  (it/pattern 0 :rows 4
+    \\    (row 0 (ev 1 "C-5" :ins 1 :vol 64 :fx "G01"))
+    \\    (row 2 (ev 1 "E-5" :ins 1)))
+    \\  (it/pattern 1 :rows 4
+    \\    (row 0 (ev 1 "G-5" :ins 1)))
+    \\  (it/pattern 2 :rows 4))
+    \\
+    \\(lane :name lead :kind notes :from mod :channel 1)
     \\
 ;
