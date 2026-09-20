@@ -47,6 +47,12 @@ pub const bridge_it = @import("bridge_it.zig");
 /// The skeleton: the timeline tier a file with no residue derives.
 pub const skeleton = @import("skeleton.zig");
 
+/// The `dump` pipeline: a `.mid` or a `.it` in, a document out — the
+/// one file in this part that sits ABOVE it (it reaches into
+/// `residue/` and both format cores), because an assembly needs every
+/// layer at once.
+pub const pipeline = @import("pipeline.zig");
+
 // ---- the value ----
 
 /// The timeline as a value.
@@ -113,4 +119,5 @@ test {
     _ = bridge_smf;
     _ = bridge_it;
     _ = skeleton;
+    _ = pipeline;
 }

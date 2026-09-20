@@ -264,14 +264,25 @@ pub fn detach(gpa: Allocator, seq: *const Sequence.Sequence) Error!Detached {
         try b.addForeign(ch.tag, try b.addBytes(seq.bytesOf(ch.bytes)));
     }
 
+    // BEFORE the struct literal, and deliberately: a field initialiser
+    // runs in order, so `.arena = arena` would COPY the arena's state
+    // and a `reassemble` after it could grow the original with a buffer
+    // the copy never hears about — which is a leak of everything on that
+    // buffer. `reconcile`'s round trip is what found it (a real essence
+    // is kilobytes and needs a second buffer; the 21-byte one here did
+    // not), and `it.zig`'s `parseChunk` has always hoisted it for the
+    // same reason.
+    const essence_body = try records.reassemble(a, parts.items, &diags);
+    const sequence = try b.finish();
+
     return .{
         .arena = arena,
         .payloads = .{
-            .essence = try records.reassemble(a, parts.items, &diags),
+            .essence = essence_body,
             .conductor = conductor,
             .lanes = lanes.items,
         },
-        .sequence = try b.finish(),
+        .sequence = sequence,
         .diags = diags,
     };
 }

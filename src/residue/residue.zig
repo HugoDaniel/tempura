@@ -19,7 +19,9 @@
 //!      tail.
 //!
 //! Reconciliation — what a `dump` does with what it finds — is plan 04's
-//! fifth phase and is NOT here.
+//! fifth phase, `reconcile.zig`: the five rules over a file and its
+//! carrier, producing the timeline tier text a dump prepends to the
+//! file's own. The assembly and the re-load are `doc/pipeline.zig`'s.
 
 const std = @import("std");
 
@@ -35,6 +37,10 @@ pub const smf = @import("smf.zig");
 /// The IT carriers: the `TMPU` chunk and the message tail.
 pub const it = @import("it.zig");
 
+/// Plan 04's five reconciliation rules, over a file and what its carrier
+/// held.
+pub const reconcile = @import("reconcile.zig");
+
 /// This part's error set: only resource exhaustion. Every defect of a
 /// payload is a diagnostic or a returned variant, never a Zig error.
 pub const Error = error{OutOfMemory};
@@ -44,4 +50,5 @@ test {
     _ = records;
     _ = smf;
     _ = it;
+    _ = reconcile;
 }
