@@ -45,12 +45,21 @@ pub const itf = @import("itf/itf.zig");
 /// tempo and meter maps.
 pub const time = @import("time/time.zig");
 
+/// The document value (P102): `Doc`, `fromSjon`, `toSjon`, the resolver, the
+/// midi and it bridges and the skeleton.
+pub const doc = @import("doc/doc.zig");
+
+/// The residue (P104): the essence, the records and the two carriers.
+pub const residue = @import("residue/residue.zig");
+
 test {
     _ = Diag;
     _ = Schema;
     _ = smf;
     _ = itf;
     _ = time;
+    _ = doc;
+    _ = residue;
     // Not part of the `tempura` module — the corpus runner is its own
     // executable root, built against these same sources — but its
     // harness vocabulary, its canonical renderer and its verdict earn
