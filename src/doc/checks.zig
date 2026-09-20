@@ -27,11 +27,14 @@ pub const Error = error{OutOfMemory};
 /// (plan 02, "(anchor …)"; the controller's ruling on the two optional
 /// keys).
 ///
-/// An INLINE dump carries its own bytes and asks nothing of a
-/// filesystem, so it is left alone — reading that dump is the anchored
-/// half's work. A BY-REFERENCE anchor is read only when the host handed
-/// the bridge a resolver: without one nothing was asked of anybody, and
-/// the anchor is recorded unresolved in silence.
+/// An INLINE dump's anchor is left alone HERE and verified where its
+/// dump is read instead (`fromSjon.Ctx.verifiedAnchorBytes`): an
+/// `(it/module …)` keeps each opaque body as a `(bin :at :len)` into the
+/// anchor's file, so those bytes are honoured after all and the check
+/// belongs beside the offsets it guards, once per dump. A BY-REFERENCE
+/// anchor is read only when the host handed the bridge a resolver:
+/// without one nothing was asked of anybody, and the anchor is recorded
+/// unresolved in silence.
 ///
 /// Sets `anchor.resolved` on success. Either way the anchor stays in
 /// the document: it is recorded, and what could not be verified is said

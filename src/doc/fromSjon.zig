@@ -166,6 +166,39 @@ pub fn fromSource(
     return .{ .doc = doc, .diags = diags, .map = map };
 }
 
+/// Where a document's content ends — plan 02's `:length` default before
+/// the round-up: "the end of the last event or clip".
+///
+/// This is the rule `Ctx.max_end` accumulates while the walk resolves
+/// each form, stated over a FINISHED value so that a consumer holding a
+/// `Doc` and no tree computes the same number: a native note's
+/// `at + dur`, a keyframe's `at`, and a clip's whole WINDOW whether or
+/// not anything sounds in it (`checks.clipPlacement`'s own arithmetic).
+/// A phrase's own lanes count for nothing — they sound where a clip puts
+/// them and the clip's window already says where that is — and a bound
+/// lane's content counts for nothing either, because it is the ANCHOR's
+/// material and the document did not place it.
+///
+/// `time/derive.zig` calls this rather than keeping a second copy of the
+/// rule: the map that layer builds for a document has to be the map this
+/// one built for it, and one function is how that stays true.
+///
+/// Saturating throughout: every term is user arithmetic.
+pub fn contentEnd(doc: *const Doc.Doc) i64 {
+    var end: i64 = 0;
+    for (doc.lanes) |lane| {
+        for (lane.notes) |n| end = @max(end, n.at +| n.dur);
+        for (lane.keyframes) |k| end = @max(end, k.at);
+        for (lane.clips) |c| {
+            const phrase = doc.phraseByName(c.phrase) orelse continue;
+            const window = c.length orelse
+                (phrase.length *| @as(i64, c.repeat)) -| c.offset;
+            end = @max(end, c.at +| @max(0, window));
+        }
+    }
+    return end;
+}
+
 // ---------------------------------------------------------------------
 // The walk
 // ---------------------------------------------------------------------
@@ -267,6 +300,9 @@ const Ctx = struct {
     cond_tempo: []Doc.TempoPoint = &.{},
     cond_meter: []Doc.MeterPoint = &.{},
     cond_live: bool = false,
+    /// Where the conductor's own material ends — `max_end`'s other half
+    /// for an anchored document (see `Conductor.end`).
+    cond_end: i64 = 0,
 
     fn emit(
         self: *Ctx,
@@ -511,11 +547,17 @@ const Ctx = struct {
     /// reported once, not once per derive.
     fn finalMap(self: *Ctx, doc: *const Doc.Doc) Error!TimeMap.TimeMap {
         const length = doc.length orelse len: {
-            if (self.max_end <= 0) break :len 0;
-            var probe = try self.derive(self.max_end);
+            // A conducted document's events are its ANCHOR's, so the
+            // file's own end counts alongside what the document placed
+            // (`Conductor.end`). `time/derive.zig` adds the same two
+            // terms, and its agreement test pins that the two layers
+            // give one document one map.
+            const content = @max(self.max_end, self.cond_end);
+            if (content <= 0) break :len 0;
+            var probe = try self.derive(content);
             defer probe.deinit();
             const bars = probe.map.bars;
-            break :len if (bars.len == 0) self.max_end else bars[bars.len - 1];
+            break :len if (bars.len == 0) content else bars[bars.len - 1];
         };
 
         var final = try self.derive(length);
@@ -747,6 +789,10 @@ const Ctx = struct {
             else
                 continue;
             const roots = dump_roots[dump.start..][0..dump.len];
+            // Once per dump, before either bridge runs: the anchor's own
+            // claim about its file is checked whether or not this tier
+            // has offsets to honour against it.
+            const anchor_bytes = try self.verifiedAnchorBytes(doc, anchor_id);
 
             switch (dump.kind) {
                 .smf => {
@@ -759,12 +805,7 @@ const Ctx = struct {
                     try midi.append(self.a, .{ .anchor = anchor_id, .sequence = read.sequence });
                 },
                 .it => {
-                    var read = try bridge_it.formsToModule(
-                        self.gpa,
-                        self.tree,
-                        roots,
-                        self.anchorBytes(doc, anchor_id),
-                    );
+                    var read = try bridge_it.formsToModule(self.gpa, self.tree, roots, anchor_bytes);
                     defer read.diags.deinit();
                     errdefer read.module.deinit();
                     for (read.diags.items()) |d| {
@@ -780,22 +821,73 @@ const Ctx = struct {
         doc.it = try it.toOwnedSlice(self.a);
     }
 
-    /// The anchor's bytes, VERIFIED, or null.
+    /// The anchor's bytes, VERIFIED, or null — and a diagnostic at the
+    /// anchor's span whenever they could not be.
     ///
-    /// An inline `(it/module …)` still points at the anchor's file for
-    /// every opaque region it keeps (it 03, "The anchor"), and those
-    /// offsets "are only meaningful against this exact file". So the
-    /// verification is done here rather than left to `checks.anchorBytes`,
-    /// which deliberately asks nothing of a filesystem for an anchor
-    /// whose dump is inline. Unverifiable is the same as unavailable: the
-    /// bridge is handed nothing and honours no offset against it.
-    fn anchorBytes(self: *const Ctx, doc: *const Doc.Doc, id: Doc.AnchorId) ?[]const u8 {
-        const anchor = doc.anchorById(id) orelse return null;
+    /// `checks.anchorBytes` deliberately leaves an anchor whose dump is
+    /// INLINE alone, on the reading that such a dump "carries its own
+    /// bytes and asks nothing of a filesystem". That is true of a
+    /// `(midi/smf …)`, whose every byte is in the document, and false of
+    /// an `(it/module …)`, which keeps each opaque body as a `(bin :at
+    /// :len)` into the anchor's file (it 03, "The anchor": an offset "is
+    /// only meaningful against this exact file"). Plan 02 admits no
+    /// difference — `:size` and `:sha256` are "verified before any
+    /// `(bin …)` or bound lane is honoured (`anchor_mismatch`, never a
+    /// silent re-read)" — so an inline anchor is verified HERE, once, for
+    /// either tier, and what could not be verified is said out loud
+    /// rather than silently dropped.
+    ///
+    /// The one silence left is plan 02's own: with no resolver nothing
+    /// was asked of anybody, so nothing is reported and no offset is
+    /// honoured either.
+    fn verifiedAnchorBytes(self: *Ctx, doc: *Doc.Doc, id: Doc.AnchorId) Error!?[]const u8 {
+        var anchor: *Doc.Anchor = for (doc.anchors) |*a| {
+            if (std.mem.eql(u8, a.id, id)) break a;
+        } else return null;
         const r = self.resolver orelse return null;
-        const bytes = r.read(anchor.file) orelse return null;
-        const size = anchor.size orelse return null;
-        const digest = anchor.sha256 orelse return null;
-        return if (Resolver.verify(bytes, size, digest)) bytes else null;
+
+        const bytes = r.read(anchor.file) orelse {
+            try self.diags.add(
+                .anchor_unavailable,
+                .err,
+                anchor.span,
+                "no resolver could read \"{s}\", so this dump's offsets name nothing",
+                .{anchor.file},
+            );
+            return null;
+        };
+        const size = anchor.size orelse {
+            try self.diags.add(
+                .anchor_mismatch,
+                .err,
+                anchor.span,
+                "\"{s}\" was read, and this anchor declares no :size to check it against",
+                .{anchor.file},
+            );
+            return null;
+        };
+        const digest = anchor.sha256 orelse {
+            try self.diags.add(
+                .anchor_mismatch,
+                .err,
+                anchor.span,
+                "\"{s}\" was read, and this anchor declares no readable :sha256 to check it against",
+                .{anchor.file},
+            );
+            return null;
+        };
+        if (!Resolver.verify(bytes, size, digest)) {
+            try self.diags.add(
+                .anchor_mismatch,
+                .err,
+                anchor.span,
+                "\"{s}\" is {d} bytes and does not match the declared :size {d} / :sha256; this dump's offsets name a file that has changed",
+                .{ anchor.file, bytes.len, size },
+            );
+            return null;
+        }
+        anchor.resolved = true;
+        return bytes;
     }
 
     /// A hosted `(it/source …)` inside an inline module "is accepted when
@@ -862,6 +954,7 @@ const Ctx = struct {
         self.cond_tempo = try self.a.dupe(Doc.TempoPoint, built.tempo);
         self.cond_meter = try self.a.dupe(Doc.MeterPoint, built.meter);
         self.cond_live = true;
+        self.cond_end = built.end;
     }
 
     // ---- sections and cues --------------------------------------------
@@ -1151,6 +1244,20 @@ const Ctx = struct {
                     const t = tree.stringText(n);
                     break :blk if (t.len == 1) t[0] else null;
                 } else null;
+                // The mirror of the SMF surface check: a bound IT curve
+                // lane "reads one column" (plan 02, "(lane …)"), and the
+                // manifest cannot say so because `:column` is legal on a
+                // NATIVE curve lane's sibling keys and the anchor's kind
+                // is a second form away.
+                if (lane_kind == .curve and column == null) {
+                    try self.emit(
+                        .address_invalid,
+                        span,
+                        "a curve lane bound to the IT anchor \"{s}\" reads one :column — vol, pan or fx",
+                        .{id},
+                    );
+                    return null;
+                }
 
                 return .{ .anchor = anchor.id, .address = .{ .it = .{
                     .channel = wireChannel(u6, readNumber(tree, channel_node)),
@@ -1463,8 +1570,24 @@ pub const Conductor = struct {
     meter: []Doc.MeterPoint,
     diags: Diag.List,
     arena: std.heap.ArenaAllocator,
+    /// Where the anchored material ENDS, in ticks: the last event of
+    /// the file for rule 2, the walk's total for rule 3. A conducted
+    /// document's events are the anchor's, so this is the other half of
+    /// plan 02's `:length` default for one — without it a document whose
+    /// content is all in its file has a length of zero and a playhead
+    /// that cannot leave tick 0.
+    end: i64 = 0,
+    /// The timing walk rule 3 built these tables from, for the caller
+    /// that needs more of it than the tempo: the tracker position at a
+    /// tick (`time/Playhead.orderRowAt`) and a bound lane's content both
+    /// read it, and walking the module a second time to get it would be
+    /// a second answer to a question with one. Null for an SMF
+    /// conductor. `deinit` frees it; a caller that wants to keep it
+    /// takes it out and leaves null behind.
+    rowmap: ?itf.walk.RowMap = null,
 
     pub fn deinit(self: *Conductor) void {
+        if (self.rowmap) |*r| r.deinit();
         self.diags.deinit();
         self.arena.deinit();
     }
@@ -1511,8 +1634,12 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
     var tempo: std.ArrayList(Doc.TempoPoint) = .empty;
     var meter: std.ArrayList(Doc.MeterPoint) = .empty;
     var ignored: usize = 0;
+    var end: i64 = 0;
 
     for (seq.tracks) |track| {
+        for (track.events) |e| {
+            end = @max(end, Grid.smfToTicks(e.at, ppq).tick);
+        }
         for (track.events) |e| switch (e.kind) {
             .set_tempo => {
                 if (smpte) {
@@ -1563,6 +1690,7 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
         .meter = try seedMeter(a, try mergeByTick(a, Doc.MeterPoint, meter.items), span),
         .diags = diags,
         .arena = arena,
+        .end = end,
     };
 }
 
@@ -1579,17 +1707,35 @@ pub fn itConductor(gpa: Allocator, module: *const itf.Module, span: Diag.Span) E
     const a = arena.allocator();
 
     var rowmap = try itf.walk.derive(gpa, module, .{});
-    defer rowmap.deinit();
+    errdefer rowmap.deinit();
     for (rowmap.diags.items()) |d| {
         try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
     }
 
     var tempo: std.ArrayList(Doc.TempoPoint) = .empty;
-    for (rowmap.segments) |seg| try tempo.append(a, .{
-        .tick = seg.start_tick * Grid.IT_TICK,
-        .tempo = .{ .qpm = @floatFromInt(seg.tempo) },
-        .span = span,
-    });
+    var over = false;
+    for (rowmap.segments) |seg| {
+        // IT ticks times 1 921 920 in `i128`, so the grid's ceiling is a
+        // CHECK and never a wrap: a module whose walk runs past it is
+        // `tick_overflow` and the segments past it are dropped.
+        const tick = @as(i128, seg.start_tick) * Grid.IT_TICK;
+        if (tick > Grid.MAX_TICK) {
+            over = true;
+            break;
+        }
+        try tempo.append(a, .{
+            .tick = @intCast(tick),
+            .tempo = .{ .qpm = @floatFromInt(seg.tempo) },
+            .span = span,
+        });
+    }
+    if (over) try diags.add(
+        .tick_overflow,
+        .err,
+        span,
+        "this module's walk reaches past the grid ceiling {d}; the tempo segments past it are dropped",
+        .{Grid.MAX_TICK},
+    );
 
     const h = module.header;
     const stated = (h.special & itf.model.special.highlight) != 0 and h.highlight_minor > 0;
@@ -1603,6 +1749,11 @@ pub fn itConductor(gpa: Allocator, module: *const itf.Module, span: Diag.Span) E
         .meter = try a.dupe(Doc.MeterPoint, &[_]Doc.MeterPoint{.{ .tick = 0, .n = n, .d = 4, .span = span }}),
         .diags = diags,
         .arena = arena,
+        .end = end: {
+            const total = @as(i128, rowmap.total_ticks) * Grid.IT_TICK;
+            break :end if (total > Grid.MAX_TICK) Grid.MAX_TICK else @intCast(total);
+        },
+        .rowmap = rowmap,
     };
 }
 
@@ -2904,4 +3055,133 @@ test "fromSjon: an inline module's (bin …) is checked against the anchor's ver
         defer res.deinit();
         try testing.expectEqual(row[1], res.diags.count(.it_parapointer_out_of_range));
     }
+}
+
+test "fromSjon: an inline dump's anchor is verified too, and says so when it cannot be" {
+    const gpa = testing.allocator;
+
+    const bytes = "IMPM" ++ [_]u8{0} ** 60;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    var hex: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    const store: Resolver.Memory = .{ .entries = &.{.{ .path = "x.it", .bytes = bytes }} };
+
+    const dump = "(it/module (it/instrument 1 :name \"bass\" :raw (bin :at 0x0 :len 0x10)))";
+
+    // The truth first: an inline anchor that checks out resolves in
+    // silence and its offsets are honoured.
+    {
+        const source = try std.fmt.allocPrintSentinel(gpa,
+            \\(timeline :conductor song)
+            \\(anchor :id song :kind it :file "x.it" :size {d} :sha256 "{s}")
+            \\{s}
+        , .{ bytes.len, hex, dump }, 0);
+        defer gpa.free(source);
+
+        var res = try load(gpa, source, Resolver.memory(&store));
+        defer res.deinit();
+        try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+        try testing.expect(res.doc.anchorById("song").?.resolved);
+        try testing.expectEqual(@as(u32, 0x10), res.doc.it[0].module.instruments[0].raw.len);
+    }
+
+    // A STALE digest: the file the offsets name has changed under the
+    // document, and that is never a silent re-read (plan 02).
+    {
+        var wrong = hex;
+        wrong[0] = if (wrong[0] == '0') '1' else '0';
+        const source = try std.fmt.allocPrintSentinel(gpa,
+            \\(timeline :conductor song)
+            \\(anchor :id song :kind it :file "x.it" :size {d} :sha256 "{s}")
+            \\{s}
+        , .{ bytes.len, wrong, dump }, 0);
+        defer gpa.free(source);
+
+        var res = try load(gpa, source, Resolver.memory(&store));
+        defer res.deinit();
+        // Once, at the ANCHOR's span, and the offsets are dropped.
+        try testing.expectEqual(@as(usize, 1), res.diags.count(.anchor_mismatch));
+        try testing.expect(!res.doc.anchorById("song").?.resolved);
+        const anchor_span = res.doc.anchorById("song").?.span;
+        try testing.expectEqual(anchor_span.start, res.diags.items()[0].span.start);
+    }
+
+    // No digest at all is the same refusal: bytes honoured without one
+    // cannot be verified (the controller's ruling on the two optional
+    // keys), and an inline dump's `(bin …)` refs are bytes honoured.
+    {
+        const source = try std.fmt.allocPrintSentinel(gpa,
+            \\(timeline :conductor song)
+            \\(anchor :id song :kind it :file "x.it" :size {d})
+            \\{s}
+        , .{ bytes.len, dump }, 0);
+        defer gpa.free(source);
+
+        var res = try load(gpa, source, Resolver.memory(&store));
+        defer res.deinit();
+        try testing.expectEqual(@as(usize, 1), res.diags.count(.anchor_mismatch));
+    }
+
+    // …and a file the resolver cannot produce at all.
+    {
+        const source = try std.fmt.allocPrintSentinel(gpa,
+            \\(timeline :conductor song)
+            \\(anchor :id song :kind it :file "gone.it" :size {d} :sha256 "{s}")
+            \\{s}
+        , .{ bytes.len, hex, dump }, 0);
+        defer gpa.free(source);
+
+        var res = try load(gpa, source, Resolver.memory(&store));
+        defer res.deinit();
+        try testing.expectEqual(@as(usize, 1), res.diags.count(.anchor_unavailable));
+    }
+
+    // With NO resolver nothing was asked of anybody, so nothing is said —
+    // plan 02's own silence, unchanged.
+    {
+        const source = try std.fmt.allocPrintSentinel(gpa,
+            \\(timeline :conductor song)
+            \\(anchor :id song :kind it :file "x.it" :size 1 :sha256 "beef")
+            \\{s}
+        , .{dump}, 0);
+        defer gpa.free(source);
+
+        var res = try load(gpa, source, null);
+        defer res.deinit();
+        try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+    }
+}
+
+test "fromSjon: an inline (midi/smf …) anchor is verified on the same rule" {
+    // An SMF dump honours no offset against its file, but plan 02 draws
+    // no such line: `:size` and `:sha256` are verified "before any
+    // (bin …) OR BOUND LANE is honoured", and a bound lane over a stale
+    // dump is a lane over music the file no longer holds.
+    const gpa = testing.allocator;
+    const store: Resolver.Memory = .{ .entries = &.{.{ .path = "x.mid", .bytes = "MThd" }} };
+
+    var res = try load(gpa,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind smf :file "x.mid" :size 4 :sha256 "beefbeef")
+        \\(midi/smf :format 0 :division 96)
+        \\(midi/mtrk (end-of-track :at 0))
+    , Resolver.memory(&store));
+    defer res.deinit();
+
+    try testing.expectEqual(@as(usize, 1), res.diags.count(.anchor_mismatch));
+}
+
+test "fromSjon: a bound IT curve lane names one :column" {
+    // The mirror of the SMF surface check (plan 02, "(lane …)").
+    try expectCode(preamble ++
+        \\(anchor :id song :kind it :file "x.it")
+        \\(lane :name bass-vol :kind curve :from song :channel 5)
+    , .address_invalid);
+    // With a column it is fine, and a bound NOTES lane never needed one.
+    try expectClean(preamble ++
+        \\(anchor :id song :kind it :file "x.it")
+        \\(lane :name bass-vol :kind curve :from song :channel 5 :column vol)
+        \\(lane :name kick :kind notes :from song :channel 3)
+    );
 }

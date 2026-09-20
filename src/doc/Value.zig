@@ -13,9 +13,11 @@
 //! 01). Nothing here borrows the document source.
 //!
 //! The two file tiers (`midi`, `it`) are the inline dumps of plan 02's
-//! anchor pairing. They are EMPTY in this task: an anchor with a dump
-//! after it is marked `inline_dump`, and reading that dump into a
-//! `Sequence` / `Module` is the anchored half's work.
+//! anchor pairing: an anchor with a dump after it is marked
+//! `inline_dump`, and the dump itself is read into a `Sequence` or a
+//! `Module` beside it. They are the one thing here a `Doc` does not own
+//! through its own arena — each tier's value carries an arena of its
+//! own, which `deinit` releases with the rest.
 //!
 //! **Why this file is not `Doc.zig`.** The brief names it so, and the
 //! part aggregator `doc/doc.zig` — the path `zig build
@@ -247,15 +249,22 @@ pub const Passthrough = struct {
     span: Diag.Span,
 };
 
-/// An inline `(midi/smf …)` dump and the anchor it pairs with. EMPTY in
-/// this task — the type exists so the anchored half fills it.
+/// An inline `(midi/smf …)` dump and the anchor it pairs with — the
+/// whole `.mid` as a value, filled by `doc/bridge_smf.zig` when the
+/// document's roots carry one.
+///
+/// `sequence` owns an arena of its own (the format cores are arena-backed
+/// values, plan 05), so `Doc.deinit` releases it explicitly rather than
+/// letting the document's arena stand for it.
 pub const SmfTier = struct {
     anchor: AnchorId,
     sequence: Sequence.Sequence,
 };
 
-/// An inline `(it/module …)` dump and the anchor it pairs with. EMPTY in
-/// this task, as `SmfTier` is.
+/// An inline `(it/module …)` dump and the anchor it pairs with, filled
+/// by `doc/bridge_it.zig`. `module` owns its own arena, as `SmfTier`'s
+/// `sequence` does; its opaque regions point at the ANCHOR's bytes,
+/// which it neither owns nor copies.
 pub const ItTier = struct {
     anchor: AnchorId,
     module: Module.Module,
@@ -396,8 +405,14 @@ pub const Doc = struct {
             }
         }
 
-        // The two tiers are empty in this task; length equality is the
-        // whole of their contract until the anchored half fills them.
+        // The tiers are compared by COUNT only. Two dumps are equal when
+        // they say the same thing, and saying so means walking two event
+        // streams or two pattern grids across two byte pools — which is
+        // `Sequence` / `Module` equality, a thing neither core exports
+        // yet (plan 05's rung 2 spells the shape in its own tests). The
+        // round-trip property this function serves is the DOCUMENT's, and
+        // a dump's own round trip is pinned where it belongs, in the two
+        // bridges' fixed-point tests. Deferred by the controller.
         if (a.midi.len != b.midi.len or a.it.len != b.it.len) return false;
         return true;
     }

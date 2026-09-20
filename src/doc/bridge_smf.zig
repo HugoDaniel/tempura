@@ -256,6 +256,9 @@ const Printer = struct {
                 try self.raw(" :num ");
                 try self.int(e.payload.number);
             },
+            // RP-001's channel prefix is 0..15 and the manifest's `:ch`
+            // is 1..16, so a byte past 15 — which only a malformed file
+            // holds — saturates and does not read back as itself.
             .midi_channel_prefix => try self.channel(@min(e.payload.byte, 15)),
             .midi_port => {
                 try self.raw(" :port ");

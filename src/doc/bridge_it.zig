@@ -87,10 +87,12 @@ pub fn moduleToForms(gpa: Allocator, module: *const itf.Module, opts: Options) E
 /// letters IT's editor shows (IT.TXT, and the display code batida's 02
 /// cites; SUMMARY.TXT has A/C and B/D swapped and is never the source).
 ///
-/// `u` is NOT IT's: bytes 223..232 are OpenMPT's vibrato-speed
-/// extension, spelled with OpenMPT's own letter and NAMED whenever it is
-/// read or written (`it_command_unknown`). Bytes 125..127, 213..222 and
-/// 233..254 mean nothing in either tracker and have no spelling at all.
+/// `o` is NOT IT's: bytes 223..232 are OpenMPT's volume-column
+/// SAMPLE-OFFSET extension (it 04, "Volume-column byte": "not strict IT;
+/// read with a diagnostic, dropped on write"), spelled with OpenMPT's own
+/// letter and NAMED whenever it is read or written
+/// (`it_command_unknown`). Bytes 125..127, 213..222 and 233..254 mean
+/// nothing in either tracker and have no spelling at all.
 const VolFamily = struct { letter: u8, base: u8, span: u8, it: bool = true };
 
 const vol_families = [_]VolFamily{
@@ -103,7 +105,7 @@ const vol_families = [_]VolFamily{
     .{ .letter = 'p', .base = 128, .span = 65 },
     .{ .letter = 'g', .base = 193, .span = 10 },
     .{ .letter = 'h', .base = 203, .span = 10 },
-    .{ .letter = 'u', .base = 223, .span = 10, .it = false },
+    .{ .letter = 'o', .base = 223, .span = 10, .it = false },
 };
 
 /// The volume column's set-volume ceiling: 0..64 is a number, not a code.
@@ -480,7 +482,7 @@ const Printer = struct {
             try self.unspellable(byte, "no tracker gives it a meaning");
             return;
         };
-        if (!family.it) try self.unspellable(byte, "OpenMPT's vibrato-speed extension, not IT's own column");
+        if (!family.it) try self.unspellable(byte, "OpenMPT's volume-column sample-offset extension, not IT's own column");
         try self.raw(" :vol \"");
         try self.raw(&[_]u8{family.letter});
         try self.int(byte - family.base);
@@ -985,8 +987,8 @@ const Reader = struct {
             if (!f.it) try self.diags.add(
                 .it_command_unknown,
                 .warning,
-                .{ .start = 0, .end = 0 },
-                "volume-column code \"{s}\" is OpenMPT's vibrato-speed extension, not IT's own column",
+                spanOf(tree, node),
+                "volume-column code \"{s}\" is OpenMPT's volume-column sample-offset extension, not IT's own column",
                 .{text},
             );
             return f.base + @as(u8, @intCast(value));
@@ -1162,6 +1164,15 @@ fn castInt(comptime T: type, v: ?f64, fallback: T) T {
 /// `cut` or `fade`, or at the walk's end. Velocity is `round(vol ×
 /// 127 / 64)` floored at 1 when the volume column sets a volume, and 127
 /// otherwise: a stated convention, since instrument volumes are opaque.
+///
+/// `module` is taken and not read. The walk already carries each onset's
+/// CELL (`walk.Onset.cell`, "because what ENDS a note is a cell too"), so
+/// the notes come off the `RowMap` alone — but the two derivations are
+/// one surface and read as a pair, `curveSteps` genuinely needs the
+/// module's grid, and no caller holds a `RowMap` without the `Module` it
+/// was walked from. The parameter stays so the pair keeps one shape and
+/// the day the walk stops carrying cells is a body change and not a
+/// signature change.
 pub fn boundNotes(
     gpa: Allocator,
     module: *const itf.Module,
@@ -1478,8 +1489,9 @@ test "bridge_it: the OpenMPT volume-column extension is spelled and named" {
         var b: itf.Builder = .init(gpa);
         errdefer b.deinit();
         const p = try b.addPattern(64);
-        // 223..232 is OpenMPT's vibrato-speed extension; 213..222 is unused
-        // in both IT and OpenMPT and has no spelling at all.
+        // 223..232 is OpenMPT's volume-column SAMPLE-OFFSET extension
+        // (it 04, "Volume-column byte"); 213..222 is unused in both IT
+        // and OpenMPT and has no spelling at all.
         p.at(0, 0).* = .{ .vol = 226 };
         p.at(1, 0).* = .{ .vol = 215 };
         break :module b.finish();
@@ -1491,7 +1503,7 @@ test "bridge_it: the OpenMPT volume-column extension is spelled and named" {
     const text = try moduleToForms(gpa, &module, .{ .diags = &diags });
     defer gpa.free(text);
 
-    try testing.expect(std.mem.indexOf(u8, text, ":vol \"u3\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, ":vol \"o3\"") != null);
     // The unused byte carries no column at all — and neither byte is
     // IT's, so both are named.
     try testing.expect(std.mem.indexOf(u8, text, "215") == null);
@@ -1796,4 +1808,21 @@ test "bridge_it: :qualify false spells the module's own children bare" {
         \\  (orders 0 end))
         \\
     , text);
+}
+
+test "bridge_it: the OpenMPT extension read back is named at its own :vol node" {
+    const gpa = testing.allocator;
+    const source = "(it/module (it/pattern 0 :rows 4 (row 0 (ev 1 :vol \"o3\"))))";
+    var p = try parse(gpa, source);
+    defer p.deinit();
+
+    var read = try formsToModule(gpa, &p.tree, p.roots, null);
+    defer read.deinit();
+
+    // The byte is read — the extension round-trips — and the complaint
+    // points at the code that caused it, not at the whole document.
+    try testing.expectEqual(@as(u8, 226), read.module.patterns[0].at(0, 0).vol);
+    try testing.expectEqual(@as(usize, 1), read.diags.count(.it_command_unknown));
+    const span = read.diags.items()[0].span;
+    try testing.expectEqualStrings("\"o3\"", source[span.start..span.end]);
 }
