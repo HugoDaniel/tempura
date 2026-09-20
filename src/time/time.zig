@@ -13,7 +13,11 @@ pub const Grid = @import("Grid.zig");
 /// seam, and the printer's spelling rule.
 pub const Pos = @import("Pos.zig");
 
+/// The tempo and meter maps: seconds and bars over the grid.
+pub const TimeMap = @import("TimeMap.zig");
+
 test {
     _ = Grid;
     _ = Pos;
+    _ = TimeMap;
 }
