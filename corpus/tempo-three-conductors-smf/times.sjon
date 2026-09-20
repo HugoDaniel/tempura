@@ -1,0 +1,10 @@
+; The native twin's script, verbatim, so the two goldens differ only
+; where the conductor does. `(build :kind mid)` writes the inline tier
+; back through the canonical writer: plan 09's rung 3, the half a bridge
+; can answer today.
+(times "0000000000000000" "3FDEB851EB851EB8" "3FEC28F5C28F5C29")
+(at :tick 0)
+(at :tick 46126080)
+(at :tick 92252160)
+(build :kind mid)
+(dump)

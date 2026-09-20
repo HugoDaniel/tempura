@@ -1,0 +1,5 @@
+; The dump IS the rule. Beside it, the two ticks that say which side of
+; the meter change a bar line is on.
+(dump)
+(at :tick 276756480)
+(at :tick 138378240)

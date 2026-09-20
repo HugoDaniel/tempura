@@ -1,0 +1,16 @@
+; By tick first: the origin (inside `intro` alone, no cue behind it), bar
+; 1 (inside both `intro` and `swell`), bar 2 (the drop, `swell` only) and
+; bar 3 (`outro`, no cue ahead).
+(at :tick 0)
+(at :tick 138378240)
+(at :tick 276756480)
+(at :tick 461260800)
+; …and by seconds, which is the same question through the tempo map:
+; 0.5 s is one quarter, 1.5 s is three (bar 1's line) and 3 s is six.
+(times "3FE0000000000000" "3FF8000000000000" "4008000000000000")
+; Snaps on both sides of the meter change, straight and swung.
+(snap :tick 100000000 :grid beat)
+(snap :tick 100000000 :grid q16)
+(snap :tick 100000000 :grid q16 :swing "3FD999999999999A")
+(snap :tick 300000000 :grid bar)
+(dump)

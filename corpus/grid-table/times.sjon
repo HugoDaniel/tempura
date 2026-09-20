@@ -1,0 +1,9 @@
+; The dump is the table: every landmark spelled back by the printer's
+; rule. The three positions beside it are the ones a snap has to agree
+; with — a triplet eighth is nowhere near a sixteenth line, and the tie
+; at the halfway point between two sixteenths resolves DOWN.
+(dump)
+(at :tick 15375360)
+(snap :tick 15375360 :grid q16)
+(snap :tick 5765760 :grid q16)
+(snap :tick 15375360 :grid q12)

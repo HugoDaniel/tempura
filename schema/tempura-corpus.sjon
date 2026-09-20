@@ -42,15 +42,16 @@
     :unit (unit-shape :reject true))
 
   (value-kind :name snap-grid
-    :description "A snap subdivision, spelled as the studio spells it: \"1/16\", \"1/12\", \"1bar\". A string rather than a position, because a subdivision is a ratio and not a point."
-    :underlying string)
-
-  (value-kind :name swing-amount
-    :description "How far a snap grid's odd lines are pushed late, 0..1 of the subdivision. Narrowed to f32 where it is applied."
-    :underlying number
-    :numeric (numeric-bounds :min 0 :max 1)
-    :unit (unit-shape :reject true)
-    :repr (repr-shape :type f32))
+    :description "A snap subdivision, spelled as `Playhead.SnapGrid` names it: `q4` is a quarter, `q8` an eighth, `q12` a triplet eighth, `q16` a sixteenth, `q32` a thirty-second, and `beat` and `bar` are the meter's own lines. A member set rather than a free string, because the set is closed in Zig and a subdivision the playhead cannot name is a typo, not a ratio."
+    :underlying symbol
+    :members (member-set
+      (member :name q4 :description "A quarter note.")
+      (member :name q8 :description "An eighth note.")
+      (member :name q12 :description "A triplet eighth — TPQ / 3, an integer on this grid.")
+      (member :name q16 :description "A sixteenth note.")
+      (member :name q32 :description "A thirty-second note.")
+      (member :name beat :description "The meter's own beat, 4 / d quarters.")
+      (member :name bar :description "The meter's own bar lines.")))
 
   (value-kind :name row-cap
     :description "A cap on how many tracker rows a walk may play before it gives up, 1..2^20. The walk's own default is the ceiling, so a case that wants the runaway diagnostic asks for a small one; the cap is a walk INPUT, and the `walk_runaway` it trips is a diagnostic the golden pins."
@@ -62,7 +63,7 @@
     :description "Which file a (build …) writes."
     :underlying symbol
     :members (member-set
-      (member :name smf :description "A Standard MIDI File.")
+      (member :name mid :description "A Standard MIDI File — the extension the file carries, so a case reads as the file it writes.")
       (member :name it :description "An Impulse Tracker module.")))
 
   (value-kind :name plan-op
@@ -90,17 +91,23 @@
     (key :name format0 :type boolean :optional true :default false
       :description "`--format 0`: merge every track into one, by tick, stable, the first track's events first at a tie. SMF only."))
 
-  (form :name at
-    :description "One Playhead.at per positional seconds value: the tick, bar, beat, sub-tick, the sections in force and the surrounding cues, after the end-behaviour wrap. May repeat and interleave with the other script forms."
+  (form :name times
+    :description "One Playhead.at per positional seconds value: the tick, bar, beat, sub-tick, the sections in force and the surrounding cues, after the end-behaviour wrap — and, for a document an IT anchor conducts, the tracker position beside them. The seconds are BIT PATTERNS, which is what lets a case ask for a segment boundary and the ulp below it in the same breath. May repeat and interleave with the other script forms."
     :positional f64-bits)
 
+  (form :name at
+    :description "The same answer as `times`, asked by TICK rather than by seconds: the query an editor makes when the playhead was dragged on the grid instead of on the clock."
+    (key :name tick :type tick-value
+      :description "Where to ask."))
+
   (form :name snap
-    :description "One Playhead.snap per positional tick: the nearest grid line under the meter in force, with the tie broken downwards."
-    :positional tick-value
+    :description "One Playhead.snap: the nearest grid line under the meter in force, with the tie broken downwards."
+    (key :name tick :type tick-value
+      :description "The tick to snap.")
     (key :name grid :type snap-grid
       :description "The subdivision to snap to.")
-    (key :name swing :type swing-amount :optional true :default 0
-      :description "How far the odd grid lines are pushed late."))
+    (key :name swing :type f64-bits :optional true :default "0000000000000000"
+      :description "How far the odd grid lines are pushed late, as a fraction of the step and as a BIT PATTERN: the offset rounds through the one literal seam, so the last bit of the fraction is exactly what a case wants to pin. The default is +0.0 — a straight grid."))
 
   (form :name plan
     :description "Plan one edit operation and render its actions as text, so a change in ordering is a diff rather than a surprise. Plans only — the corpus never applies an edit it did not print first."
@@ -119,8 +126,9 @@
       :description "Cap on how many tempo segments to render, for a case whose walk produces thousands. Absent means all of them."))
 
   (form :name build
-    :description "Build the case's document into a file of the given kind and render the bytes' hash. Same document must give the same bytes on x86_64, aarch64 and wasm32 — that is what the hash is for."
-    :positional build-kind)
+    :description "Build the case's document into a file of the given kind and render the bytes' length and hash, then rung 1 over what was written. Same document must give the same bytes on x86_64, aarch64 and wasm32 — that is what the hash is for."
+    (key :name kind :type build-kind
+      :description "Which file to write."))
 
   (form :name dump
     :description "Re-dump the case's document and render its timeline tier, so a read-write round trip is a diff. Takes no rows."))

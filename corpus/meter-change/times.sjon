@@ -1,0 +1,19 @@
+; Bar 1's start, bar 2's start, and a tick in the middle of each: the
+; `:bar`, `:beat` and `:sub` columns are the bar table answering.
+(at :tick 138378240)
+(at :tick 276756480)
+(at :tick 207567360)
+(at :tick 322882560)
+; Snaps. A `bar` snap near the change belongs to whichever bar line is
+; nearer, and the two are three quarters apart on one side and four on
+; the other. A `beat` snap is the meter's own 4/d quarters. A `q16` line
+; is counted from the BAR LINE, not from tick 0, which is what keeps a
+; [3 4] bar's grid inside its own bar.
+(snap :tick 250000000 :grid bar)
+(snap :tick 250000000 :grid beat)
+(snap :tick 250000000 :grid q16)
+; A tie: exactly halfway between two sixteenth lines resolves DOWN.
+(snap :tick 144143760 :grid q16)
+; …and the same line with the odd ones pushed halfway late (swing 0.5).
+(snap :tick 144143760 :grid q16 :swing "3FE0000000000000")
+(snap :tick 150000000 :grid q16 :swing "3FE0000000000000")

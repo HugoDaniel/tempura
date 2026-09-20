@@ -1,0 +1,21 @@
+; Plan 04's rule 1, the SMF half: a file tempura never wrote has no
+; essence in it, and the document it dumps to must still be usable. The
+; runner wraps the fixture in the smallest document that can hold it —
+; an anchor, the core's own dump, `:conductor` naming that anchor — and
+; the SKELETON states the lanes and cues the bytes actually justify.
+;
+; `(read)` first, so the golden says what the core made of the file.
+; `(dump)` then shows the derived TIMELINE tier and nothing else: one
+; bound `notes` lane for the channel that sounds, one bound `curve` for
+; controller 7 (which moved three times) and one for the pitch bend
+; (which moved twice) — and NOTHING for controller 10, which was set once
+; and is a setting, not automation. The marker is a cue.
+;
+; `(build :kind mid)` writes the inline tier back through the canonical
+; writer: rung 1 over a file the writer itself produced, which is plan
+; 09's ladder standing on its own feet.
+(read)
+(dump)
+(build :kind mid)
+(at :tick 0)
+(at :tick 184504320)

@@ -1,0 +1,19 @@
+; The same seam on the F64 path. `60 000 000 / 97.3` is not an integer,
+; so the whole table falls to the floating-point arithmetic of plan 03
+; (`integral` is false for the table, not just for the one segment) — and
+; that is the path the gate exists for.
+;
+; Plan 03, phase 2's own row: `:qpm 97.3` then `150` at `13q`, where tick
+; 599 639 040 has to come back from its own seconds. 13q is 599 639 040
+; and 26q is 1 199 278 080.
+;
+; The boundary seconds are NOT hand-writable here — they are whatever the
+; documented op order produces — so the echo's `:start-sec` column is
+; where they are pinned, and `times.sjon` asks about exactly those bit
+; patterns and the ulp below each.
+(timeline :title "seams-three-segment-f64" :length 8bar)
+
+(tempo-point :at 0q :qpm 97.3)
+(tempo-point :at 13q :qpm 150)
+(tempo-point :at 26q :qpm 200)
+(meter-point :at 0bar :sig [4 4])

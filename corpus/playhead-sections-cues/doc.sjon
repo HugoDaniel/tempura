@@ -1,0 +1,29 @@
+; Every `Playhead` query of plan 03 on one fixture: overlapping sections,
+; two cues, a meter change, a notes lane and a curve lane.
+;
+; [3 4] for two bars then [4 4]: bar 1 starts at 138 378 240, bar 2 at
+; 276 756 480, bar 3 at 461 260 800. `intro` and `swell` OVERLAP on
+; purpose — a section list is a set and not one answer — and the cues are
+; written out of tick order so the search for the nearest one each way is
+; the thing being pinned, not a scan.
+(timeline :title "playhead-sections-cues" :length 4bar)
+
+(tempo-point :at 0q :us 500000)
+(meter-point :at 0bar :sig [3 4])
+(meter-point :at 2bar :sig [4 4])
+
+(section :name intro :at 0bar :dur 2bar)
+(section :name swell :at 1bar :dur 2bar)
+(section :name outro :at 3bar :dur 1bar)
+
+(cue :name "the drop" :at 2bar)
+(cue :name "count in" :at 1q)
+
+(lane :name flash :kind notes :target flash
+  (note :at 0bar :dur 2q :key 36 :vel 110)
+  (note :at 1bar :dur 1bar :key 38 :vel 90)
+  (note :at 3bar :dur 1q :key 41 :vel 64))
+(lane :name glow :kind curve :target glow
+  (keyframe :at 0bar :value 0.2 :ease hold)
+  (keyframe :at 2bar :value 0.9 :ease in-cubic)
+  (keyframe :at 4bar :value 0.1))

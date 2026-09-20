@@ -1,0 +1,18 @@
+; Rule 1's tracker half. Two channels sound, so the skeleton states two
+; bound `notes` lanes; channel 1's volume column MOVES (64, 48, 32), so
+; it earns a bound `curve` as well. The module conducts: `:conductor` is
+; the anchor, the tempo table is the timing walk's, and the bar grid
+; comes from the highlight `[4 16]` — 16 rows to the measure over 4 to
+; the beat, which is [4 4].
+;
+; `T80` on row 16 is a tempo change to 128, so the echo carries two
+; segments and every position past row 16 is on the second one.
+; The walk itself is `walk-*`'s business — this case asks the walk only
+; for what a PLAYHEAD reads out of it, which is the `(order, row,
+; tick-in-row)` beside every position below.
+(read)
+(dump)
+(build :kind it)
+(at :tick 0)
+(at :tick 184504320)
+(times "3FE0000000000000")

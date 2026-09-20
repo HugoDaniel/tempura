@@ -1,0 +1,38 @@
+; The five position units of plan 03 in one document — `q`, `t`, `bar`,
+; `b` and `s` — and the one seam where a literal ROUNDS.
+;
+; At 500 000 microseconds to the quarter in [4 4]: one beat is one
+; quarter, one bar is four, and one second is two.
+;
+;   0bar                    0   the origin, named as a bar line
+;   0.00048828125q     22 522   1 / 2048 quarters — see below
+;   0.00146484375q     67 568   3 / 2048
+;   96096t             96 096   one SMF tick at division 480, as a tick
+;   0.00244140625q    112 612   5 / 2048
+;   0.00341796875q    157 658   7 / 2048
+;   1q             46 126 080   one quarter
+;   0.75s          69 189 120   three quarters of a second
+;   3b            138 378 240   three beats
+;   1bar          184 504 320   one bar
+;
+; `j / 2048` quarters with `j` odd is the only way an f64 lands EXACTLY
+; between two ticks (TPQ / 2048 = 22 522.5), and plan 03's rule is that
+; such a tie goes to the EVEN tick rather than away from zero. All four
+; above are even, and `@round` alone would have answered 22 523, 67 569,
+; 112 613 and 157 659. The dump is where the golden pins them.
+(timeline :title "positions-units" :length 2bar)
+
+(tempo-point :at 0q :us 500000)
+(meter-point :at 0bar :sig [4 4])
+
+(lane :name units :kind notes :target units
+  (note :at 0bar            :dur 1t :key 60)
+  (note :at 0.00048828125q  :dur 1t :key 60)
+  (note :at 0.00146484375q  :dur 1t :key 60)
+  (note :at 96096t          :dur 1t :key 60)
+  (note :at 0.00244140625q  :dur 1t :key 60)
+  (note :at 0.00341796875q  :dur 1t :key 60)
+  (note :at 1q              :dur 1t :key 60)
+  (note :at 0.75s           :dur 1t :key 60)
+  (note :at 3b              :dur 1t :key 60)
+  (note :at 1bar            :dur 1t :key 60))

@@ -1,0 +1,10 @@
+; The native twin's script, plus the walk's own answer: an IT conductor
+; is the one that makes `Playhead.orderRowAt` non-null, so every position
+; here carries the tracker's `(order, row, tick-in-row)` beside it — the
+; studio's readout with no renderer in the loop (plan 03; it 09's rule).
+(times "0000000000000000" "3FDEB851EB851EB8" "3FEC28F5C28F5C29")
+(at :tick 0)
+(at :tick 46126080)
+(at :tick 92252160)
+(build :kind it)
+(dump)

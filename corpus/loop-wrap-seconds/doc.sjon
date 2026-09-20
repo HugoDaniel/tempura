@@ -1,0 +1,13 @@
+; `:end loop` wraps in SECONDS, before the conversion (plan 03): wrapping
+; ticks instead would replay the loop at the FINAL segment's tempo, and
+; the whole point of a two-tempo loop is that it does not.
+;
+; Two bars of [4 4]: the first at 500 000 microseconds to the quarter is
+; two seconds long, the second at 250 000 is one. The loop is three
+; seconds, so 3.5 s is 0.5 s into the SLOW bar and lands at 1q — not at
+; the 2q a tick-space wrap would have given.
+(timeline :title "loop-wrap-seconds" :length 2bar :end loop)
+
+(tempo-point :at 0q :us 500000)
+(tempo-point :at 1bar :us 250000)
+(meter-point :at 0bar :sig [4 4])

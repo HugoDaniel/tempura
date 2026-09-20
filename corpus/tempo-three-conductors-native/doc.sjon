@@ -1,0 +1,19 @@
+; The three-segment map of plan 03, phase 3, authored NATIVELY: 125, 150
+; and 200 quarter notes per minute at ticks 0, 1q and 2q, one bar of
+; [4 4] long.
+;
+; 60 000 000 / 125 = 480 000 microseconds per quarter note, / 150 =
+; 400 000 and / 200 = 300 000 — all three integers, so the map takes the
+; INTEGER path whichever conductor built it, which is what makes the
+; three spellings comparable to the last bit.
+;
+; This document, `tempo-three-conductors-smf` and
+; `tempo-three-conductors-it` are the same map three ways. Their `(echo
+; …)` headers are asserted byte-identical by a test in
+; `src/corpus_runner.zig` — plan 03, phase 3's red.
+(timeline :length 1bar)
+
+(tempo-point :at 0q :us 480000)
+(tempo-point :at 1q :us 400000)
+(tempo-point :at 2q :us 300000)
+(meter-point :at 0bar :sig [4 4])

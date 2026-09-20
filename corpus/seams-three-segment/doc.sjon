@@ -1,0 +1,25 @@
+; The determinism gate's SEAM, on the INTEGER path (plan 09,
+; "Determinism gates"): `seconds(tick)` at a segment boundary, against
+; the arithmetic done by hand in the documented op order.
+;
+; Four tempo points, all of whose microseconds-per-quarter are integers
+; — 60 000 000 / 125 = 480 000, / 150 = 400 000, / 200 = 300 000, / 100 =
+; 600 000 — so the whole table takes the integer path and every segment
+; origin is an exact i128 (plan 03, "The segment table").
+;
+; `seconds(tick_i) = T_i / (TPQ · 1e6)`, one division, with
+;
+;   T_1 = 0  + 46 126 080 · 480 000 = 22 140 518 400 000   → 0.48
+;   T_2 = T_1 + 46 126 080 · 400 000 = 40 590 950 400 000  → 0.88
+;   T_3 = T_2 + 46 126 080 · 300 000 = 54 428 774 400 000  → 1.18
+;
+; and 46 126 080 · 1e6 = 4.612608e13, every one of those five numbers
+; exactly representable in f64 — so the three quotients are correctly
+; rounded and the bit patterns in `times.sjon` are the arithmetic itself.
+(timeline :title "seams-three-segment" :length 1bar)
+
+(tempo-point :at 0q :us 480000)
+(tempo-point :at 1q :us 400000)
+(tempo-point :at 2q :us 300000)
+(tempo-point :at 3q :us 600000)
+(meter-point :at 0bar :sig [4 4])

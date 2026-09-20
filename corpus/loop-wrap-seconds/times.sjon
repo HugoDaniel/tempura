@@ -1,0 +1,12 @@
+; 0.5 s, 2.5 s (inside the fast bar), 3 s (exactly the loop point, which
+; wraps to 0), 3.5 s (half a second past it) and 6.5 s (two loops and a
+; half). Every one of them is an exact binary fraction, so the bit
+; patterns are the numbers and not a rounding.
+(times "3FE0000000000000" "4004000000000000" "4008000000000000" "400C000000000000" "401A000000000000")
+; And what no clock can answer. `at` takes its seconds from OUTSIDE, so a
+; host that hands over a NaN or an infinity gets a refusal by name rather
+; than a position nobody asked for. A LOOPING document is where that
+; survives to be seen: `loop` wraps with `@mod` and a NaN stays one,
+; while `hold` clamps with `@min`, which is IEEE minNum and answers the
+; finite side.
+(times "7FF8000000000000" "7FF0000000000000")

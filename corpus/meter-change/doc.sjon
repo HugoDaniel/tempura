@@ -1,0 +1,15 @@
+; The bar table under a [3 4] → [4 4] change (plan 03, phase 2), and what
+; a snap does across it.
+;
+; At 500 000 microseconds to the quarter: a [3 4] bar is three quarters
+; (138 378 240 ticks) and a [4 4] bar is four (184 504 320). Bars 0 and 1
+; are the short ones, so bar 2 starts at 276 756 480 and every bar after
+; it is four quarters long.
+;
+; The meter change is ON a bar line, which is the only place plan 03
+; allows one (`meter_off_bar` otherwise).
+(timeline :title "meter-change" :length 5bar)
+
+(tempo-point :at 0q :us 500000)
+(meter-point :at 0bar :sig [3 4])
+(meter-point :at 2bar :sig [4 4])

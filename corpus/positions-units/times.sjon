@@ -1,0 +1,5 @@
+; One dump: every unit resolved to its tick and spelled back by the one
+; printer rule. The four half-tick ties are the determinism gate's
+; "literal-rounding rule at half-way ticks" (plan 09) — they read back as
+; `22522t`, `67568t`, `112612t` and `157658t`, every one of them even.
+(dump)

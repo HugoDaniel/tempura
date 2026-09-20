@@ -1,0 +1,9 @@
+; Each boundary's exact seconds, then ONE ULP BELOW it. The pair is the
+; gate: at the boundary the answer is the segment's own start tick, and
+; one ulp below it is the tick before — because a clock value floors, "a
+; clock value is the last tick BEGUN" (plan 03; `TimeMap`'s own header).
+; A host that rounded instead of flooring, or that lost the last bit
+; anywhere in the conversion, moves one of these six lines.
+(times "3FDEB851EB851EB8" "3FDEB851EB851EB7")
+(times "3FEC28F5C28F5C29" "3FEC28F5C28F5C28")
+(times "3FF2E147AE147AE1" "3FF2E147AE147AE0")

@@ -73,6 +73,10 @@ const cases = [_]Case{
     .{ .name = "smf-running-status", .file = "song.mid", .build = smfRunningStatus },
     .{ .name = "smf-smpte", .file = "song.mid", .build = smfSmpte },
     .{ .name = "smf-vlq-edges", .file = "song.mid", .build = smfVlqEdges },
+    .{ .name = "skeleton-it", .file = "song.it", .build = skeletonIt },
+    .{ .name = "skeleton-smf", .file = "song.mid", .build = skeletonSmf },
+    .{ .name = "tempo-three-conductors-it", .file = "song.it", .build = threeConductorsIt },
+    .{ .name = "tempo-three-conductors-smf", .file = "song.mid", .build = threeConductorsSmf },
     .{ .name = "walk-axx", .file = "song.it", .build = walkAxx },
     .{ .name = "walk-bxx", .file = "song.it", .build = walkBxx },
     .{ .name = "walk-constant", .file = "song.it", .build = walkConstant },
@@ -268,9 +272,137 @@ fn smfFormat0(gpa: Allocator) ![]u8 {
     return finishSmf(gpa, &b, .{});
 }
 
+/// `tempo-three-conductors-smf` — the file the case's `doc.sjon` is
+/// arranged around, and whose timing tier that document carries inline.
+///
+/// Plan 03's three-segment map with the tempo on TRACK 2, which is the
+/// midi set's rule that tempo on any track is honoured. Division 960
+/// divides TPQ exactly (46 126 080 / 960 = 48 048), so SMF tick 960 is
+/// 1q and 1920 is 2q with nothing to round.
+///
+/// The document's `(anchor …)` pins these bytes by `:size` and
+/// `:sha256`, and `fromSjon` verifies them before the inline dump's
+/// offsets are honoured — so a regeneration that changed one byte fails
+/// `zig build corpus` with `anchor_mismatch` in the golden rather than
+/// drifting quietly.
+fn threeConductorsSmf(gpa: Allocator) ![]u8 {
+    var b: smf.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.format = 1;
+    b.division = .{ .ppq = 960 };
+
+    const conductor = try b.addTrack();
+    const tempo = try b.addTrack();
+    const name = try b.addBytes("conductor");
+    try b.addEvent(conductor, 0, .sequence_name, .{ .bytes = name });
+    try b.addEvent(conductor, 3840, .end_of_track, .empty);
+    try b.addEvent(tempo, 0, .set_tempo, .{ .tempo = 480_000 });
+    try b.addEvent(tempo, 960, .set_tempo, .{ .tempo = 400_000 });
+    try b.addEvent(tempo, 1920, .set_tempo, .{ .tempo = 300_000 });
+    try b.addEvent(tempo, 3840, .end_of_track, .empty);
+    return finishSmf(gpa, &b, .{});
+}
+
+/// `skeleton-smf` — a file with no residue in it, which is what plan 04's
+/// rule 1 derives a timeline from.
+///
+/// Everything rule 1 reads is here, and so is the line it draws. Track 2
+/// sounds on channel 1 and moves controller 7 three times, so the
+/// skeleton states a bound `notes` lane and a bound `curve` lane for it;
+/// controller 10 is SET ONCE on the same channel and earns no lane at
+/// all, because "more than one value" is the line between automation and
+/// a setting. The pitch bend moves too. Track 1 is a conductor with a
+/// name, a meter, a tempo and a marker — and the marker is a CUE.
+fn skeletonSmf(gpa: Allocator) ![]u8 {
+    var b: smf.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.format = 1;
+    b.division = .{ .ppq = 960 };
+
+    const conductor = try b.addTrack();
+    const name = try b.addBytes("skeleton");
+    try b.addEvent(conductor, 0, .sequence_name, .{ .bytes = name });
+    try b.addEvent(conductor, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(conductor, 0, .set_tempo, .{ .tempo = 500_000 });
+    const marker = try b.addBytes("bar 2");
+    try b.addEvent(conductor, 3840, .marker, .{ .bytes = marker });
+    try b.addEvent(conductor, 7680, .end_of_track, .empty);
+
+    const lead = try b.addTrack();
+    try b.addEvent(lead, 0, .control_change, .{ .control = .{ .ch = 0, .num = 7, .val = 64 } });
+    try b.addEvent(lead, 0, .control_change, .{ .control = .{ .ch = 0, .num = 10, .val = 64 } });
+    try b.addEvent(lead, 0, .note_on, .{ .note = .{ .ch = 0, .key = 60, .vel = 100 } });
+    try b.addEvent(lead, 960, .control_change, .{ .control = .{ .ch = 0, .num = 7, .val = 96 } });
+    try b.addEvent(lead, 1920, .note_off, .{ .note = .{ .ch = 0, .key = 60, .vel = 64 } });
+    try b.addEvent(lead, 1920, .note_on, .{ .note = .{ .ch = 0, .key = 64, .vel = 100 } });
+    try b.addEvent(lead, 2880, .pitch_bend, .{ .bend = .{ .ch = 0, .value = 9000 } });
+    try b.addEvent(lead, 3840, .control_change, .{ .control = .{ .ch = 0, .num = 7, .val = 127 } });
+    try b.addEvent(lead, 3840, .pitch_bend, .{ .bend = .{ .ch = 0, .value = 8192 } });
+    try b.addEvent(lead, 3840, .note_off, .{ .note = .{ .ch = 0, .key = 64, .vel = 64 } });
+    try b.addEvent(lead, 7680, .end_of_track, .empty);
+    return finishSmf(gpa, &b, .{});
+}
+
 // ---------------------------------------------------------------------------
 // The IT fixtures
 // ---------------------------------------------------------------------------
+
+/// `skeleton-it` — the tracker twin of `skeleton-smf`: a module with no
+/// residue, which rule 1 reads for the addresses it uses.
+///
+/// Two channels sound, so two bound `notes` lanes; channel 1 also moves
+/// its volume column, which is a bound `curve`. The pattern is 32 rows —
+/// IT 2.14's own floor — so the file needs no `:loose` and rung 1 holds
+/// on it under the strict clamps. The highlight `[4 16]` is 4 rows to the
+/// beat and 16 to the measure, which is the module's way of saying
+/// [4 4], and `T80` at row 16 is a tempo change the conductor picks up.
+/// `tempo-three-conductors-it` — the tracker twin, and the third of the
+/// three spellings of one map.
+///
+/// Speed 6 and 24 ticks to the quarter make a row a 16th note, so row 4
+/// is 1q and row 8 is 2q; `T96` sets the tempo to 150 and `TC8` to 200.
+/// Pattern 1 is the one-row `B01` that jumps to itself, which is what
+/// ends the walk with the state pattern 0 left behind — so the module
+/// plays its two tempo changes ONCE. The highlight `[4 16]` is 16 rows
+/// to the measure over 4 to the beat, which is the module's way of
+/// spelling [4 4].
+///
+/// Written `:loose`, for the reason the walk corners are: the patterns
+/// are 16 and 1 rows, under IT 2.14's floor of 32, because the row
+/// arithmetic above is meant to be read rather than padded.
+fn threeConductorsIt(gpa: Allocator) ![]u8 {
+    var b: itf.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.module.header.initial_speed = 6;
+    b.module.header.initial_tempo = 125;
+    b.module.header.highlight_minor = 4;
+    b.module.header.highlight_major = 16;
+    try b.addOrder(0);
+    try b.addOrder(1);
+    const song = try b.addPattern(16);
+    song.at(4, 0).* = .{ .fx = fx_t, .param = 150 };
+    song.at(8, 0).* = .{ .fx = fx_t, .param = 200 };
+    const tail = try b.addPattern(1);
+    tail.at(0, 0).* = .{ .fx = fx_b, .param = 1 };
+    return finishIt(gpa, &b, null, .{ .loose = true });
+}
+
+fn skeletonIt(gpa: Allocator) ![]u8 {
+    var b: itf.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.setTitle("skeleton");
+    b.module.header.highlight_minor = 4;
+    b.module.header.highlight_major = 16;
+    try b.addOrder(0);
+    const p = try b.addPattern(32);
+    p.at(0, 0).* = .{ .note = 60, .ins = 1, .vol = 64 };
+    p.at(0, 1).* = .{ .note = 36, .ins = 2 };
+    p.at(8, 0).* = .{ .note = 64, .ins = 1, .vol = 48 };
+    p.at(16, 0).* = .{ .note = 67, .ins = 1, .vol = 32, .fx = fx_t, .param = 0x80 };
+    p.at(16, 1).* = .{ .note = 36, .ins = 2 };
+    p.at(24, 0).* = .{ .note = itf.model.note_off };
+    return finishIt(gpa, &b, null, .{});
+}
 
 /// `it-minimal` — one order, one 64-row pattern, one cell with all four
 /// fields. The smallest module the canonical writer produces.

@@ -1,0 +1,14 @@
+; `:us` and `:qpm` are two spellings of one tempo, and a document may use
+; either (plan 02). 60 000 000 / 125 = 480 000 exactly, so the two points
+; below describe the SAME segment value — and the echo's `:us` column
+; shows it, while the dump shows each point still spelled the way it was
+; written. One value, two spellings, neither normalised away.
+(timeline :title "tempo-us-vs-qpm" :length 2bar)
+
+(tempo-point :at 0q :us 480000)
+(tempo-point :at 1bar :qpm 125)
+(meter-point :at 0bar :sig [4 4])
+
+(lane :name pulse :kind notes :target pulse
+  (note :at 0bar :dur 1q :key 60)
+  (note :at 1bar :dur 1q :key 60))

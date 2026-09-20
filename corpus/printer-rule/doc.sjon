@@ -1,0 +1,26 @@
+; The printer's rule (plan 03): `Nbar` on a bar line, else `Nq` when the
+; tick has an exact short decimal in quarters, else `Nt`. And a DURATION
+; is measured from its form's own `:at` — `Nbar` when both ends sit on
+; bar lines, else the delta's own `Nq` / `Nt`.
+;
+; The meter changes at bar 2, so a bar is three quarters before it and
+; four after: the same `1bar` duration is 3q of ticks in one place and 4q
+; in another, and that is exactly what makes the round trip an identity
+; rather than an arithmetic coincidence.
+(timeline :title "printer-rule" :length 4bar)
+
+(tempo-point :at 0q :us 500000)
+(meter-point :at 0bar :sig [3 4])
+(meter-point :at 2bar :sig [4 4])
+
+(section :name three :at 0bar :dur 2bar)
+(section :name four :at 2bar :dur 2bar)
+(cue :name "the change" :at 2bar)
+
+(lane :name spell :kind notes :target spell
+  (note :at 0bar       :dur 1bar :key 60)
+  (note :at 1q         :dur 0.5q :key 62)
+  (note :at 15375360t  :dur 1t   :key 64)
+  (note :at 1bar       :dur 1bar :key 65)
+  (note :at 2bar       :dur 1bar :key 67)
+  (note :at 3bar       :dur 1bar :key 69))

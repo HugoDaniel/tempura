@@ -1,0 +1,6 @@
+; Two segments with the same tempo are still two segments — the document
+; said so twice — and the seconds run straight through the boundary:
+; 1.92 s is four quarters at 480 000 us, and the clock does not step.
+(at :tick 0)
+(at :tick 184504320)
+(dump)

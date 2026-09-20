@@ -1,0 +1,15 @@
+; The two non-zero boundaries, each with the ulp below it, exactly as the
+; integer-path twin asks them — but here every start second came out of
+; the f64 arithmetic rather than an i128, which is the difference the
+; gate is about.
+;
+; 4020086B58AA7DC3 is where segment 1 begins (13 quarters at 97.3 quarter
+; notes per minute: 8.016443...s) and 402A6ED1BF10E42A where segment 2
+; does (thirteen more at 150: 13.2164...s). One ulp below each is the
+; tick before, because a clock value floors.
+(times "4020086B58AA7DC3" "4020086B58AA7DC2")
+(times "402A6ED1BF10E42A" "402A6ED1BF10E429")
+; …and the same two boundaries asked by TICK, which is plan 03's phase-2
+; row in as many words: tick 599 639 040 comes back from its own seconds.
+(at :tick 599639040)
+(at :tick 1199278080)
