@@ -119,6 +119,14 @@ pub const Code = enum(u16) {
     render_polyphony_exceeded,
     tempo_inexact,
     build_cross_kind,
+
+    // ---- appended after the E0 seeding, in landing order ----
+
+    /// SMF: a byte where an event's status was due is one no track may
+    /// carry — a data byte with no running status in effect, or a system
+    /// common / real-time status (`F1`..`F6`, `F8`..`FE`) a file has no
+    /// room for. The reader keeps the prefix it parsed (P100, plan 05).
+    smf_status_invalid,
 };
 
 /// How much a diagnostic costs its caller. Orthogonal to `Code` — the
@@ -313,6 +321,7 @@ const code_order = [_]Code{
     .render_polyphony_exceeded,
     .tempo_inexact,
     .build_cross_kind,
+    .smf_status_invalid,
 };
 
 test "Diag.Code: ordinals are dense and unique — the wire contract" {

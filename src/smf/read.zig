@@ -1,0 +1,1368 @@
+//! The SMF reader: bytes in, a `Sequence` + a `SourceMap` + diagnostics
+//! out.
+//!
+//! Total on ARBITRARY bytes. There is no input this function refuses and
+//! none it panics on: a malformed chunk, a truncated track, a VLQ that
+//! runs off the end, a status byte that cannot be one — each is a
+//! `Diag` entry with the byte offset that caused it, and the walk keeps
+//! whatever it parsed before that point (collection over abort, the SJON
+//! discipline applied to bytes). `zig build fuzz` and the property test
+//! at the bottom of this file hold that line.
+//!
+//! Two rules worth stating once:
+//!
+//!   * **Spans are offsets into the bytes the caller handed in.** A
+//!     `RIFF`-wrapped file is unwrapped by moving the WINDOW, never by
+//!     re-slicing, so an offset in a diagnostic or in the `SourceMap` is
+//!     an offset a hex editor can be pointed at.
+//!   * **A length-delimited payload is never inspected for status
+//!     bits.** `FF 51 03 07 A1 20` is 120 BPM and its `A1` is data; the
+//!     same goes for a sysex carrying `F0` or `FF` inside.
+//!
+//! What a chunk length says is what the walk believes: a chunk that
+//! claims more bytes than the file holds is clamped to what is there and
+//! reported, and the events inside a track are read against the TRACK's
+//! end, never the file's.
+
+const std = @import("std");
+const Diag = @import("../Diag.zig");
+const sequence = @import("Sequence.zig");
+const vlq = @import("vlq.zig");
+
+const testing = std.testing;
+const support = @import("test_support.zig");
+const Kind = sequence.Kind;
+const Payload = sequence.Payload;
+
+/// This module's error set: reading can only fail the way any allocation
+/// fails. A defective file is diagnostics, never an error.
+pub const Error = error{OutOfMemory};
+
+/// One top-level chunk, as the file spelled it: `len` is the DECLARED
+/// body length even when the file was too short to hold it.
+pub const Chunk = struct {
+    tag: [4]u8,
+    offset: u32,
+    len: u32,
+};
+
+/// Where one event came from, and whether it was read on running status.
+pub const EventSite = struct {
+    offset: u32,
+    running_status: bool,
+};
+
+/// The per-track half of the map, parallel to `Sequence.tracks`.
+pub const TrackMap = struct {
+    /// Index into `SourceMap.chunks` of the `MTrk` this track came from.
+    chunk: u32,
+    events: []EventSite,
+};
+
+/// The SMPTE division the reader converted, and what it became.
+pub const SmpteConversion = struct {
+    fps: u8,
+    tpf: u8,
+    ppq: u15,
+};
+
+/// A byte range of the input.
+pub const Region = struct {
+    offset: u32,
+    len: u32,
+};
+
+/// Everything the reader saw that the `Sequence` itself does not say:
+/// `tempura inspect` prints it, the residue uses it, and a test asserts
+/// on it instead of counting bytes by hand.
+pub const SourceMap = struct {
+    arena: std.heap.ArenaAllocator,
+    /// Every top-level chunk in file order, `MThd` and `MTrk` included.
+    chunks: []Chunk,
+    /// Parallel to `Sequence.tracks`.
+    tracks: []TrackMap,
+    /// The chunks that were neither, parallel to `Sequence.foreign`.
+    foreign: []Chunk,
+    /// Set when the header's division was SMPTE.
+    smpte: ?SmpteConversion,
+    /// Set when the file was `RIFF`/`RMID`-wrapped: the region the SMF
+    /// was found in.
+    riff: ?Region,
+
+    pub fn deinit(self: *SourceMap) void {
+        self.arena.deinit();
+    }
+};
+
+/// What `read` returns. Three owned pieces, three `deinit`s, one call.
+pub const Result = struct {
+    sequence: sequence.Sequence,
+    source_map: SourceMap,
+    diags: Diag.List,
+
+    pub fn deinit(self: *Result) void {
+        self.sequence.deinit();
+        self.source_map.deinit();
+        self.diags.deinit();
+    }
+};
+
+/// The most bytes the reader will look at. Offsets are `u32` (a chunk
+/// length is), so a larger input is read up to here and the rest is not
+/// addressable — no SMF in the wild is anywhere near it.
+const MAX_INPUT: usize = std.math.maxInt(u32);
+
+/// Read a Standard MIDI File.
+///
+/// The returned `Result` owns everything in it and borrows nothing from
+/// `bytes`: payloads are copied into the sequence's pool, so the caller
+/// may free the input the moment this returns.
+pub fn read(gpa: std.mem.Allocator, bytes: []const u8) Error!Result {
+    var r: Walk = .{
+        .bytes = bytes[0..@min(bytes.len, MAX_INPUT)],
+        .builder = .init(gpa),
+        .diags = .init(gpa),
+        .arena = .init(gpa),
+    };
+    // What a file with no readable header reads as: one track's worth of
+    // everything, on a division the file never stated. `Division.ppq(0)`
+    // is OpenMPT's 96 the moment anybody asks for a grid, and the value
+    // still says plainly that nothing was read.
+    r.builder.format = 0;
+    r.builder.division = .{ .ppq = 0 };
+    errdefer {
+        r.builder.deinit();
+        r.diags.deinit();
+        r.arena.deinit();
+    }
+
+    try r.run();
+
+    const a = r.arena.allocator();
+    const map: SourceMap = .{
+        .chunks = try r.chunks.toOwnedSlice(a),
+        .tracks = try r.tracks.toOwnedSlice(a),
+        .foreign = try r.foreign.toOwnedSlice(a),
+        .smpte = r.smpte,
+        .riff = r.riff,
+        .arena = r.arena,
+    };
+    return .{
+        .sequence = try r.builder.finish(),
+        .source_map = map,
+        .diags = r.diags,
+    };
+}
+
+/// One pass over one file. Everything mutable the walk needs, so the
+/// functions below read as the specification reads.
+const Walk = struct {
+    bytes: []const u8,
+    builder: sequence.Builder,
+    diags: Diag.List,
+    /// The `SourceMap`'s arena, and the only allocator its slices use.
+    arena: std.heap.ArenaAllocator,
+    chunks: std.ArrayList(Chunk) = .empty,
+    tracks: std.ArrayList(TrackMap) = .empty,
+    foreign: std.ArrayList(Chunk) = .empty,
+    smpte: ?SmpteConversion = null,
+    riff: ?Region = null,
+    header_seen: bool = false,
+    ntrks: u16 = 0,
+    mtrk_count: u32 = 0,
+    header_span: Diag.Span = .{ .start = 0, .end = 0 },
+
+    fn diag(
+        self: *Walk,
+        code: Diag.Code,
+        severity: Diag.Severity,
+        start: usize,
+        end: usize,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) Error!void {
+        try self.diags.add(code, severity, .{
+            .start = @intCast(start),
+            .end = @intCast(end),
+        }, fmt, args);
+    }
+
+    fn run(self: *Walk) Error!void {
+        var start: usize = 0;
+        var end: usize = self.bytes.len;
+        if (try self.unwrapRiff()) |region| {
+            start = region.offset;
+            end = region.offset + region.len;
+            self.riff = region;
+        }
+
+        var pos = start;
+        while (pos + 8 <= end) {
+            const tag: [4]u8 = self.bytes[pos..][0..4].*;
+            const declared = std.mem.readInt(u32, self.bytes[pos + 4 ..][0..4], .big);
+            const body = pos + 8;
+            const available = end - body;
+            var len: usize = declared;
+            if (len > available) {
+                len = available;
+                try self.diag(
+                    .smf_chunk_truncated,
+                    .err,
+                    pos,
+                    body,
+                    "chunk {s} claims {d} bytes and the file holds {d}",
+                    .{ &tag, declared, available },
+                );
+            }
+
+            const index: u32 = @intCast(self.chunks.items.len);
+            try self.chunks.append(self.arena.allocator(), .{
+                .tag = tag,
+                .offset = @intCast(pos),
+                .len = declared,
+            });
+
+            if (std.mem.eql(u8, &tag, "MThd") and !self.header_seen) {
+                try self.header(body, body + len);
+            } else if (std.mem.eql(u8, &tag, "MTrk")) {
+                self.mtrk_count += 1;
+                try self.track(index, body, body + len);
+            } else {
+                try self.foreignChunk(index, tag, body, body + len);
+            }
+
+            pos = body + len;
+        }
+
+        // Trailing bytes are junk after a complete file, not a file cut
+        // short: a warning, so a caller that meant to read the music
+        // still can.
+        if (pos < end) try self.diag(
+            .smf_chunk_truncated,
+            .warning,
+            pos,
+            end,
+            "{d} trailing bytes are too few for a chunk header",
+            .{end - pos},
+        );
+
+        if (!self.header_seen) {
+            try self.diag(
+                .smf_bad_header,
+                .err,
+                start,
+                @min(start + 8, end),
+                "no MThd header chunk",
+                .{},
+            );
+        } else if (self.ntrks != self.mtrk_count) {
+            try self.diag(
+                .smf_ntrks_mismatch,
+                .warning,
+                self.header_span.start,
+                self.header_span.end,
+                "the header declares {d} tracks and the file holds {d}",
+                .{ self.ntrks, self.mtrk_count },
+            );
+        }
+    }
+
+    /// `RIFF <size le> RMID data <size le> <the SMF>` — the `.rmi`
+    /// wrapper (OpenMPT's `Load_mid.cpp:587-613`). Returns the region the
+    /// file proper lives in, or null when this is not one.
+    fn unwrapRiff(self: *Walk) Error!?Region {
+        const b = self.bytes;
+        if (b.len < 12) return null;
+        if (!std.mem.eql(u8, b[0..4], "RIFF")) return null;
+        if (!std.mem.eql(u8, b[8..12], "RMID")) return null;
+
+        const outer = std.mem.readInt(u32, b[4..8][0..4], .little);
+        const outer_end = @min(b.len, 8 + @as(usize, outer));
+
+        var pos: usize = 12;
+        while (pos + 8 <= outer_end) {
+            const tag = b[pos..][0..4];
+            const len = std.mem.readInt(u32, b[pos + 4 ..][0..4], .little);
+            const body = pos + 8;
+            const clamped = @min(@as(usize, len), outer_end - body);
+            if (std.mem.eql(u8, tag, "data")) {
+                try self.diag(
+                    .smf_riff_unwrapped,
+                    .info,
+                    0,
+                    12,
+                    "RIFF/RMID wrapper: the file starts at {d}",
+                    .{body},
+                );
+                return .{ .offset = @intCast(body), .len = @intCast(clamped) };
+            }
+            // RIFF pads odd-sized chunks to an even boundary.
+            pos = body + clamped + (clamped & 1);
+        }
+        return null;
+    }
+
+    fn header(self: *Walk, body: usize, end: usize) Error!void {
+        self.header_seen = true;
+        self.header_span = .{ .start = @intCast(body), .end = @intCast(@min(body + 6, end)) };
+        if (end - body < 6) {
+            try self.diag(
+                .smf_bad_header,
+                .err,
+                body,
+                end,
+                "MThd holds {d} bytes, six are the minimum",
+                .{end - body},
+            );
+            return;
+        }
+
+        self.builder.format = @truncate(std.mem.readInt(u16, self.bytes[body..][0..2], .big));
+        self.ntrks = std.mem.readInt(u16, self.bytes[body + 2 ..][0..2], .big);
+
+        const raw = std.mem.readInt(u16, self.bytes[body + 4 ..][0..2], .big);
+        if (raw & 0x8000 != 0) {
+            // Bits 8..14 are a NEGATIVE frame rate; bits 0..7 the ticks
+            // per frame. OpenMPT's `frames · subframes / 2` is what the
+            // grid becomes (`Load_mid.cpp:661-669`), and the file's
+            // tempo events stop conducting (plan 03).
+            const signed: i8 = @bitCast(@as(u8, @truncate(raw >> 8)));
+            const fps: u8 = if (signed < 0) @intCast(-@as(i16, signed)) else @intCast(signed);
+            const tpf: u8 = @truncate(raw);
+            const division: sequence.Division = .{ .smpte = .{ .fps = fps, .tpf = tpf } };
+            self.builder.division = division;
+            self.smpte = .{ .fps = fps, .tpf = tpf, .ppq = division.pulsesPerQuarter() };
+        } else {
+            self.builder.division = .{ .ppq = @intCast(raw) };
+            if (raw == 0) try self.diag(
+                .smf_bad_header,
+                .warning,
+                body + 4,
+                body + 6,
+                "a zero division; reading the file on 96 pulses per quarter",
+                .{},
+            );
+        }
+
+        if (self.builder.format > 2) try self.diag(
+            .smf_bad_header,
+            .warning,
+            body,
+            body + 2,
+            "format {d} is none of 0, 1 or 2",
+            .{self.builder.format},
+        );
+    }
+
+    fn foreignChunk(self: *Walk, index: u32, tag: [4]u8, body: usize, end: usize) Error!void {
+        const kept = try self.builder.addBytes(self.bytes[body..end]);
+        try self.builder.addForeign(tag, kept);
+        try self.foreign.append(self.arena.allocator(), self.chunks.items[index]);
+        try self.diag(
+            .smf_unknown_chunk,
+            .info,
+            body - 8,
+            end,
+            "chunk {s} is neither the header nor a track; skipped by length and kept",
+            .{&tag},
+        );
+    }
+
+    /// One `MTrk` body: `<delta event>*`, ending at `FF 2F 00`.
+    fn track(self: *Walk, chunk_index: u32, body: usize, end: usize) Error!void {
+        const ti = try self.builder.addTrack();
+        var sites: std.ArrayList(EventSite) = .empty;
+
+        var pos = body;
+        var at: i64 = 0;
+        // The last CHANNEL status byte, whatever came after it.
+        var last_status: u8 = 0;
+        // RP-001 forbids running status across a meta or a sysex; the
+        // reader tolerates it the way OpenMPT does and says so.
+        var cancelled = false;
+        var saw_end = false;
+        var aborted = false;
+
+        while (pos < end) {
+            switch (vlq.read(self.bytes[0..end], &pos)) {
+                .ok => |delta| at +|= delta,
+                .err => |code| {
+                    try self.diag(code, .err, pos, @min(pos + 1, end), "a delta time that is not one", .{});
+                    aborted = true;
+                    break;
+                },
+            }
+
+            if (pos >= end) {
+                try self.diag(.smf_track_truncated, .err, pos, end, "the track ends after a delta time", .{});
+                aborted = true;
+                break;
+            }
+
+            const at_offset = pos;
+            var running = false;
+            var status = self.bytes[pos];
+            if (status >= 0x80) {
+                pos += 1;
+                if (status < 0xF0) {
+                    last_status = status;
+                    cancelled = false;
+                }
+            } else {
+                if (last_status == 0) {
+                    try self.diag(
+                        .smf_status_invalid,
+                        .err,
+                        pos,
+                        pos + 1,
+                        "a data byte {x:0>2} where a status byte was due and no running status is in effect",
+                        .{status},
+                    );
+                    aborted = true;
+                    break;
+                }
+                status = last_status;
+                running = true;
+                if (cancelled) try self.diag(
+                    .smf_running_status_across_meta,
+                    .warning,
+                    pos,
+                    pos + 1,
+                    "running status reused across a meta or sysex event",
+                    .{},
+                );
+            }
+
+            const parsed = if (status < 0xF0)
+                try self.channelEvent(status, &pos, end)
+            else switch (status) {
+                0xF0, 0xF7 => blk: {
+                    cancelled = true;
+                    break :blk try self.bytesEvent(status, &pos, end);
+                },
+                0xFF => blk: {
+                    cancelled = true;
+                    break :blk try self.metaEvent(&pos, end);
+                },
+                else => notParsed: {
+                    try self.diag(
+                        .smf_status_invalid,
+                        .err,
+                        at_offset,
+                        at_offset + 1,
+                        "status {x:0>2} is a system message no file may carry",
+                        .{status},
+                    );
+                    break :notParsed null;
+                },
+            };
+
+            const event = parsed orelse {
+                aborted = true;
+                break;
+            };
+
+            try self.builder.addEvent(ti, at, event.kind, event.payload);
+            try sites.append(self.arena.allocator(), .{
+                .offset = @intCast(at_offset),
+                .running_status = running,
+            });
+
+            if (event.kind == .set_tempo) {
+                if (event.payload.tempo == 0) try self.diag(
+                    .smf_set_tempo_zero,
+                    .err,
+                    at_offset,
+                    pos,
+                    "a set-tempo of zero microseconds per quarter note",
+                    .{},
+                );
+                if (self.smpte != null) try self.diag(
+                    .smpte_tempo_ignored,
+                    .info,
+                    at_offset,
+                    pos,
+                    "a SMPTE file's tempo event is kept and not believed",
+                    .{},
+                );
+            }
+
+            if (event.kind == .end_of_track) {
+                saw_end = true;
+                if (pos < end) try self.diag(
+                    .end_of_track_early,
+                    .warning,
+                    at_offset,
+                    pos,
+                    "end of track with {d} bytes of the chunk left",
+                    .{end - pos},
+                );
+                break;
+            }
+        }
+
+        if (!saw_end and !aborted) try self.diag(
+            .end_of_track_missing,
+            .warning,
+            end,
+            end,
+            "the track ends without FF 2F 00",
+            .{},
+        );
+
+        try self.tracks.append(self.arena.allocator(), .{
+            .chunk = chunk_index,
+            .events = try sites.toOwnedSlice(self.arena.allocator()),
+        });
+    }
+
+    /// An event the walk built, or nothing when the bytes ran out.
+    const Parsed = struct { kind: Kind, payload: Payload };
+
+    fn channelEvent(self: *Walk, status: u8, pos: *usize, end: usize) Error!?Parsed {
+        const kind: Kind = switch (status & 0xF0) {
+            0x80 => .note_off,
+            0x90 => .note_on,
+            0xA0 => .poly_pressure,
+            0xB0 => .control_change,
+            0xC0 => .program_change,
+            0xD0 => .channel_pressure,
+            else => .pitch_bend,
+        };
+        const ch: u8 = status & 0x0F;
+        const n = kind.dataBytes();
+        if (pos.* + n > end) {
+            try self.diag(
+                .smf_track_truncated,
+                .err,
+                pos.*,
+                end,
+                "a {s} needs {d} data bytes and the track holds {d}",
+                .{ @tagName(kind), n, end - pos.* },
+            );
+            return null;
+        }
+        // A data byte is seven bits by definition; the mask is what makes
+        // "every payload field is in range" an invariant a consumer can
+        // rely on, whatever the file said.
+        const d1: u8 = self.bytes[pos.*] & 0x7F;
+        const d2: u8 = if (n == 2) self.bytes[pos.* + 1] & 0x7F else 0;
+        pos.* += n;
+
+        return .{
+            .kind = kind,
+            .payload = switch (kind) {
+                .note_off, .note_on => .{ .note = .{ .ch = ch, .key = d1, .vel = d2 } },
+                .poly_pressure => .{ .poly = .{ .ch = ch, .key = d1, .val = d2 } },
+                .control_change => .{ .control = .{ .ch = ch, .num = d1, .val = d2 } },
+                .program_change => .{ .program = .{ .ch = ch, .num = d1 } },
+                .channel_pressure => .{ .pressure = .{ .ch = ch, .val = d1 } },
+                // 14 bits, LSB first, centre 8192.
+                else => .{ .bend = .{ .ch = ch, .value = @as(u16, d1) | (@as(u16, d2) << 7) } },
+            },
+        };
+    }
+
+    /// `F0` / `F7`: a VLQ length and that many bytes, stored verbatim —
+    /// a trailing `F7` included, so a split message survives whole.
+    fn bytesEvent(self: *Walk, status: u8, pos: *usize, end: usize) Error!?Parsed {
+        const payload = try self.payloadBytes(pos, end) orelse return null;
+        return .{
+            .kind = if (status == 0xF0) .sysex else .escape,
+            .payload = .{ .bytes = payload },
+        };
+    }
+
+    /// The `<len VLQ> <bytes>` tail both sysex and meta events carry,
+    /// copied into the pool.
+    fn payloadBytes(self: *Walk, pos: *usize, end: usize) Error!?sequence.Bytes {
+        const len: usize = switch (vlq.read(self.bytes[0..end], pos)) {
+            .ok => |n| n,
+            .err => |code| {
+                try self.diag(code, .err, pos.*, @min(pos.* + 1, end), "a payload length that is not one", .{});
+                return null;
+            },
+        };
+        if (pos.* + len > end) {
+            try self.diag(
+                .smf_track_truncated,
+                .err,
+                pos.*,
+                end,
+                "a payload of {d} bytes with {d} left in the track",
+                .{ len, end - pos.* },
+            );
+            return null;
+        }
+        const kept = try self.builder.addBytes(self.bytes[pos.*..][0..len]);
+        pos.* += len;
+        return kept;
+    }
+
+    /// `FF <type> <len VLQ> <bytes>`.
+    ///
+    /// A known type whose length disagrees with RP-001 is kept as
+    /// `meta_unknown` rather than forced into a shape it does not have:
+    /// the bytes round-trip, and no consumer reads a field the file never
+    /// wrote.
+    fn metaEvent(self: *Walk, pos: *usize, end: usize) Error!?Parsed {
+        if (pos.* >= end) {
+            try self.diag(.smf_track_truncated, .err, pos.*, end, "a meta event with no type byte", .{});
+            return null;
+        }
+        const meta_type = self.bytes[pos.*];
+        pos.* += 1;
+
+        const payload = try self.payloadBytes(pos, end) orelse return null;
+        const raw = self.builder.bytesOf(payload);
+
+        const typed: ?Parsed = switch (meta_type) {
+            0x00 => if (raw.len == 2) .{
+                .kind = .sequence_number,
+                .payload = .{ .number = std.mem.readInt(u16, raw[0..2], .big) },
+            } else null,
+            0x01 => .{ .kind = .text_event, .payload = .{ .bytes = payload } },
+            0x02 => .{ .kind = .copyright_notice, .payload = .{ .bytes = payload } },
+            0x03 => .{ .kind = .sequence_name, .payload = .{ .bytes = payload } },
+            0x04 => .{ .kind = .instrument_name, .payload = .{ .bytes = payload } },
+            0x05 => .{ .kind = .lyric, .payload = .{ .bytes = payload } },
+            0x06 => .{ .kind = .marker, .payload = .{ .bytes = payload } },
+            0x07 => .{ .kind = .cue_point, .payload = .{ .bytes = payload } },
+            0x08 => .{ .kind = .program_name, .payload = .{ .bytes = payload } },
+            0x09 => .{ .kind = .device_name, .payload = .{ .bytes = payload } },
+            0x20 => if (raw.len == 1) .{
+                .kind = .midi_channel_prefix,
+                .payload = .{ .byte = raw[0] },
+            } else null,
+            0x21 => if (raw.len == 1) .{
+                .kind = .midi_port,
+                .payload = .{ .byte = raw[0] },
+            } else null,
+            0x2F => if (raw.len == 0) .{ .kind = .end_of_track, .payload = .empty } else null,
+            0x51 => if (raw.len == 3) .{
+                .kind = .set_tempo,
+                .payload = .{ .tempo = (@as(u32, raw[0]) << 16) | (@as(u32, raw[1]) << 8) | raw[2] },
+            } else null,
+            0x54 => if (raw.len == 5) .{ .kind = .smpte_offset, .payload = .{ .smpte = .{
+                .hr = raw[0],
+                .mn = raw[1],
+                .se = raw[2],
+                .fr = raw[3],
+                .ff = raw[4],
+            } } } else null,
+            0x58 => if (raw.len == 4) .{ .kind = .time_signature, .payload = .{ .time_sig = .{
+                .nn = raw[0],
+                .dd = raw[1],
+                .cc = raw[2],
+                .bb = raw[3],
+            } } } else null,
+            0x59 => if (raw.len == 2) .{ .kind = .key_signature, .payload = .{ .key_sig = .{
+                .sf = @bitCast(raw[0]),
+                .mi = raw[1],
+            } } } else null,
+            0x7F => self.sequencerSpecific(raw, payload),
+            else => null,
+        };
+
+        return typed orelse .{
+            .kind = .meta_unknown,
+            .payload = .{ .meta = .{ .bytes = payload, .meta_type = meta_type } },
+        };
+    }
+
+    /// `FF 7F`: whose payload is it?
+    ///
+    /// `7D` is the manufacturer id every non-commercial project shares,
+    /// so the three bytes after it are the tag: `tem` is tempura's
+    /// residue envelope (plan 04) and is parsed typed, `pau` is
+    /// midivia's easing hint (midi 03) and keeps its body as bytes.
+    /// Anything else is somebody's and stays verbatim.
+    fn sequencerSpecific(_: *Walk, raw: []const u8, payload: sequence.Bytes) ?Parsed {
+        if (raw.len >= 8 and std.mem.eql(u8, raw[0..4], "\x7Dtem")) return .{
+            .kind = .tempura_residue,
+            .payload = .{ .residue = .{
+                .ver = raw[4],
+                .kind = raw[5],
+                .seq = raw[6],
+                .total = raw[7],
+                .body = .{ .off = payload.off + 8, .len = payload.len - 8 },
+            } },
+        };
+        if (raw.len >= 4 and std.mem.eql(u8, raw[0..4], "\x7Dpau")) return .{
+            .kind = .ease_hint,
+            .payload = .{ .bytes = payload },
+        };
+        return .{ .kind = .sequencer_specific, .payload = .{ .bytes = payload } };
+    }
+};
+
+test "read: the hand-built two-track fixture parses to the expected Sequence" {
+    const gpa = testing.allocator;
+    const bytes = try support.twoTrackFixture(gpa);
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    const seq = &result.sequence;
+    try testing.expectEqual(@as(usize, 0), result.diags.items().len);
+    try testing.expectEqual(@as(u8, 1), seq.format);
+    try testing.expectEqual(sequence.Division{ .ppq = 96 }, seq.division);
+    try testing.expectEqual(@as(usize, 2), seq.tracks.len);
+    try testing.expectEqual(@as(usize, 0), seq.foreign.len);
+
+    const t0 = seq.tracks[0].events;
+    try testing.expectEqual(@as(usize, 12), t0.len);
+
+    try testing.expectEqual(Kind.sequence_number, t0[0].kind);
+    try testing.expectEqual(@as(u16, 1), t0[0].payload.number);
+    try testing.expectEqual(@as(i64, 0), t0[0].at);
+
+    try testing.expectEqual(Kind.sequence_name, t0[1].kind);
+    try testing.expectEqualStrings("Tempura", seq.bytesOf(t0[1].payload.bytes));
+
+    try testing.expectEqual(Kind.time_signature, t0[2].kind);
+    try testing.expectEqual(sequence.TimeSig{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 }, t0[2].payload.time_sig);
+
+    // `FF 51 03 07 A1 20` is 500 000 µs per quarter — 120 BPM — and its
+    // `A1` has the high bit set, which is nothing at all inside a
+    // length-delimited payload.
+    try testing.expectEqual(Kind.set_tempo, t0[3].kind);
+    try testing.expectEqual(@as(u32, 500_000), t0[3].payload.tempo);
+
+    try testing.expectEqual(Kind.key_signature, t0[4].kind);
+    try testing.expectEqual(sequence.KeySig{ .sf = -1, .mi = 0 }, t0[4].payload.key_sig);
+
+    try testing.expectEqual(Kind.midi_port, t0[5].kind);
+    try testing.expectEqual(@as(u8, 0), t0[5].payload.byte);
+
+    // tempura's own `7D 'tem'` envelope, parsed typed.
+    try testing.expectEqual(Kind.tempura_residue, t0[6].kind);
+    const residue = t0[6].payload.residue;
+    try testing.expectEqual(@as(u8, 1), residue.ver);
+    try testing.expectEqual(@as(u8, 1), residue.kind);
+    try testing.expectEqual(@as(u8, 0), residue.seq);
+    try testing.expectEqual(@as(u8, 1), residue.total);
+    try testing.expectEqualStrings("hi", seq.bytesOf(residue.body));
+
+    // midivia's `7D 'pau'` hint: typed as a kind, body kept as bytes.
+    try testing.expectEqual(Kind.ease_hint, t0[7].kind);
+    try testing.expectEqualSlices(u8, &support.ease_hint_payload, seq.bytesOf(t0[7].payload.bytes));
+
+    // Somebody else's `7F` payload stays bytes.
+    try testing.expectEqual(Kind.sequencer_specific, t0[8].kind);
+    try testing.expectEqualSlices(u8, &support.yamaha_payload, seq.bytesOf(t0[8].payload.bytes));
+
+    try testing.expectEqual(Kind.meta_unknown, t0[9].kind);
+    try testing.expectEqual(@as(u8, 0x0A), t0[9].payload.meta.meta_type);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xAB, 0xCD }, seq.bytesOf(t0[9].payload.meta.bytes));
+
+    try testing.expectEqual(Kind.marker, t0[10].kind);
+    try testing.expectEqual(@as(i64, 192), t0[10].at);
+    try testing.expectEqualStrings("verse", seq.bytesOf(t0[10].payload.bytes));
+
+    try testing.expectEqual(Kind.end_of_track, t0[11].kind);
+    try testing.expectEqual(@as(i64, 384), t0[11].at);
+
+    const t1 = seq.tracks[1].events;
+    try testing.expectEqual(@as(usize, 11), t1.len);
+
+    try testing.expectEqual(Kind.note_on, t1[0].kind);
+    try testing.expectEqual(sequence.Note{ .ch = 0, .key = 60, .vel = 100 }, t1[0].payload.note);
+    // Running status: a data byte where a status byte was expected.
+    try testing.expectEqual(Kind.note_on, t1[1].kind);
+    try testing.expectEqual(sequence.Note{ .ch = 0, .key = 64, .vel = 100 }, t1[1].payload.note);
+    try testing.expectEqual(@as(i64, 0), t1[1].at);
+
+    try testing.expectEqual(Kind.note_off, t1[2].kind);
+    try testing.expectEqual(@as(i64, 96), t1[2].at);
+    try testing.expectEqual(sequence.Note{ .ch = 0, .key = 60, .vel = 64 }, t1[2].payload.note);
+    try testing.expectEqual(Kind.note_off, t1[3].kind);
+    try testing.expectEqual(sequence.Note{ .ch = 0, .key = 64, .vel = 64 }, t1[3].payload.note);
+
+    // A sysex whose payload carries bytes ≥ 0x80, kept whole.
+    try testing.expectEqual(Kind.sysex, t1[4].kind);
+    try testing.expectEqualSlices(u8, &support.sysex_payload, seq.bytesOf(t1[4].payload.bytes));
+    try testing.expectEqual(Kind.escape, t1[5].kind);
+    try testing.expectEqualSlices(u8, &support.escape_payload, seq.bytesOf(t1[5].payload.bytes));
+
+    try testing.expectEqual(Kind.control_change, t1[6].kind);
+    try testing.expectEqual(sequence.NumVal{ .ch = 0, .num = 7, .val = 127 }, t1[6].payload.control);
+    try testing.expectEqual(Kind.control_change, t1[7].kind);
+    try testing.expectEqual(sequence.NumVal{ .ch = 0, .num = 10, .val = 64 }, t1[7].payload.control);
+
+    try testing.expectEqual(Kind.program_change, t1[8].kind);
+    try testing.expectEqual(sequence.ChNum{ .ch = 0, .num = 5 }, t1[8].payload.program);
+    try testing.expectEqual(@as(i64, 192), t1[8].at);
+
+    try testing.expectEqual(Kind.pitch_bend, t1[9].kind);
+    try testing.expectEqual(sequence.Bend{ .ch = 0, .value = 8192 }, t1[9].payload.bend);
+
+    try testing.expectEqual(Kind.end_of_track, t1[10].kind);
+    try testing.expectEqual(@as(i64, 288), t1[10].at);
+}
+
+test "read: the SourceMap carries the chunks, the event offsets and the running-status reuse" {
+    const gpa = testing.allocator;
+    const bytes = try support.twoTrackFixture(gpa);
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    const map = &result.source_map;
+    try testing.expectEqual(@as(usize, 3), map.chunks.len);
+    try testing.expectEqualSlices(u8, "MThd", &map.chunks[0].tag);
+    try testing.expectEqual(@as(u32, 0), map.chunks[0].offset);
+    try testing.expectEqual(@as(u32, 6), map.chunks[0].len);
+    try testing.expectEqualSlices(u8, "MTrk", &map.chunks[1].tag);
+    try testing.expectEqual(@as(u32, 14), map.chunks[1].offset);
+    try testing.expectEqualSlices(u8, "MTrk", &map.chunks[2].tag);
+    try testing.expectEqual(@as(?SmpteConversion, null), map.smpte);
+    try testing.expectEqual(@as(?Region, null), map.riff);
+    try testing.expectEqual(@as(usize, 0), map.foreign.len);
+
+    try testing.expectEqual(@as(usize, 2), map.tracks.len);
+    for (map.tracks, result.sequence.tracks) |tm, t| {
+        try testing.expectEqual(t.events.len, tm.events.len);
+        // Every event names a byte offset inside its own chunk, and the
+        // offsets only go forward.
+        const chunk = map.chunks[tm.chunk];
+        var prev: u32 = 0;
+        for (tm.events) |site| {
+            try testing.expect(site.offset > prev);
+            try testing.expect(site.offset >= chunk.offset + 8);
+            try testing.expect(site.offset < chunk.offset + 8 + chunk.len);
+            prev = site.offset;
+        }
+    }
+
+    // The first event of track 1 sits one byte into the chunk body: the
+    // delta `00`, then the status.
+    try testing.expectEqual(map.chunks[2].offset + 8 + 1, map.tracks[1].events[0].offset);
+
+    // Exactly three events of track 1 were read on running status.
+    const reuse = map.tracks[1].events;
+    for (reuse, 0..) |site, i| {
+        const expected = i == 1 or i == 3 or i == 7;
+        try testing.expectEqual(expected, site.running_status);
+    }
+    for (map.tracks[0].events) |site| try testing.expect(!site.running_status);
+}
+
+test "read: a SMPTE division converts OpenMPT's way and its tempo events are recorded as ignored" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20 });
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    // 25 frames per second, 40 ticks per frame: `E7 28`.
+    const bytes = try support.buildFile(gpa, .{ .format = 0, .division = 0xE728 }, &.{t.buf.items});
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(
+        sequence.Division{ .smpte = .{ .fps = 25, .tpf = 40 } },
+        result.sequence.division,
+    );
+    try testing.expectEqual(@as(u15, 500), result.sequence.division.pulsesPerQuarter());
+    try testing.expectEqual(SmpteConversion{ .fps = 25, .tpf = 40, .ppq = 500 }, result.source_map.smpte.?);
+
+    // The event is kept; the timing walk is told not to believe it.
+    try testing.expectEqual(Kind.set_tempo, result.sequence.tracks[0].events[0].kind);
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smpte_tempo_ignored));
+    try testing.expect(!result.diags.hasErrors());
+}
+
+test "read: an unknown chunk is skipped by length, preserved and recorded" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    var w = support.ByteWriter.init(gpa);
+    defer w.deinit();
+    try w.chunk("MThd", &[_]u8{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x60 });
+    // RP-001: a reader skips a chunk type it does not know, by length.
+    // Its body carries `MTrk` bytes, which must not tempt the walk.
+    try w.chunk("XFIH", &[_]u8{ 'M', 'T', 'r', 'k', 0xFF, 0x2F, 0x00 });
+    try w.chunk("MTrk", t.buf.items);
+    const bytes = try w.toOwnedSlice();
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.sequence.tracks.len);
+    try testing.expectEqual(@as(usize, 1), result.sequence.foreign.len);
+    try testing.expectEqualSlices(u8, "XFIH", &result.sequence.foreign[0].tag);
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 'M', 'T', 'r', 'k', 0xFF, 0x2F, 0x00 },
+        result.sequence.bytesOf(result.sequence.foreign[0].bytes),
+    );
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_unknown_chunk));
+    try testing.expect(!result.diags.hasErrors());
+
+    try testing.expectEqual(@as(usize, 3), result.source_map.chunks.len);
+    try testing.expectEqual(@as(usize, 1), result.source_map.foreign.len);
+    try testing.expectEqual(@as(u32, 14), result.source_map.foreign[0].offset);
+}
+
+test "read: a RIFF/RMID wrapper is unwrapped, recorded, and its spans stay file offsets" {
+    const gpa = testing.allocator;
+
+    const inner = try support.twoTrackFixture(gpa);
+    defer gpa.free(inner);
+
+    var w = support.ByteWriter.init(gpa);
+    defer w.deinit();
+    try w.raw("RIFF");
+    // RIFF sizes are LITTLE-endian; the payload is `RMID` + `data` + the file.
+    const data_len: u32 = @intCast(inner.len);
+    const riff_len: u32 = 4 + 8 + data_len;
+    try w.raw(&[_]u8{
+        @truncate(riff_len),
+        @truncate(riff_len >> 8),
+        @truncate(riff_len >> 16),
+        @truncate(riff_len >> 24),
+    });
+    try w.raw("RMID");
+    try w.raw("data");
+    try w.raw(&[_]u8{
+        @truncate(data_len),
+        @truncate(data_len >> 8),
+        @truncate(data_len >> 16),
+        @truncate(data_len >> 24),
+    });
+    try w.raw(inner);
+    const bytes = try w.toOwnedSlice();
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 2), result.sequence.tracks.len);
+    try testing.expectEqual(@as(usize, 12), result.sequence.tracks[0].events.len);
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_riff_unwrapped));
+    try testing.expect(!result.diags.hasErrors());
+
+    // The unwrap is recorded, and every offset in the map is an offset
+    // into the bytes the caller handed in — not into the unwrapped region.
+    try testing.expectEqual(Region{ .offset = 20, .len = @intCast(inner.len) }, result.source_map.riff.?);
+    try testing.expectEqual(@as(u32, 20), result.source_map.chunks[0].offset);
+}
+
+test "read: ntrks that disagrees with the MTrk count is a diagnostic and the walk goes on" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    const bytes = try support.buildFile(gpa, .{ .format = 1, .ntrks = 4 }, &.{ t.buf.items, t.buf.items });
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    // Both tracks present are read (collection over abort), and the
+    // header's span is what the diagnostic points at.
+    try testing.expectEqual(@as(usize, 2), result.sequence.tracks.len);
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_ntrks_mismatch));
+    const d = result.diags.items()[0];
+    try testing.expectEqual(Diag.Span{ .start = 8, .end = 14 }, d.span);
+}
+
+test "read: a header longer than six bytes keeps its extra bytes out of the walk" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    const bytes = try support.buildFile(
+        gpa,
+        .{ .format = 0, .division = 480, .header_extra = &[_]u8{ 0xDE, 0xAD } },
+        &.{t.buf.items},
+    );
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(sequence.Division{ .ppq = 480 }, result.sequence.division);
+    try testing.expectEqual(@as(usize, 1), result.sequence.tracks.len);
+    try testing.expect(!result.diags.hasErrors());
+}
+
+test "read: a track that stops mid-event keeps the prefix and says where it stopped" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0x90, 0x3C, 0x64 });
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0x90, 0x3E }); // one data byte short
+
+    const bytes = try support.buildFile(gpa, .{}, &.{t.buf.items});
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.sequence.tracks[0].events.len);
+    try testing.expectEqual(Kind.note_on, result.sequence.tracks[0].events[0].kind);
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_track_truncated));
+    // The abort explains the end: no second diagnostic about the missing
+    // FF 2F 00 on top of it.
+    try testing.expectEqual(@as(usize, 0), result.diags.count(.end_of_track_missing));
+    try testing.expect(result.diags.hasErrors());
+}
+
+test "read: a chunk that claims more bytes than the file holds is clamped and reported" {
+    const gpa = testing.allocator;
+
+    var w = support.ByteWriter.init(gpa);
+    defer w.deinit();
+    try w.chunk("MThd", &[_]u8{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x60 });
+    try w.raw("MTrk");
+    try w.u32be(999); // and then four bytes of track
+    try w.raw(&[_]u8{ 0x00, 0xFF, 0x2F, 0x00 });
+    const bytes = try w.toOwnedSlice();
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_chunk_truncated));
+    try testing.expectEqual(@as(u32, 999), result.source_map.chunks[1].len);
+    // What is there still parses: the end of track is the whole track.
+    try testing.expectEqual(@as(usize, 1), result.sequence.tracks[0].events.len);
+    try testing.expectEqual(Kind.end_of_track, result.sequence.tracks[0].events[0].kind);
+}
+
+test "read: a five-byte delta time is vlq_too_long and stops the track there" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0x90, 0x3C, 0x64 });
+    try t.raw(&[_]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0x7F }); // a delta with five bytes
+    try t.raw(&[_]u8{ 0x90, 0x3E, 0x64 });
+
+    const bytes = try support.buildFile(gpa, .{}, &.{t.buf.items});
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.sequence.tracks[0].events.len);
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.vlq_too_long));
+    // The span is the fifth byte: `MThd` (14) + `MTrk` header (8) + the
+    // first event (4) + four continuation bytes.
+    try testing.expectEqual(Diag.Span{ .start = 30, .end = 31 }, result.diags.items()[0].span);
+}
+
+test "read: running status reused across a meta event is tolerated and warned about" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0x90, 0x3C, 0x64 });
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x01, 0x01, 'x' }); // RP-001 cancels running status here
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0x3E, 0x64 }); // OpenMPT reads it anyway, and so do we
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    const bytes = try support.buildFile(gpa, .{}, &.{t.buf.items});
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    const events = result.sequence.tracks[0].events;
+    try testing.expectEqual(@as(usize, 4), events.len);
+    try testing.expectEqual(Kind.note_on, events[2].kind);
+    try testing.expectEqual(@as(u8, 62), events[2].payload.note.key);
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_running_status_across_meta));
+    try testing.expect(!result.diags.hasErrors());
+    try testing.expect(result.source_map.tracks[0].events[2].running_status);
+}
+
+test "read: a set-tempo of zero is refused, and the event is still kept" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x51, 0x03, 0x00, 0x00, 0x00 });
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    const bytes = try support.buildFile(gpa, .{}, &.{t.buf.items});
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_set_tempo_zero));
+    try testing.expect(result.diags.hasErrors());
+    try testing.expectEqual(Kind.set_tempo, result.sequence.tracks[0].events[0].kind);
+    try testing.expectEqual(@as(u32, 0), result.sequence.tracks[0].events[0].payload.tempo);
+}
+
+test "read: a track with no end-of-track, and one with bytes after it" {
+    const gpa = testing.allocator;
+
+    var missing = support.ByteWriter.init(gpa);
+    defer missing.deinit();
+    try missing.vlq(0);
+    try missing.raw(&[_]u8{ 0x90, 0x3C, 0x64 });
+
+    var early = support.ByteWriter.init(gpa);
+    defer early.deinit();
+    try early.vlq(0);
+    try early.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+    try early.vlq(0);
+    try early.raw(&[_]u8{ 0x90, 0x3C, 0x64 });
+    try early.vlq(0);
+    try early.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    const bytes = try support.buildFile(gpa, .{ .format = 1 }, &.{ missing.buf.items, early.buf.items });
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.end_of_track_missing));
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.end_of_track_early));
+    try testing.expect(!result.diags.hasErrors());
+
+    try testing.expectEqual(@as(usize, 1), result.sequence.tracks[0].events.len);
+    // The end of track ends the track: what follows it in the chunk is
+    // not the track's.
+    try testing.expectEqual(@as(usize, 1), result.sequence.tracks[1].events.len);
+    try testing.expectEqual(Kind.end_of_track, result.sequence.tracks[1].events[0].kind);
+}
+
+test "read: a byte that cannot be a status is smf_status_invalid" {
+    const gpa = testing.allocator;
+
+    // A data byte before any status byte: nothing to run with.
+    var no_status = support.ByteWriter.init(gpa);
+    defer no_status.deinit();
+    try no_status.vlq(0);
+    try no_status.raw(&[_]u8{ 0x3C, 0x64 });
+
+    // A system common byte, which RP-001 gives a file no room for.
+    var system = support.ByteWriter.init(gpa);
+    defer system.deinit();
+    try system.vlq(0);
+    try system.raw(&[_]u8{ 0x90, 0x3C, 0x64 });
+    try system.vlq(0);
+    try system.raw(&[_]u8{ 0xF1, 0x00 });
+    try system.vlq(0);
+    try system.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    const bytes = try support.buildFile(gpa, .{ .format = 1 }, &.{ no_status.buf.items, system.buf.items });
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 2), result.diags.count(.smf_status_invalid));
+    try testing.expectEqual(@as(usize, 0), result.sequence.tracks[0].events.len);
+    try testing.expectEqual(@as(usize, 1), result.sequence.tracks[1].events.len);
+}
+
+test "read: bytes that are no MIDI file at all are one diagnostic and an empty sequence" {
+    const gpa = testing.allocator;
+
+    var result = try read(gpa, "this is not a Standard MIDI File");
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 0), result.sequence.tracks.len);
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_bad_header));
+    try testing.expect(result.diags.hasErrors());
+    // No header was read, so the value claims nothing: format 0 and a
+    // division of zero, which is 96 pulses the moment anybody asks.
+    try testing.expectEqual(@as(u8, 0), result.sequence.format);
+    try testing.expectEqual(sequence.Division{ .ppq = 0 }, result.sequence.division);
+    try testing.expectEqual(@as(u15, 96), result.sequence.division.pulsesPerQuarter());
+
+    var empty = try read(gpa, "");
+    defer empty.deinit();
+    try testing.expectEqual(@as(usize, 1), empty.diags.count(.smf_bad_header));
+    try testing.expectEqual(@as(usize, 0), empty.sequence.tracks.len);
+}
+
+test "read: a note-on with velocity 0 stays a note_on, as the file wrote it" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0x90, 0x3C, 0x64 });
+    try t.vlq(96);
+    try t.raw(&[_]u8{ 0x90, 0x3C, 0x00 });
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    const bytes = try support.buildFile(gpa, .{}, &.{t.buf.items});
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    const events = result.sequence.tracks[0].events;
+    try testing.expectEqual(Kind.note_on, events[1].kind);
+    try testing.expectEqual(@as(u8, 0), events[1].payload.note.vel);
+    try testing.expect(!result.diags.hasErrors());
+}
+
+test "read: a 7D 'tem' payload too short for the envelope stays sequencer_specific" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x7F, 0x05, 0x7D, 0x74, 0x65, 0x6D, 0x01 }); // eight bytes short of one
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    const bytes = try support.buildFile(gpa, .{}, &.{t.buf.items});
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    const events = result.sequence.tracks[0].events;
+    try testing.expectEqual(Kind.sequencer_specific, events[0].kind);
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x7D, 0x74, 0x65, 0x6D, 0x01 },
+        result.sequence.bytesOf(events[0].payload.bytes),
+    );
+}
+
+/// Everything that must hold about a `Result` for ANY input at all.
+///
+/// Deliberately says nothing about what parsed — random bytes trip every
+/// diagnostic there is — and everything about the value's own shape: the
+/// map is parallel to the sequence, no offset points outside what it
+/// indexes, and ticks never go backwards inside a track.
+fn expectWellFormed(result: *const Result, input_len: usize) !void {
+    const seq = &result.sequence;
+    const map = &result.source_map;
+
+    try testing.expectEqual(seq.tracks.len, map.tracks.len);
+    try testing.expectEqual(seq.foreign.len, map.foreign.len);
+
+    for (seq.tracks, map.tracks) |track, track_map| {
+        try testing.expectEqual(track.events.len, track_map.events.len);
+        try testing.expect(track_map.chunk < map.chunks.len);
+
+        var previous: i64 = 0;
+        for (track.events, track_map.events) |event, site| {
+            try testing.expect(event.at >= previous);
+            previous = event.at;
+            try testing.expect(site.offset < input_len);
+
+            switch (event.kind) {
+                .sysex,
+                .escape,
+                .text_event,
+                .copyright_notice,
+                .sequence_name,
+                .instrument_name,
+                .lyric,
+                .marker,
+                .cue_point,
+                .program_name,
+                .device_name,
+                .sequencer_specific,
+                .ease_hint,
+                => {
+                    const b = event.payload.bytes;
+                    try testing.expect(@as(usize, b.off) + b.len <= seq.pool.len);
+                },
+                .meta_unknown => {
+                    const b = event.payload.meta.bytes;
+                    try testing.expect(@as(usize, b.off) + b.len <= seq.pool.len);
+                },
+                .tempura_residue => {
+                    const b = event.payload.residue.body;
+                    try testing.expect(@as(usize, b.off) + b.len <= seq.pool.len);
+                },
+                else => {},
+            }
+        }
+    }
+
+    for (seq.foreign) |chunk| {
+        try testing.expect(@as(usize, chunk.bytes.off) + chunk.bytes.len <= seq.pool.len);
+    }
+    for (map.chunks) |chunk| try testing.expect(chunk.offset < input_len);
+}
+
+test "read: never panics — 2 000 pseudo-random inputs and every prefix of the fixture" {
+    const gpa = testing.allocator;
+
+    const fixture = try support.twoTrackFixture(gpa);
+    defer gpa.free(fixture);
+
+    // Every truncation of a real file: the walk meets a chunk header cut
+    // in half, a delta with no event, a payload that claims more than is
+    // left — one prefix per byte.
+    for (0..fixture.len + 1) |n| {
+        var result = try read(gpa, fixture[0..n]);
+        defer result.deinit();
+        try expectWellFormed(&result, @max(n, 1));
+    }
+
+    var prng = std.Random.DefaultPrng.init(0x74_65_6D_70); // 'temp'
+    const rand = prng.random();
+    var buf: [512]u8 = undefined;
+
+    // A thousand strings of noise, and a thousand mutations of the
+    // fixture — noise alone rarely gets past the header, and mutations
+    // reach the deep paths where the events are.
+    var n: usize = 0;
+    while (n < 1000) : (n += 1) {
+        const len = rand.uintAtMost(usize, buf.len);
+        rand.bytes(buf[0..len]);
+        if (len >= 4 and rand.boolean()) @memcpy(buf[0..4], "MThd");
+        var result = try read(gpa, buf[0..len]);
+        defer result.deinit();
+        try expectWellFormed(&result, @max(len, 1));
+    }
+
+    const mutable = try gpa.alloc(u8, fixture.len);
+    defer gpa.free(mutable);
+    n = 0;
+    while (n < 1000) : (n += 1) {
+        @memcpy(mutable, fixture);
+        const edits = rand.uintAtMost(usize, 8) + 1;
+        for (0..edits) |_| mutable[rand.uintLessThan(usize, mutable.len)] = rand.int(u8);
+        const len = rand.uintAtMost(usize, mutable.len);
+        var result = try read(gpa, mutable[0..len]);
+        defer result.deinit();
+        try expectWellFormed(&result, @max(len, 1));
+    }
+}
