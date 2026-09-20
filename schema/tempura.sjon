@@ -23,12 +23,16 @@
 ; form can say about itself — types, ranges, units, required keys, which
 ; keys a `:kind` admits, how many of a set may be present. Every rule that
 ; is a relation BETWEEN forms stays in tempura's own diagnostics with its
-; own span: `timeline_duplicate`, `tempo_map_invalid`, `meter_off_bar`,
-; `conductor_conflict`, `anchor_mismatch`, `address_invalid`,
+; own span: `timeline_duplicate`, `tempo_map_invalid`, `meter_map_invalid`,
+; `meter_off_bar`, `conductor_conflict`, `passthrough_conducts`,
+; `anchor_missing`, `anchor_dump_duplicate`, `anchor_conflict`,
+; `anchor_mismatch`, `address_invalid`, `bound_kind_invalid`,
 ; `bound_lane_has_content`, `note_overlap`, `clip_lane_missing`,
-; `phrase_lane_bound`, `clip_nested`, `position_negative`. A schema counts
-; and types; it does not know about document order or about the file an
-; anchor names.
+; `phrase_lane_bound`, `clip_nested`, `scene_duplicate`,
+; `position_negative`. A schema counts and types; it does not know about
+; document order, about which root follows which, or about the file an
+; anchor names. Each of those codes is named in the description of the
+; form whose rule it is, so the generated page says where a rule lives.
 ;
 ; Positions are plan 03's: a number with a REQUIRED unit, so a position
 ; reads as music (`16bar`, `2.5q`, `40960t`) and a bare number is a
@@ -308,7 +312,7 @@
       :description "The anchor whose tempo and meter conduct this document (plan 03, \"Three conductors\"). With one, the document's own (tempo-point …) and (meter-point …) forms are a conductor_conflict; without one, a tempo point and a meter point at tick 0 are required."))
 
   (form :name anchor
-    :description "A file this document is arranged around — the it set's (source …) generalised to both formats. An anchor is BY REFERENCE when the document holds no dump for it and INLINE when a (midi/smf …) or (it/module …) root follows it; the pairing is positional and one dump per anchor."
+    :description "A file this document is arranged around — the it set's (source …) generalised to both formats. An anchor is BY REFERENCE when the document holds no dump for it and INLINE when a (midi/smf …) or (it/module …) root follows it. The pairing is POSITIONAL and one dump per anchor, which is document order and therefore not a shape this form can carry: a dump with no anchor before it is anchor_missing, a second dump for one anchor is anchor_dump_duplicate, and a hosted (it/source …) inside an inline module that disagrees with the anchor is anchor_conflict."
     (key :name id :type anchor-id
       :description "This anchor's name, referenced by :conductor and by a bound lane's :from.")
     (key :name kind :type anchor-kind
@@ -321,7 +325,7 @@
       :description "Hex digest of the file's bytes, checked with :size."))
 
   (form :name tempo-point
-    :description "A tempo change: from :at onward the piece runs at this tempo, until the next tempo point or the end. Tempo is a step function — a source that slides yields one point per tick and coalescing happens at export. Strictly ascending in document order (tempo_map_invalid), and one at tick 0 is required when the document has no :conductor."
+    :description "A tempo change: from :at onward the piece runs at this tempo, until the next tempo point or the end. Tempo is a step function — a source that slides yields one point per tick and coalescing happens at export. Strictly ascending in document order (tempo_map_invalid), and one at tick 0 is required when the document has no :conductor. This form is the ONLY way a timeline document says tempo: a pass-through pacer (transport …) or (tempo …) is passthrough_conducts, because tempura emits those itself at export."
     (key :name at :type grid-position
       :description "Where the segment starts. Never in seconds: seconds are what this map defines.")
     (key :name us :type us-per-quarter :optional true
@@ -422,7 +426,7 @@
     ; a host check, because it is a relation between :kind and :from
     ; rather than a shape either one has.
     (key :name from :type anchor-ref :optional true
-      :description "The anchor this lane reads its content from. A lane with :from is BOUND: its content lives in the file, and children here are bound_lane_has_content. Only a notes or curve lane may bind.")
+      :description "The anchor this lane reads its content from. A lane with :from is BOUND: its content lives in the file, and children here are bound_lane_has_content. Only a notes or curve lane may bind — a query or formula lane that names one is bound_kind_invalid, which is a relation between :kind and :from and so cannot be a variant gate.")
     (key :name track :type track-index :optional true
       :description "Which track of a bound SMF anchor, 1-based in file order.")
     (key :name ch :type midi-channel :optional true

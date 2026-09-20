@@ -32,7 +32,7 @@ The document's header: what the piece is called, how long it is, what happens at
 
 ### `(anchor …)`
 
-A file this document is arranged around — the it set's (source …) generalised to both formats. An anchor is BY REFERENCE when the document holds no dump for it and INLINE when a (midi/smf …) or (it/module …) root follows it; the pairing is positional and one dump per anchor.
+A file this document is arranged around — the it set's (source …) generalised to both formats. An anchor is BY REFERENCE when the document holds no dump for it and INLINE when a (midi/smf …) or (it/module …) root follows it. The pairing is POSITIONAL and one dump per anchor, which is document order and therefore not a shape this form can carry: a dump with no anchor before it is anchor_missing, a second dump for one anchor is anchor_dump_duplicate, and a hosted (it/source …) inside an inline module that disagrees with the anchor is anchor_conflict.
 
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
@@ -44,7 +44,7 @@ A file this document is arranged around — the it set's (source …) generalise
 
 ### `(tempo-point …)`
 
-A tempo change: from :at onward the piece runs at this tempo, until the next tempo point or the end. Tempo is a step function — a source that slides yields one point per tick and coalescing happens at export. Strictly ascending in document order (tempo_map_invalid), and one at tick 0 is required when the document has no :conductor.
+A tempo change: from :at onward the piece runs at this tempo, until the next tempo point or the end. Tempo is a step function — a source that slides yields one point per tick and coalescing happens at export. Strictly ascending in document order (tempo_map_invalid), and one at tick 0 is required when the document has no :conductor. This form is the ONLY way a timeline document says tempo: a pass-through pacer (transport …) or (tempo …) is passthrough_conducts, because tempura emits those itself at export.
 
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
@@ -91,7 +91,7 @@ One stream of content driving one pacer target. :kind is the discriminant and de
 | `:name` | `symbol` | yes | — | This lane's name, unique across the timeline's lanes. |
 | `:kind` | `symbol enum` | no | `notes` | one of: `notes`, `curve`, `query`, `formula`<br>What this lane carries, and the discriminant that gates the keys below. Write it BEFORE them. |
 | `:target` | `symbol` | no | — | The pacer name this lane drives at export. Defaults to :name. |
-| `:from` | `ref → (anchor :id …)` | no | — | The anchor this lane reads its content from. A lane with :from is BOUND: its content lives in the file, and children here are bound_lane_has_content. Only a notes or curve lane may bind. |
+| `:from` | `ref → (anchor :id …)` | no | — | The anchor this lane reads its content from. A lane with :from is BOUND: its content lives in the file, and children here are bound_lane_has_content. Only a notes or curve lane may bind — a query or formula lane that names one is bound_kind_invalid, which is a relation between :kind and :from and so cannot be a variant gate. |
 | `:track` | `number` | no | — | integer; min 1<br>Which track of a bound SMF anchor, 1-based in file order. |
 | `:ch` | `number` | no | — | integer; min 1; max 16<br>Which MIDI channel of a bound SMF anchor, 1..16. |
 | `:channel` | `number` | no | — | integer; min 1; max 64<br>Which channel of a bound Impulse Tracker anchor, 1..64. |

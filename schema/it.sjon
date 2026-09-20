@@ -348,10 +348,10 @@
     :description "An auto-vibrato waveform."
     :underlying symbol
     :members (member-set
-      (member :name sine)
-      (member :name ramp-down)
-      (member :name square)
-      (member :name random)))
+      (member :name sine :description "A sine wave — IT's default and the smoothest of the four.")
+      (member :name ramp-down :description "A downward sawtooth ramp.")
+      (member :name square :description "A square wave: the depth alternates between its two extremes.")
+      (member :name random :description "Random per tick. Deterministic on replay only because the module's own generator is.")))
 
   (value-kind :name vibrato-field
     :description "One of auto-vibrato's three numbers: speed, depth (0..64 each) and rate (0..255)."
@@ -448,6 +448,22 @@
     :underlying form
     :heads (head-set :names [range]))
 
+  (value-kind :name notemap-entry
+    :description "One number of the raw keyboard table: a note 0..119, or the sample 1..99 it plays. One element kind types both halves of a pair, so the note-versus-sample reading of a position is the build's."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 119 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name notemap-table
+    :description "The escape hatch IT's own format is: the 120-pair keyboard table written out flat, [note sample note sample …], exactly 240 numbers. Reach for it when neither the whole-range :sample shorthand nor (range …) children can say what the table holds."
+    :underlying vector
+    :vector (vector-shape :len 240 :element notemap-entry))
+
+  (value-kind :name notemap-content
+    :description "A notemap's content: either (range …) children, or the raw 240-number table. The two spellings are alternatives and the arms are disjoint by node shape, so a wrong-length table reports its own length mismatch rather than a collapsed union error."
+    :underlying union
+    :union (union-shape :alternatives [notemap-section notemap-table]))
+
   (value-kind :name midi-section
     :description "The MIDI macro slots."
     :underlying form
@@ -463,6 +479,80 @@
     :description "A (bin …) reference, as the value of a key."
     :underlying form
     :heads (head-set :names [bin]))
+
+  ; ---------------------------------------------------------------------
+  ; The four slots that carry a LEADING ID and then child forms.
+  ;
+  ; `:positional` is one policy for every child, which reads at first like
+  ; "an id and a child set cannot both be narrowed" — and it is not. A
+  ; union whose arms are a number kind and a form kind is DISJOINT BY NODE
+  ; SHAPE, so a number can only have meant the id and a form can only have
+  ; meant the child set, and each reports its own diagnostic rather than a
+  ; collapsed `union_no_branch_matched` (manifest spec §4.9). An id out of
+  ; range is `number_above_max` naming the bound; a head outside the set is
+  ; `not_head_member` naming the set; a string or a vector, which neither
+  ; arm reaches, keeps the collapsed code. `:positional any` gave all three
+  ; of those a pass.
+  ;
+  ; What a union CANNOT carry is the per-head count: `(head … :max 1)`
+  ; inside one of these is inert, because counts are enforced at a form's
+  ; positional slot and a union alternative is not that slot. So
+  ; "(pattern …) has row children XOR one bin child" stays a build check,
+  ; as it would have anyway — per-head counts cannot express "many of one
+  ; or exactly one of the other" (the it set's amendment 4 says so).
+  ; ---------------------------------------------------------------------
+
+  (value-kind :name instrument-section
+    :description "An instrument's children: the note-to-sample map and the three envelopes."
+    :underlying form
+    :heads (head-set
+      (head :name notemap :max 1 :description "The note-to-sample map.")
+      (head :name vol-env :max 1 :description "The volume envelope.")
+      (head :name pan-env :max 1 :description "The pan envelope.")
+      (head :name pitch-env :max 1 :description "The pitch (or filter) envelope.")))
+
+  (value-kind :name instrument-content
+    :description "An instrument's positional slot: its number first, then its children."
+    :underlying union
+    :union (union-shape :alternatives [instrument-id instrument-section]))
+
+  (value-kind :name sample-section
+    :description "A sample's children: where its body is, or the .wav to ingest in its place."
+    :underlying form
+    :heads (head-set
+      (head :name data :max 1 :description "The stored body, by reference.")
+      (head :name wav :max 1 :description "A .wav to ingest at build time instead.")))
+
+  (value-kind :name sample-content
+    :description "A sample's positional slot: its number first, then its body."
+    :underlying union
+    :union (union-shape :alternatives [sample-id sample-section]))
+
+  (value-kind :name pattern-section
+    :description "A pattern's children: its rows, or the one (bin …) of a skeleton dump. Rows XOR bin is a build check — a count can cap the bin at one but cannot say \"many of one or exactly one of the other\"."
+    :underlying form
+    :heads (head-set :names [row bin]))
+
+  (value-kind :name pattern-content
+    :description "A pattern's positional slot: its number first, then its rows (or its packed dump)."
+    :underlying union
+    :union (union-shape :alternatives [pattern-id pattern-section]))
+
+  (value-kind :name row-index
+    :description "Which row of the pattern this is, 0..1023 — one below the row count's ceiling."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 1023 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name row-section
+    :description "A row's children: its cells, one per channel that carries something."
+    :underlying form
+    :heads (head-set :names [ev]))
+
+  (value-kind :name row-content
+    :description "A row's positional slot: its index first, then its cells."
+    :underlying union
+    :union (union-shape :alternatives [row-index row-section]))
 
   ; =====================================================================
   ; Forms
@@ -554,8 +644,8 @@
       :positional macro-field))
 
   (form :name instrument
-    :description "One instrument: the voice rules, the note-to-sample map and the three envelopes. tempura keeps instruments OPAQUE — it writes the name and a :raw body and re-emits the bytes — so a document that spells a field tempura did not materialise is it_field_not_materialized at build until --full exists. The instrument number is positional."
-    :positional any
+    :description "One instrument: the voice rules, the note-to-sample map and the three envelopes. tempura keeps instruments OPAQUE — it writes the name and a :raw body and re-emits the bytes — so a document that spells a field tempura did not materialise is it_field_not_materialized at build until --full exists. The instrument number is positional, and so are the children."
+    :positional instrument-content
     (key :name name :type string :optional true
       :description "The instrument's name — the 26-byte field.")
     (key :name raw :type bin-ref :optional true
@@ -594,8 +684,8 @@
           :description "Bank to select, or nil for none. Typed `any` for the same reason. Meaningless without a channel.")))
 
     (form :name notemap
-      :description "The note-to-sample map, compiled to IT's 120-pair keyboard table. Either the whole-range :sample shorthand, or explicit (range …) children."
-      :positional notemap-section
+      :description "The note-to-sample map, compiled to IT's 120-pair keyboard table. Three spellings, in the order you should reach for them: the whole-range :sample shorthand, explicit (range …) children, or the raw 240-number table written out flat."
+      :positional notemap-content
       (key :name sample :type sample-id :optional true
         :description "One sample for the whole range.")
       (form :name range
@@ -654,8 +744,8 @@
         :positional env-node-field)))
 
   (form :name sample
-    :description "One sample: its playback parameters and its body. tempura keeps sample headers and data OPAQUE — a :raw header region and a (data …) whose extent it computed — and never decodes anything. The sample number is positional."
-    :positional any
+    :description "One sample: its playback parameters and its body. tempura keeps sample headers and data OPAQUE — a :raw header region and a (data …) whose extent it computed — and never decodes anything. The sample number is positional, and so is the body."
+    :positional sample-content
     (key :name name :type string :optional true
       :description "The sample's name — the 26-byte field.")
     (key :name raw :type bin-ref :optional true
@@ -705,13 +795,13 @@
         :description "Path to the .wav file.")))
 
   (form :name pattern
-    :description "One pattern, row-major and sparse: only rows with content appear, and only cells with content per row. The pattern number is positional. A (bin …) child instead of rows is the skeleton dump — packed data by reference, which --patterns=bin produces."
-    :positional any
+    :description "One pattern, row-major and sparse: only rows with content appear, and only cells with content per row. The pattern number is positional, and so are the rows. A (bin …) child instead of rows is the skeleton dump — packed data by reference, which --patterns=bin produces; rows XOR bin is a build check, since a per-head count cannot say \"many of one or exactly one of the other\"."
+    :positional pattern-content
     (key :name rows :type rows-count :optional true :default 64
       :description "How many rows the pattern has.")
     (form :name row
       :description "One row: its index, positionally, then its cells."
-      :positional any
+      :positional row-content
       (form :name ev
         :description "One cell: the channel, then the note when there is one, then the columns that carry something."
         :positional ev-cell

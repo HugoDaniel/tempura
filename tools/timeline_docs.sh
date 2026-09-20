@@ -14,14 +14,28 @@
 # the same render, so the gate compares exactly what the verb produces.
 #
 # Why the render feeds the exporter TWO manifests and then throws one
-# away: `(keyframe :ease …)` is typed `pacer/ease-spec`, a cross-plugin
-# kind reference into the verbatim pacer copy (LANGUAGE.md §6.7). The CLI
-# resolves a document's plugins from the document itself and does not
-# compose the project file's, so exporting `schema/tempura.sjon` alone
-# fails the aggregate phase with `value-type reference pacer/ease-spec
-# does not resolve`. Concatenating the pacer copy ahead of it is the whole
-# fix: the exporter then emits one page with a section per plugin, in
-# source order, and the page keeps the second. pacer's own reference is
+# away. `(keyframe :ease …)` is typed `pacer/ease-spec`, a cross-plugin
+# kind reference into the verbatim pacer copy (LANGUAGE.md §6.7), and
+# `export-schema` resolves a manifest's type references against that
+# manifest alone. It does NOT compose `sjon-project.sjon`'s plugins, even
+# though `sjon project info` finds the project from this same directory —
+# measured on SJON 1.4.2, where
+#
+#   sjon export-schema schema/tempura.sjon --target=markdown
+#   sjon export-schema schema/tempura.sjon --target=markdown --no-project
+#
+# produce BYTE-IDENTICAL pages and both exit 1 with
+# `[err aggregate_phase_error] value-type reference pacer/ease-spec does
+# not resolve to any value-kind`. So the direct render is not an option
+# here, and it would not be the one to want anyway: it prints the `:ease`
+# slot as an opaque `pacer/ease-spec?` with no constraints column, while
+# the concatenated render resolves the kind and prints pacer's eighteen
+# easing names in full — which is the answer an author reading the page
+# is after.
+#
+# Concatenating the pacer copy AHEAD of the manifest is the whole fix: the
+# exporter emits one page with a `# <plugin>` section per manifest in
+# source order, and this script keeps the second. pacer's own reference is
 # `docs/score-language.md` in pacer's repo and is not restated here.
 set -eu
 

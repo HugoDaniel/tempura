@@ -777,25 +777,61 @@ test "tempura: the four composed manifests share no head" {
     try t_.expectEqual(@as(usize, 36), seen);
 }
 
-test "tempura: every form, key and value kind carries the prose the docs page renders" {
+test "tempura: every form, key, kind and member carries the prose the docs page renders" {
     // `docs/timeline-language.md` IS these `:description`s — the page has
     // no other source. A key added without one renders as a blank cell,
     // and `zig build docs` would happily regenerate the blank. So the
     // manifest's own completeness is the check, not the page's.
+    //
+    // Every manifest tempura OWNS is held to it, members included: the
+    // timeline tier, the two hosted tiers, the harness and the catalog.
+    // `schema/pacer.sjon` is exempt because it is a VERBATIM copy —
+    // holding a drift-gated file to this repo's prose standard would mean
+    // editing it, which is the one thing that file forbids.
     const gpa = t_.allocator;
     var schema = try Schema.load(gpa);
     defer schema.deinit();
 
-    const tempura = schema.preloaded.plugins[0];
-    try t_.expect(tempura.value_kinds.len > 0);
+    for (schema.preloaded.plugins) |plugin| {
+        if (std.mem.eql(u8, plugin.name, "pacer")) continue;
+        try expectPluginDescribed(plugin);
+    }
 
-    for (tempura.value_kinds) |kind| {
+    var corpus = try Schema.loadCorpus(gpa);
+    defer corpus.deinit();
+    try expectPluginDescribed(corpus.preloaded.plugins[0]);
+
+    // The catalog carries its vocabulary inline rather than as a preload,
+    // so it arrives through the document pipeline.
+    const catalog_src = try readRepoFile(gpa, "schema/tempura-catalog.sjon");
+    defer gpa.free(catalog_src);
+    var res = try sjon.validateDocument(gpa, catalog_src, .{});
+    defer res.deinit();
+    try t_.expectEqual(@as(usize, 1), res.plugins.len);
+    try expectPluginDescribed(res.plugins[0]);
+}
+
+fn expectPluginDescribed(plugin: sjon.Plugin.Plugin) DescribeError!void {
+    for (plugin.value_kinds) |kind| {
         if (kind.description.len == 0) {
-            std.debug.print("value-kind `{s}` has no :description\n", .{kind.name});
+            std.debug.print("value-kind `{s}` of `{s}` has no :description\n", .{ kind.name, plugin.name });
             return error.MissingDescription;
         }
+        // A member set is a closed vocabulary the page prints one line
+        // per entry of, so an undescribed member is a blank line there.
+        if (kind.members) |set| {
+            for (set.members) |member| {
+                if (member.description.len == 0) {
+                    std.debug.print(
+                        "member `{s}` of value-kind `{s}` of `{s}` has no :description\n",
+                        .{ member.name, kind.name, plugin.name },
+                    );
+                    return error.MissingDescription;
+                }
+            }
+        }
     }
-    for (tempura.forms) |form| try expectFormDescribed(form);
+    for (plugin.forms) |form| try expectFormDescribed(form);
 }
 
 const DescribeError = error{MissingDescription};
@@ -820,4 +856,83 @@ fn expectKeyDescribed(form: sjon.Plugin.FormSpec, key: sjon.Plugin.KeySpec) Desc
         return error.MissingDescription;
     }
     for (key.local_forms) |local| try expectFormDescribed(local);
+}
+
+// ---------------------------------------------------------------------
+// The it tier's positional slots: an id AND a child set, both narrowed
+// ---------------------------------------------------------------------
+
+test "it: a form's leading id is bounded even though child forms share the slot" {
+    var schema = try Schema.load(t_.allocator);
+    defer schema.deinit();
+
+    // The slot is a union over [<id kind> <head-set kind>], whose arms are
+    // disjoint by node shape — so a number reaches only the id arm and
+    // fails with the id's own bound (manifest spec §4.9), while a form
+    // still resolves its slot-local body.
+    try expectCode(&schema, "(pattern 500 :rows 64)", .number_above_max);
+    try expectCode(&schema, "(instrument 999 :name \"over\")", .number_above_max);
+    try expectCode(&schema, "(sample 0 :name \"under\")", .number_below_min);
+
+    // …and the ids that are in range still validate.
+    try expectClean(&schema, "(pattern 199 :rows 64)");
+    try expectClean(&schema, "(instrument 99 :name \"last\")");
+    try expectClean(&schema, "(sample 1 :name \"first\")");
+}
+
+test "it: a foreign head or a foreign shape in a positional slot is refused" {
+    var schema = try Schema.load(t_.allocator);
+    defer schema.deinit();
+
+    // A form reaches only the head-set arm, so an out-of-set head is that
+    // arm's own not_head_member; a string reaches neither arm and keeps
+    // the collapsed code.
+    try expectCode(&schema, "(pattern 0 (timing :speed 6) \"junk\" 12345)", .not_head_member);
+    try expectCode(&schema, "(pattern 0 (timing :speed 6) \"junk\" 12345)", .union_no_branch_matched);
+    try expectCode(&schema, "(pattern 0 (timing :speed 6) \"junk\" 12345)", .number_above_max);
+    try expectCode(&schema, "(pattern 0 (row 0 (ev 1 \"C-5\") \"junk\"))", .union_no_branch_matched);
+    // A head outside the set that IS a form somewhere reports the
+    // narrowing's code; one that is nowhere in scope at this slot reports
+    // the descent's. Both refuse it, which is the point — `:positional
+    // any` refused neither.
+    try expectCode(&schema, "(instrument 1 (pattern 0))", .not_head_member);
+    // The two KEY-local slots — `:vibrato` and `:midi` — are `:type form`
+    // rather than a head-set kind, because a key carrying inline locals
+    // must be form-typed. The local is the narrowing all the same: the
+    // right head resolves the body, and a foreign one is refused with a
+    // message that names the set it had to be in.
+    try expectClean(&schema, "(sample 1 :vibrato (vibrato :speed 4 :wave sine))");
+    try expectCode(&schema, "(sample 1 :vibrato (data :bits 8))", .unknown_local_form);
+    try expectCode(&schema, "(instrument 1 :midi (vibrato :speed 4))", .unknown_local_form);
+    try expectCode(&schema, "(instrument 1 (data :bits 16))", .unknown_local_form);
+    try expectCode(&schema, "(sample 1 (row 0))", .unknown_local_form);
+}
+
+test "it: a notemap takes the raw 120-pair table as well as ranges" {
+    const gpa = t_.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    // it 02's escape hatch: 120 [note sample] pairs written out flat.
+    // Built here rather than pasted so the two documents differ in
+    // exactly the one element the test is about.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(gpa);
+    try buf.appendSlice(gpa, "(instrument 1 (notemap [");
+    for (0..120) |i| {
+        try buf.print(gpa, "{d} 2 ", .{i});
+    }
+    const short_at = buf.items.len - 2; // drop the trailing "2 " for 239
+    try buf.appendSlice(gpa, "]))");
+    const full = try gpa.dupeZ(u8, buf.items);
+    defer gpa.free(full);
+    try expectClean(&schema, full);
+
+    var short: std.ArrayList(u8) = .empty;
+    defer short.deinit(gpa);
+    try short.appendSlice(gpa, buf.items[0..short_at]);
+    try short.appendSlice(gpa, "]))");
+    const short_z = try gpa.dupeZ(u8, short.items);
+    defer gpa.free(short_z);
+    try expectCode(&schema, short_z, .vector_length_mismatch);
 }
