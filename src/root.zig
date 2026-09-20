@@ -41,11 +41,16 @@ pub const smf = @import("smf/smf.zig");
 /// the timing walk. Pure Zig, no SJON.
 pub const itf = @import("itf/itf.zig");
 
+/// The time model (P103): the grid, positions and their spellings, the
+/// tempo and meter maps.
+pub const time = @import("time/time.zig");
+
 test {
     _ = Diag;
     _ = Schema;
     _ = smf;
     _ = itf;
+    _ = time;
 }
 
 test "version: src/root.zig and build.zig.zon spell the same version" {
