@@ -162,22 +162,25 @@ pub const TimeMap = struct {
     /// Wrapping TICKS instead would replay iteration 2 at the final
     /// segment's tempo — the bug the ordering exists to prevent.
     ///
-    /// A map with no positive length has nothing to wrap into and the
-    /// seconds pass through (`@mod` by zero is a NaN, and a NaN is not an
-    /// answer a playhead can use).
+    /// A `loop` needs a positive length to wrap into — `@mod` by zero is
+    /// a NaN, and a NaN is no answer for a playhead — so a map without
+    /// one passes the seconds through. A `hold` clamps at whatever the
+    /// length is, including zero; only a non-finite loop point (which
+    /// nothing finite can be compared against) passes through.
     pub fn wrapSeconds(self: *const TimeMap, seconds: f64) f64 {
-        if (!(std.math.isFinite(self.loop_secs) and self.loop_secs > 0)) return seconds;
+        if (!std.math.isFinite(self.loop_secs)) return seconds;
         return switch (self.end) {
-            .loop => @mod(seconds, self.loop_secs),
+            .loop => if (self.loop_secs > 0) @mod(seconds, self.loop_secs) else seconds,
             .hold => @min(seconds, self.loop_secs),
         };
     }
 
-    /// Where a tick sits in the bar table: the bar, the beat in it, the
-    /// ticks into that beat, and the meter in force. A negative tick is
-    /// read as tick 0 (a position is never negative, plan 03), and a tick
-    /// past the table's last bar is read in that bar, whose beat count
-    /// then runs past the meter's `n`.
+    /// Where a tick sits: the bar, the beat in it, the ticks into that
+    /// beat, and the meter in force. A negative tick is read as tick 0 (a
+    /// position is never negative, plan 03). Past the bar table the last
+    /// meter CARRIES ON — a bar is a bar whether or not `:length` reached
+    /// it, and a document's positions are resolved while its default
+    /// length is still being computed.
     pub fn barOf(self: *const TimeMap, tick: i64) struct {
         bar: i64,
         beat: i64,
@@ -185,10 +188,11 @@ pub const TimeMap = struct {
         meter: MeterSeg,
     } {
         const t = @max(tick, 0);
-        const bar = self.barIndex(t);
+        const bar = self.barAt(t);
         const seg = self.meters[self.meterOfBar(bar)];
         const beat_len = Grid.beatTicks(seg.d);
-        const rem = t - self.bars[@intCast(bar)];
+        // The start is at or before `t` by construction, so it fits.
+        const rem = t - @as(i64, @intCast(self.barStartRaw(bar)));
         return .{
             .bar = bar,
             .beat = @divFloor(rem, beat_len),
@@ -197,8 +201,11 @@ pub const TimeMap = struct {
         };
     }
 
-    /// Where bar `bar` starts, or `null` when the table does not reach
-    /// it — the table stops at `:length`.
+    /// Where bar `bar` starts according to the TABLE, or `null` when the
+    /// table does not hold it. The table runs to `:length`, and one bar
+    /// start past it when `:length` falls mid-bar — so the last entry is
+    /// the first bar line at or after the end. `tickFromLiteral` and
+    /// `barOf` read further than this, through the meter map.
     pub fn barStart(self: *const TimeMap, bar: i64) ?i64 {
         if (bar < 0 or bar >= self.bars.len) return null;
         return self.bars[@intCast(bar)];
@@ -206,10 +213,23 @@ pub const TimeMap = struct {
 
     /// The bar NUMBER when `tick` is a bar line, else `null` — the
     /// question `Pos.spell` asks before it prints `Nbar`.
+    ///
+    /// A bar line past the bar table is still a bar line: this reads the
+    /// meter map exactly as `tickFromLiteral(.bar)` writes it, so
+    /// `7bar` on a six-bar timeline spells back as `7bar`.
     pub fn isBarLine(self: *const TimeMap, tick: i64) ?i64 {
         if (tick < 0) return null;
-        const bar = self.barIndex(tick);
-        return if (self.bars[@intCast(bar)] == tick) bar else null;
+        const bar = self.barAt(tick);
+        return if (self.barStartRaw(bar) == tick) bar else null;
+    }
+
+    /// The bar `tick` falls in, from the table while the table reaches
+    /// and past it from the meter in force. `tick >= 0`.
+    fn barAt(self: *const TimeMap, tick: i64) i64 {
+        std.debug.assert(self.bars.len > 0);
+        if (tick <= self.bars[self.bars.len - 1]) return self.barIndex(tick);
+        const seg = self.meters[self.meterOfTick(tick)];
+        return seg.first_bar + @divFloor(tick - seg.tick, Grid.barTicks(seg.n, seg.d));
     }
 
     /// Resolve a position literal against the maps — all five units of
@@ -326,12 +346,31 @@ pub const TimeMap = struct {
     }
 
     /// Where bar `bar` starts, whether or not the table reaches it: past
-    /// `:length` the meter in force carries on.
+    /// `:length` the meter in force carries on. Checked against the grid
+    /// ceiling, for the callers that derived `bar` from a LITERAL.
     fn barStartOf(self: *const TimeMap, bar: i64) Error!i64 {
+        return capped(self.barStartRaw(bar));
+    }
+
+    /// The same answer in `i128`, for the callers that derived `bar` from
+    /// a tick they already hold — the start is then at or before that
+    /// tick and needs no ceiling of its own.
+    fn barStartRaw(self: *const TimeMap, bar: i64) i128 {
         if (bar >= 0 and bar < @as(i64, @intCast(self.bars.len))) return self.bars[@intCast(bar)];
         const seg = self.meters[self.meterOfBar(bar)];
-        return capped(@as(i128, seg.tick) +
-            @as(i128, bar - seg.first_bar) * Grid.barTicks(seg.n, seg.d));
+        return @as(i128, seg.tick) +
+            @as(i128, bar - seg.first_bar) * Grid.barTicks(seg.n, seg.d);
+    }
+
+    /// The last meter segment starting at or before `tick` — the
+    /// tick-domain twin of `meterOfBar`, for reading past the table.
+    fn meterOfTick(self: *const TimeMap, tick: i64) usize {
+        std.debug.assert(self.meters.len > 0);
+        var i: usize = self.meters.len - 1;
+        while (i > 0) : (i -= 1) {
+            if (self.meters[i].tick <= tick) return i;
+        }
+        return 0;
     }
 
     /// The grid ceiling, checked while the value is still `i128`.
@@ -458,26 +497,38 @@ fn tempoTable(
 ) error{OutOfMemory}![]Segment {
     var segs: std.ArrayList(Segment) = .empty;
 
-    if (tempo.len == 0 or tempo[0].tick != 0) {
-        try diags.add(
-            .tempo_map_invalid,
-            .err,
-            if (tempo.len > 0) tempo[0].span else .{ .start = 0, .end = 0 },
-            "a tempo map needs a point at tick 0; assuming {d} microseconds per quarter note",
-            .{DEFAULT_US},
-        );
+    // The point at tick 0 is required, and a point that names no tempo is
+    // no point: the fallback segment goes in unless the document put a
+    // USABLE one there (the same test `meterTable` makes), or the map
+    // would start at the second point's tick — or at nothing at all —
+    // and every lookup below would read the wrong segment.
+    const at_zero = tempo.len > 0 and tempo[0].tick == 0;
+    if (!(at_zero and usOf(tempo[0]) != null)) {
+        // A point IS at tick 0 and is the thing that is wrong: the loop
+        // below reports it in its own words, once.
+        if (!at_zero) {
+            try diags.add(
+                .tempo_map_invalid,
+                .err,
+                if (tempo.len > 0) tempo[0].span else .{ .start = 0, .end = 0 },
+                "a tempo map needs a point at tick 0; assuming {d} microseconds per quarter note",
+                .{DEFAULT_US},
+            );
+        }
         try segs.append(a, blank(0, DEFAULT_US));
     }
 
     for (tempo) |p| {
-        const us = switch (p.tempo) {
-            .us => |u| @as(f64, @floatFromInt(u)),
-            .qpm => |q| US_PER_MINUTE / q,
-        };
-        if (!(std.math.isFinite(us) and us > 0)) {
-            try diags.add(.tempo_map_invalid, .err, p.span, "tempo point at tick {d} names no tempo", .{p.tick});
+        const us = usOf(p) orelse {
+            try diags.add(
+                .tempo_map_invalid,
+                .err,
+                p.span,
+                "tempo point at tick {d} names no tempo",
+                .{p.tick},
+            );
             continue;
-        }
+        };
         if (segs.items.len > 0) {
             const prev = segs.items[segs.items.len - 1].tick;
             if (p.tick <= prev) {
@@ -644,6 +695,18 @@ fn bits(x: f64) u64 {
     return @bitCast(x);
 }
 
+/// The microseconds per quarter note a point names, or `null` when it
+/// names no tempo at all — `:us 0`, or a `:qpm` that is zero, negative or
+/// not a number. `60e6 / qpm` is ONE f64 division (plan 03, "Tempo").
+fn usOf(p: TempoPoint) ?f64 {
+    const us = switch (p.tempo) {
+        .us => |u| @as(f64, @floatFromInt(u)),
+        .qpm => |q| US_PER_MINUTE / q,
+    };
+    if (!(std.math.isFinite(us) and us > 0)) return null;
+    return us;
+}
+
 fn blank(tick: i64, us: f64) Segment {
     return .{ .tick = tick, .us = us, .tps = 0, .start_sec = 0, .t_i = 0 };
 }
@@ -727,6 +790,24 @@ test "TimeMap.derive: the segment table builds in plan 03's op order" {
     // exact in f64 — it is the same one multiply and one divide.
     try testing.expectApproxEqRel(@as(f64, 74_801_126.4), r.map.segments[2].tps, 1e-12);
     try testing.expectEqual(@as(f64, 4), r.map.segments[2].start_sec);
+
+    // Every value above is exact under ANY equivalent accumulation, so
+    // they pin the numbers and not the op ORDER. This map does: 97.3 qpm
+    // from 0 and 150 at 4q, where
+    //   start_sec_1 = 0 + 184 504 320 / tps_0 = 2.466598150051387
+    // and the last bit is the whole point — a microseconds origin
+    // (Δtick · us_0 / TPQ, then / 1e6) lands one ulp above, on
+    // 0x4003BB97CF96C22C.
+    var pin = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 97.3 } },
+        .{ .tick = 184_504_320, .tempo = .{ .qpm = 150 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 184_504_320, .hold);
+    defer pin.deinit();
+    try testing.expectEqual(false, pin.map.integral);
+    try testing.expectEqual(
+        @as(u64, 0x4003BB97CF96C22B),
+        @as(u64, @bitCast(pin.map.segments[1].start_sec)),
+    );
 }
 
 /// The fixture of plan 03's op-order table: 120 qpm, 240 qpm at 4q,
@@ -805,17 +886,21 @@ test "TimeMap: :qpm 97.3 then 150 at 13q returns the boundary tick from its own 
 
     // Why the shape and not a microseconds origin (plan 03, "The segment
     // table"): the same fixture with origins kept in MICROSECONDS and
-    // scaled by 1e6 on the way in and out loses a ulp in the round trip
-    // and answers the boundary tick MINUS ONE. The `@floor` below is the
-    // REJECTED table's own clock floor, inside a test body — the repo's
-    // one clock floor is `tickFromSeconds`, above.
+    // scaled by 1e6 on the way in and out loses a ulp in the round trip,
+    // so the offset it hands its clock floor is NEGATIVE — and larger
+    // than −1, about −1.07e−7 of a tick. A floor of a value in (−1, 0) is
+    // −1, so that table answers 599 639 039, the boundary tick MINUS ONE.
+    // Stated as the two inequalities and not as a floor builtin, because
+    // the repo's one clock floor is `tickFromSeconds` and 03's lint
+    // greps the source for that builtin ("Round versus floor").
     const tpq: f64 = @floatFromInt(Grid.TPQ);
     const us_0: f64 = 60_000_000.0 / 97.3;
     const us_1: f64 = 60_000_000.0 / 150.0;
     const origin_us: f64 = 599_639_040.0 * us_0 / tpq;
     const bad_seconds = origin_us / 1e6;
-    const bad_tick = 599_639_040 + @as(i64, @intFromFloat(@floor((bad_seconds * 1e6 - origin_us) * tpq / us_1)));
-    try testing.expectEqual(@as(i64, 599_639_039), bad_tick);
+    const bad_offset = (bad_seconds * 1e6 - origin_us) * tpq / us_1;
+    try testing.expect(bad_offset < 0);
+    try testing.expect(bad_offset > -1);
 }
 
 test "TimeMap: the same fixture in :us takes the integer path to the same tick" {
@@ -923,8 +1008,24 @@ test "TimeMap.derive: the bar table under a [3 4] → [4 4] change" {
     try testing.expectEqual(@as(i64, 1), off.sub_ticks);
     try testing.expectEqual(@as(u8, 3), off.meter.n);
 
+    // Past the table the [4 4] carries on: bar 7 starts at
+    // 1 014 773 760 + 184 504 320 = 1 199 278 080, and one quarter into
+    // it is beat 1 of bar 7.
+    const past = m.barOf(1_199_278_080 + 46_126_080);
+    try testing.expectEqual(@as(i64, 7), past.bar);
+    try testing.expectEqual(@as(i64, 1), past.beat);
+    try testing.expectEqual(@as(i64, 0), past.sub_ticks);
+
+    try testing.expectEqual(@as(?i64, 0), m.isBarLine(0));
     try testing.expectEqual(@as(?i64, 2), m.isBarLine(276_756_480));
     try testing.expectEqual(@as(?i64, null), m.isBarLine(276_756_481));
+    // `:length` is bar 6, the table's last entry…
+    try testing.expectEqual(@as(?i64, 6), m.isBarLine(1_014_773_760));
+    // …and a bar line past the table is still a bar line.
+    try testing.expectEqual(@as(?i64, 7), m.isBarLine(1_199_278_080));
+    try testing.expectEqual(@as(?i64, null), m.isBarLine(1_199_278_079));
+
+    // `barStart` is the TABLE's own answer and stops where it stops.
     try testing.expectEqual(@as(?i64, 645_765_120), m.barStart(4));
     try testing.expectEqual(@as(?i64, null), m.barStart(7));
 }
@@ -1042,6 +1143,16 @@ fn twoSegmentMap(end: End) error{OutOfMemory}!Result {
     }, 369_008_640, end);
 }
 
+/// 120 qpm, `[4 4]`, and no length at all — the map a document has
+/// before its `:length` is worked out.
+fn zeroLengthMap(end: End) error{OutOfMemory}!Result {
+    return derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 120 } },
+    }, &.{
+        .{ .tick = 0, .n = 4, .d = 4 },
+    }, 0, end);
+}
+
 test "TimeMap: :end loop wraps SECONDS first, into the early segment" {
     var r = try twoSegmentMap(.loop);
     defer r.deinit();
@@ -1063,6 +1174,13 @@ test "TimeMap: :end loop wraps SECONDS first, into the early segment" {
 
     // Negative time wraps into [0, loop_secs) like the tick-domain @mod.
     try testing.expectEqual(@as(f64, 2.5), m.wrapSeconds(-0.5));
+
+    // A loop with no length has nothing to wrap into: `@mod` by zero is
+    // a NaN, so the seconds pass through instead.
+    var zero = try zeroLengthMap(.loop);
+    defer zero.deinit();
+    try testing.expectEqual(@as(f64, 0), zero.map.loop_secs);
+    try testing.expectEqual(@as(f64, 5), zero.map.wrapSeconds(5.0));
 }
 
 test "TimeMap: :end hold clamps at seconds(length)" {
@@ -1078,6 +1196,14 @@ test "TimeMap: :end hold clamps at seconds(length)" {
     try testing.expectEqual(@as(f64, 2.5), m.wrapSeconds(2.5));
     try testing.expectEqual(@as(f64, -1.5), m.wrapSeconds(-1.5));
     try testing.expectEqual(@as(i64, 0), try m.tickFromSeconds(m.wrapSeconds(-1.5)));
+
+    // A hold clamps at whatever the length is, INCLUDING zero: a
+    // timeline of no length holds every clock at its one tick.
+    var zero = try zeroLengthMap(.hold);
+    defer zero.deinit();
+    try testing.expectEqual(@as(f64, 0), zero.map.loop_secs);
+    try testing.expectEqual(@as(f64, 0), zero.map.wrapSeconds(5.0));
+    try testing.expectEqual(@as(i64, 0), try zero.map.tickFromSeconds(zero.map.wrapSeconds(5.0)));
 }
 
 test "TimeMap.derive: a bar table past MAX_TICK is tick_overflow" {
@@ -1186,6 +1312,18 @@ test "TimeMap.spell: the printer's rule, with this map's bar table" {
     w = std.Io.Writer.fixed(&buf);
     try m.spell(&w, 1);
     try testing.expectEqualStrings("1t", w.buffered());
+
+    // A bar line past the bar table spells as a bar, not as the 26
+    // quarters it also is: this fixture ends at bar 6 and bar 7 starts at
+    // 1 014 773 760 + 184 504 320 = 1 199 278 080.
+    w = std.Io.Writer.fixed(&buf);
+    try m.spell(&w, 1_199_278_080);
+    try testing.expectEqualStrings("7bar", w.buffered());
+    // And the literal that named it reads back to the same tick.
+    try testing.expectEqual(
+        @as(i64, 1_199_278_080),
+        (try m.tickFromLiteral(.{ .value = 7, .unit = .bar })).tick,
+    );
 }
 
 test "TimeMap.echo: the canonical text of a map, floats as bit patterns" {
@@ -1211,4 +1349,47 @@ test "TimeMap.echo: the canonical text of a map, floats as bit patterns" {
         \\(length :tick 369008640 :end loop :loop-secs "4008000000000000")
         \\
     , w.buffered());
+}
+
+test "TimeMap.derive: a tempo point at tick 0 that names no tempo still leaves a segment there" {
+    // `:us 0` is not a tempo, so the point is dropped with its own
+    // diagnostic — and the fallback segment has to take tick 0 anyway.
+    // Without it the table would be EMPTY and `derive` itself would read
+    // past its end computing `loop_secs`.
+    var lone = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .us = 0 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold);
+    defer lone.deinit();
+    try testing.expectEqual(@as(usize, 1), lone.diags.count(.tempo_map_invalid));
+    try testing.expectEqual(@as(usize, 1), lone.map.segments.len);
+    try testing.expectEqual(@as(i64, 0), lone.map.segments[0].tick);
+    try testing.expectEqual(@as(f64, 500_000), lone.map.segments[0].us);
+    try testing.expectEqual(@as(f64, 0), lone.map.secondsFromTick(0));
+
+    // The same with a usable point after it: the fallback holds tick 0,
+    // so the map still starts where the timeline does — 184 504 320 ticks
+    // at 500 000 µs per quarter note is 2 s, the second segment's origin.
+    var then_good = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 0 } },
+        .{ .tick = 184_504_320, .tempo = .{ .us = 400_000 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 184_504_320, .hold);
+    defer then_good.deinit();
+    try testing.expectEqual(@as(usize, 1), then_good.diags.count(.tempo_map_invalid));
+    try testing.expectEqual(@as(usize, 2), then_good.map.segments.len);
+    try testing.expectEqual(@as(i64, 0), then_good.map.segments[0].tick);
+    try testing.expectEqual(@as(f64, 0), then_good.map.secondsFromTick(0));
+    try testing.expectEqual(@as(i64, 0), try then_good.map.tickFromSeconds(0));
+    try testing.expectEqual(@as(f64, 2), then_good.map.segments[1].start_sec);
+    try testing.expectEqual(@as(f64, 2), then_good.map.loop_secs);
+
+    // A NaN and a negative `:qpm` are the same non-tempo, and the map is
+    // still built around them.
+    var not_numbers = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = std.math.nan(f64) } },
+        .{ .tick = 46_126_080, .tempo = .{ .qpm = -120 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold);
+    defer not_numbers.deinit();
+    try testing.expectEqual(@as(usize, 2), not_numbers.diags.count(.tempo_map_invalid));
+    try testing.expectEqual(@as(usize, 1), not_numbers.map.segments.len);
+    try testing.expectEqual(@as(f64, 500_000), not_numbers.map.segments[0].us);
 }
