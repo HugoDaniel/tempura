@@ -1,0 +1,27 @@
+; exported from native.sjon (conductor: none, 4 lanes, 2 sections) by tempura 0.1.0
+; positions: 0 rounded (max 0b); onsets: 1 aggregated
+(transport :bpm 125 :meter [4 4] :dur 4bar :end loop)
+; cue "the drop" — bar 2
+(scene :name intro :at 0bar :dur 2bar)
+(scene :name drop  :at 2bar :dur 2bar)
+(trigger :target kick :at [0bar 1b 2bar 8.5b 3bar 12.5b])
+(track :target kick-vel
+  (key :at 0bar :value 0.86614174 :ease hold)
+  (key :at 1b :value 0.503937 :ease hold)
+  (key :at 2bar :value 0.78740156 :ease hold)
+  (key :at 8.5b :value 0.62992126 :ease hold)
+  (key :at 3bar :value 0.78740156 :ease hold)
+  (key :at 12.5b :value 0.62992126 :ease hold))
+(track :target glow
+  (key :at 0bar :value 0.2 :ease hold)
+  (key :at 1bar :value 0.9 :ease in-cubic)
+  (key :at 2bar :value 0.1 :ease (spring :damping 0.5)))
+(track :target hats :pattern (euclid 3 8 1))
+(track :target pulse :expr (* beat 2))
+(control :id glow-amt :type slider :min 0 :max 1 :value 0.5 :target glow-amt)
+(target :name kick :arity 4)
+(target :name kick-vel :arity 1)
+(target :name glow :arity 1)
+(target :name hats :arity 1)
+(target :name pulse :arity 1)
+(target :name glow-amt :arity 1)

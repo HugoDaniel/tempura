@@ -6,21 +6,26 @@
 #   tools/zt test -Dtest-root=time/time.zig
 #   tools/zt verify
 #
-# The lock is a directory under $TMPDIR (mkdir is atomic); a stale lock
-# older than 30 minutes is reclaimed. ZT_JOBS caps the build runner's own
-# parallelism (default 4).
+# The lock is a directory under $TMPDIR (mkdir is atomic) holding the
+# owner's pid; a lock whose owner is gone is reclaimed at once, and one
+# older than 30 minutes is reclaimed regardless. ZT_JOBS caps the build
+# runner's own parallelism (default 4).
 set -eu
 lock="${TMPDIR:-/tmp}/tempura-zig.lock"
 jobs="${ZT_JOBS:-4}"
 i=0
 while ! mkdir "$lock" 2>/dev/null; do
+    owner=$(cat "$lock/pid" 2>/dev/null || echo "")
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+        rm -rf "$lock"; continue
+    fi
     if [ -d "$lock" ] && [ "$(find "$lock" -maxdepth 0 -mmin +30 | wc -l)" -gt 0 ]; then
-        rmdir "$lock" 2>/dev/null || true
-        continue
+        rm -rf "$lock"; continue
     fi
     i=$((i + 1))
     [ "$i" -eq 1 ] && echo "zt: waiting for another zig build to finish…" >&2
     sleep 2
 done
-trap 'rmdir "$lock" 2>/dev/null || true' EXIT INT TERM
-exec zig build -j"$jobs" "$@"
+echo $$ > "$lock/pid"
+trap 'rm -rf "$lock"' EXIT INT TERM
+zig build -j"$jobs" "$@"

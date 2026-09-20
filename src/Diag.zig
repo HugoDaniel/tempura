@@ -166,6 +166,30 @@ pub const Code = enum(u16) {
     /// WRITER's, raised by `pack` and restated by a carrier handed an
     /// empty essence (plan 04, "What the residue is").
     residue_unencodable,
+
+    /// `export-score`: a notes lane carries more onsets than pacer's
+    /// parked `:at`-list cap of 1 000. Every onset is still emitted —
+    /// plan 08's rule is that a trigger keeps them all — so this is the
+    /// warning that says the score is past the size pacer's own plans
+    /// budgeted for (plan 08, "The key budget", item 4).
+    export_onset_budget,
+
+    /// `export-score`: a curve lane printed more keys than
+    /// `--max-keys-per-track`, the per-track share of pacer's
+    /// `MAX_KEYS = 4096`. A bound lane has already been through both
+    /// budget stages and a native one is never simplified at all, so the
+    /// keys stand and the count is reported (plan 08, "The key budget",
+    /// item 3).
+    export_key_budget,
+
+    /// `export-score`: the tempo map needs more than pacer's
+    /// `MAX_TEMPO_SEGMENTS = 512` even after coalescing everything
+    /// within `--tempo-eps` — a per-tick slide over a whole song. The
+    /// score drops its `(tempo …)` table and prints every position in
+    /// SECONDS instead, so the piece still sounds right while its bar
+    /// and beat lanes run on the transport's one tempo (plan 08,
+    /// "Transport and tempo"; the it set's 09 fallback).
+    export_tempo_budget,
 };
 
 /// How much a diagnostic costs its caller. Orthogonal to `Code` — the
@@ -366,6 +390,9 @@ const code_order = [_]Code{
     .note_key_invalid,
     .lane_duplicate,
     .residue_unencodable,
+    .export_onset_budget,
+    .export_key_budget,
+    .export_tempo_budget,
 };
 
 test "Diag.Code: ordinals are dense and unique — the wire contract" {

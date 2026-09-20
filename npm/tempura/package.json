@@ -1,0 +1,40 @@
+{
+  "name": "tempura",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "The pacer landing proof for tempura's score exporter — every printed position read back by the real pacer.wasm",
+  "keywords": [
+    "tempura",
+    "pacer",
+    "sjon",
+    "timeline",
+    "midi",
+    "impulse-tracker",
+    "deterministic"
+  ],
+  "author": "Hugo Daniel <mail@hugodaniel.pt>",
+  "license": "CC0-1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://git.hugodaniel.com/hugo/tempura.git",
+    "directory": "npm/tempura"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false,
+  "files": [
+    "test"
+  ],
+  "scripts": {
+    "build:fixtures": "cd ../.. && zig build landing",
+    "build:wasm": "cd ../../../pacer && zig build wasm",
+    "build:wasm-copy": "node -e \"require('node:fs').copyFileSync('../../../pacer/zig-out/bin/pacer.wasm','../../../pacer/npm/pacer/pacer.wasm')\"",
+    "pretest": "npm run build:fixtures && npm run build:wasm && npm run build:wasm-copy",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "pacer": "file:../../../pacer/npm/pacer"
+  }
+}

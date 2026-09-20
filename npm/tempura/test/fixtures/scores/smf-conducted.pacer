@@ -1,0 +1,15 @@
+; exported from smf.sjon (conductor: impulse.mid, 2 lanes, 0 sections) by tempura 0.1.0
+; positions: 0 rounded (max 0b); onsets: 0 aggregated
+; curve keys: 5 → 5 within eps 0.007874016
+(transport :bpm 125 :meter [4 4] :dur 2bar :end hold)
+(tempo :at 1b :bpm 150)
+(trigger :target kick :at [0bar 0.5b])
+(track :target filter
+  (key :at 0bar :value 0 :ease hold)
+  (key :at 0.25b :value 0.2519685 :ease hold)
+  (key :at 0.5b :value 0.503937 :ease hold)
+  (key :at 0.75b :value 0.7559055 :ease hold)
+  (key :at 1b :value 1 :ease hold))
+(target :name kick :arity 4)
+(target :name kick-vel :arity 1)
+(target :name filter :arity 1)

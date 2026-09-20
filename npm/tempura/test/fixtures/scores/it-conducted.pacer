@@ -1,0 +1,8 @@
+; exported from it.sjon (conductor: impulse-04.it, 1 lanes, 0 sections) by tempura 0.1.0
+; positions: 0 rounded (max 0b); onsets: 0 aggregated
+(transport :bpm 125 :meter [4 4] :dur 2bar :end hold)
+(tempo :at 1b :bpm 150)
+(tempo :at 2b :bpm 200)
+(trigger :target bass :at [0bar 1b 2b 3b])
+(target :name bass :arity 4)
+(target :name bass-vel :arity 1)

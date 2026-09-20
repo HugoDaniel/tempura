@@ -56,6 +56,10 @@ pub const residue = @import("residue/residue.zig");
 /// snapping.
 pub const edit = @import("edit/edit.zig");
 
+/// The pacer exporter (P106): score text within pacer's grid and budget.
+/// Named `exporter` because `export` is a Zig keyword.
+pub const exporter = @import("export/export.zig");
+
 test {
     _ = Diag;
     _ = Schema;
@@ -65,6 +69,7 @@ test {
     _ = doc;
     _ = residue;
     _ = edit;
+    _ = exporter;
     // Not part of the `tempura` module — the corpus runner is its own
     // executable root, built against these same sources — but its
     // harness vocabulary, its canonical renderer and its verdict earn
