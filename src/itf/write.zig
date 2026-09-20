@@ -1,0 +1,929 @@
+//! `Module` → `.it` bytes, in plan 06's canonical layout.
+//!
+//! ```
+//! 0x0000  header (192 B)
+//! 0x00C0  orders (trimmed + exactly one trailing 255, min length 2)
+//!         parapointers: instruments ×4, samples ×4, patterns ×4
+//!         [edit history]   [MIDI config]   [message + residue tail]
+//!         instruments (554 B each, copied)
+//!         sample headers (80 B each, copied, SamplePointer back-patched)
+//!         patterns (8 B header + packed; empty 64-row → parapointer 0)
+//!         sample data (sample-index order, copied)
+//!         [foreign chunks, verbatim, in order]
+//!         ['TMPU' u32 len payload — the residue, last]
+//! ```
+//!
+//! The section order and every pad byte are FIXED, so one module is one
+//! file on every host (plan 09), and `write(read(bytes)) == bytes` for
+//! any file this writer produced. Opaque regions are copied out of
+//! `source` — the anchor's bytes — and never decoded (plan 06, "The
+//! canonical writer"; it 05 §"Canonical layout"). The layout freezes at
+//! E1.
+//!
+//! Strict clamps are it 05's and are DIAGNOSTICS, never silent: 200
+//! patterns, 99 instruments and samples, rows 32–200 (a shorter pattern
+//! gets a `C00` break on its last row), tempo 32–255, speed 1–255.
+//! `loose` lifts the counts to OpenMPT's itEx bounds.
+//!
+//! Diagnostic spans are offsets into the OUTPUT — the writer has no input
+//! file to point at, and where a record landed is what a reader of the
+//! result needs.
+
+const std = @import("std");
+const Diag = @import("../Diag.zig");
+const model = @import("Module.zig");
+const pattern = @import("pattern.zig");
+const read_it = @import("read.zig");
+
+const Builder = model.Builder;
+const Cell = model.Cell;
+const Fixture = read_it.Fixture;
+const Module = model.Module;
+const Region = model.Region;
+const hdr = model.hdr;
+const testing = std.testing;
+
+/// Only resource exhaustion is an error (plan 01).
+pub const Error = error{OutOfMemory};
+
+/// What the caller wants of a write.
+pub const Options = struct {
+    /// Copy the anchor's edit-history block through (it 03: dropped
+    /// unless asked for).
+    preserve_history: bool = false,
+    /// Lift the strict count clamps to OpenMPT's itEx bounds (it 05).
+    loose: bool = false,
+    /// The residue's trailing-chunk payload (plan 04). When null, a
+    /// `TMPU` chunk the module was READ with is copied through instead.
+    tmpu: ?[]const u8 = null,
+    /// The residue's message tail, appended to the song message (plan 04,
+    /// "The IT carriers").
+    message_tail: ?[]const u8 = null,
+};
+
+/// The bytes and everything that had to give to produce them.
+pub const Written = struct {
+    arena: std.heap.ArenaAllocator,
+    bytes: []const u8,
+    diags: Diag.List,
+
+    pub fn deinit(self: *Written) void {
+        self.diags.deinit();
+        self.arena.deinit();
+    }
+};
+
+/// it 05's clamps. `strict` is a file IT 2.14 itself loads; `loose` is
+/// OpenMPT's itEx bounds, for people who know their target player.
+const Limits = struct {
+    patterns: usize,
+    instruments: usize,
+    samples: usize,
+    rows_min: u16,
+    rows_max: u16,
+
+    const strict: Limits = .{
+        .patterns = 200,
+        .instruments = 99,
+        .samples = 99,
+        .rows_min = 32,
+        .rows_max = 200,
+    };
+    const loose: Limits = .{
+        .patterns = 240,
+        .instruments = 255,
+        .samples = 3999,
+        .rows_min = 1,
+        .rows_max = 1024,
+    };
+};
+
+/// IT's `Cxx` — break to row xx of the next order (`'C' - '@'`), the one
+/// effect the writer ever synthesises (it 05: a short pattern's break).
+const cmd_break: u8 = 'C' - '@';
+
+/// `OrdNum` is a u16 and IT's own list is 256 entries.
+const max_orders: usize = 256;
+/// `MsgLgth` is a u16, and the NUL terminator has to fit inside it.
+const max_message: usize = std.math.maxInt(u16) - 1;
+
+/// Writes `module` as an Impulse Tracker module.
+///
+/// `source` is the anchor's bytes, where every opaque region is copied
+/// from; it may be null only when the module carries no regions (a module
+/// tempura authored). A region that cannot be copied is a diagnostic and
+/// a zeroed record — never a refusal to write.
+pub fn write(
+    gpa: std.mem.Allocator,
+    module: *const Module,
+    source: ?[]const u8,
+    opts: Options,
+) Error!Written {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena.deinit();
+    var diags: Diag.List = .init(gpa);
+    errdefer diags.deinit();
+
+    var w: Writer = .{
+        .gpa = gpa,
+        .a = arena.allocator(),
+        .module = module,
+        .source = source,
+        .opts = opts,
+        .limits = if (opts.loose) .loose else .strict,
+        .diags = &diags,
+    };
+    try w.run();
+
+    return .{ .arena = arena, .bytes = w.out.items, .diags = diags };
+}
+
+/// The emission in progress.
+const Writer = struct {
+    gpa: std.mem.Allocator,
+    a: std.mem.Allocator,
+    module: *const Module,
+    source: ?[]const u8,
+    opts: Options,
+    limits: Limits,
+    diags: *Diag.List,
+    out: std.ArrayList(u8) = .empty,
+
+    fn here(self: *const Writer) u32 {
+        return @intCast(self.out.items.len);
+    }
+
+    fn byte(self: *Writer, v: u8) Error!void {
+        try self.out.append(self.a, v);
+    }
+
+    fn word(self: *Writer, v: u16) Error!void {
+        try self.out.appendSlice(self.a, &std.mem.toBytes(std.mem.nativeToLittle(u16, v)));
+    }
+
+    fn dword(self: *Writer, v: u32) Error!void {
+        try self.out.appendSlice(self.a, &std.mem.toBytes(std.mem.nativeToLittle(u32, v)));
+    }
+
+    fn blob(self: *Writer, s: []const u8) Error!void {
+        try self.out.appendSlice(self.a, s);
+    }
+
+    fn zeros(self: *Writer, n: usize) Error!void {
+        try self.out.appendNTimes(self.a, 0, n);
+    }
+
+    fn patchWord(self: *Writer, at: u32, v: u16) void {
+        std.mem.writeInt(u16, self.out.items[at..][0..2], v, .little);
+    }
+
+    fn patchDword(self: *Writer, at: u32, v: u32) void {
+        std.mem.writeInt(u32, self.out.items[at..][0..4], v, .little);
+    }
+
+    fn note(
+        self: *Writer,
+        code: Diag.Code,
+        severity: Diag.Severity,
+        at: u32,
+        end: u32,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) Error!void {
+        try self.diags.add(code, severity, .{ .start = at, .end = end }, fmt, args);
+    }
+
+    fn run(self: *Writer) Error!void {
+        const m = self.module;
+        const orders = try self.trimOrders();
+        const ins_count = try self.clampCount(m.instruments.len, self.limits.instruments, "instruments", hdr.ins_num);
+        const smp_count = try self.clampCount(m.samples.len, self.limits.samples, "samples", hdr.smp_num);
+        const pat_count = try self.clampCount(m.patterns.len, self.limits.patterns, "patterns", hdr.pat_num);
+        const message = try self.buildMessage();
+
+        // Special b1 is set only when a block is really written — never
+        // flag-without-block, the bug the reader guards against (it 05).
+        const history: ?Region = if (self.opts.preserve_history) m.edit_history else null;
+        const embed_midi = m.midi_config != null or
+            m.header.flags & model.flag.embed_midi != 0 or
+            m.header.special & model.special.midi_config != 0;
+
+        var special = m.header.special;
+        special = setBit(special, model.special.message, message.len > 0);
+        special = setBit(special, model.special.edit_history, history != null);
+        special = setBit(special, model.special.midi_config, embed_midi);
+
+        try self.writeHeader(.{
+            .ord_num = @intCast(orders.len),
+            .ins_num = @intCast(ins_count),
+            .smp_num = @intCast(smp_count),
+            .pat_num = @intCast(pat_count),
+            .special = special,
+        });
+        try self.blob(orders);
+
+        const ins_pp = self.here();
+        try self.zeros(ins_count * 4);
+        const smp_pp = self.here();
+        try self.zeros(smp_count * 4);
+        const pat_pp = self.here();
+        try self.zeros(pat_count * 4);
+
+        if (history) |region| {
+            try self.copyRegion(region, region.len, .it_truncated, "the edit-history block");
+        }
+        if (embed_midi) {
+            if (m.midi_config) |region| {
+                try self.copyRegion(region, model.midi_config_size, .it_truncated, "the MIDI configuration");
+            } else {
+                // The flags demand a block and the module has none: IT's
+                // default table goes back (it 03, "What becomes a ref").
+                try self.zeros(model.midi_config_size);
+            }
+        }
+        if (message.len > 0) {
+            self.patchWord(hdr.message_length, @intCast(message.len));
+            self.patchDword(hdr.message_offset, self.here());
+            try self.blob(message);
+        }
+
+        for (m.instruments[0..ins_count], 0..) |instrument, i| {
+            self.patchDword(ins_pp + @as(u32, @intCast(i)) * 4, self.here());
+            try self.copyRegion(instrument.raw, model.instrument_size, .it_no_instrument, "an instrument body");
+        }
+
+        const sample_headers = try self.a.alloc(u32, smp_count);
+        for (m.samples[0..smp_count], 0..) |sample, i| {
+            self.patchDword(smp_pp + @as(u32, @intCast(i)) * 4, self.here());
+            sample_headers[i] = self.here();
+            try self.copyRegion(sample.raw, model.sample_header_size, .it_sample_extent_truncated, "a sample header");
+        }
+
+        for (m.patterns[0..pat_count], 0..) |p, i| {
+            // An empty 64-row pattern is a parapointer 0 and no data —
+            // exactly what IT writes (it 05, `D_SaveIT1`).
+            if (p.rows == model.channels and p.isEmpty()) continue;
+            self.patchDword(pat_pp + @as(u32, @intCast(i)) * 4, self.here());
+            try self.writePattern(p, i);
+        }
+
+        for (m.samples[0..smp_count], 0..) |sample, i| {
+            const pointer_at = sample_headers[i] + model.smp.sample_pointer;
+            if (sample.data.isEmpty()) {
+                self.patchDword(pointer_at, 0);
+                continue;
+            }
+            const bytes = self.regionBytes(sample.data);
+            if (bytes == null) {
+                try self.note(.it_sample_extent_truncated, .warning, pointer_at, pointer_at + 4, "sample {d}'s data is not inside the anchor's bytes; written without data", .{i});
+                self.patchDword(pointer_at, 0);
+                continue;
+            }
+            self.patchDword(pointer_at, self.here());
+            try self.blob(bytes.?);
+        }
+
+        for (m.foreign) |chunk| {
+            try self.copyRegion(chunk.raw, chunk.raw.len, .it_truncated, "a foreign chunk");
+        }
+
+        // The residue chunk is last, where every tracker puts its own
+        // extensions (plan 04, "The IT carriers").
+        const payload: ?[]const u8 = self.opts.tmpu orelse
+            if (m.tmpu) |region| self.regionBytes(region) else null;
+        if (payload) |bytes| {
+            try self.blob("TMPU");
+            try self.dword(@intCast(bytes.len));
+            try self.blob(bytes);
+        }
+    }
+
+    const HeaderCounts = struct {
+        ord_num: u16,
+        ins_num: u16,
+        smp_num: u16,
+        pat_num: u16,
+        special: u16,
+    };
+
+    fn writeHeader(self: *Writer, counts: HeaderCounts) Error!void {
+        const h = self.module.header;
+        try self.blob("IMPM");
+        try self.blob(&h.title);
+        try self.byte(h.highlight_minor);
+        try self.byte(h.highlight_major);
+        try self.word(counts.ord_num);
+        try self.word(counts.ins_num);
+        try self.word(counts.smp_num);
+        try self.word(counts.pat_num);
+        // A module READ from a file keeps its own identification; a fresh
+        // one carries tempura's, applied when the Builder made it
+        // (plan 06, "Header policy").
+        try self.word(h.cwtv);
+        try self.word(h.cmwt);
+        try self.word(h.flags);
+        try self.word(counts.special);
+        try self.byte(h.global_volume);
+        try self.byte(h.mix_volume);
+        try self.byte(try self.clampSpeed());
+        try self.byte(try self.clampTempo());
+        try self.byte(h.pan_separation);
+        try self.byte(h.pitch_wheel_depth);
+        try self.word(0); // MsgLgth, back-patched
+        try self.dword(0); // MsgOffset, back-patched
+        try self.dword(h.reserved);
+        // The channel tables go back as they came: `Module` carries all
+        // 64 entries, so there is nothing for the writer to invent.
+        try self.blob(&h.channel_pan);
+        try self.blob(&h.channel_vol);
+        std.debug.assert(self.here() == model.header_size);
+    }
+
+    /// The order list, trimmed of its trailing end markers and given
+    /// exactly one, at least two bytes long (it 05's canonical layout).
+    fn trimOrders(self: *Writer) Error![]u8 {
+        const orders = self.module.orders;
+        var n = orders.len;
+        while (n > 0 and orders[n - 1] == 255) n -= 1;
+        if (n > max_orders) {
+            try self.note(.it_count_exceeds_spec, .err, hdr.ord_num, hdr.ord_num + 2, "the module has {d} orders, past IT's {d}; the rest are dropped", .{ orders.len, max_orders });
+            n = max_orders;
+        }
+
+        var out: std.ArrayList(u8) = .empty;
+        try out.appendSlice(self.a, orders[0..n]);
+        try out.append(self.a, 255);
+        if (out.items.len < 2) try out.append(self.a, 255);
+        return out.items;
+    }
+
+    /// The song message plus the residue's tail, CR newlines kept and one
+    /// NUL terminator (plan 06; plan 04, "The IT carriers").
+    fn buildMessage(self: *Writer) Error![]u8 {
+        const body = self.module.message;
+        const tail = self.opts.message_tail orelse "";
+        if (body.len == 0 and tail.len == 0) return &.{};
+
+        var out: std.ArrayList(u8) = .empty;
+        try out.appendSlice(self.a, body);
+        try out.appendSlice(self.a, tail);
+        // `MsgLgth` is a u16 (it 04's header table), terminator included.
+        if (out.items.len > max_message) {
+            try self.note(.it_truncated, .warning, hdr.message_length, hdr.message_length + 2, "the song message is {d} bytes; MsgLgth is a u16, so it was cut to {d}", .{ out.items.len, max_message });
+            out.shrinkRetainingCapacity(max_message);
+        }
+        try out.append(self.a, 0);
+        return out.items;
+    }
+
+    fn writePattern(self: *Writer, p: model.Pattern, index: usize) Error!void {
+        const at = self.here();
+        var rows = p.rows;
+        var cells = p.cells;
+
+        if (rows > self.limits.rows_max) {
+            try self.note(.it_pattern_rows_out_of_range, .err, at, at + 8, "pattern {d} has {d} rows, past IT's {d}; the extra rows are dropped", .{ index, rows, self.limits.rows_max });
+            rows = self.limits.rows_max;
+            cells = cells[0..@min(cells.len, @as(usize, rows) * model.channels)];
+        } else if (rows < self.limits.rows_min) {
+            // IT's shortest pattern is 32 rows, so a shorter one is
+            // padded and told to break where it used to end (it 05).
+            const padded = try self.a.alloc(Cell, @as(usize, self.limits.rows_min) * model.channels);
+            @memset(padded, .empty);
+            @memcpy(padded[0..cells.len], cells);
+            const last: usize = @as(usize, rows) - 1;
+            const channel = breakChannel(padded, last);
+            const slot = &padded[last * model.channels + channel];
+            slot.fx = cmd_break;
+            slot.param = 0;
+            try self.note(.it_pattern_rows_out_of_range, .warning, at, at + 8, "pattern {d} has {d} rows, under IT's {d}; written {d} rows with a C00 break on row {d}, channel {d}", .{ index, rows, self.limits.rows_min, self.limits.rows_min, last, channel + 1 });
+            rows = self.limits.rows_min;
+            cells = padded;
+        }
+
+        var packed_rows = try pattern.pack(self.gpa, cells, rows);
+        defer packed_rows.deinit();
+        for (packed_rows.diags.items()) |d| {
+            try self.diags.add(d.code, d.severity, .{
+                .start = at + d.span.start,
+                .end = at + d.span.end,
+            }, "{s}", .{d.message});
+        }
+
+        try self.word(@intCast(packed_rows.bytes.len));
+        try self.word(rows);
+        try self.zeros(4);
+        try self.blob(packed_rows.bytes);
+    }
+
+    /// The bytes of an opaque region, or null when the anchor cannot
+    /// give them.
+    fn regionBytes(self: *const Writer, region: Region) ?[]const u8 {
+        if (region.isEmpty()) return null;
+        const source = self.source orelse return null;
+        return region.slice(source);
+    }
+
+    /// Copies an opaque region, padded or truncated to `size`. A region
+    /// the anchor cannot give is a diagnostic and a zeroed record: the
+    /// file stays structurally sound.
+    fn copyRegion(
+        self: *Writer,
+        region: Region,
+        size: u32,
+        code: Diag.Code,
+        comptime what: []const u8,
+    ) Error!void {
+        const at = self.here();
+        if (self.regionBytes(region)) |bytes| {
+            const take = @min(bytes.len, size);
+            try self.blob(bytes[0..take]);
+            if (take < size) try self.zeros(size - take);
+            return;
+        }
+        if (size > 0) {
+            try self.note(code, .warning, at, at + size, what ++ " is not inside the anchor's bytes; wrote {d} zero bytes", .{size});
+            try self.zeros(size);
+        }
+    }
+
+    fn clampCount(
+        self: *Writer,
+        have: usize,
+        cap: usize,
+        comptime what: []const u8,
+        field: u32,
+    ) Error!usize {
+        if (have <= cap) return have;
+        try self.note(.it_count_exceeds_spec, .err, field, field + 2, "the module has {d} " ++ what ++ ", past IT's {d}; the rest are dropped", .{ have, cap });
+        return cap;
+    }
+
+    fn clampTempo(self: *Writer) Error!u8 {
+        const tempo = self.module.header.initial_tempo;
+        if (tempo >= 32) return tempo;
+        try self.note(.it_count_exceeds_spec, .warning, hdr.initial_tempo, hdr.initial_tempo + 1, "an initial tempo of {d} is under IT's 32; written as 32", .{tempo});
+        return 32;
+    }
+
+    fn clampSpeed(self: *Writer) Error!u8 {
+        const speed = self.module.header.initial_speed;
+        if (speed >= 1) return speed;
+        // IT's own loader reads a zero speed as 6, so 6 is what keeps the
+        // music (plan 06's header table), not the bare minimum 1.
+        try self.note(.it_count_exceeds_spec, .warning, hdr.initial_speed, hdr.initial_speed + 1, "an initial speed of 0 is outside IT's 1–255; written as IT's default 6", .{});
+        return 6;
+    }
+};
+
+fn setBit(value: u16, bit: u16, on: bool) u16 {
+    return if (on) value | bit else value & ~bit;
+}
+
+/// The leftmost channel with no command on that row — a synthesised `C00`
+/// break goes where it displaces nothing.
+fn breakChannel(cells: []const Cell, row: usize) usize {
+    for (0..model.channels) |channel| {
+        if (cells[row * model.channels + channel].fx == 0) return channel;
+    }
+    return model.channels - 1;
+}
+
+fn minimalModule(gpa: std.mem.Allocator) !Module {
+    var b: Builder = .init(gpa);
+    errdefer b.deinit();
+    try b.addOrder(0);
+    const p = try b.addPattern(64);
+    p.at(0, 0).* = .{ .note = 60, .ins = 1, .vol = 64, .fx = 1, .param = 6 };
+    return b.finish();
+}
+
+test "write: the canonical layout, byte by byte, on the minimal module" {
+    const gpa = testing.allocator;
+    var m = try minimalModule(gpa);
+    defer m.deinit();
+
+    var w = try write(gpa, &m, null, .{});
+    defer w.deinit();
+    const out = w.bytes;
+
+    try testing.expectEqual(@as(usize, 0), w.diags.items().len);
+
+    // 0x0000 the header.
+    try testing.expectEqualStrings("IMPM", out[0..4]);
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 26), out[4..30]);
+    try testing.expectEqual(@as(u8, 4), out[hdr.highlight_minor]);
+    try testing.expectEqual(@as(u8, 16), out[hdr.highlight_major]);
+    // Orders: the one order plus exactly one trailing 255.
+    try testing.expectEqual(@as(u16, 2), word(out, hdr.ord_num));
+    try testing.expectEqual(@as(u16, 0), word(out, hdr.ins_num));
+    try testing.expectEqual(@as(u16, 0), word(out, hdr.smp_num));
+    try testing.expectEqual(@as(u16, 1), word(out, hdr.pat_num));
+    // A module tempura authored identifies as tempura (plan 06).
+    try testing.expectEqual(@as(u16, 0xB801), word(out, hdr.cwtv));
+    try testing.expectEqual(@as(u16, 0x0214), word(out, hdr.cmwt));
+    try testing.expectEqual(model.flag.stereo | model.flag.linear_slides, word(out, hdr.flags));
+    try testing.expectEqual(model.special.highlight, word(out, hdr.special));
+    try testing.expectEqual(@as(u8, 128), out[hdr.global_volume]);
+    try testing.expectEqual(@as(u8, 48), out[hdr.mix_volume]);
+    try testing.expectEqual(@as(u8, 6), out[hdr.initial_speed]);
+    try testing.expectEqual(@as(u8, 125), out[hdr.initial_tempo]);
+    try testing.expectEqual(@as(u8, 128), out[hdr.pan_separation]);
+    try testing.expectEqual(@as(u8, 0), out[hdr.pitch_wheel_depth]);
+    // No message, no history, no MIDI config.
+    try testing.expectEqual(@as(u16, 0), word(out, hdr.message_length));
+    try testing.expectEqual(@as(u32, 0), dword(out, hdr.message_offset));
+    try testing.expectEqual(@as(u32, 0), dword(out, hdr.reserved));
+    try testing.expectEqualSlices(u8, &([_]u8{32} ** 64), out[hdr.channel_pan..][0..64]);
+    try testing.expectEqualSlices(u8, &([_]u8{64} ** 64), out[hdr.channel_vol..][0..64]);
+
+    // 0x00C0 the orders, then the one parapointer array.
+    try testing.expectEqualSlices(u8, &.{ 0, 255 }, out[0xC0..0xC2]);
+    try testing.expectEqual(@as(u32, 0xC6), dword(out, 0xC2));
+
+    // 0x00C6 the pattern: 8-byte header then the packed stream.
+    try testing.expectEqual(@as(u16, 71), word(out, 0xC6));
+    try testing.expectEqual(@as(u16, 64), word(out, 0xC8));
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 4), out[0xCA..0xCE]);
+    try testing.expectEqualSlices(u8, &.{ 0x81, 0x0F, 60, 1, 64, 1, 6, 0x00 }, out[0xCE..0xD6]);
+    // 63 empty rows, one end-of-row byte each.
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 63), out[0xD6..][0..63]);
+    try testing.expectEqual(@as(usize, 0xCE + 71), out.len);
+}
+
+test "write: orders are trimmed to exactly one 255, minimum length 2" {
+    const gpa = testing.allocator;
+
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    for ([_]u8{ 0, 1, 254, 2, 255, 255, 255 }) |o| try b.addOrder(o);
+    var m = b.finish();
+    defer m.deinit();
+
+    var w = try write(gpa, &m, null, .{});
+    defer w.deinit();
+    try testing.expectEqualSlices(u8, &.{ 0, 1, 254, 2, 255 }, w.bytes[0xC0..][0..5]);
+    try testing.expectEqual(@as(u16, 5), word(w.bytes, hdr.ord_num));
+
+    // A module with no orders at all still writes two bytes.
+    var e: Builder = .init(gpa);
+    defer e.deinit();
+    var em = e.finish();
+    defer em.deinit();
+    var ew = try write(gpa, &em, null, .{});
+    defer ew.deinit();
+    try testing.expectEqual(@as(u16, 2), word(ew.bytes, hdr.ord_num));
+    try testing.expectEqualSlices(u8, &.{ 255, 255 }, ew.bytes[0xC0..][0..2]);
+}
+
+test "write: an empty 64-row pattern is a parapointer 0 and no data" {
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    _ = try b.addPattern(64);
+    // A 32-row empty pattern is NOT the same thing: parapointer 0 means
+    // 64 rows, so this one has to be written.
+    _ = try b.addPattern(32);
+    var m = b.finish();
+    defer m.deinit();
+
+    var w = try write(gpa, &m, null, .{});
+    defer w.deinit();
+    try testing.expectEqual(@as(u32, 0), dword(w.bytes, 0xC2));
+    const second = dword(w.bytes, 0xC6);
+    try testing.expectEqual(@as(u32, 0xCA), second);
+    try testing.expectEqual(@as(u16, 32), word(w.bytes, second + 2));
+}
+
+test "write: a short pattern is padded to 32 rows with a C00 break" {
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    const p = try b.addPattern(16);
+    p.at(0, 0).* = .{ .note = 60 };
+    var m = b.finish();
+    defer m.deinit();
+
+    var w = try write(gpa, &m, null, .{});
+    defer w.deinit();
+    try testing.expectEqual(@as(usize, 1), w.diags.count(.it_pattern_rows_out_of_range));
+    try testing.expectEqual(@as(u16, 32), word(w.bytes, 0xC8));
+
+    // Read it back: the break sits on the last row the module had.
+    var r = try read_it.read(gpa, w.bytes);
+    defer r.deinit();
+    const back = r.module.patterns[0];
+    try testing.expectEqual(@as(u16, 32), back.rows);
+    try testing.expectEqual(@as(u8, 3), back.at(15, 0).fx); // 'C'
+    try testing.expectEqual(@as(u8, 0), back.at(15, 0).param);
+    try testing.expectEqual(@as(u8, 60), back.at(0, 0).note);
+}
+
+test "write: strict clamps are diagnostics, and --loose lifts the counts" {
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    for (0..250) |_| _ = try b.addPattern(64);
+    for (0..120) |_| try b.addInstrument("x", .none);
+    var m = b.finish();
+    defer m.deinit();
+    m.header.initial_tempo = 10;
+    m.header.initial_speed = 0;
+
+    var strict = try write(gpa, &m, null, .{});
+    defer strict.deinit();
+    try testing.expectEqual(@as(u16, 200), word(strict.bytes, hdr.pat_num));
+    try testing.expectEqual(@as(u16, 99), word(strict.bytes, hdr.ins_num));
+    try testing.expectEqual(@as(u8, 32), strict.bytes[hdr.initial_tempo]);
+    try testing.expectEqual(@as(u8, 6), strict.bytes[hdr.initial_speed]);
+    // Two counts and two out-of-range header values, all of them "past
+    // what the IT spec allows" — one code, four messages.
+    try testing.expectEqual(@as(usize, 4), strict.diags.count(.it_count_exceeds_spec));
+    try testing.expect(strict.diags.hasErrors());
+
+    var loose = try write(gpa, &m, null, .{ .loose = true });
+    defer loose.deinit();
+    try testing.expectEqual(@as(u16, 240), word(loose.bytes, hdr.pat_num));
+    try testing.expectEqual(@as(u16, 120), word(loose.bytes, hdr.ins_num));
+}
+
+test "write: the message, its residue tail and the TMPU chunk last" {
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    try b.setMessage("hello\rworld");
+    var m = b.finish();
+    defer m.deinit();
+
+    var w = try write(gpa, &m, null, .{
+        .message_tail = ";; tempura\r(timeline)",
+        .tmpu = "residue",
+    });
+    defer w.deinit();
+    const out = w.bytes;
+
+    try testing.expect(word(out, hdr.special) & model.special.message != 0);
+    const at = dword(out, hdr.message_offset);
+    const n = word(out, hdr.message_length);
+    try testing.expectEqualStrings("hello\rworld;; tempura\r(timeline)\x00", out[at..][0..n]);
+
+    // The residue chunk is the last thing in the file.
+    const chunk_at = out.len - (8 + 7);
+    try testing.expectEqualStrings("TMPU", out[chunk_at..][0..4]);
+    try testing.expectEqual(@as(u32, 7), dword(out, @intCast(chunk_at + 4)));
+    try testing.expectEqualStrings("residue", out[chunk_at + 8 ..]);
+
+    // And re-reading finds exactly that payload and message.
+    var r = try read_it.read(gpa, out);
+    defer r.deinit();
+    try testing.expectEqualStrings("hello\rworld;; tempura\r(timeline)", r.module.message);
+    try testing.expectEqualStrings("residue", r.module.tmpu.?.slice(out).?);
+}
+
+/// A file with one of everything opaque: an instrument, a PCM sample, an
+/// ADPCM sample and a compressed one (hand-built block headers, no real
+/// codec), a message, an edit-history block, a foreign chunk and a TMPU
+/// chunk.
+fn richFixture(gpa: std.mem.Allocator) ![]u8 {
+    var f: Fixture = .init(gpa);
+    defer f.deinit();
+
+    try f.header(.{
+        .ord = 3,
+        .ins = 1,
+        .smp = 3,
+        .pat = 2,
+        .special = model.special.message | model.special.edit_history,
+    });
+    try f.blob(&.{ 0, 254, 255 });
+    const ins_pp = f.here();
+    try f.dword(0);
+    const smp_pp = f.here();
+    try f.zeros(3 * 4);
+    const pat_pp = f.here();
+    try f.zeros(2 * 4);
+
+    // The edit history sits right after the parapointers.
+    try f.word(2);
+    try f.zeros(16);
+
+    const message_at = f.here();
+    try f.blob("a wild module\rsecond line\x00");
+    f.patchWord(hdr.message_length, 25);
+    f.patchDword(hdr.message_offset, message_at);
+
+    f.patchDword(ins_pp, f.here());
+    _ = try f.instrument("piano");
+
+    var headers: [3]u32 = undefined;
+    headers[0] = try f.sampleHeader(.{ .name = "pcm", .flags = model.sample_flag.has_data | model.sample_flag.bits16, .length = 6 });
+    headers[1] = try f.sampleHeader(.{ .name = "adpcm", .convert = model.sample_convert.adpcm, .length = 16 });
+    headers[2] = try f.sampleHeader(.{
+        .name = "packed",
+        .flags = model.sample_flag.has_data | model.sample_flag.compressed,
+        .length = 40000,
+    });
+    for (headers, 0..) |at, i| f.patchDword(smp_pp + @as(u32, @intCast(i)) * 4, at);
+
+    // Pattern 0 is real; pattern 1 is a parapointer 0.
+    f.patchDword(pat_pp, f.here());
+    const stream = [_]u8{ 0x81, 0x0F, 60, 1, 64, 1, 6, 0x00, 0x01, 62, 2, 32, 4, 0x10, 0x00 };
+    try f.word(stream.len);
+    try f.word(64);
+    try f.zeros(4);
+    try f.blob(&stream);
+
+    f.patchDword(headers[0] + model.smp.sample_pointer, f.here());
+    try f.blob(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    f.patchDword(headers[1] + model.smp.sample_pointer, f.here());
+    for (0..24) |i| try f.byte(@intCast(0x40 + i));
+    f.patchDword(headers[2] + model.smp.sample_pointer, f.here());
+    try f.word(4);
+    try f.blob(&.{ 0xDE, 0xAD, 0xBE, 0xEF });
+    try f.word(3);
+    try f.blob(&.{ 0x11, 0x22, 0x33 });
+
+    try f.blob("STPM\x07\x08");
+    try f.blob("TMPU");
+    try f.dword(4);
+    try f.blob("resd");
+
+    return f.toOwned();
+}
+
+test "write: the opaque regions come back byte-equal after read → write" {
+    const gpa = testing.allocator;
+    const source = try richFixture(gpa);
+    defer gpa.free(source);
+
+    var r = try read_it.read(gpa, source);
+    defer r.deinit();
+    try testing.expect(!r.diags.hasErrors());
+
+    var w = try write(gpa, &r.module, source, .{ .preserve_history = true });
+    defer w.deinit();
+
+    var back = try read_it.read(gpa, w.bytes);
+    defer back.deinit();
+    try testing.expect(!back.diags.hasErrors());
+
+    // Every sacred region survives, byte for byte.
+    try testing.expectEqualSlices(
+        u8,
+        r.module.instruments[0].raw.slice(source).?,
+        back.module.instruments[0].raw.slice(w.bytes).?,
+    );
+    try testing.expectEqual(@as(usize, 3), back.module.samples.len);
+    for (r.module.samples, back.module.samples) |before, after| {
+        try testing.expectEqual(before.enc, after.enc);
+        try testing.expectEqual(before.bits, after.bits);
+        try testing.expectEqualSlices(u8, before.raw.slice(source).?[0..model.smp.sample_pointer], after.raw.slice(w.bytes).?[0..model.smp.sample_pointer]);
+        try testing.expectEqualSlices(u8, before.data.slice(source).?, after.data.slice(w.bytes).?);
+    }
+    try testing.expectEqualSlices(
+        u8,
+        r.module.edit_history.?.slice(source).?,
+        back.module.edit_history.?.slice(w.bytes).?,
+    );
+    try testing.expectEqualSlices(
+        u8,
+        r.module.foreign[0].raw.slice(source).?,
+        back.module.foreign[0].raw.slice(w.bytes).?,
+    );
+    try testing.expectEqualStrings("resd", back.module.tmpu.?.slice(w.bytes).?);
+    try testing.expectEqualStrings("a wild module\rsecond line", back.module.message);
+    try testing.expectEqualSlices(u8, &.{ 0, 254, 255 }, back.module.orders);
+    try testing.expectEqual(r.module.patterns[0].cells[0], back.module.patterns[0].cells[0]);
+    try testing.expectEqual(r.module.patterns[0].cells[64], back.module.patterns[0].cells[64]);
+    try testing.expect(back.module.patterns[1].isEmpty());
+}
+
+test "write: write(read(bytes)) == bytes on the writer's own output" {
+    const gpa = testing.allocator;
+    const source = try richFixture(gpa);
+    defer gpa.free(source);
+
+    var r = try read_it.read(gpa, source);
+    defer r.deinit();
+    var once = try write(gpa, &r.module, source, .{ .preserve_history = true });
+    defer once.deinit();
+
+    var back = try read_it.read(gpa, once.bytes);
+    defer back.deinit();
+    var twice = try write(gpa, &back.module, once.bytes, .{ .preserve_history = true });
+    defer twice.deinit();
+
+    try testing.expectEqualSlices(u8, once.bytes, twice.bytes);
+
+    // The same fixed point for the module tempura authored itself.
+    var m = try minimalModule(gpa);
+    defer m.deinit();
+    var a = try write(gpa, &m, null, .{ .tmpu = "x", .message_tail = ";; tempura" });
+    defer a.deinit();
+    var ar = try read_it.read(gpa, a.bytes);
+    defer ar.deinit();
+    var c = try write(gpa, &ar.module, a.bytes, .{});
+    defer c.deinit();
+    try testing.expectEqualSlices(u8, a.bytes, c.bytes);
+}
+
+test "write: a MIDI configuration the flags demand is written back" {
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    var m = b.finish();
+    defer m.deinit();
+    m.header.flags |= model.flag.embed_midi;
+
+    var w = try write(gpa, &m, null, .{});
+    defer w.deinit();
+    try testing.expect(word(w.bytes, hdr.special) & model.special.midi_config != 0);
+
+    var r = try read_it.read(gpa, w.bytes);
+    defer r.deinit();
+    try testing.expectEqual(@as(?Region, null), r.module.midi_config);
+    var again = try write(gpa, &r.module, w.bytes, .{});
+    defer again.deinit();
+    try testing.expectEqualSlices(u8, w.bytes, again.bytes);
+}
+
+test "write: a module with no bytes behind its regions is written with diagnostics" {
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    try b.addInstrument("ghost", .{ .off = 4000, .len = model.instrument_size });
+    try b.addSample(.{ .raw = .{ .off = 9000, .len = model.sample_header_size }, .data = .{ .off = 9100, .len = 64 } });
+    var m = b.finish();
+    defer m.deinit();
+
+    var w = try write(gpa, &m, null, .{});
+    defer w.deinit();
+    try testing.expectEqual(@as(usize, 1), w.diags.count(.it_no_instrument));
+    try testing.expect(w.diags.count(.it_sample_extent_truncated) > 0);
+    // The file is still structurally sound: the records are there, zeroed.
+    var r = try read_it.read(gpa, w.bytes);
+    defer r.deinit();
+    try testing.expectEqual(@as(usize, 1), r.module.instruments.len);
+    try testing.expectEqual(@as(u32, model.instrument_size), r.module.instruments[0].raw.len);
+}
+
+test "write: whatever pseudo-random bytes read as can be written back" {
+    // The other half of the never-panic contract: a module the reader
+    // salvaged from noise still has to produce bytes, with its regions
+    // pointing into that same noise.
+    const gpa = testing.allocator;
+    var prng: std.Random.DefaultPrng = .init(0x2026_09_20);
+    const rand = prng.random();
+
+    var buf: [512]u8 = undefined;
+    for (0..48) |i| {
+        const n = rand.uintLessThan(usize, buf.len);
+        rand.bytes(buf[0..n]);
+        if (i % 2 == 0 and n >= 4) @memcpy(buf[0..4], "IMPM");
+
+        var r = try read_it.read(gpa, buf[0..n]);
+        defer r.deinit();
+        var w = try write(gpa, &r.module, buf[0..n], .{
+            .preserve_history = i % 3 == 0,
+            .loose = i % 5 == 0,
+        });
+        defer w.deinit();
+
+        // And the result is readable, whatever went into it.
+        var again = try read_it.read(gpa, w.bytes);
+        again.deinit();
+    }
+}
+
+test "write: a message past MsgLgth's u16 is cut, never a panic" {
+    const gpa = testing.allocator;
+    const huge = try gpa.alloc(u8, 70_000);
+    defer gpa.free(huge);
+    @memset(huge, 'a');
+
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    try b.setMessage(huge);
+    var m = b.finish();
+    defer m.deinit();
+
+    var w = try write(gpa, &m, null, .{});
+    defer w.deinit();
+    try testing.expectEqual(@as(usize, 1), w.diags.count(.it_truncated));
+    try testing.expectEqual(@as(u16, 65535), word(w.bytes, hdr.message_length));
+}
+
+fn word(bytes: []const u8, at: u32) u16 {
+    return std.mem.readInt(u16, bytes[at..][0..2], .little);
+}
+
+fn dword(bytes: []const u8, at: u32) u32 {
+    return std.mem.readInt(u32, bytes[at..][0..4], .little);
+}
