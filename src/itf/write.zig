@@ -33,11 +33,9 @@ const std = @import("std");
 const Diag = @import("../Diag.zig");
 const model = @import("Module.zig");
 const pattern = @import("pattern.zig");
-const read_it = @import("read.zig");
 
 const Builder = model.Builder;
 const Cell = model.Cell;
-const Fixture = read_it.Fixture;
 const Module = model.Module;
 const Region = model.Region;
 const hdr = model.hdr;
@@ -212,12 +210,17 @@ const Writer = struct {
         special = setBit(special, model.special.message, message.len > 0);
         special = setBit(special, model.special.edit_history, history != null);
         special = setBit(special, model.special.midi_config, embed_midi);
+        // An embedded configuration sets BOTH bits — `Special` b3 and
+        // `Flags` b7 (it 05 §"Header field policy") — so a reader that
+        // keys on either one finds the block.
+        const flags = setBit(m.header.flags, model.flag.embed_midi, embed_midi);
 
         try self.writeHeader(.{
             .ord_num = @intCast(orders.len),
             .ins_num = @intCast(ins_count),
             .smp_num = @intCast(smp_count),
             .pat_num = @intCast(pat_count),
+            .flags = flags,
             .special = special,
         });
         try self.blob(orders);
@@ -249,7 +252,11 @@ const Writer = struct {
 
         for (m.instruments[0..ins_count], 0..) |instrument, i| {
             self.patchDword(ins_pp + @as(u32, @intCast(i)) * 4, self.here());
-            try self.copyRegion(instrument.raw, model.instrument_size, .it_no_instrument, "an instrument body");
+            // The region is the instrument, so a region the anchor
+            // cannot give is a pointer that leads nowhere;
+            // `it_no_instrument` is plan 08's, for a render with no
+            // instrument to sound.
+            try self.copyRegion(instrument.raw, model.instrument_size, .it_parapointer_out_of_range, "an instrument body");
         }
 
         const sample_headers = try self.a.alloc(u32, smp_count);
@@ -261,8 +268,10 @@ const Writer = struct {
 
         for (m.patterns[0..pat_count], 0..) |p, i| {
             // An empty 64-row pattern is a parapointer 0 and no data —
-            // exactly what IT writes (it 05, `D_SaveIT1`).
-            if (p.rows == model.channels and p.isEmpty()) continue;
+            // exactly what IT writes (it 05, `D_SaveIT1`). Any other
+            // height has to be written, because a 0 would read back as
+            // 64 rows.
+            if (p.rows == model.empty_pattern_rows and p.isEmpty()) continue;
             self.patchDword(pat_pp + @as(u32, @intCast(i)) * 4, self.here());
             try self.writePattern(p, i);
         }
@@ -303,6 +312,7 @@ const Writer = struct {
         ins_num: u16,
         smp_num: u16,
         pat_num: u16,
+        flags: u16,
         special: u16,
     };
 
@@ -321,7 +331,7 @@ const Writer = struct {
         // (plan 06, "Header policy").
         try self.word(h.cwtv);
         try self.word(h.cmwt);
-        try self.word(h.flags);
+        try self.word(counts.flags);
         try self.word(counts.special);
         try self.byte(h.global_volume);
         try self.byte(h.mix_volume);
@@ -345,9 +355,11 @@ const Writer = struct {
         const orders = self.module.orders;
         var n = orders.len;
         while (n > 0 and orders[n - 1] == 255) n -= 1;
-        if (n > max_orders) {
-            try self.note(.it_count_exceeds_spec, .err, hdr.ord_num, hdr.ord_num + 2, "the module has {d} orders, past IT's {d}; the rest are dropped", .{ orders.len, max_orders });
-            n = max_orders;
+        // The mandatory end marker is one of the 256 entries, so the
+        // orders themselves get at most 255 of them.
+        if (n > max_orders - 1) {
+            try self.note(.it_count_exceeds_spec, .err, hdr.ord_num, hdr.ord_num + 2, "the module has {d} orders; IT's list is {d} entries including the end marker, so the rest are dropped", .{ n, max_orders });
+            n = max_orders - 1;
         }
 
         var out: std.ArrayList(u8) = .empty;
@@ -390,13 +402,28 @@ const Writer = struct {
             // padded and told to break where it used to end (it 05).
             const padded = try self.a.alloc(Cell, @as(usize, self.limits.rows_min) * model.channels);
             @memset(padded, .empty);
-            @memcpy(padded[0..cells.len], cells);
-            const last: usize = @as(usize, rows) - 1;
-            const channel = breakChannel(padded, last);
-            const slot = &padded[last * model.channels + channel];
-            slot.fx = cmd_break;
-            slot.param = 0;
-            try self.note(.it_pattern_rows_out_of_range, .warning, at, at + 8, "pattern {d} has {d} rows, under IT's {d}; written {d} rows with a C00 break on row {d}, channel {d}", .{ index, rows, self.limits.rows_min, self.limits.rows_min, last, channel + 1 });
+            @memcpy(padded[0..@min(cells.len, padded.len)], cells[0..@min(cells.len, padded.len)]);
+
+            if (rows == 0) {
+                // A pattern with no rows has no last row to break on, so
+                // it is written as the shortest IT accepts, and empty.
+                try self.note(.it_pattern_rows_out_of_range, .warning, at, at + 8, "pattern {d} has no rows; written as {d} empty rows", .{ index, self.limits.rows_min });
+            } else {
+                const last: usize = @as(usize, rows) - 1;
+                const free = breakChannel(padded, last);
+                const channel = free orelse model.channels - 1;
+                const slot = &padded[last * model.channels + channel];
+                if (free == null) {
+                    // Every channel on that row already carries a
+                    // command: the break has to displace one, and which
+                    // rows caused it is the diagnostic's whole point.
+                    try self.note(.it_pattern_rows_out_of_range, .err, at, at + 8, "pattern {d} has {d} rows, under IT's {d}; the C00 break on row {d} overwrote channel {d}'s command {c}{x:0>2}", .{ index, rows, self.limits.rows_min, last, channel + 1, '@' + slot.fx, slot.param });
+                } else {
+                    try self.note(.it_pattern_rows_out_of_range, .warning, at, at + 8, "pattern {d} has {d} rows, under IT's {d}; written {d} rows with a C00 break on row {d}, channel {d}", .{ index, rows, self.limits.rows_min, self.limits.rows_min, last, channel + 1 });
+                }
+                slot.fx = cmd_break;
+                slot.param = 0;
+            }
             rows = self.limits.rows_min;
             cells = padded;
         }
@@ -438,7 +465,12 @@ const Writer = struct {
         if (self.regionBytes(region)) |bytes| {
             const take = @min(bytes.len, size);
             try self.blob(bytes[0..take]);
-            if (take < size) try self.zeros(size - take);
+            if (take < size) {
+                // A record the anchor holds only part of: the rest is
+                // zeroed, and the file says so.
+                try self.note(.it_truncated, .warning, at, at + size, what ++ " is {d} bytes of the {d} it must be; zero-padded to size", .{ take, size });
+                try self.zeros(size - take);
+            }
             return;
         }
         if (size > 0) {
@@ -480,14 +512,21 @@ fn setBit(value: u16, bit: u16, on: bool) u16 {
     return if (on) value | bit else value & ~bit;
 }
 
-/// The leftmost channel with no command on that row — a synthesised `C00`
-/// break goes where it displaces nothing.
-fn breakChannel(cells: []const Cell, row: usize) usize {
+/// The leftmost channel with no command on that row — where a
+/// synthesised `C00` break displaces nothing. Null when the row is full,
+/// which the caller has to report rather than swallow.
+fn breakChannel(cells: []const Cell, row: usize) ?usize {
     for (0..model.channels) |channel| {
         if (cells[row * model.channels + channel].fx == 0) return channel;
     }
-    return model.channels - 1;
+    return null;
 }
+
+// Test support only: the reader, to prove what the writer wrote, and the
+// shared `.it` byte writer for the pass-through fixtures. Neither is
+// reachable from `write`.
+const read_it = @import("read.zig");
+const Fixture = @import("test_support.zig").Fixture;
 
 fn minimalModule(gpa: std.mem.Allocator) !Module {
     var b: Builder = .init(gpa);
@@ -576,6 +615,43 @@ test "write: orders are trimmed to exactly one 255, minimum length 2" {
     try testing.expectEqualSlices(u8, &.{ 255, 255 }, ew.bytes[0xC0..][0..2]);
 }
 
+test "write: the order list is 256 entries INCLUDING the end marker" {
+    const gpa = testing.allocator;
+
+    // 255 orders fill the list exactly — 255 plus the marker — and
+    // nothing is dropped.
+    var fit: Builder = .init(gpa);
+    defer fit.deinit();
+    for (0..255) |i| try fit.addOrder(@intCast(i % 200));
+    var fm = fit.finish();
+    defer fm.deinit();
+    var fw = try write(gpa, &fm, null, .{});
+    defer fw.deinit();
+    try testing.expectEqual(@as(u16, 256), word(fw.bytes, hdr.ord_num));
+    try testing.expectEqual(@as(u8, 255), fw.bytes[0xC0 + 255]);
+    try testing.expectEqual(@as(usize, 0), fw.diags.count(.it_count_exceeds_spec));
+
+    // 256 orders do not: the marker has to have one of the 256 slots, so
+    // the last order goes, and says so.
+    var over: Builder = .init(gpa);
+    defer over.deinit();
+    for (0..256) |i| try over.addOrder(@intCast(i % 200));
+    var om = over.finish();
+    defer om.deinit();
+    var ow = try write(gpa, &om, null, .{});
+    defer ow.deinit();
+    try testing.expectEqual(@as(u16, 256), word(ow.bytes, hdr.ord_num));
+    try testing.expectEqual(@as(u8, 255), ow.bytes[0xC0 + 255]);
+    try testing.expectEqual(@as(usize, 1), ow.diags.count(.it_count_exceeds_spec));
+
+    // And what came back out is what IT will read: exactly one marker,
+    // at the end.
+    var r = try read_it.read(gpa, ow.bytes);
+    defer r.deinit();
+    try testing.expectEqual(@as(usize, 256), r.module.orders.len);
+    try testing.expectEqual(@as(usize, 255), std.mem.indexOfScalar(u8, r.module.orders, 255).?);
+}
+
 test "write: an empty 64-row pattern is a parapointer 0 and no data" {
     const gpa = testing.allocator;
     var b: Builder = .init(gpa);
@@ -619,6 +695,64 @@ test "write: a short pattern is padded to 32 rows with a C00 break" {
     try testing.expectEqual(@as(u8, 3), back.at(15, 0).fx); // 'C'
     try testing.expectEqual(@as(u8, 0), back.at(15, 0).param);
     try testing.expectEqual(@as(u8, 60), back.at(0, 0).note);
+}
+
+test "write: a pattern with no rows is written empty, never a row -1" {
+    // `rows == 0` is representable in `Pattern`, and the last row a break
+    // would go on is `rows - 1`: the underflow was a panic in both modes
+    // (review round 1). There is no row to break on, so there is no
+    // break.
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    _ = try b.addPattern(0);
+    var m = b.finish();
+    defer m.deinit();
+
+    var w = try write(gpa, &m, null, .{});
+    defer w.deinit();
+    try testing.expectEqual(@as(usize, 1), w.diags.count(.it_pattern_rows_out_of_range));
+    try testing.expectEqual(@as(u16, 32), word(w.bytes, 0xC8));
+
+    var r = try read_it.read(gpa, w.bytes);
+    defer r.deinit();
+    try testing.expectEqual(@as(u16, 32), r.module.patterns[0].rows);
+    try testing.expect(r.module.patterns[0].isEmpty());
+
+    // Loose mode's floor is 1 row, and it survives the same way.
+    var loose = try write(gpa, &m, null, .{ .loose = true });
+    defer loose.deinit();
+    try testing.expectEqual(@as(u16, 1), word(loose.bytes, 0xC8));
+    try testing.expectEqual(@as(usize, 1), loose.diags.count(.it_pattern_rows_out_of_range));
+}
+
+test "write: a C00 break with nowhere free overwrites a command, loudly" {
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    const p = try b.addPattern(4);
+    // Every channel of the last row already carries an A05.
+    for (0..model.channels) |ch| p.at(3, ch).* = .{ .fx = 1, .param = 5 };
+    var m = b.finish();
+    defer m.deinit();
+
+    var w = try write(gpa, &m, null, .{});
+    defer w.deinit();
+
+    try testing.expectEqual(@as(usize, 1), w.diags.count(.it_pattern_rows_out_of_range));
+    try testing.expect(w.diags.hasErrors());
+    try testing.expect(std.mem.indexOf(u8, w.diags.items()[0].message, "overwrote") != null);
+    try testing.expect(std.mem.indexOf(u8, w.diags.items()[0].message, "A05") != null);
+
+    var r = try read_it.read(gpa, w.bytes);
+    defer r.deinit();
+    const back = r.module.patterns[0];
+    try testing.expectEqual(@as(u8, 3), back.at(3, 63).fx); // the break
+    try testing.expectEqual(@as(u8, 0), back.at(3, 63).param);
+    try testing.expectEqual(@as(u8, 1), back.at(3, 0).fx); // every other channel kept its own
+    try testing.expectEqual(@as(u8, 5), back.at(3, 0).param);
 }
 
 test "write: strict clamps are diagnostics, and --loose lifts the counts" {
@@ -781,7 +915,12 @@ test "write: the opaque regions come back byte-equal after read → write" {
     for (r.module.samples, back.module.samples) |before, after| {
         try testing.expectEqual(before.enc, after.enc);
         try testing.expectEqual(before.bits, after.bits);
-        try testing.expectEqualSlices(u8, before.raw.slice(source).?[0..model.smp.sample_pointer], after.raw.slice(w.bytes).?[0..model.smp.sample_pointer]);
+        // Everything but the 4 back-patched SamplePointer bytes: the
+        // fields before it AND the auto-vibrato bytes after it.
+        const head = model.smp.sample_pointer;
+        const tail = model.smp.sample_pointer + 4;
+        try testing.expectEqualSlices(u8, before.raw.slice(source).?[0..head], after.raw.slice(w.bytes).?[0..head]);
+        try testing.expectEqualSlices(u8, before.raw.slice(source).?[tail..model.sample_header_size], after.raw.slice(w.bytes).?[tail..model.sample_header_size]);
         try testing.expectEqualSlices(u8, before.data.slice(source).?, after.data.slice(w.bytes).?);
     }
     try testing.expectEqualSlices(
@@ -842,7 +981,9 @@ test "write: a MIDI configuration the flags demand is written back" {
 
     var w = try write(gpa, &m, null, .{});
     defer w.deinit();
+    // An embedded block sets BOTH bits (it 05's header policy).
     try testing.expect(word(w.bytes, hdr.special) & model.special.midi_config != 0);
+    try testing.expect(word(w.bytes, hdr.flags) & model.flag.embed_midi != 0);
 
     var r = try read_it.read(gpa, w.bytes);
     defer r.deinit();
@@ -850,6 +991,31 @@ test "write: a MIDI configuration the flags demand is written back" {
     var again = try write(gpa, &r.module, w.bytes, .{});
     defer again.deinit();
     try testing.expectEqualSlices(u8, w.bytes, again.bytes);
+
+    // The other way round: a module that asks through `Special` b3 alone
+    // still gets `Flags` b7, so a reader keying on either one finds it.
+    var s: Builder = .init(gpa);
+    defer s.deinit();
+    try s.addOrder(0);
+    var sm = s.finish();
+    defer sm.deinit();
+    sm.header.special |= model.special.midi_config;
+
+    var sw = try write(gpa, &sm, null, .{});
+    defer sw.deinit();
+    try testing.expect(word(sw.bytes, hdr.flags) & model.flag.embed_midi != 0);
+    try testing.expect(word(sw.bytes, hdr.special) & model.special.midi_config != 0);
+
+    // And a module that asks for neither gets neither, nor a block.
+    var n: Builder = .init(gpa);
+    defer n.deinit();
+    try n.addOrder(0);
+    var nm = n.finish();
+    defer nm.deinit();
+    var nw = try write(gpa, &nm, null, .{});
+    defer nw.deinit();
+    try testing.expectEqual(@as(u16, 0), word(nw.bytes, hdr.flags) & model.flag.embed_midi);
+    try testing.expectEqual(@as(u16, 0), word(nw.bytes, hdr.special) & model.special.midi_config);
 }
 
 test "write: a module with no bytes behind its regions is written with diagnostics" {
@@ -864,13 +1030,37 @@ test "write: a module with no bytes behind its regions is written with diagnosti
 
     var w = try write(gpa, &m, null, .{});
     defer w.deinit();
-    try testing.expectEqual(@as(usize, 1), w.diags.count(.it_no_instrument));
+    // A region the anchor cannot give is a pointer that leads nowhere.
+    // (The code plan 08 reserves for a render with no instrument is NOT
+    // named here on purpose: naming it would tell `audit-diagnostics`
+    // that somebody covers it.)
+    try testing.expectEqual(@as(usize, 1), w.diags.count(.it_parapointer_out_of_range));
     try testing.expect(w.diags.count(.it_sample_extent_truncated) > 0);
     // The file is still structurally sound: the records are there, zeroed.
     var r = try read_it.read(gpa, w.bytes);
     defer r.deinit();
     try testing.expectEqual(@as(usize, 1), r.module.instruments.len);
     try testing.expectEqual(@as(u32, model.instrument_size), r.module.instruments[0].raw.len);
+}
+
+test "write: a region the anchor holds only part of is zero-padded and said so" {
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    // 300 bytes of the 554 an instrument record must be.
+    try b.addInstrument("half", .{ .off = 0, .len = 300 });
+    var m = b.finish();
+    defer m.deinit();
+
+    const source = [_]u8{0xAB} ** 300;
+    var w = try write(gpa, &m, &source, .{});
+    defer w.deinit();
+
+    try testing.expectEqual(@as(usize, 1), w.diags.count(.it_truncated));
+    const at = dword(w.bytes, 0xC2);
+    try testing.expectEqualSlices(u8, &([_]u8{0xAB} ** 300), w.bytes[at..][0..300]);
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 254), w.bytes[at + 300 ..][0..254]);
 }
 
 test "write: whatever pseudo-random bytes read as can be written back" {

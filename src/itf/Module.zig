@@ -45,6 +45,12 @@ pub const midi_config_size: u32 = 4896;
 /// unpacking": the header stores no channel count).
 pub const channels: u16 = 64;
 
+/// The height of the pattern a parapointer 0 stands for — synthesised by
+/// the reader, and the only shape the writer may spell as a 0 in return
+/// (it 04 §"Pattern unpacking"; it 05's canonical layout). It is 64 for
+/// the same reason `channels` is, and they are NOT the same 64.
+pub const empty_pattern_rows: u16 = 64;
+
 /// Byte offsets into the 192-byte header (it 04 §Header, ITTECH's
 /// "Impulse Header Layout").
 pub const hdr = struct {
@@ -500,6 +506,12 @@ pub fn nameText(name: []const u8) []const u8 {
 /// UTF-8 (plan 06, "The message and its encoding"); the low half is
 /// ASCII, control bytes included — IT's own newline is CR and its
 /// terminator is NUL, so neither is remapped.
+///
+/// Source: OpenMPT's `CharsetTableCP437`
+/// (`src/mpt/string_transcode/transcode.hpp:134`, BSD-3-Clause, itself
+/// generated from Unicode's `CP437.TXT`), which it 05 §"Message
+/// encoding" names as the table to take. Attribution is the condition
+/// OpenMPT's licence and `THIRD_PARTY_NOTICES.md` put on porting it.
 const cp437_high = [128]u21{
     0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7,
     0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
