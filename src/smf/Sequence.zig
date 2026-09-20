@@ -452,8 +452,8 @@ pub const Sequence = struct {
 };
 
 /// Builds a `Sequence` programmatically: the tests' fixtures, the
-/// renderer that has no file to read, and the residue layer that seats
-/// new events in an existing track all go through here.
+/// renderer that has no file to read, and the residue layer that rebuilds
+/// a sequence with its payloads seated in it all go through here.
 ///
 /// Lifetime: `init`, then either `finish` (which MOVES the arena into the
 /// returned `Sequence` and leaves the builder spent) or `deinit` (which
@@ -515,28 +515,7 @@ pub const Builder = struct {
         try self.tracks.items[track].append(a, .{ .at = at, .kind = kind, .payload = payload });
     }
 
-    /// Seats an event at `index` in `track`'s document order, moving the
-    /// rest along.
-    ///
-    /// This is the residue's placement rule (plan 04): an essence event
-    /// belongs at tick 0 of the conductor track BEFORE whatever else is
-    /// at tick 0, and the canonical writer's stable sort keeps document
-    /// order among equal ticks — so seating it first here is what makes
-    /// it first in the file.
-    pub fn insertEvent(
-        self: *Builder,
-        track: u32,
-        index: usize,
-        at: i64,
-        kind: Kind,
-        payload: Payload,
-    ) Error!void {
-        const a = self.arena.allocator();
-        try self.tracks.items[track].insert(a, index, .{ .at = at, .kind = kind, .payload = payload });
-    }
-
-    /// How many events `track` holds so far — an inserting caller's index
-    /// space.
+    /// How many events `track` holds so far.
     pub fn eventCount(self: *const Builder, track: u32) usize {
         return self.tracks.items[track].items.len;
     }
@@ -792,22 +771,27 @@ test "Builder: tracks, document order, and one byte pool behind every payload" {
     try testing.expectEqualStrings("drums", seq.pool);
 }
 
-test "Builder: insertEvent seats an event BEFORE the ones already at its tick" {
-    // The residue's placement rule (plan 04): the essence goes at tick 0
-    // of track 0 *before any other event at that tick*, and the canonical
-    // writer's stable sort keeps it there.
+test "Builder: document order decides among events at one tick" {
+    // The residue's placement rule (plan 04) rests on this: an essence
+    // event belongs at tick 0 of the conductor track *before any other
+    // event at that tick*, and the canonical writer's stable sort keeps
+    // document order among equal ticks — so a builder that appends it
+    // first is what makes it first in the file. (`src/residue/smf.zig`
+    // rebuilds each track for exactly this reason, which is why there is
+    // no `insertEvent` here: nothing ever needed to seat an event into a
+    // track that was already built.)
     var b: Builder = .init(testing.allocator);
     errdefer b.deinit();
 
     const t0 = try b.addTrack();
+    const body = try b.addBytes("\x01\x02");
+    try b.addEvent(t0, 0, .tempura_residue, .{
+        .residue = .{ .ver = 1, .kind = 1, .seq = 0, .total = 1, .body = body },
+    });
     try b.addEvent(t0, 0, .set_tempo, .{ .tempo = 500_000 });
     try b.addEvent(t0, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
     try b.addEvent(t0, 96, .end_of_track, .empty);
-
-    const body = try b.addBytes("\x01\x02");
-    try b.insertEvent(t0, 0, 0, .tempura_residue, .{
-        .residue = .{ .ver = 1, .kind = 1, .seq = 0, .total = 1, .body = body },
-    });
+    try testing.expectEqual(@as(usize, 4), b.eventCount(t0));
 
     var seq = try b.finish();
     defer seq.deinit();

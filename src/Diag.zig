@@ -156,6 +156,16 @@ pub const Code = enum(u16) {
     /// (plan 02, "(lane …)"). A form's own shape cannot see a sibling,
     /// so this is a host check like `scene_duplicate` beside it.
     lane_duplicate,
+
+    /// The residue could not encode the document's timeline tier: the
+    /// tree is past one of SJON's Binary IR limits (`MAX_NODES`,
+    /// `MAX_COMMENTS_PER_NODE`, `MAX_STRING_LENGTH`, the depth cap —
+    /// `SJON/docs/LANGUAGE.md` §10.6), so there is no essence to carry
+    /// and the file would hold only what its own format can say. The
+    /// reader's counterpart is `residue_corrupt`; this one is the
+    /// WRITER's, raised by `pack` and restated by a carrier handed an
+    /// empty essence (plan 04, "What the residue is").
+    residue_unencodable,
 };
 
 /// How much a diagnostic costs its caller. Orthogonal to `Code` — the
@@ -355,6 +365,7 @@ const code_order = [_]Code{
     .timeline_missing,
     .note_key_invalid,
     .lane_duplicate,
+    .residue_unencodable,
 };
 
 test "Diag.Code: ordinals are dense and unique — the wire contract" {

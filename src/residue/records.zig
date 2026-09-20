@@ -109,6 +109,22 @@
 //! its two ticks — the hash is over what SOUNDS, which is what a tracker
 //! edits.
 //!
+//! **Two limits of these layouts, stated so nobody has to find them.**
+//! A lane hash is over the whole `(track, ch)` pair and not over the
+//! narrower address a record may carry: two lanes bound to one channel —
+//! one by `:key 36`, one by `:cc 74` — share a hash, so an edit to
+//! either moves both. That is deliberate (the record's question is "were
+//! these events written by tempura", and a DAW edits a channel, not a
+//! controller), and it means a stale verdict can name a lane whose own
+//! bytes nobody touched. And the SMF conductor's division rule has a
+//! blind spot at the origin: tick 0 maps to tempura tick 0 under every
+//! division, so a conductor whose only timing events sit at tick 0 —
+//! one `set-tempo` and one `time-signature`, the common case — hashes
+//! the same after a `division` change under unchanged ticks. The
+//! division's CLASS is in the hash, so ppq ⇄ SMPTE is still caught; a
+//! ppq → ppq change with nothing past tick 0 is not, and nothing in that
+//! file moved either.
+//!
 //! **`hashItConductor(module)`** — `"tmpu/cond/it/1\n"`, then the
 //! effective speed and tempo u8 (the loader's, `Header.effectiveSpeed` /
 //! `effectiveTempo`, so a file IT itself would floor hashes as IT reads
@@ -178,7 +194,12 @@ pub const Payload = struct {
 /// carrier reads the placement out of the body rather than being told it
 /// twice.
 pub const Payloads = struct {
-    essence: []const u8 = &.{},
+    /// The packed timeline tier, or null when there is none to carry.
+    /// An EMPTY body is not the same as no body: it is what `pack`
+    /// returns when the tier is past SJON's wire limits, and a carrier
+    /// handed one says `residue_unencodable` rather than writing
+    /// nothing (`essence.Packed`).
+    essence: ?[]const u8 = null,
     conductor: ?[]const u8 = null,
     lanes: []const []const u8 = &.{},
 };
@@ -221,8 +242,8 @@ pub const Part = struct {
 /// missing part, a disagreeing `total` or a repeated `seq` is
 /// `residue_corrupt` and the caller takes the skeleton path (plan 04,
 /// rule 4).
-pub fn reassemble(a: Allocator, parts: []const Part, diags: *Diag.List) Error![]const u8 {
-    if (parts.len == 0) return &.{};
+pub fn reassemble(a: Allocator, parts: []const Part, diags: *Diag.List) Error!?[]const u8 {
+    if (parts.len == 0) return null;
 
     const total = parts[0].total;
     var seen = [_]bool{false} ** (max_parts + 1);
@@ -246,7 +267,7 @@ pub fn reassemble(a: Allocator, parts: []const Part, diags: *Diag.List) Error![]
             "the essence rides in {d} of {d} parts; a split body is all or none, so none of it was used",
             .{ parts.len, total },
         );
-        return &.{};
+        return null;
     }
 
     const out = try a.alloc(u8, size);
@@ -347,6 +368,12 @@ pub fn decodeLane(gpa: Allocator, body: []const u8) Error!DecodedLane {
 
     // `.corrupt` is a RETURN, not an error, so `errdefer` would not fire:
     // the flag is what frees the segments on every way out but the last.
+    // The count is bounded BEFORE it is trusted with an allocation: a
+    // segment is at least ten bytes (`at` i64 and an `ease_len` u16), so
+    // a body promising more than it could possibly hold is corrupt and
+    // nothing is reserved for it.
+    if (c.left() / 10 < seg_count) return corruptLane();
+
     const segments = try gpa.alloc(Segment, seg_count);
     var kept = false;
     defer if (!kept) gpa.free(segments);
@@ -474,6 +501,10 @@ const Cursor = struct {
         if (self.bytes.len - self.at < n) return null;
         defer self.at += n;
         return self.bytes[self.at..][0..n];
+    }
+
+    fn left(self: *const Cursor) usize {
+        return self.bytes.len - self.at;
     }
 
     fn int(self: *Cursor, comptime T: type) ?T {
@@ -1014,6 +1045,53 @@ test "records: the conductor body is the hash, and a wrong length is refused" {
     try testing.expectEqual(rec.hash, decodeConductor(&body).?.hash);
     try testing.expect(decodeConductor(body[0..31]) == null);
     try testing.expect(decodeConductor("") == null);
+}
+
+test "records: the parts of a split essence, in order, once each, or not at all" {
+    const gpa = testing.allocator;
+    var diags: Diag.List = .init(gpa);
+    defer diags.deinit();
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // In order.
+    const whole = [_]Part{
+        .{ .seq = 0, .total = 3, .body = "one" },
+        .{ .seq = 1, .total = 3, .body = "two" },
+        .{ .seq = 2, .total = 3, .body = "three" },
+    };
+    try testing.expectEqualStrings("onetwothree", (try reassemble(a, &whole, &diags)).?);
+
+    // OUT of order: the carrier may hand them back in any order, and
+    // `seq` — not arrival — is what says where a part belongs.
+    const shuffled = [_]Part{ whole[2], whole[0], whole[1] };
+    try testing.expectEqualStrings("onetwothree", (try reassemble(a, &shuffled, &diags)).?);
+    try testing.expectEqual(@as(usize, 0), diags.items().len);
+
+    // A DUPLICATE `seq`: three parts, `total` 3, but part 1 is missing
+    // and part 0 is there twice. Counting alone would accept it.
+    const duplicated = [_]Part{ whole[0], whole[0], whole[2] };
+    try testing.expect((try reassemble(a, &duplicated, &diags)) == null);
+    try testing.expectEqual(@as(usize, 1), diags.count(.residue_corrupt));
+
+    // A `total` two parts disagree on, a `seq` past `total`, a `total`
+    // of zero, and a part that is simply missing.
+    const cases = [_][]const Part{
+        &.{ .{ .seq = 0, .total = 2, .body = "a" }, .{ .seq = 1, .total = 3, .body = "b" } },
+        &.{ .{ .seq = 0, .total = 2, .body = "a" }, .{ .seq = 9, .total = 2, .body = "b" } },
+        &.{.{ .seq = 0, .total = 0, .body = "a" }},
+        &.{ whole[0], whole[1] },
+    };
+    for (cases) |parts| {
+        try testing.expect((try reassemble(a, parts, &diags)) == null);
+    }
+    try testing.expectEqual(@as(usize, 5), diags.count(.residue_corrupt));
+
+    // No parts at all is no essence, and no complaint.
+    try testing.expect((try reassemble(a, &.{}, &diags)) == null);
+    try testing.expectEqual(@as(usize, 5), diags.count(.residue_corrupt));
 }
 
 test "records: the envelope is 7D 74 65 6D ver kind seq total" {

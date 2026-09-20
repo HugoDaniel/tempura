@@ -51,9 +51,10 @@
 //! is reported `it_message_encoding_lossy`.
 //!
 //! **Newlines are CR**, IT's own (`src/itf/write.zig` keeps the message
-//! raw). A caller appending the tail to a non-empty human message puts
-//! one CR between them; `splitMessage` finds the marker at the start of
-//! the message or after either newline.
+//! raw). `appendTail` is what joins a human message to a tail, because
+//! the one CR between them is what keeps the marker at the start of a
+//! line — `splitMessage` finds it there and nowhere else, and
+//! `parseTail` undoes the `%XX` escaping on the way back.
 //!
 //! **4096 bytes.** What does not fit is dropped whole lines at a time,
 //! and `residue_tail_truncated` names what fell off.
@@ -124,10 +125,15 @@ pub fn chunk(gpa: Allocator, payloads: records.Payloads) Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
 
-    if (payloads.essence.len > 0) try appendRecord(&out, gpa, .{
-        .kind = @intFromEnum(records.Kind.essence),
-        .body = payloads.essence,
-    });
+    if (payloads.essence) |body| {
+        // An essence offered and empty is `pack`'s report that the tier
+        // is past SJON's limits (`residue_unencodable`, raised there);
+        // there is no record to write for it.
+        if (body.len > 0) try appendRecord(&out, gpa, .{
+            .kind = @intFromEnum(records.Kind.essence),
+            .body = body,
+        });
+    }
     for (payloads.lanes) |body| try appendRecord(&out, gpa, .{
         .kind = @intFromEnum(records.Kind.lane),
         .body = body,
@@ -157,7 +163,12 @@ fn appendRecord(out: *std.ArrayList(u8), gpa: Allocator, p: records.Payload) Err
 /// (plan 04, rule 3).
 pub fn parseChunk(gpa: Allocator, bytes: []const u8) Error!ParsedChunk {
     var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
+    // `.corrupt` and `.version` are RETURNS, not errors, so `errdefer`
+    // would not fire on them and a chunk whose framing broke after a
+    // record had already been duped would leak the lot. The flag covers
+    // every way out but the one that hands the arena on.
+    var kept = false;
+    defer if (!kept) arena.deinit();
     const a = arena.allocator();
 
     var parts: std.ArrayList(records.Part) = .empty;
@@ -201,7 +212,6 @@ pub fn parseChunk(gpa: Allocator, bytes: []const u8) Error!ParsedChunk {
     // chunk belongs to a newer tempura.
     if (newer) |v| {
         if (parts.items.len == 0 and lanes.items.len == 0 and conductor == null) {
-            arena.deinit();
             return .{ .version = v };
         }
     }
@@ -213,11 +223,9 @@ pub fn parseChunk(gpa: Allocator, bytes: []const u8) Error!ParsedChunk {
     var quiet: Diag.List = .init(gpa);
     defer quiet.deinit();
     const essence_body = try records.reassemble(a, parts.items, &quiet);
-    if (quiet.count(.residue_corrupt) > 0) {
-        arena.deinit();
-        return .{ .corrupt = .residue_corrupt };
-    }
+    if (quiet.count(.residue_corrupt) > 0) return .{ .corrupt = .residue_corrupt };
 
+    kept = true;
     return .{ .ok = .{
         .arena = arena,
         .payloads = .{
@@ -290,8 +298,16 @@ pub fn splitMessage(message: []const u8) Split {
     return .{ .human = message, .tail = null };
 }
 
-/// A tail back into SJON source: the marker line dropped, IT's CR
-/// newlines turned into the LF a parser reads. Caller owns the text.
+/// A tail back into SJON source: the marker line dropped, the `%XX`
+/// escaping undone, IT's CR newlines turned into the LF a parser reads.
+/// Caller owns the text.
+///
+/// The reversal is exact because the writer escapes `%` itself as
+/// `%25`, so every `%` followed by two hex digits in a tail is an
+/// escape and nothing else. It is safe for a SYMBOL as well as for a
+/// string: SJON's identifiers are ASCII (`LANGUAGE.md` §2.3), so the
+/// only byte a name spelled as a symbol can ever have had escaped is
+/// the `%`.
 pub fn parseTail(gpa: Allocator, text: []const u8) Error![:0]u8 {
     var body = text;
     if (std.mem.startsWith(u8, body, marker)) {
@@ -303,16 +319,58 @@ pub fn parseTail(gpa: Allocator, text: []const u8) Error![:0]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     var i: usize = 0;
-    while (i < body.len) : (i += 1) {
-        if (body[i] != '\r') {
-            try out.append(gpa, body[i]);
+    while (i < body.len) {
+        const c = body[i];
+        if (c == '%') {
+            if (i + 2 < body.len) {
+                if (unhex(body[i + 1])) |hi| {
+                    if (unhex(body[i + 2])) |lo| {
+                        try out.append(gpa, hi * 16 + lo);
+                        i += 3;
+                        continue;
+                    }
+                }
+            }
+            // A `%` this writer did not put there: kept as it stands.
+            try out.append(gpa, c);
+            i += 1;
             continue;
         }
-        // A lone CR is a newline; a CRLF is one newline, not two.
-        if (i + 1 < body.len and body[i + 1] == '\n') continue;
-        try out.append(gpa, '\n');
+        if (c == '\r') {
+            // A lone CR is a newline; a CRLF is one newline, not two.
+            i += 1;
+            if (i < body.len and body[i] == '\n') continue;
+            try out.append(gpa, '\n');
+            continue;
+        }
+        try out.append(gpa, c);
+        i += 1;
     }
     return out.toOwnedSliceSentinel(gpa, 0);
+}
+
+fn unhex(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'A'...'F' => c - 'A' + 10,
+        'a'...'f' => c - 'a' + 10,
+        else => null,
+    };
+}
+
+/// `message` with `tail` after it, one CR between them when there is a
+/// message to separate — what `itf.write.Options.message_tail` wants.
+///
+/// It exists so a caller cannot produce a marker in the middle of a
+/// line, which `splitMessage` would not find. Caller owns the bytes.
+pub fn appendTail(gpa: Allocator, message: []const u8, text: []const u8) Error![]u8 {
+    if (message.len == 0) return gpa.dupe(u8, text);
+    const ends_in_newline = message[message.len - 1] == '\r' or message[message.len - 1] == '\n';
+    return std.mem.concat(gpa, u8, &.{
+        message,
+        if (ends_in_newline) "" else &[_]u8{newline},
+        text,
+    });
 }
 
 /// Builds the tail one form at a time, and stops when the budget is
@@ -371,6 +429,16 @@ const Tailer = struct {
             self.dropped[group] += 1;
             return;
         }
+        try self.keep();
+    }
+
+    /// The line just built, budget or no budget — the two forms a tail
+    /// is not a tail without. They are the first things written, so
+    /// this can only overrun on a document whose own header is longer
+    /// than 4096 bytes, and a truncated header would be worse than a
+    /// long one.
+    fn keep(self: *Tailer) Error!void {
+        defer self.line.clearRetainingCapacity();
         try self.out.appendSlice(self.gpa, self.line.items);
         try self.out.append(self.gpa, newline);
     }
@@ -392,9 +460,9 @@ const Tailer = struct {
             try self.symbol(c);
         }
         try self.raw(")");
-        // The header is never dropped: a tail without it is not a
-        // document, and `group_section` is only reached past the budget.
-        try self.commit(group_section);
+        // Never dropped: `(timeline …)` is the document's first root and
+        // a tail without it does not read at all.
+        try self.keep();
     }
 
     /// The carrying anchor, as the same marker the essence carries.
@@ -412,7 +480,8 @@ const Tailer = struct {
         try self.raw(" :file ");
         try self.string(essence.self_file);
         try self.raw(")");
-        try self.commit(group_section);
+        // Never dropped either: every address below is `:from` this.
+        try self.keep();
     }
 
     fn section(self: *Tailer, s: Doc.Section) Error!void {
@@ -632,7 +701,7 @@ pub fn choose(
         var parsed = try parseChunk(gpa, bytes);
         switch (parsed) {
             .ok => |p| {
-                const empty = p.payloads.essence.len == 0 and
+                const empty = p.payloads.essence == null and
                     p.payloads.conductor == null and
                     p.payloads.lanes.len == 0;
                 if (!empty) return .{ .chunk = p };
@@ -699,8 +768,10 @@ const example_source =
 fn loadExample(gpa: Allocator, schema: *const Schema, source: [:0]const u8) !fromSjon.Result {
     var res = try fromSjon.fromSource(gpa, schema, source, null);
     errdefer res.deinit();
-    for (res.diags.items()) |d| std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
-    if (res.diags.hasErrors()) return error.UnexpectedDiagnostics;
+    if (res.diags.hasErrors()) {
+        for (res.diags.items()) |d| std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
+        return error.UnexpectedDiagnostics;
+    }
     return res;
 }
 
@@ -734,7 +805,7 @@ test "it: the chunk is the record list, framed, in plan 04's order" {
 
     var got = try parseChunk(gpa, bytes);
     defer got.deinit();
-    try testing.expectEqualStrings("ESSENCE", got.ok.payloads.essence);
+    try testing.expectEqualStrings("ESSENCE", got.ok.payloads.essence.?);
     try testing.expectEqualSlices(u8, &conductor, got.ok.payloads.conductor.?);
     try testing.expectEqual(@as(usize, 1), got.ok.payloads.lanes.len);
     try testing.expectEqualSlices(u8, lane, got.ok.payloads.lanes[0]);
@@ -758,7 +829,7 @@ test "it: a chunk that does not frame is corrupt, and a newer ver is kept opaque
     // An empty chunk holds nothing and is not an error.
     var empty = try parseChunk(gpa, "");
     defer empty.deinit();
-    try testing.expectEqual(@as(usize, 0), empty.ok.payloads.essence.len);
+    try testing.expect(empty.ok.payloads.essence == null);
 
     // A record from a newer tempura: nothing this build can read.
     const newer = try gpa.dupe(u8, bytes);
@@ -912,7 +983,7 @@ test "it: the chunk wins, the tail is the fallback, and residue_partial names th
     defer diags.deinit();
     var won = try choose(gpa, bytes, message, &diags);
     defer won.deinit();
-    try testing.expectEqualStrings("ESSENCE", won.chunk.payloads.essence);
+    try testing.expectEqualStrings("ESSENCE", won.chunk.payloads.essence.?);
     try testing.expectEqual(@as(usize, 0), diags.items().len);
 
     // No chunk: the tail, and the loss named.
@@ -944,9 +1015,10 @@ test "it: chunk → write → read → parse, the whole carrier round trip" {
     var res = try loadExample(gpa, &schema, example_source);
     defer res.deinit();
 
-    const body = try essence.pack(gpa, &res.doc, example_source);
-    defer gpa.free(body);
-    const payload = try chunk(gpa, .{ .essence = body });
+    var packed_essence = try essence.pack(gpa, &res.doc, example_source);
+    defer packed_essence.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), packed_essence.diags.items().len);
+    const payload = try chunk(gpa, .{ .essence = packed_essence.bytes });
     defer gpa.free(payload);
     var t = try tail(gpa, &res.doc, &res.map);
     defer t.deinit(gpa);
@@ -959,11 +1031,13 @@ test "it: chunk → write → read → parse, the whole carrier round trip" {
     var module = b.finish();
     defer module.deinit();
 
-    const message_tail = try std.mem.concat(gpa, u8, &.{ "\r", t.bytes });
-    defer gpa.free(message_tail);
+    // `appendTail` is what puts the CR in: a marker mid-line is a marker
+    // `splitMessage` never finds.
+    const whole = try appendTail(gpa, module.message, t.bytes);
+    defer gpa.free(whole);
     var file = try itf_write.write(gpa, &module, null, .{
         .tmpu = payload,
-        .message_tail = message_tail,
+        .message_tail = whole[module.message.len..],
     });
     defer file.deinit();
     try testing.expect(!file.diags.hasErrors());
@@ -979,17 +1053,95 @@ test "it: chunk → write → read → parse, the whole carrier round trip" {
     defer diags.deinit();
     var chosen = try choose(gpa, chunk_bytes, back.module.message, &diags);
     defer chosen.deinit();
-    try testing.expectEqualSlices(u8, body, chosen.chunk.payloads.essence);
+    try testing.expectEqualSlices(u8, packed_essence.bytes, chosen.chunk.payloads.essence.?);
 
     const split = splitMessage(back.module.message);
     try testing.expectEqualStrings("a song about the sea", split.human);
     try testing.expectEqualStrings(t.bytes, split.tail.?);
 
     // And the essence is the document again, form for form.
-    var unpacked = try essence.unpack(gpa, chosen.chunk.payloads.essence);
+    var unpacked = try essence.unpack(gpa, chosen.chunk.payloads.essence.?);
     defer unpacked.deinit(gpa);
     var again = try loadExample(gpa, &schema, unpacked.ok.text);
     defer again.deinit();
     try testing.expectEqual(res.doc.lanes.len, again.doc.lanes.len);
     try testing.expectEqual(@as(usize, 1), again.doc.lanes[2].notes.len);
+}
+
+test "it: a chunk that breaks AFTER a record frees what it had taken" {
+    // The leak this closes: `.corrupt` is a returned VALUE, so the
+    // `errdefer` on the arena never fired, and by then a record had
+    // already been duped into it. `std.testing.allocator` is the
+    // assertion.
+    const gpa = testing.allocator;
+    const good = try chunk(gpa, .{ .essence = "ESSENCE" });
+    defer gpa.free(good);
+
+    const with_rubbish = try std.mem.concat(gpa, u8, &.{ good, "\x7Dtem\x01" });
+    defer gpa.free(with_rubbish);
+
+    var broken = try parseChunk(gpa, with_rubbish);
+    defer broken.deinit();
+    try testing.expectEqual(Diag.Code.residue_corrupt, broken.corrupt);
+
+    // The same, one record further in: a lane record duped, then a head
+    // that promises a length the chunk does not have.
+    const lane = try records.encodeLane(gpa, .{
+        .lane = "kick",
+        .address = .{ .it = .{ .channel = 0, .column = null, .fx = null } },
+        .hash = @splat(1),
+    });
+    defer gpa.free(lane);
+    const two = try chunk(gpa, .{ .essence = "ESSENCE", .lanes = &.{lane} });
+    defer gpa.free(two);
+    const cut = try gpa.dupe(u8, two[0 .. two.len - 3]);
+    defer gpa.free(cut);
+
+    var short = try parseChunk(gpa, cut);
+    defer short.deinit();
+    try testing.expectEqual(Diag.Code.residue_corrupt, short.corrupt);
+}
+
+test "it: parseTail undoes the %XX escaping, in a string and in a symbol" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    // Spelled as bytes, because a SJON source file carries UTF-8 raw and
+    // this test is about what happens to those bytes.
+    const utf8 =
+        "(timeline :title \"50% caf\xC3\xA9\" :conductor song)\n" ++
+        "(anchor :id song :kind it :file \"x.it\")\n" ++
+        "(cue :name \"caf\xC3\xA9\" :at 0bar)\n";
+    var res = try loadExample(gpa, &schema, utf8);
+    defer res.deinit();
+
+    var t = try tail(gpa, &res.doc, &res.map);
+    defer t.deinit(gpa);
+    for (t.bytes) |c| try testing.expect(c == newline or (c >= 0x20 and c < 0x7F));
+    try testing.expect(std.mem.indexOf(u8, t.bytes, "50%25 caf%C3%A9") != null);
+
+    // …and back: the bytes the author wrote, not the escaping.
+    const back_src = try parseTail(gpa, t.bytes);
+    defer gpa.free(back_src);
+    try testing.expect(std.mem.indexOf(u8, back_src, "50% caf\xC3\xA9") != null);
+
+    var back = try loadExample(gpa, &schema, back_src);
+    defer back.deinit();
+    try testing.expectEqualStrings("50% caf\xC3\xA9", back.doc.title.?);
+    try testing.expectEqualStrings("caf\xC3\xA9", back.doc.cues[0].name);
+}
+
+test "it: appendTail puts the marker at the start of a line, whatever the message" {
+    const gpa = testing.allocator;
+    const text = marker ++ "\r(timeline :title \"x\")";
+
+    for ([_][]const u8{ "", "a song", "a song\r", "a song\n" }) |message| {
+        const whole = try appendTail(gpa, message, text);
+        defer gpa.free(whole);
+        const split = splitMessage(whole);
+        try testing.expect(split.tail != null);
+        try testing.expectEqualStrings(text, split.tail.?);
+        // The human half is the message, its own trailing newline gone.
+        try testing.expect(std.mem.startsWith(u8, message, split.human));
+    }
 }

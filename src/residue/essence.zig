@@ -33,11 +33,20 @@
 //! older tempura never re-prints what it could not fully read (plan 04,
 //! rule 3 and "Binary IR versions").
 //!
-//! ```zig
-//! const body = try essence.pack(gpa, &doc, source);
-//! defer gpa.free(body);
+//! **A tier this wire cannot hold is said out loud.** SJON's Binary IR
+//! has limits (`MAX_NODES`, `MAX_COMMENTS_PER_NODE = 256`,
+//! `MAX_STRING_LENGTH`, the depth cap — §10.6), and a document past one
+//! of them has NO essence. `pack` returns that as an empty body beside a
+//! `residue_unencodable` diagnostic rather than as a quiet nothing,
+//! because a carrier with no essence writes a file that says only what
+//! its own format can say — which a build has to be told.
 //!
-//! var got = try essence.unpack(gpa, body);
+//! ```zig
+//! var packed_tier = try essence.pack(gpa, &doc, source);
+//! defer packed_tier.deinit(gpa);
+//! if (packed_tier.diags.hasErrors()) { /* residue_unencodable */ }
+//!
+//! var got = try essence.unpack(gpa, packed_tier.bytes);
 //! defer got.deinit(gpa);
 //! switch (got) {
 //!     .ok => |e| { /* e.text is SJON, NUL-terminated, ready for fromSource */ },
@@ -108,11 +117,28 @@ pub fn carrierOf(doc: *const Doc.Doc) ?Doc.AnchorId {
     return null;
 }
 
-/// The timeline tier of `source`, as Binary IR. Caller owns the bytes.
+/// A packed essence and what it cost.
+///
+/// `bytes` is empty exactly when the tier could not be encoded, and
+/// `diags` then carries `residue_unencodable` naming the SJON limit that
+/// stopped it. A carrier handed an empty body writes no essence, so the
+/// diagnostic is the only thing standing between a too-wide document and
+/// a file that silently holds no timeline at all.
+pub const Packed = struct {
+    bytes: []u8,
+    diags: Diag.List,
+
+    pub fn deinit(self: *Packed, gpa: Allocator) void {
+        gpa.free(self.bytes);
+        self.diags.deinit();
+    }
+};
+
+/// The timeline tier of `source`, as Binary IR.
 ///
 /// The carrying anchor is `carrierOf(doc)`; `packFor` takes it when the
 /// caller knows better.
-pub fn pack(gpa: Allocator, doc: *const Doc.Doc, source: [:0]const u8) Error![]u8 {
+pub fn pack(gpa: Allocator, doc: *const Doc.Doc, source: [:0]const u8) Error!Packed {
     return packFor(gpa, source, carrierOf(doc));
 }
 
@@ -123,7 +149,10 @@ pub fn packFor(
     gpa: Allocator,
     source: [:0]const u8,
     carrier: ?Doc.AnchorId,
-) Error![]u8 {
+) Error!Packed {
+    var diags: Diag.List = .init(gpa);
+    errdefer diags.deinit();
+
     var tree = try sjon.parse(gpa, source);
     defer tree.deinit();
 
@@ -143,20 +172,36 @@ pub fn packFor(
         try roots.append(arena.allocator(), cloned);
     }
 
-    var sub = try b.finalize(&arena, source, roots.items);
+    // The comments after the last root are the document's, not any
+    // node's, and they are a channel of their own on the wire
+    // (`with_tree_trailing_comments`, §10.2) — so they are cloned
+    // explicitly, exactly as SJON's own `Edit` pass clones them.
+    var sub = try b.finalizeWith(&arena, source, roots.items, .{
+        .tree_trailing_comments = try b.cloneCommentRange(&tree, tree.tree_trailing_comments),
+    });
     defer sub.deinit();
 
     var bytes = sjon.toBinary(gpa, sub, .forMode(.full)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        // Every other `Binary.Error` is a LIMIT (`MAX_NODES`,
-        // `MAX_STRING_LENGTH`, …). A document that wide cannot ride in a
-        // file, and the caller finds out by getting no essence: an empty
-        // body is not valid IR, so `unpack` says `residue_corrupt` on it
-        // and the skeleton path takes over.
-        else => return gpa.alloc(u8, 0),
+        // Every other `Binary.Error` is a LIMIT: `MAX_NODES` (2^20),
+        // `MAX_COMMENTS_PER_NODE` (256 — a 257-line comment block ahead
+        // of one form reaches it), `MAX_STRING_LENGTH`, the depth cap
+        // (§10.6). There is then NO essence, and a file that carries no
+        // essence says nothing the format cannot — which a build has to
+        // be told, or the loss is silent.
+        else => {
+            try diags.add(
+                .residue_unencodable,
+                .err,
+                .{ .start = 0, .end = 0 },
+                "the timeline tier is past SJON's Binary IR limits ({t}; see LANGUAGE.md §10.6), so no essence was packed and this file would carry nothing the format cannot say itself",
+                .{err},
+            );
+            return .{ .bytes = try gpa.alloc(u8, 0), .diags = diags };
+        },
     };
     defer bytes.deinit();
-    return gpa.dupe(u8, bytes.data);
+    return .{ .bytes = try gpa.dupe(u8, bytes.data), .diags = diags };
 }
 
 /// A body back into SJON text.
@@ -314,10 +359,11 @@ test "essence: the 02 example packs and unpacks form-identical, comments and all
     defer loaded.deinit();
     try testing.expectEqual(@as(usize, 0), loaded.diags.items().len);
 
-    const body = try pack(gpa, &loaded.doc, source);
-    defer gpa.free(body);
+    var packed_essence = try pack(gpa, &loaded.doc, source);
+    defer packed_essence.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), packed_essence.diags.items().len);
 
-    var got = try unpack(gpa, body);
+    var got = try unpack(gpa, packed_essence.bytes);
     defer got.deinit(gpa);
     try testing.expect(got == .ok);
 
@@ -361,17 +407,19 @@ test "essence: the unpacked text is a document again, and packing it is stable" 
     var first = try fromSjon.fromSource(gpa, &schema, source, null);
     defer first.deinit();
 
-    const body = try pack(gpa, &first.doc, source);
-    defer gpa.free(body);
-    var got = try unpack(gpa, body);
+    var packed_essence = try pack(gpa, &first.doc, source);
+    defer packed_essence.deinit(gpa);
+    var got = try unpack(gpa, packed_essence.bytes);
     defer got.deinit(gpa);
 
     // It loads clean: the marker is a valid anchor, and a document that
     // names no file it cannot read raises nothing.
     var again = try fromSjon.fromSource(gpa, &schema, got.ok.text, null);
     defer again.deinit();
-    for (again.diags.items()) |d| std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
-    try testing.expectEqual(@as(usize, 0), again.diags.items().len);
+    if (again.diags.items().len != 0) {
+        for (again.diags.items()) |d| std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
+        return error.UnexpectedDiagnostics;
+    }
     try testing.expectEqualStrings(self_file, again.doc.anchorById("song").?.file);
     try testing.expect(again.doc.anchorById("song").?.size == null);
     try testing.expectEqual(first.doc.lanes.len, again.doc.lanes.len);
@@ -379,9 +427,9 @@ test "essence: the unpacked text is a document again, and packing it is stable" 
     try testing.expectEqual(first.doc.passthrough.len, again.doc.passthrough.len);
 
     // And a second round changes nothing: the essence is a fixed point.
-    const body2 = try pack(gpa, &again.doc, got.ok.text);
-    defer gpa.free(body2);
-    var got2 = try unpack(gpa, body2);
+    var packed_again = try pack(gpa, &again.doc, got.ok.text);
+    defer packed_again.deinit(gpa);
+    var got2 = try unpack(gpa, packed_again.bytes);
     defer got2.deinit(gpa);
     try testing.expectEqualStrings(got.ok.text, got2.ok.text);
 }
@@ -412,9 +460,9 @@ test "essence: the file tiers are not in it, and the anchor's dump goes with the
     doc.anchors = &anchors;
     doc.conductor = "song";
 
-    const body = try pack(gpa, &doc, source);
-    defer gpa.free(body);
-    var got = try unpack(gpa, body);
+    var packed_essence = try pack(gpa, &doc, source);
+    defer packed_essence.deinit(gpa);
+    var got = try unpack(gpa, packed_essence.bytes);
     defer got.deinit(gpa);
 
     try testing.expectEqual(@as(u32, 3), got.ok.roots);
@@ -447,9 +495,9 @@ test "essence: a document with no carrying anchor keeps every anchor as written"
 
     try testing.expect(carrierOf(&doc) == null);
 
-    const body = try pack(gpa, &doc, source);
-    defer gpa.free(body);
-    var got = try unpack(gpa, body);
+    var packed_essence = try pack(gpa, &doc, source);
+    defer packed_essence.deinit(gpa);
+    var got = try unpack(gpa, packed_essence.bytes);
     defer got.deinit(gpa);
 
     try testing.expect(std.mem.indexOf(u8, got.ok.text, "one.mid") != null);
@@ -457,9 +505,9 @@ test "essence: a document with no carrying anchor keeps every anchor as written"
 
     // Named explicitly, the second one becomes the marker and the first
     // stays a file by reference.
-    const body_b = try packFor(gpa, source, "b");
-    defer gpa.free(body_b);
-    var got_b = try unpack(gpa, body_b);
+    var packed_b = try packFor(gpa, source, "b");
+    defer packed_b.deinit(gpa);
+    var got_b = try unpack(gpa, packed_b.bytes);
     defer got_b.deinit(gpa);
     try testing.expect(std.mem.indexOf(u8, got_b.ok.text, "one.mid") != null);
     try testing.expect(std.mem.indexOf(u8, got_b.ok.text, "two.mid") == null);
@@ -472,8 +520,9 @@ test "essence: a newer wire version is kept opaque, and rubbish is residue_corru
     var doc: Doc.Doc = .empty(gpa);
     defer doc.deinit();
 
-    const body = try pack(gpa, &doc, source);
-    defer gpa.free(body);
+    var packed_essence = try pack(gpa, &doc, source);
+    defer packed_essence.deinit(gpa);
+    const body = packed_essence.bytes;
 
     // The header's fifth byte is the IR's wire version (§10.1). Bumped,
     // the body is a future tempura's and this one keeps it as bytes
@@ -492,4 +541,56 @@ test "essence: a newer wire version is kept opaque, and rubbish is residue_corru
         defer c.deinit(gpa);
         try testing.expectEqual(Diag.Code.residue_corrupt, c.corrupt);
     }
+}
+
+test "essence: the comments after the last root ride too" {
+    // `Tree.tree_trailing_comments` is its own channel on the wire
+    // (§10.2) and belongs to the document rather than to any node, so a
+    // clone that only walks the roots loses the end of the file.
+    const gpa = testing.allocator;
+    const source =
+        \\(timeline :title "ends in prose")
+        \\
+        \\; the last word is a comment
+        \\; and so is this one
+        \\
+    ;
+    var doc: Doc.Doc = .empty(gpa);
+    defer doc.deinit();
+
+    var packed_essence = try pack(gpa, &doc, source);
+    defer packed_essence.deinit(gpa);
+    var got = try unpack(gpa, packed_essence.bytes);
+    defer got.deinit(gpa);
+
+    try testing.expect(std.mem.indexOf(u8, got.ok.text, "; the last word is a comment") != null);
+    try testing.expect(std.mem.indexOf(u8, got.ok.text, "; and so is this one") != null);
+}
+
+test "essence: a tier past SJON's limits is residue_unencodable, never a silent nothing" {
+    // `MAX_COMMENTS_PER_NODE` is 256 (§10.6), so a 257-line comment
+    // block ahead of one form is a document this wire cannot carry. The
+    // old behaviour was an empty body and no word about it, which would
+    // have written a file holding nothing of the timeline.
+    const gpa = testing.allocator;
+
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    for (0..257) |i| {
+        var line: [32]u8 = undefined;
+        try src.appendSlice(gpa, std.fmt.bufPrint(&line, "; comment {d}\n", .{i}) catch unreachable);
+    }
+    try src.appendSlice(gpa, "(timeline :title \"buried\")\n");
+    const source = try src.toOwnedSliceSentinel(gpa, 0);
+    defer gpa.free(source);
+
+    var doc: Doc.Doc = .empty(gpa);
+    defer doc.deinit();
+
+    var packed_essence = try packFor(gpa, source, null);
+    defer packed_essence.deinit(gpa);
+
+    try testing.expectEqual(@as(usize, 0), packed_essence.bytes.len);
+    try testing.expectEqual(@as(usize, 1), packed_essence.diags.count(.residue_unencodable));
+    try testing.expect(packed_essence.diags.hasErrors());
 }

@@ -118,14 +118,28 @@ pub fn attach(
     b.division = seq.division;
 
     const cap = @max(opts.max_event, 1);
-    var parts: usize = if (payloads.essence.len == 0) 0 else (payloads.essence.len + cap - 1) / cap;
+    const essence = payloads.essence orelse &.{};
+    // An essence OFFERED and empty is `pack` reporting that the tier is
+    // past SJON's wire limits (`essence.Packed`). Writing the file
+    // anyway would leave it holding nothing the format cannot say, so
+    // the loss is restated here rather than passing in silence — a
+    // caller that means to carry no essence passes none.
+    if (payloads.essence != null and essence.len == 0) try diags.add(
+        .residue_unencodable,
+        .err,
+        .{ .start = 0, .end = 0 },
+        "the essence handed to this carrier is empty; the timeline tier could not be packed, so this .mid would carry nothing the format cannot say itself",
+        .{},
+    );
+
+    var parts: usize = if (essence.len == 0) 0 else (essence.len + cap - 1) / cap;
     if (parts > max_parts) {
         try diags.add(
             .residue_partial,
             .warning,
             .{ .start = 0, .end = 0 },
             "the essence is {d} bytes and one .mid carries at most {d} ({d} events of {d}); none of it was written, because half an essence only reads as corrupt",
-            .{ payloads.essence.len, max_parts * cap, max_parts, cap },
+            .{ essence.len, max_parts * cap, max_parts, cap },
         );
         parts = 0;
     }
@@ -150,12 +164,12 @@ pub fn attach(
             var part: usize = 0;
             while (part < parts) : (part += 1) {
                 const from = part * cap;
-                const to = @min(from + cap, payloads.essence.len);
+                const to = @min(from + cap, essence.len);
                 try addPayload(&b, track, .{
                     .kind = @intFromEnum(records.Kind.essence),
                     .seq = @intCast(part),
                     .total = @intCast(parts),
-                    .body = payloads.essence[from..to],
+                    .body = essence[from..to],
                 });
             }
             if (payloads.conductor) |body| try addPayload(&b, track, .{
@@ -240,6 +254,14 @@ pub fn detach(gpa: Allocator, seq: *const Sequence.Sequence) Error!Detached {
             }
             try copyEvent(&b, seq, e, track);
         }
+    }
+
+    // The chunks that are neither `MThd` nor `MTrk` are the file's, not
+    // the residue's: `attach` copied them and `detach` gives them back,
+    // or the round trip would quietly lose a chunk RP-001 told every
+    // reader to preserve.
+    for (seq.foreign) |ch| {
+        try b.addForeign(ch.tag, try b.addBytes(seq.bytesOf(ch.bytes)));
     }
 
     return .{
@@ -330,7 +352,24 @@ fn fixture(gpa: Allocator) !Sequence.Sequence {
     try b.addEvent(t1, 96, .note_off, .{ .note = .{ .ch = 3, .key = 60, .vel = 64 } });
     try b.addEvent(t1, 384, .end_of_track, .empty);
 
+    // A chunk that is neither `MThd` nor `MTrk`: RP-001 tells a reader
+    // to keep it, and the residue must not be what loses it.
+    const kept = try b.addBytes("some other tool's chunk");
+    try b.addForeign("XFIR".*, kept);
+
     return b.finish();
+}
+
+/// Everything `sameEvents` compares, plus the foreign chunks with their
+/// tags — the whole value, for the two functions that must not lose any
+/// of it.
+fn sameSequence(a: *const Sequence.Sequence, b: *const Sequence.Sequence) bool {
+    if (a.foreign.len != b.foreign.len) return false;
+    for (a.foreign, b.foreign) |fa, fb| {
+        if (!std.mem.eql(u8, &fa.tag, &fb.tag)) return false;
+        if (!std.mem.eql(u8, a.bytesOf(fa.bytes), b.bytesOf(fb.bytes))) return false;
+    }
+    return sameEvents(a, b);
 }
 
 /// Event for event, ACROSS two sequences: kinds, ticks, the payload
@@ -428,19 +467,27 @@ test "smf: detach hands the payloads back and the sequence event-identical" {
     defer back.deinit();
     try testing.expect(!back.diags.hasErrors());
 
-    try testing.expectEqualStrings("ESSENCE", back.payloads.essence);
+    try testing.expectEqualStrings("ESSENCE", back.payloads.essence.?);
     try testing.expectEqualSlices(u8, &conductor, back.payloads.conductor.?);
     try testing.expectEqual(@as(usize, 1), back.payloads.lanes.len);
     try testing.expectEqualSlices(u8, lane, back.payloads.lanes[0]);
 
-    // The one property the whole carrier rests on.
-    try testing.expect(sameEvents(&seq, &back.sequence));
+    // The one property the whole carrier rests on — events AND the
+    // foreign chunks, which is what makes the fixture carry one.
+    try testing.expectEqual(@as(usize, 1), carried.sequence.foreign.len);
+    try testing.expectEqual(@as(usize, 1), back.sequence.foreign.len);
+    try testing.expectEqualStrings("XFIR", &back.sequence.foreign[0].tag);
+    try testing.expectEqualStrings(
+        "some other tool's chunk",
+        back.sequence.bytesOf(back.sequence.foreign[0].bytes),
+    );
+    try testing.expect(sameSequence(&seq, &back.sequence));
 
     // And with nothing to carry, `attach` is a copy: no track invented,
     // no event moved.
     var nothing = try attach(gpa, &seq, .{}, .{});
     defer nothing.deinit();
-    try testing.expect(sameEvents(&seq, &nothing.sequence));
+    try testing.expect(sameSequence(&seq, &nothing.sequence));
     try testing.expectEqual(@as(usize, 0), nothing.diags.items().len);
 }
 
@@ -465,7 +512,7 @@ test "smf: a split essence reassembles, and a missing part is residue_corrupt" {
 
     var back = try detach(gpa, &carried.sequence);
     defer back.deinit();
-    try testing.expectEqualStrings(essence, back.payloads.essence);
+    try testing.expectEqualStrings(essence, back.payloads.essence.?);
 
     // Drop the third part: the rest cannot be trusted to be the essence,
     // so nothing is handed back and the loss is named.
@@ -499,7 +546,7 @@ test "smf: a split essence reassembles, and a missing part is residue_corrupt" {
 
     var bad = try detach(gpa, &holed_seq);
     defer bad.deinit();
-    try testing.expectEqual(@as(usize, 0), bad.payloads.essence.len);
+    try testing.expect(bad.payloads.essence == null);
     try testing.expectEqual(@as(usize, 1), bad.diags.count(.residue_corrupt));
 }
 
@@ -541,7 +588,7 @@ test "smf: a foreign 7F, a reserved kind 04 and a newer ver all stay where they 
     var back = try detach(gpa, &seq);
     defer back.deinit();
 
-    try testing.expectEqualStrings("ours", back.payloads.essence);
+    try testing.expectEqualStrings("ours", back.payloads.essence.?);
     // Four events kept: the two foreign payloads, the reserved kind, the
     // newer version — and the end of track.
     const kept = back.sequence.tracks[0].events;
@@ -580,6 +627,26 @@ test "smf: an essence past what the carrier can hold is refused whole" {
     }
 }
 
+test "smf: an essence that could not be packed is refused, not written as nothing" {
+    // `essence.pack` hands back an empty body with `residue_unencodable`
+    // when the tier is past SJON's wire limits. A carrier that wrote the
+    // file anyway would leave it holding nothing of the timeline and say
+    // nothing about it.
+    const gpa = testing.allocator;
+    var seq = try fixture(gpa);
+    defer seq.deinit();
+
+    var refused = try attach(gpa, &seq, .{ .essence = "" }, .{});
+    defer refused.deinit();
+    try testing.expectEqual(@as(usize, 1), refused.diags.count(.residue_unencodable));
+    try testing.expect(refused.diags.hasErrors());
+
+    // No essence OFFERED is a different thing and stays silent.
+    var silent = try attach(gpa, &seq, .{}, .{});
+    defer silent.deinit();
+    try testing.expectEqual(@as(usize, 0), silent.diags.items().len);
+}
+
 test "smf: pack → attach → write → read → detach, the whole carrier round trip" {
     // The corpus case `residue-smf-exact` (plan 04, phase 3's gate),
     // held as a unit test until the runner learns `(build)` / `(dump)`.
@@ -611,13 +678,16 @@ test "smf: pack → attach → write → read → detach, the whole carrier roun
     var back = try detach(gpa, &read_back.sequence);
     defer back.deinit();
 
-    try testing.expectEqualStrings("(timeline :title \"x\")", back.payloads.essence);
+    try testing.expectEqualStrings("(timeline :title \"x\")", back.payloads.essence.?);
     try testing.expectEqualSlices(u8, &conductor, back.payloads.conductor.?);
     try testing.expectEqualSlices(u8, lane, back.payloads.lanes[0]);
 
-    // The file's own events survived the whole trip — except that
-    // `read` supplies the `end_of_track` the writer emitted, which the
-    // fixture already carried, so the two sequences match event for
-    // event.
+    // The file's own EVENTS survived the whole trip. Not the foreign
+    // chunk: the canonical writer emits a header and its tracks and
+    // nothing else (`Sequence.ForeignChunk`), so a chunk is lost to a
+    // `write`, which is the SMF core's contract and not the residue's
+    // doing — `attach` and `detach` both carry it, and the test above
+    // is where that is pinned.
     try testing.expect(sameEvents(&seq, &back.sequence));
+    try testing.expectEqual(@as(usize, 0), back.sequence.foreign.len);
 }
