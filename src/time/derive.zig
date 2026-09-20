@@ -2,11 +2,19 @@
 //! 03, "Three conductors" and "Phases" item 3).
 //!
 //! `TimeMap.derive` builds the two tables from POINTS; this file decides
-//! which points they are — the document's own, an SMF anchor's tempo and
-//! time-signature events, or an IT anchor's timing walk — and assembles
-//! everything else a playhead reads: the sections and cues in ticks, one
-//! onset list per lane with every clip expanded, the curve steps, the
-//! length and the loop point.
+//! which points they are — the document's own, or the ones the
+//! DOCUMENT LAYER reads off an anchor — and assembles everything else a
+//! playhead reads: the sections and cues in ticks, one onset list per
+//! lane with every clip expanded, the curve steps, the length and the
+//! loop point.
+//!
+//! Where the rules live is the point. Plan 03 names the three conductors
+//! and `doc/fromSjon.zig` implements rules 2 and 3 (`smfConductor`,
+//! `itConductor`) because a document's own positions resolve against
+//! them while it is being read; this file CALLS those, and calls
+//! `fromSjon.contentEnd` for plan 02's `:length` default, so that the
+//! map a `Doc` gets here is the map `fromSource` gave it. Two readings
+//! of one rule is one reading too many.
 
 const std = @import("std");
 const testing = std.testing;
@@ -17,9 +25,11 @@ const tm = @import("TimeMap.zig");
 const value = @import("../doc/Value.zig");
 const bridge_smf = @import("../doc/bridge_smf.zig");
 const bridge_it = @import("../doc/bridge_it.zig");
+const fromSjon = @import("../doc/fromSjon.zig");
 const walk = @import("../itf/walk.zig");
 const Module = @import("../itf/Module.zig");
 const Sequence = @import("../smf/Sequence.zig");
+const test_support = @import("test_support.zig");
 
 const Doc = value.Doc;
 const TimeMap = tm.TimeMap;
@@ -101,7 +111,15 @@ pub const Derived = struct {
             try writer.print("(section :name {s} :at {d} :dur {d})\n", .{ s.name, s.at, s.dur });
         }
         for (self.cues) |c| {
-            try writer.print("(cue :name \"{s}\" :at {d})\n", .{ c.name, c.at });
+            // A cue's name is a string the author wrote, so the echo
+            // spells it as one: a `"` or a `\\` inside it is escaped,
+            // or the line would not read back as the form it prints.
+            try writer.writeAll("(cue :name \"");
+            for (c.name) |ch| {
+                if (ch == '"' or ch == '\\') try writer.writeByte('\\');
+                try writer.writeByte(ch);
+            }
+            try writer.print("\" :at {d})\n", .{c.at});
         }
         for (self.lanes) |l| {
             const first: i64 = if (l.onsets.len == 0) 0 else l.onsets[0].tick;
@@ -143,25 +161,13 @@ pub fn derive(gpa: std.mem.Allocator, doc: *const Doc) Error!Derived {
     const lanes = try laneTable(gpa, a, doc, &diags, &rowmap);
 
     // Plan 02's `:length` default — "the end of the last event or clip,
-    // rounded up to a bar" — over everything this derivation placed, the
-    // anchored material included.
-    var content_end: i64 = conducted.end;
-    for (lanes) |l| {
-        for (l.onsets) |o| content_end = @max(content_end, o.tick + @max(o.dur, 0));
-        for (l.steps) |s| content_end = @max(content_end, s.tick);
-    }
-    // A clip's WINDOW counts whether or not anything sounds in it — the
-    // same arithmetic `doc/checks.zig` hands the bridge, so a document
-    // derived here and one loaded through `fromSource` agree on the
-    // default length. Saturating, because the window is user arithmetic.
-    for (doc.lanes) |l| {
-        for (l.clips) |c| {
-            const phrase = doc.phraseByName(c.phrase) orelse continue;
-            const window = c.length orelse
-                (phrase.length *| @as(i64, c.repeat)) -| c.offset;
-            content_end = @max(content_end, c.at +| @max(0, window));
-        }
-    }
+    // rounded up to a bar" — in the document layer's own two terms: what
+    // the DOCUMENT placed (`fromSjon.contentEnd`, the rule `fromSource`
+    // accumulates while it reads) and where the CONDUCTOR's material
+    // ends. Not the derivation's own placed content: a clip's window
+    // already bounds what it placed, and a bound lane's notes are the
+    // anchor's, which the conductor's end already covers.
+    const content_end = @max(fromSjon.contentEnd(doc), conducted.end);
     const length = doc.length orelse
         try roundUpToBar(gpa, conducted, content_end, doc.end);
 
@@ -187,14 +193,12 @@ pub fn derive(gpa: std.mem.Allocator, doc: *const Doc) Error!Derived {
 
 // ---- the conductor ----
 
-/// The points the two tables are built from, and where the anchored
-/// material ends.
+/// The points the two tables are built from, and where the conductor's
+/// own material ends (`fromSjon.Conductor.end`; zero for a document that
+/// conducts itself).
 const Conducted = struct {
     tempo: []const tm.TempoPoint,
     meter: []const tm.MeterPoint,
-    /// The end of the CONDUCTOR's own material in ticks, which the
-    /// `:length` default counts alongside the document's content. Zero
-    /// for a document that conducts itself.
     end: i64 = 0,
 };
 
@@ -205,9 +209,16 @@ const Conducted = struct {
 const seed_tempo = [_]tm.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
 const seed_meter = [_]tm.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
 
-/// Plan 03's three conductors: the document's own points, an SMF
-/// anchor's tempo and time-signature events, or an IT anchor's timing
-/// walk.
+/// Plan 03's three conductors: the document's own points, or the tables
+/// the DOCUMENT LAYER reads off the anchor the `(timeline :conductor …)`
+/// names.
+///
+/// Rules 2 and 3 are `doc/fromSjon.zig`'s `smfConductor` and
+/// `itConductor` — every merge, seed, diagnostic and conversion of them
+/// — because an anchored document's own positions resolve against those
+/// same tables while it is being read. This chooses which one to ask and
+/// copies the answer into the derivation's arena; an IT walk comes back
+/// with it, and is what `Playhead.orderRowAt` and a bound IT lane read.
 fn conduct(
     gpa: std.mem.Allocator,
     a: std.mem.Allocator,
@@ -237,218 +248,42 @@ fn conduct(
     );
 
     const anchor = doc.anchorById(id) orelse return seeded();
-    switch (anchor.kind) {
-        .smf => if (smfTier(doc, id)) |t| return try fromSmf(a, &t.sequence, diags),
-        .it => if (itTier(doc, id)) |t| return try fromIt(gpa, a, &t.module, diags, rowmap),
+    var built: fromSjon.Conductor = switch (anchor.kind) {
+        .smf => if (smfTier(doc, id)) |t|
+            try fromSjon.smfConductor(gpa, &t.sequence, anchor.span)
+        else
+            // A by-reference anchor nothing has read yet: the document
+            // says the file conducts, and until the file is here the
+            // tables are the fallback. `anchor_unavailable` belongs to
+            // the resolver, not here.
+            return seeded(),
+        .it => if (itTier(doc, id)) |t|
+            try fromSjon.itConductor(gpa, &t.module, anchor.span)
+        else
+            return seeded(),
+    };
+    defer built.deinit();
+
+    // The walk moves out of the conductor and into the caller's slot,
+    // whose errdefer owns it from here; `built.deinit` then frees only
+    // what is left.
+    rowmap.* = built.rowmap;
+    built.rowmap = null;
+
+    for (built.diags.items()) |d| {
+        try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
     }
-    // A by-reference anchor nothing has read yet: the document says the
-    // file conducts, and until the file is here the tables are the
-    // fallback. `anchor_unavailable` belongs to the resolver, not here.
-    return seeded();
+    // Copied out: the conductor's arena dies with this call and the
+    // tables outlive it.
+    return .{
+        .tempo = try a.dupe(tm.TempoPoint, built.tempo),
+        .meter = try a.dupe(tm.MeterPoint, built.meter),
+        .end = built.end,
+    };
 }
 
 fn seeded() Conducted {
     return .{ .tempo = &seed_tempo, .meter = &seed_meter };
-}
-
-/// Rule 2: every `set-tempo` in EVERY track merged by tick (stable;
-/// equal ticks keep file order and the last wins), `time-signature`
-/// likewise, and SMF tick `k` at `k · TPQ / PPQ`.
-///
-/// A file with SMPTE division is one segment at 120 quarter notes per
-/// minute over the converted grid and its `set-tempo` events are ignored
-/// for timing: SMPTE ticks are wall-clock by definition and that segment
-/// reproduces them exactly.
-fn fromSmf(
-    a: std.mem.Allocator,
-    seq: *const Sequence.Sequence,
-    diags: *Diag.List,
-) Error!Conducted {
-    const ppq = seq.division.pulsesPerQuarter();
-    const wall_clock = switch (seq.division) {
-        .smpte => true,
-        .ppq => false,
-    };
-
-    var tempo: std.ArrayList(tm.TempoPoint) = .empty;
-    var meter: std.ArrayList(tm.MeterPoint) = .empty;
-    var inexact = false;
-    var overflow = false;
-    var ignored: usize = 0;
-    var end: i64 = 0;
-
-    for (seq.tracks) |t| {
-        for (t.events) |e| {
-            const conv = Grid.smfToTicks(e.at, ppq);
-            if (!conv.exact) inexact = true;
-            if (conv.overflow) overflow = true;
-            end = @max(end, conv.tick);
-            switch (e.kind) {
-                .set_tempo => {
-                    if (wall_clock) {
-                        ignored += 1;
-                        continue;
-                    }
-                    try tempo.append(a, .{ .tick = conv.tick, .tempo = .{ .us = e.payload.tempo } });
-                },
-                .time_signature => {
-                    const sig = e.payload.time_sig;
-                    try meter.append(a, .{ .tick = conv.tick, .n = sig.nn, .d = powerOfTwo(sig.dd) });
-                },
-                else => {},
-            }
-        }
-    }
-
-    if (inexact) try diags.add(
-        .division_inexact,
-        .warning,
-        .{ .start = 0, .end = 0 },
-        "division {d} does not divide {d}; this file's ticks land on the nearest tempura tick",
-        .{ ppq, Grid.TPQ },
-    );
-    if (overflow) try diags.add(
-        .tick_overflow,
-        .err,
-        .{ .start = 0, .end = 0 },
-        "this file reaches past the grid ceiling {d}; its ticks are clamped",
-        .{Grid.MAX_TICK},
-    );
-    if (ignored > 0) try diags.add(
-        .smpte_tempo_ignored,
-        .warning,
-        .{ .start = 0, .end = 0 },
-        "SMPTE division: {d} set-tempo event(s) are ignored for timing and the file plays at 120 quarter notes per minute",
-        .{ignored},
-    );
-
-    std.mem.sort(tm.TempoPoint, tempo.items, {}, byTick(tm.TempoPoint));
-    std.mem.sort(tm.MeterPoint, meter.items, {}, byTick(tm.MeterPoint));
-    return .{
-        .tempo = try openAtZero(tm.TempoPoint, a, try lastPerTick(tm.TempoPoint, a, tempo.items), seed_tempo[0]),
-        .meter = try openAtZero(tm.MeterPoint, a, try lastPerTick(tm.MeterPoint, a, meter.items), seed_meter[0]),
-        .end = end,
-    };
-}
-
-/// Rule 3: the timing walk. tempura ticks are IT ticks · 1 921 920,
-/// segments are one per tempo change (a slide yields one per tick), and
-/// `qpm` IS the IT tempo — the 24-ticks-per-quarter convention.
-///
-/// Bars come from the module's highlight `[minor major]` when set, as one
-/// meter point at 0 with `[major / minor, 4]`, else `[4 4]`: a speed
-/// change moves the row grid, never the bar grid.
-fn fromIt(
-    gpa: std.mem.Allocator,
-    a: std.mem.Allocator,
-    module: *const Module.Module,
-    diags: *Diag.List,
-    rowmap: *?walk.RowMap,
-) Error!Conducted {
-    // The map goes to the caller's slot FIRST: it owns an arena from the
-    // moment it exists, and `derive`'s errdefer is what frees it.
-    rowmap.* = try walk.derive(gpa, module, .{});
-    const map = &rowmap.*.?;
-    for (map.diags.items()) |d| {
-        try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-    }
-
-    var tempo: std.ArrayList(tm.TempoPoint) = .empty;
-    var overflow = false;
-    for (map.segments) |s| {
-        const tick = itToTicks(s.start_tick) orelse {
-            overflow = true;
-            break;
-        };
-        try tempo.append(a, .{ .tick = tick, .tempo = .{ .qpm = @floatFromInt(s.tempo) } });
-    }
-    const end = itToTicks(map.total_ticks) orelse end: {
-        overflow = true;
-        break :end Grid.MAX_TICK;
-    };
-    if (overflow) try diags.add(
-        .tick_overflow,
-        .err,
-        .{ .start = 0, .end = 0 },
-        "this module reaches past the grid ceiling {d}; the segments past it are dropped",
-        .{Grid.MAX_TICK},
-    );
-
-    const meter = try a.alloc(tm.MeterPoint, 1);
-    meter[0] = itMeter(module.header);
-    return .{
-        .tempo = try openAtZero(tm.TempoPoint, a, tempo.items, seed_tempo[0]),
-        .meter = meter,
-        .end = end,
-    };
-}
-
-/// The module's highlight as a meter: `[major / minor, 4]` when the
-/// header carries a valid one, else `[4 4]`.
-fn itMeter(header: Module.Header) tm.MeterPoint {
-    const minor = header.highlight_minor;
-    const major = header.highlight_major;
-    if (header.special & Module.special.highlight != 0 and
-        minor > 0 and major >= minor and major % minor == 0)
-    {
-        const n = major / minor;
-        if (n >= 1 and n <= 64) return .{ .tick = 0, .n = n, .d = 4 };
-    }
-    return .{ .tick = 0, .n = 4, .d = 4 };
-}
-
-/// IT ticks to tempura ticks, or null past the grid ceiling. The product
-/// is formed in `i128`, so the ceiling is a CHECK and never a wrap.
-fn itToTicks(it_ticks: i64) ?i64 {
-    const t = @as(i128, it_ticks) * Grid.IT_TICK;
-    if (t < 0 or t > Grid.MAX_TICK) return null;
-    return @intCast(t);
-}
-
-/// SMF's `dd`, which is a power of two by definition. Past 32 there is
-/// no meter tempura can spell, and 0 is what `TimeMap` refuses by name
-/// (`meter_map_invalid`).
-fn powerOfTwo(dd: u8) u8 {
-    if (dd > 5) return 0;
-    return @as(u8, 1) << @intCast(dd);
-}
-
-/// A comparator on `.tick` alone. `std.mem.sort` is stable, so points
-/// that share a tick keep the order they were collected in — which is
-/// file order, across tracks (plan 03, rule 2).
-fn byTick(comptime T: type) fn (void, T, T) bool {
-    return struct {
-        fn less(_: void, x: T, y: T) bool {
-            return x.tick < y.tick;
-        }
-    }.less;
-}
-
-/// One point per tick, the LAST of each run — "equal ticks keep file
-/// order and the last wins".
-fn lastPerTick(comptime T: type, a: std.mem.Allocator, items: []const T) Error![]T {
-    var out: std.ArrayList(T) = .empty;
-    var i: usize = 0;
-    while (i < items.len) {
-        var j = i;
-        while (j + 1 < items.len and items[j + 1].tick == items[i].tick) j += 1;
-        try out.append(a, items[j]);
-        i = j + 1;
-    }
-    return out.toOwnedSlice(a);
-}
-
-/// The table with a point at tick 0, whatever the file said: a `.mid`
-/// whose first tempo comes late plays at 120 until it, and a module or a
-/// file with no meter is in [4 4]. Without this the map's first segment
-/// would start at the second point's tick and every lookup before it
-/// would read the wrong one.
-fn openAtZero(comptime T: type, a: std.mem.Allocator, items: []T, first: T) Error![]T {
-    if (items.len > 0 and items[0].tick == 0) return items;
-    const out = try a.alloc(T, items.len + 1);
-    out[0] = first;
-    @memcpy(out[1..], items);
-    return out;
 }
 
 /// The first bar line at or after `end`, which is the `:length` default.
@@ -612,6 +447,14 @@ fn bound(
     }
 }
 
+/// IT ticks to tempura ticks, or null past the grid ceiling. The product
+/// is formed in `i128`, so the ceiling is a CHECK and never a wrap.
+fn itToTicks(it_ticks: i64) ?i64 {
+    const t = @as(i128, it_ticks) * Grid.IT_TICK;
+    if (t < 0 or t > Grid.MAX_TICK) return null;
+    return @intCast(t);
+}
+
 /// One step of a bound curve. A bound lane has no authored easing, so
 /// the segment between two of its values is `linear` — the name pacer
 /// gives a straight line.
@@ -644,6 +487,15 @@ fn itTier(doc: *const Doc, id: value.AnchorId) ?*const value.ItTier {
 /// — what a split clip's left half needs — and the measure is the
 /// event's own onset, so a note that starts inside keeps its whole
 /// duration.
+///
+/// Every term here is USER arithmetic: `:repeat` has no maximum in the
+/// manifest and a phrase's `:length` reaches to the grid ceiling, so
+/// `length · repeat` does not fit an `i64` in general. The window is
+/// therefore formed with saturating operators, and the repeat count is
+/// bounded BEFORE the loop by the last source tick that can still land
+/// — the window's end, or the ceiling, whichever comes first — so the
+/// loop runs once per repeat that places something and never once per
+/// repeat the document asked for.
 fn place(
     a: std.mem.Allocator,
     doc: *const Doc,
@@ -658,18 +510,37 @@ fn place(
     // where the span lives. Here it simply places nothing.
     const phrase = doc.phraseByName(clip.phrase) orelse return;
     const from = laneOf(phrase, lane.name) orelse return;
-    if (phrase.length <= 0) return;
+    if (phrase.length <= 0 or clip.offset < 0 or clip.at < 0) return;
 
     const repeat: i64 = @max(1, clip.repeat);
-    const total = phrase.length * repeat;
-    const window = clip.length orelse (total - clip.offset);
+    const window = clip.length orelse ((phrase.length *| repeat) -| clip.offset);
     if (window <= 0) return;
+    // The window in SOURCE ticks, half-open.
+    const window_end = clip.offset +| window;
+    // The furthest source tick whose placement still lands on the grid.
+    const reach: i64 = if (clip.at >= Grid.MAX_TICK)
+        clip.offset
+    else
+        clip.offset +| (Grid.MAX_TICK - clip.at);
+    const last = @min(window_end, reach);
+
+    // A repeat whose body starts past `last` places nothing, so the loop
+    // stops there — and `length · r` stays under `last + length`, which
+    // is the bound that makes the multiply safe.
+    const repeats = @min(repeat, @divFloor(last, phrase.length) + 1);
+    if (repeats < repeat and window_end > reach) try diags.add(
+        .tick_overflow,
+        .err,
+        clip.span,
+        "this clip's repeats reach past the grid ceiling {d}; the ones past it are not placed",
+        .{Grid.MAX_TICK},
+    );
 
     var r: i64 = 0;
-    while (r < repeat) : (r += 1) {
-        const base = r * phrase.length;
+    while (r < repeats) : (r += 1) {
+        const base = phrase.length * r;
         for (from.notes) |n| {
-            const at = try placedTick(base + n.at, clip, window, diags) orelse continue;
+            const at = placedTick(base + n.at, clip, window_end) orelse continue;
             try onsets.append(a, .{
                 .tick = at,
                 .dur = n.dur,
@@ -678,7 +549,7 @@ fn place(
             });
         }
         for (from.keyframes) |k| {
-            const at = try placedTick(base + k.at, clip, window, diags) orelse continue;
+            const at = placedTick(base + k.at, clip, window_end) orelse continue;
             try steps.append(a, .{
                 .tick = at,
                 .value = k.value,
@@ -690,20 +561,17 @@ fn place(
 }
 
 /// Where a source tick lands, or null when the window or the grid
-/// ceiling refuses it.
-fn placedTick(source: i64, clip: value.Clip, window: i64, diags: *Diag.List) Error!?i64 {
-    if (source < clip.offset or source >= clip.offset + window) return null;
+/// ceiling refuses it. `window_end` is the window's exclusive end in
+/// source ticks, already saturated by `place`.
+///
+/// The ceiling is checked in `i128` and reported by `place`, once for
+/// the clip, rather than here once per event: a clip that reaches past
+/// the ceiling does so for every note it holds, and one diagnostic is
+/// the news.
+fn placedTick(source: i64, clip: value.Clip, window_end: i64) ?i64 {
+    if (source < clip.offset or source >= window_end) return null;
     const at = @as(i128, clip.at) + (source - clip.offset);
-    if (at > Grid.MAX_TICK) {
-        try diags.add(
-            .tick_overflow,
-            .err,
-            clip.span,
-            "this clip places content past the grid ceiling {d}; it is not placed",
-            .{Grid.MAX_TICK},
-        );
-        return null;
-    }
+    if (at > Grid.MAX_TICK) return null;
     return @intCast(at);
 }
 
@@ -742,14 +610,9 @@ fn stepBefore(_: void, x: Step, y: Step) bool {
 const TPQ = Grid.TPQ;
 const bar44 = 4 * TPQ;
 
-/// A document owning its own arena, with the header every fixture needs.
-fn fixtureDoc(gpa: std.mem.Allocator) Doc {
-    return .empty(gpa);
-}
-
 test "derive: sections and cues come over in ticks, in document order" {
     const gpa = testing.allocator;
-    var doc: Doc = fixtureDoc(gpa);
+    var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
     var tempo = [_]tm.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
@@ -806,7 +669,7 @@ test "derive: a native notes lane, its clip expanded by :repeat and :transpose" 
     //
     // The lane's own two notes come first: 0 and 1q.
     const gpa = testing.allocator;
-    var doc: Doc = fixtureDoc(gpa);
+    var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
     var tempo = [_]tm.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
@@ -894,7 +757,7 @@ test "derive: a clip's :offset and :length window, content past it not placed" {
     //   0.5q → 0 + (23 063 040 − 23 063 040) = 0
     //   1q   → 0 + (46 126 080 − 23 063 040) = 23 063 040
     const gpa = testing.allocator;
-    var doc: Doc = fixtureDoc(gpa);
+    var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
     var tempo = [_]tm.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
@@ -961,7 +824,7 @@ test "derive: a clip's :offset and :length window, content past it not placed" {
 
 test "derive: a curve lane's keyframes become steps in tick order" {
     const gpa = testing.allocator;
-    var doc: Doc = fixtureDoc(gpa);
+    var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
     var tempo = [_]tm.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
@@ -1008,7 +871,7 @@ test "derive: the default :length is the last content rounded up to a bar" {
     // 69 189 120, and the first bar line at or after that is bar 1,
     // 184 504 320.
     const gpa = testing.allocator;
-    var doc: Doc = fixtureDoc(gpa);
+    var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
     var tempo = [_]tm.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
@@ -1047,7 +910,7 @@ test "derive: the default :length counts a clip's whole window" {
     // ends a quarter of a quarter into bar 1. Plan 02 counts "the end of
     // the last event OR CLIP", so the length is the window's end.
     const gpa = testing.allocator;
-    var doc: Doc = fixtureDoc(gpa);
+    var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
     var tempo = [_]tm.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
@@ -1105,7 +968,7 @@ test "derive: the default :length counts a clip's whole window" {
 
 test "derive.echo: the map, then the sections, the cues and the lanes" {
     const gpa = testing.allocator;
-    var doc: Doc = fixtureDoc(gpa);
+    var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
     var tempo = [_]tm.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
@@ -1258,35 +1121,12 @@ test "derive: an SMF conductor — set-tempo on track 2, merged by tick" {
     try testing.expectEqual(@as(usize, 0), d.diags.items().len);
 }
 
-/// The same three segments as an Impulse Tracker module.
-///
-/// Speed 6 and 24 ticks to the quarter make a row a 16th note, so row 4
-/// is 1q and row 8 is 2q. Pattern 1 is the one-row `B01` that jumps to
-/// itself: the walk ends at the second visit of that row, with the state
-/// it left pattern 0 in — so the module plays its tempo changes ONCE and
-/// the segment table is the three the document authored.
-pub fn threeSegmentModule(gpa: std.mem.Allocator) !Module.Module {
-    var b: Module.Builder = .init(gpa);
-    errdefer b.deinit();
-    b.module.header.initial_speed = 6;
-    b.module.header.initial_tempo = 125;
-    try b.addOrder(0);
-    try b.addOrder(1);
-    const song = try b.addPattern(16);
-    // `Txx` with xx >= 0x20 sets the tempo: 0x96 = 150, 0xC8 = 200.
-    song.at(4, 0).* = .{ .fx = 'T' - '@', .param = 150 };
-    song.at(8, 0).* = .{ .fx = 'T' - '@', .param = 200 };
-    const tail = try b.addPattern(1);
-    tail.at(0, 0).* = .{ .fx = 'B' - '@', .param = 1 };
-    return b.finish();
-}
-
 test "derive: an IT conductor — Txx rows through the timing walk" {
     const gpa = testing.allocator;
     var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
-    const module = try threeSegmentModule(gpa);
+    const module = try test_support.threeSegmentModule(gpa);
     const a = doc.arena.allocator();
     const tiers = try a.alloc(value.ItTier, 1);
     tiers[0] = .{ .anchor = "song", .module = module };
@@ -1548,6 +1388,39 @@ test "derive: an IT highlight becomes the meter, [major/minor 4]" {
     try testing.expectEqual(@as(u8, 4), d.map.meters[0].d);
 }
 
+test "derive: a highlight that does not divide truncates, as the document layer does" {
+    // 14 rows to the measure over 4 to the beat is three and a half
+    // beats, and plan 03 says `[major / minor, 4]` — an integer
+    // division. `fromSjon.itConductor` is the one reading of that rule
+    // and this layer inherits it: `[3 4]`, not `[4 4]`.
+    const gpa = testing.allocator;
+    var doc: Doc = .empty(gpa);
+    defer doc.deinit();
+
+    var b: Module.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.module.header.initial_speed = 6;
+    b.module.header.initial_tempo = 125;
+    b.module.header.highlight_minor = 4;
+    b.module.header.highlight_major = 14;
+    try b.addOrder(0);
+    _ = try b.addPattern(4);
+    const module = b.finish();
+
+    const a = doc.arena.allocator();
+    const tiers = try a.alloc(value.ItTier, 1);
+    tiers[0] = .{ .anchor = "song", .module = module };
+    doc.anchors = anchorsOf(&doc, .it);
+    doc.conductor = "song";
+    doc.it = tiers;
+
+    var d = try derive(gpa, &doc);
+    defer d.deinit();
+
+    try testing.expectEqual(@as(u8, 3), d.map.meters[0].n);
+    try testing.expectEqual(@as(u8, 4), d.map.meters[0].d);
+}
+
 // ---- tests: bound lanes ----
 
 test "derive: a bound SMF notes lane, paired and converted to the grid" {
@@ -1680,4 +1553,397 @@ test "derive: a bound IT notes lane reads the module through the walk" {
     try testing.expectEqualSlices(Onset, &.{
         .{ .tick = 0, .dur = 23_063_040, .key = 60, .vel = 127 },
     }, bass.onsets);
+}
+
+test "derive: a clip whose repeats overflow the grid places its window and stops" {
+    // `:repeat` has no schema maximum, so `phrase.length · repeat` is
+    // user arithmetic over the whole i64 range: four thousand million
+    // repeats of a phrase 2^40 ticks long is 4.8 · 10^21, which no i64
+    // holds. The window is one quarter, so only the first repeat places
+    // anything and the loop stops at the first repeat past it.
+    const gpa = testing.allocator;
+    var doc: Doc = .empty(gpa);
+    defer doc.deinit();
+
+    const a = doc.arena.allocator();
+    const span: Diag.Span = .{ .start = 0, .end = 1 };
+    const tempo = try a.alloc(tm.TempoPoint, 1);
+    tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
+    const meter = try a.alloc(tm.MeterPoint, 1);
+    meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
+
+    const phrase_notes = try a.alloc(value.Note, 1);
+    phrase_notes[0] = .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 0, .off_vel = null, .span = span };
+    const phrase_lanes = try a.alloc(value.Lane, 1);
+    phrase_lanes[0] = .{
+        .name = "flash",
+        .kind = .notes,
+        .target = "flash",
+        .range = null,
+        .binding = null,
+        .notes = phrase_notes,
+        .keyframes = &.{},
+        .clips = &.{},
+        .query_src = null,
+        .expr_src = null,
+        .span = span,
+    };
+    const phrases = try a.alloc(value.Phrase, 1);
+    phrases[0] = .{ .name = "fill", .length = 1 << 40, .lanes = phrase_lanes, .span = span };
+
+    const clips = try a.alloc(value.Clip, 1);
+    clips[0] = .{
+        .at = 0,
+        .phrase = "fill",
+        .repeat = 4_000_000_000,
+        .offset = 0,
+        .length = TPQ,
+        .transpose = 0,
+        .span = span,
+    };
+    const lanes = try a.alloc(value.Lane, 1);
+    lanes[0] = .{
+        .name = "flash",
+        .kind = .notes,
+        .target = "flash",
+        .range = null,
+        .binding = null,
+        .notes = &.{},
+        .keyframes = &.{},
+        .clips = clips,
+        .query_src = null,
+        .expr_src = null,
+        .span = span,
+    };
+    doc.tempo = tempo;
+    doc.meter = meter;
+    doc.phrases = phrases;
+    doc.lanes = lanes;
+    doc.length = bar44;
+
+    var d = try derive(gpa, &doc);
+    defer d.deinit();
+
+    // One note placed — the phrase's own, at the clip's `:at` — and the
+    // repeats past the window never formed a tick.
+    const lane = d.laneByName("flash").?;
+    try testing.expectEqualSlices(Onset, &.{
+        .{ .tick = 0, .dur = 11_531_520, .key = 38, .vel = 100 },
+    }, lane.onsets);
+}
+
+test "derive: a clip that would place content past the grid ceiling says so" {
+    // The phrase is one bar long and the clip sits one bar below the
+    // ceiling with an unbounded window, so the second repeat has nowhere
+    // to land: `tick_overflow`, and the derivation keeps what fits.
+    const gpa = testing.allocator;
+    var doc: Doc = .empty(gpa);
+    defer doc.deinit();
+
+    const a = doc.arena.allocator();
+    const span: Diag.Span = .{ .start = 0, .end = 1 };
+    const tempo = try a.alloc(tm.TempoPoint, 1);
+    tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
+    const meter = try a.alloc(tm.MeterPoint, 1);
+    meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
+
+    const phrase_notes = try a.alloc(value.Note, 1);
+    phrase_notes[0] = .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 0, .off_vel = null, .span = span };
+    const phrase_lanes = try a.alloc(value.Lane, 1);
+    phrase_lanes[0] = .{
+        .name = "flash",
+        .kind = .notes,
+        .target = "flash",
+        .range = null,
+        .binding = null,
+        .notes = phrase_notes,
+        .keyframes = &.{},
+        .clips = &.{},
+        .query_src = null,
+        .expr_src = null,
+        .span = span,
+    };
+    const phrases = try a.alloc(value.Phrase, 1);
+    phrases[0] = .{ .name = "fill", .length = bar44, .lanes = phrase_lanes, .span = span };
+
+    const clips = try a.alloc(value.Clip, 1);
+    clips[0] = .{
+        .at = Grid.MAX_TICK - bar44,
+        .phrase = "fill",
+        .repeat = 4_000_000_000,
+        .offset = 0,
+        .length = null,
+        .transpose = 0,
+        .span = span,
+    };
+    const lanes = try a.alloc(value.Lane, 1);
+    lanes[0] = .{
+        .name = "flash",
+        .kind = .notes,
+        .target = "flash",
+        .range = null,
+        .binding = null,
+        .notes = &.{},
+        .keyframes = &.{},
+        .clips = clips,
+        .query_src = null,
+        .expr_src = null,
+        .span = span,
+    };
+    doc.tempo = tempo;
+    doc.meter = meter;
+    doc.phrases = phrases;
+    doc.lanes = lanes;
+    doc.length = bar44;
+
+    var d = try derive(gpa, &doc);
+    defer d.deinit();
+
+    try testing.expectEqual(@as(usize, 1), d.diags.count(.tick_overflow));
+    const lane = d.laneByName("flash").?;
+    try testing.expectEqual(@as(usize, 2), lane.onsets.len);
+    try testing.expectEqual(@as(i64, Grid.MAX_TICK - bar44), lane.onsets[0].tick);
+    try testing.expectEqual(@as(i64, Grid.MAX_TICK), lane.onsets[1].tick);
+}
+
+test "derive.echo: a cue name's quotes and backslashes are escaped" {
+    const gpa = testing.allocator;
+    var doc: Doc = .empty(gpa);
+    defer doc.deinit();
+
+    const a = doc.arena.allocator();
+    const span: Diag.Span = .{ .start = 0, .end = 1 };
+    const tempo = try a.alloc(tm.TempoPoint, 1);
+    tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
+    const meter = try a.alloc(tm.MeterPoint, 1);
+    meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
+    const cues = try a.alloc(value.Cue, 1);
+    cues[0] = .{ .name = "say \"hi\" \\ bye", .at = 0, .span = span };
+    doc.tempo = tempo;
+    doc.meter = meter;
+    doc.cues = cues;
+    doc.length = 0;
+
+    var d = try derive(gpa, &doc);
+    defer d.deinit();
+
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try d.echo(&w);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "(cue :name \"say \\\"hi\\\" \\\\ bye\" :at 0)") != null);
+}
+
+test "derive: one clip with :repeat, :offset, :length and :transpose at once" {
+    // Hand computation. The phrase is one quarter long and holds notes
+    // at 0 and 0.5q; `:repeat 3` makes its own timeline
+    //
+    //   0    0.5q   1q   1.5q   2q   2.5q      (source ticks)
+    //
+    // `:offset 0.5q` and `:length 1.5q` take the window
+    // [0.5q, 2q) — so the note at 0 is before it and the note at 2q is
+    // past it, four of the six remain, and each lands at
+    // `3bar + (s − 0.5q)` with `:transpose −2` on its key:
+    //
+    //   0.5q → 553 512 960          key 36
+    //   1q   → 576 576 000          key 36
+    //   1.5q → 599 639 040          key 36
+    //   2q   → dropped (the window ends there)
+    const gpa = testing.allocator;
+    var doc: Doc = .empty(gpa);
+    defer doc.deinit();
+
+    const a = doc.arena.allocator();
+    const span: Diag.Span = .{ .start = 0, .end = 1 };
+    const tempo = try a.alloc(tm.TempoPoint, 1);
+    tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
+    const meter = try a.alloc(tm.MeterPoint, 1);
+    meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
+
+    const phrase_notes = try a.alloc(value.Note, 2);
+    phrase_notes[0] = .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 0, .off_vel = null, .span = span };
+    phrase_notes[1] = .{ .at = TPQ / 2, .dur = TPQ / 4, .key = 38, .vel = 80, .ch = 0, .off_vel = null, .span = span };
+    const phrase_lanes = try a.alloc(value.Lane, 1);
+    phrase_lanes[0] = .{
+        .name = "flash",
+        .kind = .notes,
+        .target = "flash",
+        .range = null,
+        .binding = null,
+        .notes = phrase_notes,
+        .keyframes = &.{},
+        .clips = &.{},
+        .query_src = null,
+        .expr_src = null,
+        .span = span,
+    };
+    const phrases = try a.alloc(value.Phrase, 1);
+    phrases[0] = .{ .name = "fill", .length = TPQ, .lanes = phrase_lanes, .span = span };
+
+    const clips = try a.alloc(value.Clip, 1);
+    clips[0] = .{
+        .at = 3 * bar44,
+        .phrase = "fill",
+        .repeat = 3,
+        .offset = TPQ / 2,
+        .length = 3 * TPQ / 2,
+        .transpose = -2,
+        .span = span,
+    };
+    const lanes = try a.alloc(value.Lane, 1);
+    lanes[0] = .{
+        .name = "flash",
+        .kind = .notes,
+        .target = "flash",
+        .range = null,
+        .binding = null,
+        .notes = &.{},
+        .keyframes = &.{},
+        .clips = clips,
+        .query_src = null,
+        .expr_src = null,
+        .span = span,
+    };
+    doc.tempo = tempo;
+    doc.meter = meter;
+    doc.phrases = phrases;
+    doc.lanes = lanes;
+
+    var d = try derive(gpa, &doc);
+    defer d.deinit();
+
+    const lane = d.laneByName("flash").?;
+    try testing.expectEqualSlices(Onset, &.{
+        .{ .tick = 553_512_960, .dur = 11_531_520, .key = 36, .vel = 80 },
+        .{ .tick = 576_576_000, .dur = 11_531_520, .key = 36, .vel = 100 },
+        .{ .tick = 599_639_040, .dur = 11_531_520, .key = 36, .vel = 80 },
+    }, lane.onsets);
+    // The window's end is the `:length` default's input too: 3bar + 1.5q
+    // rounded up to a bar is bar 4.
+    try testing.expectEqual(@as(i64, 4 * bar44), d.map.length);
+}
+
+// ---- tests: the two layers derive one map ----
+
+test "derive: an SMF-anchored document's map is the one fromSource built" {
+    // The pin for "one owner of the conductor rules": the document layer
+    // reads the tier (`fromSjon.smfConductor`) and resolves the
+    // document's positions against it; this layer asks that same
+    // function and adds the same `:length` default. Two maps, one text.
+    const gpa = testing.allocator;
+
+    var b: Sequence.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.division = .{ .ppq = 960 };
+    _ = try b.addTrack();
+    _ = try b.addTrack();
+    try b.addEvent(1, 0, .set_tempo, .{ .tempo = 480_000 });
+    try b.addEvent(1, 960, .set_tempo, .{ .tempo = 400_000 });
+    try b.addEvent(1, 1920, .set_tempo, .{ .tempo = 300_000 });
+    try b.addEvent(0, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(0, 3840, .end_of_track, .empty);
+    try b.addEvent(1, 3840, .end_of_track, .empty);
+    var seq = try b.finish();
+    defer seq.deinit();
+
+    const dump = try bridge_smf.sequenceToForms(gpa, &seq, null, .{});
+    defer gpa.free(dump);
+    const source = try std.fmt.allocPrintSentinel(gpa,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\{s}
+        \\(phrase :name fill :length 1bar
+        \\  (lane :name flash
+        \\    (note :at 0q :dur 0.25q :key 38 :vel 100)))
+        \\(lane :name flash :kind notes :target flash
+        \\  (note :at 0q :dur 0.5q :key 36 :vel 110)
+        \\  (clip :at 2bar :phrase fill :repeat 2 :offset 0.5q :length 1q :transpose 12))
+    , .{dump}, 0);
+    defer gpa.free(source);
+
+    var res = try test_support.load(gpa, source);
+    defer res.deinit();
+    try testing.expect(!res.diags.hasErrors());
+
+    var d = try derive(gpa, &res.doc);
+    defer d.deinit();
+
+    var mine: [1024]u8 = undefined;
+    var theirs: [1024]u8 = undefined;
+    var wa = std.Io.Writer.fixed(&mine);
+    var wb = std.Io.Writer.fixed(&theirs);
+    try d.map.echo(&wa);
+    try res.map.echo(&wb);
+    try testing.expectEqualStrings(wb.buffered(), wa.buffered());
+    try testing.expectEqual(@as(usize, 3), d.map.segments.len);
+}
+
+test "derive: an IT-anchored document's map is the one fromSource built" {
+    const gpa = testing.allocator;
+
+    var module = try test_support.threeSegmentModule(gpa);
+    defer module.deinit();
+
+    const dump = try bridge_it.moduleToForms(gpa, &module, .{});
+    defer gpa.free(dump);
+    const source = try std.fmt.allocPrintSentinel(gpa,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind it :file "x.it")
+        \\{s}
+        \\(phrase :name fill :length 1bar
+        \\  (lane :name flash
+        \\    (note :at 0q :dur 0.25q :key 38 :vel 100)))
+        \\(lane :name flash :kind notes :target flash
+        \\  (note :at 0q :dur 0.5q :key 36 :vel 110)
+        \\  (clip :at 2bar :phrase fill :repeat 2 :offset 0.5q :length 1q :transpose 12))
+    , .{dump}, 0);
+    defer gpa.free(source);
+
+    var res = try test_support.load(gpa, source);
+    defer res.deinit();
+    try testing.expect(!res.diags.hasErrors());
+
+    var d = try derive(gpa, &res.doc);
+    defer d.deinit();
+
+    var mine: [1024]u8 = undefined;
+    var theirs: [1024]u8 = undefined;
+    var wa = std.Io.Writer.fixed(&mine);
+    var wb = std.Io.Writer.fixed(&theirs);
+    try d.map.echo(&wa);
+    try res.map.echo(&wb);
+    try testing.expectEqualStrings(wb.buffered(), wa.buffered());
+    try testing.expectEqual(@as(usize, 3), d.map.segments.len);
+    // …and the walk came back with it, which is what the tracker
+    // position and a bound IT lane read.
+    try testing.expect(d.rowmap != null);
+}
+
+test "derive: a conducted document with no content of its own is as long as its file" {
+    // Plan 02's `:length` default over an anchored document: the events
+    // ARE the anchor's. The module plays 102 IT ticks — 196 035 840
+    // tempura ticks — and the first bar line at or after that is bar 2,
+    // 369 008 640. Both layers say so.
+    const gpa = testing.allocator;
+
+    var module = try test_support.threeSegmentModule(gpa);
+    defer module.deinit();
+
+    const dump = try bridge_it.moduleToForms(gpa, &module, .{});
+    defer gpa.free(dump);
+    const source = try std.fmt.allocPrintSentinel(gpa,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind it :file "x.it")
+        \\{s}
+    , .{dump}, 0);
+    defer gpa.free(source);
+
+    var res = try test_support.load(gpa, source);
+    defer res.deinit();
+    try testing.expect(!res.diags.hasErrors());
+
+    var d = try derive(gpa, &res.doc);
+    defer d.deinit();
+
+    try testing.expectEqual(@as(i64, 369_008_640), res.map.length);
+    try testing.expectEqual(res.map.length, d.map.length);
 }

@@ -21,6 +21,7 @@ const tm = @import("TimeMap.zig");
 const derive_file = @import("derive.zig");
 const value = @import("../doc/Value.zig");
 const walk = @import("../itf/walk.zig");
+const test_support = @import("test_support.zig");
 
 const Derived = derive_file.Derived;
 const Onset = derive_file.Onset;
@@ -628,7 +629,7 @@ test "Playhead.orderRowAt: the tracker position, against the walk's row map" {
     var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
-    const module = try derive_file.threeSegmentModule(gpa);
+    const module = try test_support.threeSegmentModule(gpa);
     const a = doc.arena.allocator();
     const tiers = try a.alloc(value.ItTier, 1);
     tiers[0] = .{ .anchor = "song", .module = module };
@@ -677,4 +678,36 @@ test "Playhead.orderRowAt: a document no IT anchor conducts has none" {
     defer d.deinit();
 
     try testing.expect(orderRowAt(&d, 0) == null);
+}
+
+test "Playhead.snap: swing under a meter change, and a swung tie resolves down" {
+    // Hand computation. Bar 2 starts at 369 008 640 and is [3 4], so its
+    // beats are a quarter (46 126 080) apart and a swing of 0.5 pushes
+    // the odd ones half a beat late:
+    //
+    //   beat 0 → 369 008 640   beat 1 → 415 134 720 + 23 063 040
+    //                                 = 438 197 760   beat 2 → 461 260 800
+    //
+    // 430 000 000 is 8 197 760 below the swung beat 1 and 60 991 360
+    // above beat 0, so the swung line wins — and bar 1's own beats, a
+    // [4 4] bar away, are further still.
+    const gpa = testing.allocator;
+    var doc = fixture(gpa, .hold);
+    defer doc.deinit();
+    var d = try derive_file.derive(gpa, &doc);
+    defer d.deinit();
+
+    try testing.expectEqual(@as(i64, 438_197_760), snap(&d, 430_000_000, .beat, 0.5));
+    // Straight, the same tick snaps to beat 1 where it really sits.
+    try testing.expectEqual(@as(i64, 415_134_720), snap(&d, 430_000_000, .beat, 0));
+    // A bar line is line 0 of its own bar and never moves, so a tick just
+    // below bar 2 snaps onto it and not onto bar 1's swung last beat.
+    try testing.expectEqual(@as(i64, 369_008_640), snap(&d, 369_007_640, .beat, 0.5));
+
+    // A swung line makes a tie of its own: an eighth is 23 063 040 and
+    // the swung line 1 sits at 34 594 560, so 17 297 280 is exactly
+    // halfway between it and line 0 — and a tie resolves DOWN.
+    try testing.expectEqual(@as(i64, 0), snap(&d, 17_297_280, .q8, 0.5));
+    // One tick past the middle it is the swung line's.
+    try testing.expectEqual(@as(i64, 34_594_560), snap(&d, 17_297_281, .q8, 0.5));
 }

@@ -1,0 +1,26 @@
+#!/bin/sh
+# Serialised `zig build`: one compile at a time on this machine, with a
+# bounded job count, so parallel agents (or a human and CI) do not stack
+# several Debug test builds in memory.
+#
+#   tools/zt test -Dtest-root=time/time.zig
+#   tools/zt verify
+#
+# The lock is a directory under $TMPDIR (mkdir is atomic); a stale lock
+# older than 30 minutes is reclaimed. ZT_JOBS caps the build runner's own
+# parallelism (default 4).
+set -eu
+lock="${TMPDIR:-/tmp}/tempura-zig.lock"
+jobs="${ZT_JOBS:-4}"
+i=0
+while ! mkdir "$lock" 2>/dev/null; do
+    if [ -d "$lock" ] && [ "$(find "$lock" -maxdepth 0 -mmin +30 | wc -l)" -gt 0 ]; then
+        rmdir "$lock" 2>/dev/null || true
+        continue
+    fi
+    i=$((i + 1))
+    [ "$i" -eq 1 ] && echo "zt: waiting for another zig build to finish…" >&2
+    sleep 2
+done
+trap 'rmdir "$lock" 2>/dev/null || true' EXIT INT TERM
+exec zig build -j"$jobs" "$@"
