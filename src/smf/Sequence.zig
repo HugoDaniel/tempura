@@ -54,6 +54,33 @@ pub const Division = union(enum) {
     }
 };
 
+/// Which member of `Payload` carries an event's data. One variant per
+/// union member, so a `switch` over it is exhaustive by construction and
+/// a new payload shape cannot be forgotten.
+pub const Field = enum {
+    /// `end_of_track`: nothing at all.
+    none,
+    note,
+    poly,
+    control,
+    program,
+    pressure,
+    bend,
+    /// A run in the pool: sysex, escape, every text meta, the
+    /// sequencer-specific ones and the easing hint.
+    bytes,
+    /// A type byte and a run in the pool.
+    meta,
+    number,
+    byte,
+    tempo,
+    smpte,
+    time_sig,
+    key_sig,
+    /// The residue envelope: four bytes and a run in the pool.
+    residue,
+};
+
 /// What an event IS — every row of plan 05's channel, system and meta
 /// tables, plus the three tempura adds.
 ///
@@ -126,9 +153,66 @@ pub const Kind = enum(u8) {
         };
     }
 
+    /// The kind a channel status byte names, or `null` when the byte is
+    /// not one (`F0`..`FF`, or a data byte). The inverse of `status()`,
+    /// and the reader's one table.
+    pub fn fromStatus(status_byte: u8) ?Kind {
+        return switch (status_byte & 0xF0) {
+            0x80 => .note_off,
+            0x90 => .note_on,
+            0xA0 => .poly_pressure,
+            0xB0 => .control_change,
+            0xC0 => .program_change,
+            0xD0 => .channel_pressure,
+            0xE0 => .pitch_bend,
+            else => null,
+        };
+    }
+
     /// Whether the event carries a channel in its payload.
     pub fn isChannel(self: Kind) bool {
         return self.status() != null;
+    }
+
+    /// Which member of `Payload` this kind's events read — the table in
+    /// `Payload`'s doc comment, as a value.
+    ///
+    /// The union is EXTERN and its inactive bytes are indeterminate, so
+    /// nothing may compare, hash or copy a `Payload` whole: everything
+    /// that walks events generically (the equality of two sequences, the
+    /// residue's hashes, a bridge's printer) goes through here first.
+    pub fn payloadField(self: Kind) Field {
+        return switch (self) {
+            .note_off, .note_on => .note,
+            .poly_pressure => .poly,
+            .control_change => .control,
+            .program_change => .program,
+            .channel_pressure => .pressure,
+            .pitch_bend => .bend,
+            .sysex,
+            .escape,
+            .text_event,
+            .copyright_notice,
+            .sequence_name,
+            .instrument_name,
+            .lyric,
+            .marker,
+            .cue_point,
+            .program_name,
+            .device_name,
+            .sequencer_specific,
+            .ease_hint,
+            => .bytes,
+            .meta_unknown => .meta,
+            .sequence_number => .number,
+            .midi_channel_prefix, .midi_port => .byte,
+            .set_tempo => .tempo,
+            .smpte_offset => .smpte,
+            .time_signature => .time_sig,
+            .key_signature => .key_sig,
+            .tempura_residue => .residue,
+            .end_of_track => .none,
+        };
     }
 
     /// The `FF <type>` byte, or `null` when the kind is not a meta event
@@ -265,6 +349,49 @@ pub const Payload = extern union {
 
     /// The payload of an event that carries none.
     pub const empty: Payload = .{ .none = 0 };
+
+    /// The run into the pool this payload points at, or `null` when the
+    /// kind keeps everything inline. The one place the "which kinds
+    /// carry bytes" table is written down.
+    pub fn poolBytes(self: Payload, kind: Kind) ?Bytes {
+        return switch (kind.payloadField()) {
+            .bytes => self.bytes,
+            .meta => self.meta.bytes,
+            .residue => self.residue.body,
+            else => null,
+        };
+    }
+
+    /// Whether two payloads of the same kind agree on everything they
+    /// hold THEMSELVES.
+    ///
+    /// The pool runs are deliberately not compared: two sequences spell
+    /// the same bytes with their own offsets, so a caller that is
+    /// comparing across sequences takes `poolBytes` and `bytesOf` to
+    /// those. Field by field, never `asBytes` of the union — an extern
+    /// union's inactive bytes are indeterminate.
+    pub fn eqlOutsidePool(self: Payload, other: Payload, kind: Kind) bool {
+        return switch (kind.payloadField()) {
+            .none, .bytes => true,
+            .note => std.meta.eql(self.note, other.note),
+            .poly => std.meta.eql(self.poly, other.poly),
+            .control => std.meta.eql(self.control, other.control),
+            .program => std.meta.eql(self.program, other.program),
+            .pressure => std.meta.eql(self.pressure, other.pressure),
+            .bend => std.meta.eql(self.bend, other.bend),
+            .meta => self.meta.meta_type == other.meta.meta_type,
+            .number => self.number == other.number,
+            .byte => self.byte == other.byte,
+            .tempo => self.tempo == other.tempo,
+            .smpte => std.meta.eql(self.smpte, other.smpte),
+            .time_sig => std.meta.eql(self.time_sig, other.time_sig),
+            .key_sig => std.meta.eql(self.key_sig, other.key_sig),
+            .residue => self.residue.ver == other.residue.ver and
+                self.residue.kind == other.residue.kind and
+                self.residue.seq == other.residue.seq and
+                self.residue.total == other.residue.total,
+        };
+    }
 };
 
 /// One event at an ABSOLUTE tick in the file's division.
@@ -529,6 +656,90 @@ test "Kind: the status and meta-type tables the reader and the writer share" {
     // `meta_unknown` carries its own type byte in the payload.
     try testing.expectEqual(@as(?u8, null), Kind.meta_unknown.metaType());
     try testing.expectEqual(@as(?u8, null), Kind.sysex.metaType());
+}
+
+test "Kind: fromStatus is the inverse of status, for channel bytes and nothing else" {
+    var status: u16 = 0;
+    while (status <= 0xFF) : (status += 1) {
+        const byte: u8 = @intCast(status);
+        const kind = Kind.fromStatus(byte);
+        if (byte < 0x80 or byte >= 0xF0) {
+            try testing.expectEqual(@as(?Kind, null), kind);
+        } else {
+            // Round trip: the kind's status byte is this one's high
+            // nibble, whatever channel it named.
+            try testing.expectEqual(byte & 0xF0, kind.?.status().?);
+            try testing.expect(kind.?.isChannel());
+        }
+    }
+}
+
+test "Kind: payloadField names one member per kind, and poolBytes finds the runs" {
+    // Exhaustive by construction: every kind answers, and the answer is
+    // the member `Payload`'s table names.
+    for (std.enums.values(Kind)) |kind| {
+        const field = kind.payloadField();
+        switch (field) {
+            .bytes, .meta, .residue => {
+                const payload: Payload = switch (field) {
+                    .bytes => .{ .bytes = .{ .off = 3, .len = 4 } },
+                    .meta => .{ .meta = .{ .bytes = .{ .off = 3, .len = 4 }, .meta_type = 0x0A } },
+                    else => .{ .residue = .{
+                        .ver = 1,
+                        .kind = 1,
+                        .seq = 0,
+                        .total = 1,
+                        .body = .{ .off = 3, .len = 4 },
+                    } },
+                };
+                try testing.expectEqual(Bytes{ .off = 3, .len = 4 }, payload.poolBytes(kind).?);
+            },
+            else => try testing.expectEqual(@as(?Bytes, null), Payload.empty.poolBytes(kind)),
+        }
+    }
+
+    try testing.expectEqual(Field.note, Kind.note_on.payloadField());
+    try testing.expectEqual(Field.bend, Kind.pitch_bend.payloadField());
+    try testing.expectEqual(Field.bytes, Kind.ease_hint.payloadField());
+    try testing.expectEqual(Field.meta, Kind.meta_unknown.payloadField());
+    try testing.expectEqual(Field.residue, Kind.tempura_residue.payloadField());
+    try testing.expectEqual(Field.tempo, Kind.set_tempo.payloadField());
+    try testing.expectEqual(Field.none, Kind.end_of_track.payloadField());
+}
+
+test "Payload: eqlOutsidePool compares the active member, never the union's other bytes" {
+    // The trap this exists to close: an EXTERN union's inactive bytes are
+    // indeterminate, so two payloads that mean the same thing can differ
+    // byte for byte. Assign a wide member first, then the narrow one, and
+    // the tail keeps whatever the wide one left there.
+    var a: Payload = .{ .residue = .{
+        .ver = 0xAA,
+        .kind = 0xAA,
+        .seq = 0xAA,
+        .total = 0xAA,
+        .body = .{ .off = 0xAAAA_AAAA, .len = 0xAAAA_AAAA },
+    } };
+    a.note = .{ .ch = 2, .key = 60, .vel = 100 };
+
+    var b: Payload = .{ .bytes = .{ .off = 0, .len = 0 } };
+    b.note = .{ .ch = 2, .key = 60, .vel = 100 };
+
+    try testing.expect(a.eqlOutsidePool(b, .note_on));
+    try testing.expect(!std.mem.eql(u8, std.mem.asBytes(&a), std.mem.asBytes(&b)));
+
+    // And it still tells two different notes apart.
+    b.note = .{ .ch = 2, .key = 61, .vel = 100 };
+    try testing.expect(!a.eqlOutsidePool(b, .note_on));
+
+    // A run into the pool is not this function's business; what the run
+    // POINTS AT is compared through `bytesOf` by whoever has the pools.
+    const one: Payload = .{ .bytes = .{ .off = 0, .len = 4 } };
+    const other: Payload = .{ .bytes = .{ .off = 99, .len = 7 } };
+    try testing.expect(one.eqlOutsidePool(other, .marker));
+    // Everything BESIDE the run is: a meta type, a residue envelope.
+    const m1: Payload = .{ .meta = .{ .bytes = .{ .off = 0, .len = 1 }, .meta_type = 0x0A } };
+    const m2: Payload = .{ .meta = .{ .bytes = .{ .off = 5, .len = 1 }, .meta_type = 0x0B } };
+    try testing.expect(!m1.eqlOutsidePool(m2, .meta_unknown));
 }
 
 test "Event: the layout is pinned, as pacer pins its blobs" {

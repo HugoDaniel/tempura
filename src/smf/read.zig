@@ -38,12 +38,18 @@ const Payload = sequence.Payload;
 /// fails. A defective file is diagnostics, never an error.
 pub const Error = error{OutOfMemory};
 
-/// One top-level chunk, as the file spelled it: `len` is the DECLARED
-/// body length even when the file was too short to hold it.
+/// One top-level chunk, as the file spelled it.
 pub const Chunk = struct {
     tag: [4]u8,
+    /// Where the eight-byte chunk header starts.
     offset: u32,
+    /// The DECLARED body length, even when the file was too short to
+    /// hold it (which is `smf_chunk_truncated`).
     len: u32,
+    /// The body length that is actually there: `len` clamped to what the
+    /// file holds. `bytes[offset + 8 ..][0..clamped_len]` is always a
+    /// slice a consumer may take.
+    clamped_len: u32,
 };
 
 /// Where one event came from, and whether it was read on running status.
@@ -220,6 +226,7 @@ const Walk = struct {
                 .tag = tag,
                 .offset = @intCast(pos),
                 .len = declared,
+                .clamped_len = @intCast(len),
             });
 
             if (std.mem.eql(u8, &tag, "MThd") and !self.header_seen) {
@@ -234,15 +241,16 @@ const Walk = struct {
             pos = body + len;
         }
 
-        // Trailing bytes are junk after a complete file, not a file cut
-        // short: a warning, so a caller that meant to read the music
-        // still can.
+        // Trailing bytes after the last chunk are junk appended to a
+        // whole file, not a file cut short, so they are an unknown chunk
+        // that never had a header rather than a truncation — a caller
+        // that meant to read the music still can.
         if (pos < end) try self.diag(
-            .smf_chunk_truncated,
+            .smf_unknown_chunk,
             .warning,
             pos,
             end,
-            "{d} trailing bytes are too few for a chunk header",
+            "{d} trailing bytes after the last chunk, too few for a chunk header",
             .{end - pos},
         );
 
@@ -433,6 +441,37 @@ const Walk = struct {
                 );
             }
 
+            // A system common or real-time byte has no place in a file
+            // (RP-001 gives them none, and they do not update running
+            // status) but plenty of files carry one anyway, dumped from
+            // a live stream. It is skipped with its data bytes and the
+            // track goes on — the reader keeps what it parsed.
+            if (status >= 0xF1 and status != 0xF7 and status != 0xFF) {
+                const data = systemDataBytes(status);
+                try self.diag(
+                    .smf_status_invalid,
+                    .warning,
+                    at_offset,
+                    at_offset + 1,
+                    "status {x:0>2} is a system message a file has no room for; skipped",
+                    .{status},
+                );
+                if (pos + data > end) {
+                    try self.diag(
+                        .smf_track_truncated,
+                        .err,
+                        pos,
+                        end,
+                        "a system message needs {d} data bytes and the track holds {d}",
+                        .{ data, end - pos },
+                    );
+                    aborted = true;
+                    break;
+                }
+                pos += data;
+                continue;
+            }
+
             const parsed = if (status < 0xF0)
                 try self.channelEvent(status, &pos, end)
             else switch (status) {
@@ -440,20 +479,9 @@ const Walk = struct {
                     cancelled = true;
                     break :blk try self.bytesEvent(status, &pos, end);
                 },
-                0xFF => blk: {
+                else => blk: {
                     cancelled = true;
                     break :blk try self.metaEvent(&pos, end);
-                },
-                else => notParsed: {
-                    try self.diag(
-                        .smf_status_invalid,
-                        .err,
-                        at_offset,
-                        at_offset + 1,
-                        "status {x:0>2} is a system message no file may carry",
-                        .{status},
-                    );
-                    break :notParsed null;
                 },
             };
 
@@ -519,16 +547,20 @@ const Walk = struct {
     /// An event the walk built, or nothing when the bytes ran out.
     const Parsed = struct { kind: Kind, payload: Payload };
 
-    fn channelEvent(self: *Walk, status: u8, pos: *usize, end: usize) Error!?Parsed {
-        const kind: Kind = switch (status & 0xF0) {
-            0x80 => .note_off,
-            0x90 => .note_on,
-            0xA0 => .poly_pressure,
-            0xB0 => .control_change,
-            0xC0 => .program_change,
-            0xD0 => .channel_pressure,
-            else => .pitch_bend,
+    /// How many data bytes follow a system common or real-time status:
+    /// one for MIDI time code (`F1`) and song select (`F3`), two for song
+    /// position (`F2`), none for tune request, the undefined ones and
+    /// every real-time byte (`F8`..`FE`).
+    fn systemDataBytes(status: u8) usize {
+        return switch (status) {
+            0xF1, 0xF3 => 1,
+            0xF2 => 2,
+            else => 0,
         };
+    }
+
+    fn channelEvent(self: *Walk, status: u8, pos: *usize, end: usize) Error!?Parsed {
+        const kind = Kind.fromStatus(status).?;
         const ch: u8 = status & 0x0F;
         const n = kind.dataBytes();
         if (pos.* + n > end) {
@@ -1047,10 +1079,49 @@ test "read: a chunk that claims more bytes than the file holds is clamped and re
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_chunk_truncated));
+    // The map keeps both numbers: what the file CLAIMED, and what a
+    // consumer may actually slice.
     try testing.expectEqual(@as(u32, 999), result.source_map.chunks[1].len);
+    try testing.expectEqual(@as(u32, 4), result.source_map.chunks[1].clamped_len);
+    for (result.source_map.chunks) |chunk| {
+        try testing.expect(chunk.offset + 8 + chunk.clamped_len <= bytes.len);
+        try testing.expect(chunk.clamped_len <= chunk.len);
+    }
     // What is there still parses: the end of track is the whole track.
     try testing.expectEqual(@as(usize, 1), result.sequence.tracks[0].events.len);
     try testing.expectEqual(Kind.end_of_track, result.sequence.tracks[0].events[0].kind);
+}
+
+test "read: bytes trailing the last chunk are junk, not a file cut short" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    const file = try support.buildFile(gpa, .{}, &.{t.buf.items});
+    defer gpa.free(file);
+
+    var w = support.ByteWriter.init(gpa);
+    defer w.deinit();
+    try w.raw(file);
+    try w.raw(&[_]u8{ '\n', 0x00, 0x00 }); // three bytes some tool appended
+    const bytes = try w.toOwnedSlice();
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_unknown_chunk));
+    try testing.expectEqual(@as(usize, 0), result.diags.count(.smf_chunk_truncated));
+    // The music is whole, so nothing here is an error.
+    try testing.expect(!result.diags.hasErrors());
+    try testing.expectEqual(@as(usize, 1), result.sequence.tracks.len);
+    try testing.expectEqual(Diag.Span{
+        .start = @intCast(file.len),
+        .end = @intCast(bytes.len),
+    }, result.diags.items()[0].span);
 }
 
 test "read: a five-byte delta time is vlq_too_long and stops the track there" {
@@ -1161,34 +1232,96 @@ test "read: a track with no end-of-track, and one with bytes after it" {
     try testing.expectEqual(Kind.end_of_track, result.sequence.tracks[1].events[0].kind);
 }
 
-test "read: a byte that cannot be a status is smf_status_invalid" {
+test "read: a data byte with no running status aborts the track" {
     const gpa = testing.allocator;
 
-    // A data byte before any status byte: nothing to run with.
-    var no_status = support.ByteWriter.init(gpa);
-    defer no_status.deinit();
-    try no_status.vlq(0);
-    try no_status.raw(&[_]u8{ 0x3C, 0x64 });
+    // Nothing to run with: the byte cannot be read as anything, and
+    // guessing would invent music.
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0x3C, 0x64 });
 
-    // A system common byte, which RP-001 gives a file no room for.
-    var system = support.ByteWriter.init(gpa);
-    defer system.deinit();
-    try system.vlq(0);
-    try system.raw(&[_]u8{ 0x90, 0x3C, 0x64 });
-    try system.vlq(0);
-    try system.raw(&[_]u8{ 0xF1, 0x00 });
-    try system.vlq(0);
-    try system.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
-
-    const bytes = try support.buildFile(gpa, .{ .format = 1 }, &.{ no_status.buf.items, system.buf.items });
+    const bytes = try support.buildFile(gpa, .{}, &.{t.buf.items});
     defer gpa.free(bytes);
 
     var result = try read(gpa, bytes);
     defer result.deinit();
 
-    try testing.expectEqual(@as(usize, 2), result.diags.count(.smf_status_invalid));
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_status_invalid));
+    try testing.expectEqual(Diag.Severity.err, result.diags.items()[0].severity);
+    try testing.expect(result.diags.hasErrors());
     try testing.expectEqual(@as(usize, 0), result.sequence.tracks[0].events.len);
-    try testing.expectEqual(@as(usize, 1), result.sequence.tracks[1].events.len);
+}
+
+test "read: a system message is skipped with its data bytes and the track goes on" {
+    const gpa = testing.allocator;
+
+    // `F1` takes one data byte, `F2` two, `F8` none. RP-001 gives a file
+    // no room for any of them, and files carry them anyway — dumped from
+    // a live stream. None of them touches running status (plan 05).
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0x90, 0x3C, 0x64 });
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xF1, 0x7F }); // MIDI time code quarter frame
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0x3E, 0x64 }); // still running on 90
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xF2, 0x00, 0x40 }); // song position
+    try t.vlq(96);
+    try t.raw(&[_]u8{0xF8}); // a clock byte mid-track
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0x40, 0x64 }); // and the music carries on
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    const bytes = try support.buildFile(gpa, .{}, &.{t.buf.items});
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 3), result.diags.count(.smf_status_invalid));
+    try testing.expect(!result.diags.hasErrors());
+    for (result.diags.items()) |d| {
+        if (d.code == .smf_status_invalid) try testing.expectEqual(Diag.Severity.warning, d.severity);
+    }
+    // A system byte does not cancel running status, so no warning about
+    // reusing it either.
+    try testing.expectEqual(@as(usize, 0), result.diags.count(.smf_running_status_across_meta));
+
+    const events = result.sequence.tracks[0].events;
+    try testing.expectEqual(@as(usize, 4), events.len);
+    try testing.expectEqual(@as(u8, 60), events[0].payload.note.key);
+    try testing.expectEqual(@as(u8, 62), events[1].payload.note.key);
+    try testing.expectEqual(Kind.note_on, events[2].kind);
+    try testing.expectEqual(@as(u8, 64), events[2].payload.note.key);
+    try testing.expectEqual(@as(i64, 96), events[2].at);
+    try testing.expectEqual(Kind.end_of_track, events[3].kind);
+    try testing.expect(result.source_map.tracks[0].events[2].running_status);
+}
+
+test "read: a system message whose data bytes run past the track end stops there" {
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0x90, 0x3C, 0x64 });
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xF2, 0x00 }); // song position, one byte short
+
+    const bytes = try support.buildFile(gpa, .{}, &.{t.buf.items});
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_status_invalid));
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_track_truncated));
+    try testing.expectEqual(@as(usize, 1), result.sequence.tracks[0].events.len);
 }
 
 test "read: bytes that are no MIDI file at all are one diagnostic and an empty sequence" {
@@ -1284,33 +1417,8 @@ fn expectWellFormed(result: *const Result, input_len: usize) !void {
             previous = event.at;
             try testing.expect(site.offset < input_len);
 
-            switch (event.kind) {
-                .sysex,
-                .escape,
-                .text_event,
-                .copyright_notice,
-                .sequence_name,
-                .instrument_name,
-                .lyric,
-                .marker,
-                .cue_point,
-                .program_name,
-                .device_name,
-                .sequencer_specific,
-                .ease_hint,
-                => {
-                    const b = event.payload.bytes;
-                    try testing.expect(@as(usize, b.off) + b.len <= seq.pool.len);
-                },
-                .meta_unknown => {
-                    const b = event.payload.meta.bytes;
-                    try testing.expect(@as(usize, b.off) + b.len <= seq.pool.len);
-                },
-                .tempura_residue => {
-                    const b = event.payload.residue.body;
-                    try testing.expect(@as(usize, b.off) + b.len <= seq.pool.len);
-                },
-                else => {},
+            if (event.payload.poolBytes(event.kind)) |b| {
+                try testing.expect(@as(usize, b.off) + b.len <= seq.pool.len);
             }
         }
     }

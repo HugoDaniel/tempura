@@ -92,13 +92,33 @@ pub fn write(gpa: std.mem.Allocator, seq: *const Sequence, opts: Options) Error!
     errdefer diags.deinit();
 
     const a = arena.allocator();
+    const grid = seq.division.pulsesPerQuarter();
+
+    // `--ppq 0` asks for a division no file can carry and no tick can
+    // land on. It is refused rather than obeyed — obeying it would
+    // collapse every tick to zero and lose the music silently — and the
+    // file is written on the division it already had.
+    var to_ppq = opts.ppq orelse grid;
+    if (opts.ppq) |requested| {
+        if (requested == 0) {
+            try diags.add(
+                .ppq_rescale_inexact,
+                .err,
+                .{ .start = 0, .end = 0 },
+                "a division of zero pulses per quarter holds no tick; writing on {d}",
+                .{grid},
+            );
+            to_ppq = grid;
+        }
+    }
+
     var emit: Emit = .{
         .seq = seq,
         .opts = opts,
         .diags = &diags,
         .a = a,
-        .from_ppq = seq.division.pulsesPerQuarter(),
-        .to_ppq = opts.ppq orelse seq.division.pulsesPerQuarter(),
+        .from_ppq = grid,
+        .to_ppq = to_ppq,
         .out = .init(a),
     };
     emit.run() catch |err| switch (err) {
@@ -150,19 +170,49 @@ const Emit = struct {
             // Merged in TRACK order, then stable-sorted: at a tie the
             // conductor track's events come first, because they came
             // first in the list.
+            //
+            // Each source track brought its own `FF 2F 00`, and the one
+            // file being written wants exactly one — so they are dropped
+            // HERE, keeping the latest of their ticks for the end the
+            // merged track gets. Dropping them in the emitting loop
+            // instead would report every one but the last as a mid-track
+            // end of track, which is a merge, not a defect.
             var merged: std.ArrayList(Event) = .empty;
-            for (self.seq.tracks) |t| try merged.appendSlice(self.a, t.events);
-            try self.track(merged.items);
+            var ends_at: ?i64 = null;
+            for (self.seq.tracks) |t| {
+                for (t.events, 0..) |e, i| {
+                    if (e.kind == .end_of_track) {
+                        // A genuinely mid-track end of track is still
+                        // one, merge or no merge.
+                        if (i + 1 != t.events.len) try self.diag(
+                            .end_of_track_early,
+                            .warning,
+                            self.out.written().len,
+                            "an end of track with {d} events after it in its own track",
+                            .{t.events.len - i - 1},
+                        );
+                        ends_at = @max(ends_at orelse e.at, e.at);
+                        continue;
+                    }
+                    try merged.append(self.a, e);
+                }
+            }
+            try self.track(merged.items, ends_at);
         } else {
             for (self.seq.tracks) |t| {
                 const copy = try self.a.dupe(Event, t.events);
-                try self.track(copy);
+                try self.track(copy, null);
             }
         }
     }
 
     /// One `MTrk`. `events` is this function's to sort.
-    fn track(self: *Emit, events: []Event) Fail!void {
+    ///
+    /// `ends_at` is the tick the single `FF 2F 00` belongs at when the
+    /// caller already took the ends of track out of `events` (the
+    /// `format0` merge does); `null` leaves them in the list, where each
+    /// one but the last is a `end_of_track_early`.
+    fn track(self: *Emit, events: []Event, ends_at: ?i64) Fail!void {
         std.mem.sort(Event, events, {}, byTick);
 
         var body: Writer.Allocating = .init(self.a);
@@ -173,7 +223,7 @@ const Emit = struct {
 
         var last: i64 = 0;
         var running: u8 = 0;
-        var end_at: ?i64 = null;
+        var end_at: ?i64 = if (ends_at) |at| try self.scaled(at, base) else null;
 
         for (events, 0..) |e, i| {
             const at = try self.scaled(e.at, base + body.written().len);
@@ -339,11 +389,13 @@ const Emit = struct {
                 try w.writeAll(body[0..@min(body.len, vlq.MAX - 8)]);
             },
             // Every text meta, the sequencer-specific ones, and the
-            // easing hint: the stored bytes, whatever they are.
+            // easing hint: the stored bytes, whatever they are. Which
+            // kinds those are is `payloadField() == .bytes`, asked
+            // through `poolBytes` so the table lives in one file.
             else => try self.meta(
                 w,
                 e.kind.metaType() orelse 0x7F,
-                self.seq.bytesOf(e.payload.bytes),
+                self.seq.bytesOf(e.payload.poolBytes(e.kind).?),
             ),
         }
     }
@@ -664,6 +716,71 @@ test "write: format0 merges the tracks by tick, stable, the tempo track first" {
     // One end of track, at the latest tick of the tracks merged.
     try testing.expectEqual(Kind.end_of_track, events[4].kind);
     try testing.expectEqual(@as(i64, 192), events[4].at);
+
+    // And an ordinary merge says NOTHING: every source track brought its
+    // own end of track, and dropping all but one of them is the merge
+    // doing its job, not a defect to report.
+    try testing.expectEqual(@as(usize, 0), out.diags.items().len);
+}
+
+test "write: format0 still reports an end of track that is early in its own track" {
+    const gpa = testing.allocator;
+
+    var b: sequence.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.format = 1;
+    b.division = .{ .ppq = 96 };
+
+    const first = try b.addTrack();
+    try b.addEvent(first, 0, .set_tempo, .{ .tempo = 500_000 });
+    try b.addEvent(first, 96, .end_of_track, .empty);
+
+    const second = try b.addTrack();
+    // This one ends and then carries on: a defect of the SEQUENCE, which
+    // survives the merge as a diagnostic.
+    try b.addEvent(second, 0, .end_of_track, .empty);
+    try b.addEvent(second, 48, .note_on, .{ .note = .{ .ch = 0, .key = 60, .vel = 100 } });
+    try b.addEvent(second, 192, .end_of_track, .empty);
+
+    var seq = try b.finish();
+    defer seq.deinit();
+
+    var out = try write(gpa, &seq, .{ .format0 = true });
+    defer out.deinit();
+
+    try testing.expectEqual(@as(usize, 1), out.diags.count(.end_of_track_early));
+    try testing.expectEqual(@as(usize, 1), out.diags.items().len);
+
+    var back = try reader.read(gpa, out.bytes);
+    defer back.deinit();
+    const events = back.sequence.tracks[0].events;
+    try testing.expectEqual(@as(usize, 3), events.len);
+    try testing.expectEqual(Kind.set_tempo, events[0].kind);
+    try testing.expectEqual(Kind.note_on, events[1].kind);
+    // Exactly one end of track, at the latest end the sources named.
+    try testing.expectEqual(Kind.end_of_track, events[2].kind);
+    try testing.expectEqual(@as(i64, 192), events[2].at);
+}
+
+test "write: a zero ppq is refused, and the file keeps the division it had" {
+    const gpa = testing.allocator;
+
+    var seq = try twoNotes(gpa);
+    defer seq.deinit();
+
+    var out = try write(gpa, &seq, .{ .ppq = 0 });
+    defer out.deinit();
+
+    try testing.expectEqual(@as(usize, 1), out.diags.count(.ppq_rescale_inexact));
+    try testing.expect(out.diags.hasErrors());
+
+    // Refused, not obeyed: the ticks are where they were, on the
+    // division the sequence already carried.
+    var back = try reader.read(gpa, out.bytes);
+    defer back.deinit();
+    try testing.expect(!back.diags.hasErrors());
+    try testing.expectEqual(sequence.Division{ .ppq = 96 }, back.sequence.division);
+    try testing.expectEqual(@as(i64, 96), back.sequence.tracks[0].events[1].at);
 }
 
 test "write: ppq rescales exactly, refuses what does not land, and rounds when told to" {
@@ -828,8 +945,13 @@ test "read ∘ write ∘ read equals read, event for event, on the foreign fixtu
 }
 
 /// Event-for-event equality across two sequences whose pools are their
-/// own: kinds, ticks, and payloads compared by MEANING (bytes by content,
-/// never by offset).
+/// own: kinds, ticks, and payloads compared by MEANING.
+///
+/// `Payload` is an EXTERN union whose inactive bytes are indeterminate,
+/// so this never compares one whole: `eqlOutsidePool` compares the member
+/// the kind names, field by field, and `poolBytes` + `bytesOf` compare
+/// what the runs point at — by content, never by offset, since two
+/// sequences number their pools their own way.
 fn expectSameEvents(a: *const Sequence, b: *const Sequence) !void {
     try testing.expectEqual(a.format, b.format);
     try testing.expectEqual(a.division.pulsesPerQuarter(), b.division.pulsesPerQuarter());
@@ -839,47 +961,13 @@ fn expectSameEvents(a: *const Sequence, b: *const Sequence) !void {
         for (ta.events, tb.events) |ea, eb| {
             try testing.expectEqual(ea.at, eb.at);
             try testing.expectEqual(ea.kind, eb.kind);
-            switch (ea.kind) {
-                .sysex,
-                .escape,
-                .text_event,
-                .copyright_notice,
-                .sequence_name,
-                .instrument_name,
-                .lyric,
-                .marker,
-                .cue_point,
-                .program_name,
-                .device_name,
-                .sequencer_specific,
-                .ease_hint,
-                => try testing.expectEqualSlices(
+            try testing.expect(ea.payload.eqlOutsidePool(eb.payload, ea.kind));
+            if (ea.payload.poolBytes(ea.kind)) |run| {
+                try testing.expectEqualSlices(
                     u8,
-                    a.bytesOf(ea.payload.bytes),
-                    b.bytesOf(eb.payload.bytes),
-                ),
-                .meta_unknown => {
-                    try testing.expectEqual(ea.payload.meta.meta_type, eb.payload.meta.meta_type);
-                    try testing.expectEqualSlices(
-                        u8,
-                        a.bytesOf(ea.payload.meta.bytes),
-                        b.bytesOf(eb.payload.meta.bytes),
-                    );
-                },
-                .tempura_residue => {
-                    const ra = ea.payload.residue;
-                    const rb = eb.payload.residue;
-                    try testing.expectEqual(ra.ver, rb.ver);
-                    try testing.expectEqual(ra.kind, rb.kind);
-                    try testing.expectEqual(ra.seq, rb.seq);
-                    try testing.expectEqual(ra.total, rb.total);
-                    try testing.expectEqualSlices(u8, a.bytesOf(ra.body), b.bytesOf(rb.body));
-                },
-                else => try testing.expectEqualSlices(
-                    u8,
-                    std.mem.asBytes(&ea.payload),
-                    std.mem.asBytes(&eb.payload),
-                ),
+                    a.bytesOf(run),
+                    b.bytesOf(eb.payload.poolBytes(eb.kind).?),
+                );
             }
         }
     }

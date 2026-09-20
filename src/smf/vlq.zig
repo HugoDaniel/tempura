@@ -19,6 +19,12 @@ const Diag = @import("../Diag.zig");
 
 const testing = std.testing;
 
+/// This module's error set: only the sink `write` writes into can fail,
+/// and with an `Allocating` writer that failure IS allocation. Reading
+/// cannot fail at all — malformed bytes come back as `Result.err`, a
+/// diagnostic code the caller reports with a span.
+pub const Error = std.Io.Writer.Error;
+
 /// The largest value four 7-bit groups can hold; RP-001's ceiling for a
 /// delta time and a payload length alike.
 pub const MAX: u32 = 0x0FFF_FFFF;
@@ -76,7 +82,7 @@ pub fn len(value: u32) u8 {
 
 /// Emit `value` as the minimal VLQ. The canonical writer's rule "VLQ
 /// lengths are minimal" (plan 05) is this function having no other mode.
-pub fn write(w: *std.Io.Writer, value: u32) std.Io.Writer.Error!void {
+pub fn write(w: *std.Io.Writer, value: u32) Error!void {
     std.debug.assert(value <= MAX);
     var buf: [MAX_LEN]u8 = undefined;
     const n = len(value);
