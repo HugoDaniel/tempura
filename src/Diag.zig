@@ -127,6 +127,20 @@ pub const Code = enum(u16) {
     /// common / real-time status (`F1`..`F6`, `F8`..`FE`) a file has no
     /// room for. The reader keeps the prefix it parsed (P100, plan 05).
     smf_status_invalid,
+
+    /// A foreign SJON diagnostic, carried through verbatim. The document
+    /// bridge validates against the preloaded manifests and every
+    /// complaint the SCHEMA raises belongs to SJON's own code space, not
+    /// to this one — so it rides across under one tempura code, keeping
+    /// SJON's rendered text as its message and SJON's span. tempura never
+    /// re-spells a rule the manifest already says (`src/doc/`, plan 02).
+    sjon_diagnostic,
+
+    /// The document has no `(timeline …)` root, or one that is not its
+    /// FIRST root — `timeline_duplicate`'s sibling for the other half of
+    /// plan 02's "once, first". A head-set counts a form's children and
+    /// not a document's roots, so both halves are host checks.
+    timeline_missing,
 };
 
 /// How much a diagnostic costs its caller. Orthogonal to `Code` — the
@@ -322,6 +336,8 @@ const code_order = [_]Code{
     .tempo_inexact,
     .build_cross_kind,
     .smf_status_invalid,
+    .sjon_diagnostic,
+    .timeline_missing,
 };
 
 test "Diag.Code: ordinals are dense and unique — the wire contract" {
