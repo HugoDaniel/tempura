@@ -72,6 +72,39 @@ pub const Around = struct { before: ?Step, after: ?Step };
 pub fn at(gpa: std.mem.Allocator, d: *const Derived, seconds: f64) Error!Position {
     const wrapped = d.map.wrapSeconds(seconds);
     const tick = try d.map.tickFromSeconds(wrapped);
+
+    var pos = try atTick(gpa, d, tick);
+    // The one field the CLOCK answers better than the grid does. A tick
+    // is the last one BEGUN at `wrapped`, so `seconds(tick)` may sit an
+    // ulp below the second that was actually asked about; the caller
+    // asked about that second, and where inside the bar it fell is what
+    // it wants back. Everything else is a property of the tick and is
+    // computed once, in `atTick`.
+    pos.seconds_into_bar = wrapped - d.map.secondsFromTick(barAt(d, tick).start);
+    return pos;
+}
+
+/// The same answer, asked by TICK: the query an editor makes when the
+/// playhead was dragged on the grid rather than on the clock, and the
+/// one a golden corpus asks (plan 03's table, read from the grid side).
+///
+/// Not `at(secondsOf(tick))`: a clock value is the last tick BEGUN, so
+/// that round trip lands one tick low at an interior tick (`TimeMap`'s
+/// own header says so) and the question asked by tick would come back
+/// about a different one. The two agree wherever the seam is exact,
+/// which is every segment start.
+///
+/// `seconds_into_bar` is measured from the tick's own second here, which
+/// is why `at` recomputes it from the second it was handed.
+///
+/// The error set is NARROWER than this module's by one fact: a tick is
+/// already on the grid, so neither host guard `at` carries — a clock
+/// past the ceiling, a clock that is not a number — can fire, and only
+/// an allocation is left to fail. `Error` stays the module's set because
+/// `at` needs all three.
+///
+/// `section_ids` is allocated with `gpa`; `Position.deinit` frees it.
+pub fn atTick(gpa: std.mem.Allocator, d: *const Derived, tick: i64) error{OutOfMemory}!Position {
     const where = d.map.barOf(tick);
     const bar_start = tick - (where.beat * Grid.beatTicks(where.meter.d) + where.sub_ticks);
 
@@ -101,7 +134,7 @@ pub fn at(gpa: std.mem.Allocator, d: *const Derived, seconds: f64) Error!Positio
         .bar = where.bar,
         .beat = where.beat,
         .sub_ticks = where.sub_ticks,
-        .seconds_into_bar = wrapped - d.map.secondsFromTick(bar_start),
+        .seconds_into_bar = d.map.secondsFromTick(tick) - d.map.secondsFromTick(bar_start),
         .section_ids = try ids.toOwnedSlice(gpa),
         .prev_cue = prev,
         .next_cue = next,

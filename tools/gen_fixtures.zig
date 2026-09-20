@@ -347,15 +347,6 @@ fn skeletonSmf(gpa: Allocator) ![]u8 {
 // The IT fixtures
 // ---------------------------------------------------------------------------
 
-/// `skeleton-it` — the tracker twin of `skeleton-smf`: a module with no
-/// residue, which rule 1 reads for the addresses it uses.
-///
-/// Two channels sound, so two bound `notes` lanes; channel 1 also moves
-/// its volume column, which is a bound `curve`. The pattern is 32 rows —
-/// IT 2.14's own floor — so the file needs no `:loose` and rung 1 holds
-/// on it under the strict clamps. The highlight `[4 16]` is 4 rows to the
-/// beat and 16 to the measure, which is the module's way of saying
-/// [4 4], and `T80` at row 16 is a tempo change the conductor picks up.
 /// `tempo-three-conductors-it` — the tracker twin, and the third of the
 /// three spellings of one map.
 ///
@@ -387,6 +378,15 @@ fn threeConductorsIt(gpa: Allocator) ![]u8 {
     return finishIt(gpa, &b, null, .{ .loose = true });
 }
 
+/// `skeleton-it` — the tracker twin of `skeleton-smf`: a module with no
+/// residue, which rule 1 reads for the addresses it uses.
+///
+/// Two channels sound, so two bound `notes` lanes; channel 1 also moves
+/// its volume column, which is a bound `curve`. The pattern is 32 rows —
+/// IT 2.14's own floor — so the file needs no `:loose` and rung 1 holds
+/// on it under the strict clamps. The highlight `[4 16]` is 4 rows to the
+/// beat and 16 to the measure, which is the module's way of saying
+/// [4 4], and `T80` at row 16 is a tempo change the conductor picks up.
 fn skeletonIt(gpa: Allocator) ![]u8 {
     var b: itf.Builder = .init(gpa);
     errdefer b.deinit();

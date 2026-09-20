@@ -24,7 +24,7 @@
 ;|   (note :at 15375360t :dur 1t :key 60)
 ;|   (note :at 0.5q :dur 1t :key 60)
 ;|   (note :at 1q :dur 1t :key 60))
-(at :tick 15375360 :bar 0 :beat 0 :sub 15375360 :sections [] :prev-cue none :next-cue none)
+(at :tick 15375360 :bar 0 :beat 0 :sub 15375360 :into-bar "3FC5555555555555" :sections [] :prev-cue none :next-cue none)
 (snapped :tick 11531520)
 (snapped :tick 0)
 (snapped :tick 15375360)

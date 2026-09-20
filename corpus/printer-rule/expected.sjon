@@ -29,5 +29,5 @@
 ;|   (note :at 1bar :dur 1bar :key 65)
 ;|   (note :at 2bar :dur 1bar :key 67)
 ;|   (note :at 3bar :dur 1bar :key 69))
-(at :tick 276756480 :bar 2 :beat 0 :sub 0 :sections [1] :prev-cue 0 :next-cue none)
-(at :tick 138378240 :bar 1 :beat 0 :sub 0 :sections [0] :prev-cue none :next-cue 0)
+(at :tick 276756480 :bar 2 :beat 0 :sub 0 :into-bar "0000000000000000" :sections [1] :prev-cue 0 :next-cue none)
+(at :tick 138378240 :bar 1 :beat 0 :sub 0 :into-bar "0000000000000000" :sections [0] :prev-cue none :next-cue 0)

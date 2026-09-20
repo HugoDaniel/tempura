@@ -364,9 +364,10 @@ const Fixture = struct {
 };
 
 /// The three names a case's input may carry, in the order they are
-/// looked for. `doc.sjon` goes LAST so that a case which is a document
-/// arranged around a file — the anchored half — is read as the document
-/// it is, with the file beside it as the anchor's referent.
+/// looked for. `doc.sjon` goes FIRST so that a case which is a document
+/// arranged around a file — the anchored half, whose `song.*` sits
+/// beside it as the anchor's referent — is read as the document it is
+/// rather than as the file it names.
 fn findFixture(
     a: Allocator,
     io: Io,
@@ -796,7 +797,7 @@ fn renderDocCase(
         if (d.needsDocument()) {
             // Non-null by construction: `renderCase` loads a document
             // exactly when a directive here needs one.
-            if (!(try renderDocDirective(gpa, w, d, loaded.?, rep)).?) return false;
+            if (!try renderDocDirective(gpa, w, d, loaded.?, rep)) return false;
             continue;
         }
         switch (d) {
@@ -921,7 +922,7 @@ fn renderSmfCase(
         // remaining tag that does not — was answered above.
         else => {
             std.debug.assert(d.needsDocument());
-            if (!((try renderDocDirective(gpa, w, d, loaded.?, rep)).?)) return false;
+            if (!try renderDocDirective(gpa, w, d, loaded.?, rep)) return false;
         },
     };
     return true;
@@ -1071,7 +1072,7 @@ fn renderItCase(
         },
         else => {
             std.debug.assert(d.needsDocument());
-            if (!((try renderDocDirective(gpa, w, d, loaded.?, rep)).?)) return false;
+            if (!try renderDocDirective(gpa, w, d, loaded.?, rep)) return false;
         },
     };
     return true;
@@ -1437,16 +1438,21 @@ fn renderEcho(a: Allocator, w: *Io.Writer, loaded: *const Loaded, rep: Report) E
     return true;
 }
 
-/// One directive of the document half. Null = not one of these at all,
-/// so the caller can say what it is instead; false = a defect that voids
-/// the golden.
+/// One directive of the document half. False = a defect that voids the
+/// golden.
+///
+/// The switch is EXHAUSTIVE and its two halves are `needsDocument`'s two
+/// halves: a directive added to one without the other stops compiling
+/// here, which is what keeps every caller's "a document was loaded
+/// because this needed one" sound.
 fn renderDocDirective(
     gpa: Allocator,
     w: *Io.Writer,
     d: Directive,
     loaded: *Loaded,
     rep: Report,
-) Error!?bool {
+) Error!bool {
+    std.debug.assert(d.needsDocument());
     switch (d) {
         .times => |seconds| {
             for (seconds) |secs| {
@@ -1468,7 +1474,7 @@ fn renderDocDirective(
             }
         },
         .at => |tick| {
-            var pos = try positionAtTick(gpa, &loaded.derived, tick);
+            var pos = try Playhead.atTick(gpa, &loaded.derived, tick);
             defer pos.deinit(gpa);
             try renderPosition(w, pos, null);
         },
@@ -1513,7 +1519,10 @@ fn renderDocDirective(
         .build => |kind| {
             if (!try renderBuild(gpa, w, kind, loaded, rep)) return false;
         },
-        else => return null,
+        // Everything `needsDocument` answers false for; the assertion
+        // above is what makes this arm unreachable rather than a silent
+        // no-op.
+        .read, .roundtrip, .walk, .write, .unrun => unreachable,
     }
     return true;
 }
@@ -1533,58 +1542,18 @@ fn renderRawLine(w: *Io.Writer, line: []const u8, rep: Report) Error!bool {
     return true;
 }
 
-/// Where the playhead is at a TICK — `Playhead.at`'s answer with the
-/// seconds seam taken out of the loop.
-///
-/// Not `at(secondsOf(tick))`: a clock value is the last tick BEGUN, so
-/// that round trip lands one tick low at an interior tick (`TimeMap`'s
-/// own header says so) and the question a case asks by tick would come
-/// back about a different one. The two agree wherever the seam is exact,
-/// which is every segment start — and that is the test below.
-fn positionAtTick(gpa: Allocator, d: *const Derived, tick: i64) Error!Playhead.Position {
-    const where = d.map.barOf(tick);
-    const bar_start = tick - (where.beat * Grid.beatTicks(where.meter.d) + where.sub_ticks);
-
-    var ids: std.ArrayList(u32) = .empty;
-    errdefer ids.deinit(gpa);
-    for (d.sections, 0..) |s, i| {
-        if (s.at <= tick and tick < s.at + s.dur) try ids.append(gpa, @intCast(i));
-    }
-
-    var prev: ?u32 = null;
-    var next: ?u32 = null;
-    for (d.cues, 0..) |c, i| {
-        if (c.at <= tick) {
-            if (prev == null or c.at > d.cues[prev.?].at) prev = @intCast(i);
-        } else {
-            if (next == null or c.at < d.cues[next.?].at) next = @intCast(i);
-        }
-    }
-
-    return .{
-        .tick = tick,
-        .bar = where.bar,
-        .beat = where.beat,
-        .sub_ticks = where.sub_ticks,
-        .seconds_into_bar = d.map.secondsFromTick(tick) - d.map.secondsFromTick(bar_start),
-        .section_ids = try ids.toOwnedSlice(gpa),
-        .prev_cue = prev,
-        .next_cue = next,
-        .order_row = Playhead.orderRowAt(d, tick),
-    };
-}
-
 /// One position, as the golden spells it. `:seconds` is present exactly
 /// when the question was asked in seconds, which is what tells the two
 /// queries apart in a golden read on its own.
 fn renderPosition(w: *Io.Writer, pos: Playhead.Position, seconds: ?f64) Error!void {
     try pw(w, "(at");
     if (seconds) |secs| try p(w, " :seconds \"{X:0>16}\"", .{@as(u64, @bitCast(secs))});
-    try p(w, " :tick {d} :bar {d} :beat {d} :sub {d} :sections [", .{
+    try p(w, " :tick {d} :bar {d} :beat {d} :sub {d} :into-bar \"{X:0>16}\" :sections [", .{
         pos.tick,
         pos.bar,
         pos.beat,
         pos.sub_ticks,
+        @as(u64, @bitCast(pos.seconds_into_bar)),
     });
     for (pos.section_ids, 0..) |id, i| {
         if (i > 0) try pw(w, " ");
@@ -2234,40 +2203,60 @@ test "corpus: the three conductors' echo headers are byte-identical" {
 
 test "corpus: fromSjon's conductor map and derive's agree on the three conductors" {
     // Two independent paths build a `TimeMap` from one document —
-    // `doc/fromSjon.zig`'s `conductorTables` while it is lowering the
-    // source, and `time/derive.zig`'s `conduct` over the finished value —
-    // and a host may read either. They are the same tables or they are a
-    // bug; the three conductors are where that is worth pinning, because
-    // each takes a different arm of both functions.
+    // `doc/fromSjon.zig` while it is lowering the source, and
+    // `time/derive.zig` over the finished value — and a host may read
+    // either. They are the same tables or they are a bug; the three
+    // conductors are where that is worth pinning, because each takes a
+    // different arm of both.
+    //
+    // Each is asked twice: as committed, and with `:length 1bar` struck
+    // out. The second is the one that matters — with no authored length
+    // the two layers have to agree on plan 02's DEFAULT ("the end of the
+    // last event or clip, rounded up to a bar") over material that is the
+    // conductor's rather than the document's, which is the one place they
+    // genuinely differed before 1c9cecf.
     const gpa = t_.allocator;
 
     var schema = try Schema.load(gpa);
     defer schema.deinit();
 
+    const strip: ?SourceEdit = .{ .from = " :length 1bar", .to = "" };
+
     for (three_conductors) |case| {
-        const src = try readCorpusFile(gpa, case, "doc.sjon");
-        defer gpa.free(src);
-        const source = try gpa.dupeZ(u8, src);
-        defer gpa.free(source);
+        for ([_]?SourceEdit{ null, strip }) |edit| {
+            var loaded = try loadCaseDoc(gpa, &schema, case, edit);
+            defer loaded.deinit();
+            try t_.expect(!loaded.result.diags.hasErrors());
 
-        var result = try doc.fromSource(gpa, &schema, source, null);
-        defer result.deinit();
-        try t_.expect(!result.diags.hasErrors());
+            var from_source: Io.Writer.Allocating = .init(gpa);
+            defer from_source.deinit();
+            var from_derive: Io.Writer.Allocating = .init(gpa);
+            defer from_derive.deinit();
+            try loaded.result.map.echo(&from_source.writer);
+            try loaded.derived.map.echo(&from_derive.writer);
 
-        var derived = try time.derive.derive(gpa, &result.doc);
-        defer derived.deinit();
-
-        var from_source: Io.Writer.Allocating = .init(gpa);
-        defer from_source.deinit();
-        var from_derive: Io.Writer.Allocating = .init(gpa);
-        defer from_derive.deinit();
-        try result.map.echo(&from_source.writer);
-        try derived.map.echo(&from_derive.writer);
-
-        t_.expectEqualStrings(from_source.written(), from_derive.written()) catch |err| {
-            std.debug.print("{s}: the two conductor paths disagree\n", .{case});
-            return err;
-        };
+            t_.expectEqualStrings(from_source.written(), from_derive.written()) catch |err| {
+                std.debug.print("{s}{s}: the two conductor paths disagree\n", .{
+                    case,
+                    if (edit == null) "" else " (no :length)",
+                });
+                return err;
+            };
+            // The stripped document really did lose its length — a
+            // silent no-op edit would make the second half of this loop
+            // the first half again — and BOTH layers then computed the
+            // default rather than reading one.
+            //
+            // What that default comes out as is `fromSjon.contentEnd`'s
+            // business and not this test's: these three documents place
+            // no note and no clip, so the answer is 0 whichever
+            // conductor keeps time, and the claim here is only that the
+            // two layers say the same thing about it.
+            if (edit != null) {
+                try t_.expect(loaded.result.doc.length == null);
+                try t_.expectEqual(loaded.result.map.length, loaded.derived.map.length);
+            }
+        }
     }
 }
 
@@ -2297,7 +2286,8 @@ test "corpus render: a document case — the echo header, both queries and a sna
     // 92 252 160 and beat 2 — and the cue sits exactly there, so it is
     // the PREVIOUS one (`c.at <= tick`) and there is none ahead.
     // A `q16` line is TPQ / 4 = 11 531 520 ticks; tick 100 000 000 sits
-    // between lines 8 and 9 of the bar, nearer 9.
+    // between lines 8 and 9 of the bar, nearer 9. Bar 0 starts at tick 0,
+    // so `:into-bar` is the whole second the query asked about.
     const text = try testRender(a, testDocFixture(), &.{
         .{ .times = &.{1.0} },
         .{ .at = 92_252_160 },
@@ -2314,8 +2304,8 @@ test "corpus render: a document case — the echo header, both queries and a sna
         \\  (length :tick 184504320 :end hold :loop-secs "4000000000000000")
         \\  (section :name whole :at 0 :dur 184504320)
         \\  (cue :name "two" :at 92252160))
-        \\(at :seconds "3FF0000000000000" :tick 92252160 :bar 0 :beat 2 :sub 0 :sections [0] :prev-cue 0 :next-cue none)
-        \\(at :tick 92252160 :bar 0 :beat 2 :sub 0 :sections [0] :prev-cue 0 :next-cue none)
+        \\(at :seconds "3FF0000000000000" :tick 92252160 :bar 0 :beat 2 :sub 0 :into-bar "3FF0000000000000" :sections [0] :prev-cue 0 :next-cue none)
+        \\(at :tick 92252160 :bar 0 :beat 2 :sub 0 :into-bar "3FF0000000000000" :sections [0] :prev-cue 0 :next-cue none)
         \\(snapped :tick 103783680)
         \\
     , text);
@@ -2349,34 +2339,140 @@ test "corpus render: a seconds query that no clock can answer is refused by NAME
     try t_.expect(std.mem.indexOf(u8, text, "(at :seconds \"7FF0000000000000\" :refused non-finite-time)") != null);
 }
 
-test "corpus render: at by tick and at by seconds agree at a segment start" {
-    // `positionAtTick` is `Playhead.at`'s answer with the seconds seam
-    // taken out of the loop, and the two have to agree wherever that seam
-    // is exact — which is every segment start, by construction
-    // (`TimeMap.secondsFromTick`'s own header). A copy that drifted from
-    // the original would show up here first.
+/// Load one of the corpus's own `doc.sjon` files and derive it — the
+/// join the tests below need, over documents a reviewer can open.
+const LoadedCase = struct {
+    result: doc.Result,
+    derived: time.derive.Derived,
+
+    fn deinit(self: *LoadedCase) void {
+        self.derived.deinit();
+        self.result.deinit();
+    }
+};
+
+/// One literal substitution over a case's source, so a test can ask the
+/// same document with and without a line.
+const SourceEdit = struct { from: []const u8, to: []const u8 };
+
+fn loadCaseDoc(gpa: Allocator, schema: *const Schema, case: []const u8, edit: ?SourceEdit) !LoadedCase {
+    const raw = try readCorpusFile(gpa, case, "doc.sjon");
+    defer gpa.free(raw);
+
+    const text: []const u8 = if (edit) |e| blk: {
+        const at = std.mem.indexOf(u8, raw, e.from) orelse return error.CaseTextNotFound;
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        try out.appendSlice(gpa, raw[0..at]);
+        try out.appendSlice(gpa, e.to);
+        try out.appendSlice(gpa, raw[at + e.from.len ..]);
+        break :blk try gpa.dupe(u8, out.items);
+    } else raw;
+    defer if (edit != null) gpa.free(text);
+
+    const source = try gpa.dupeZ(u8, text);
+    defer gpa.free(source);
+
+    var result = try doc.fromSource(gpa, schema, source, null);
+    errdefer result.deinit();
+    const derived = try time.derive.derive(gpa, &result.doc);
+    return .{ .result = result, .derived = derived };
+}
+
+/// Every field of a `Position`, one against the other. `seconds_into_bar`
+/// is compared by BIT PATTERN, because an ulp is exactly the difference
+/// the two paths could have.
+fn expectSamePosition(want: Playhead.Position, got: Playhead.Position) !void {
+    try t_.expectEqual(want.tick, got.tick);
+    try t_.expectEqual(want.bar, got.bar);
+    try t_.expectEqual(want.beat, got.beat);
+    try t_.expectEqual(want.sub_ticks, got.sub_ticks);
+    try t_.expectEqual(
+        @as(u64, @bitCast(want.seconds_into_bar)),
+        @as(u64, @bitCast(got.seconds_into_bar)),
+    );
+    try t_.expectEqualSlices(u32, want.section_ids, got.section_ids);
+    try t_.expectEqual(want.prev_cue, got.prev_cue);
+    try t_.expectEqual(want.next_cue, got.next_cue);
+    try t_.expectEqual(want.order_row, got.order_row);
+}
+
+test "corpus: the two position queries agree wherever the seconds seam is exact" {
+    // `(at :tick N)` answers with `Playhead.atTick` and `(times …)` with
+    // `Playhead.at`; the second is the first plus the wrap and the
+    // seconds→tick conversion. The claim this pins is plan 03's: a
+    // SEGMENT START is exact in both directions, so the two queries give
+    // the same answer there, field for field — and everywhere else the
+    // grid answer for whatever tick the clock landed on is the same
+    // answer the clock got, which is what makes the two renderer arms
+    // one query asked two ways.
+    //
+    // Over the corpus's own documents rather than a toy: four tempo
+    // segments in `seams-three-segment` and a [3 4] → [4 4] change in
+    // `meter-change`, so `bar`, `beat` and `sub` are non-zero and the
+    // meter in force is not the same one everywhere.
     const gpa = t_.allocator;
     var schema = try Schema.load(gpa);
     defer schema.deinit();
 
-    var result = try doc.fromSource(gpa, &schema, test_doc, null);
-    defer result.deinit();
-    var derived = try time.derive.derive(gpa, &result.doc);
-    defer derived.deinit();
+    const cases = [_]struct { name: []const u8, interior: []const i64 }{
+        .{
+            .name = "seams-three-segment",
+            // A tick inside each of the four segments, none of them on a
+            // beat line: `sub` is non-zero at every one.
+            .interior = &.{ 12_345_678, 60_000_000, 100_000_000, 150_000_000 },
+        },
+        .{
+            .name = "meter-change",
+            // Mid-bar on both sides of the meter change, and one tick
+            // past the bar table's end where the last meter carries on.
+            .interior = &.{ 70_000_000, 207_567_360, 322_882_560, 900_000_000 },
+        },
+        .{ .name = "playhead-sections-cues", .interior = &.{ 1, 100_000_000, 300_000_000, 500_000_000 } },
+        .{ .name = "tempo-three-conductors-it", .interior = &.{ 10_000_000, 70_000_000, 120_000_000 } },
+    };
 
-    for (derived.map.segments) |seg| {
-        var by_tick = try positionAtTick(gpa, &derived, seg.tick);
-        defer by_tick.deinit(gpa);
-        var by_seconds = try Playhead.at(gpa, &derived, Playhead.secondsOf(&derived, seg.tick));
-        defer by_seconds.deinit(gpa);
+    for (cases) |c| {
+        var loaded = try loadCaseDoc(gpa, &schema, c.name, null);
+        defer loaded.deinit();
+        try t_.expect(!loaded.result.diags.hasErrors());
+        // A document worth asking: more than one segment, or a meter that
+        // changes. A fixture that quietly became trivial would make every
+        // comparison below vacuous.
+        try t_.expect(loaded.derived.map.segments.len > 1 or loaded.derived.map.meters.len > 1);
 
-        try t_.expectEqual(by_seconds.tick, by_tick.tick);
-        try t_.expectEqual(by_seconds.bar, by_tick.bar);
-        try t_.expectEqual(by_seconds.beat, by_tick.beat);
-        try t_.expectEqual(by_seconds.sub_ticks, by_tick.sub_ticks);
-        try t_.expectEqualSlices(u32, by_seconds.section_ids, by_tick.section_ids);
-        try t_.expectEqual(by_seconds.prev_cue, by_tick.prev_cue);
-        try t_.expectEqual(by_seconds.next_cue, by_tick.next_cue);
+        // Segment starts: exact both ways, so every field matches.
+        for (loaded.derived.map.segments) |seg| {
+            var by_tick = try Playhead.atTick(gpa, &loaded.derived, seg.tick);
+            defer by_tick.deinit(gpa);
+            var by_seconds = try Playhead.at(gpa, &loaded.derived, Playhead.secondsOf(&loaded.derived, seg.tick));
+            defer by_seconds.deinit(gpa);
+            expectSamePosition(by_seconds, by_tick) catch |err| {
+                std.debug.print("{s}: the two queries disagree at segment start {d}\n", .{ c.name, seg.tick });
+                return err;
+            };
+        }
+
+        // Interior ticks: ask the clock, then ask the grid about the tick
+        // the clock landed on. The two are the same answer or the copy
+        // has drifted.
+        for (c.interior) |tick| {
+            var by_seconds = try Playhead.at(gpa, &loaded.derived, Playhead.secondsOf(&loaded.derived, tick));
+            defer by_seconds.deinit(gpa);
+            var by_tick = try Playhead.atTick(gpa, &loaded.derived, by_seconds.tick);
+            defer by_tick.deinit(gpa);
+            // The one field the clock answers better than the grid: it is
+            // measured from the second that was ASKED about, which at an
+            // interior tick may sit an ulp above the tick's own second.
+            by_tick.seconds_into_bar = by_seconds.seconds_into_bar;
+            expectSamePosition(by_seconds, by_tick) catch |err| {
+                std.debug.print("{s}: the two queries disagree at tick {d}\n", .{ c.name, tick });
+                return err;
+            };
+            // …and a non-trivial position, so the comparison has
+            // something to compare.
+            try t_.expect(by_tick.bar > 0 or by_tick.beat > 0 or by_tick.sub_ticks > 0);
+        }
     }
 }
 
