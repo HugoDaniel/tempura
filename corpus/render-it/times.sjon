@@ -1,0 +1,5 @@
+; Render the native timeline into a `.it`, then print the document's own
+; timeline tier beside it. `:cc` says nothing here — an IT curve goes in
+; the volume column — so it is left off.
+(build :kind it)
+(dump)

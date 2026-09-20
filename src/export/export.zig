@@ -20,6 +20,12 @@ pub const lanes = @import("lanes.zig");
 /// `exportScore` — the one door from tempura to pacer.
 pub const score = @import("score.zig");
 
+/// `renderSmf` — a native timeline as a Standard MIDI File.
+pub const render_smf = @import("render_smf.zig");
+
+/// `renderIt` — a native timeline as an Impulse Tracker module.
+pub const render_it = @import("render_it.zig");
+
 /// The three conductors as fixtures, shared with `tools/gen_landing.zig`.
 pub const test_support = @import("test_support.zig");
 
@@ -29,6 +35,8 @@ pub const Options = score.Options;
 pub const Result = score.Result;
 pub const EaseHint = score.EaseHint;
 pub const exportScore = score.exportScore;
+pub const renderSmf = render_smf.renderSmf;
+pub const renderIt = render_it.renderIt;
 
 /// This part's error set: only resource exhaustion. Every defect of a
 /// document is a diagnostic on the returned result.
@@ -39,5 +47,7 @@ test {
     _ = simplify;
     _ = lanes;
     _ = score;
+    _ = render_smf;
+    _ = render_it;
     _ = test_support;
 }

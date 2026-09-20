@@ -397,6 +397,11 @@ fn findFixture(
 /// case reads as the file it produces.
 const BuildKind = enum { mid, it };
 
+/// What a `(build …)` asks for: the kind, and the one renderer switch a
+/// golden needs to show (plan 08's `--cc`, without which a native curve
+/// lane has no controller to render onto and says `render_cc_missing`).
+const BuildAsk = struct { kind: BuildKind, cc: ?u7 };
+
 /// One directive, executed in document order against the case's fixture.
 const Directive = union(enum) {
     /// What the core made of the bytes, and everything it complained of.
@@ -415,8 +420,10 @@ const Directive = union(enum) {
     snap: struct { tick: i64, grid: Playhead.SnapGrid, swing: f64 },
     /// The document, re-printed: its timeline tier, verbatim.
     dump,
-    /// The document's inline tier through the canonical writer.
-    build: BuildKind,
+    /// The document as a file: its inline tier through the canonical
+    /// writer, or — for a NATIVE document — plan 08's renderers and plan
+    /// 04's carriers through `doc/pipeline.zig`'s `build`.
+    build: BuildAsk,
     /// A head the manifest declares and this half does not implement.
     /// It carries the head so the report can name it.
     unrun: []const u8,
@@ -524,9 +531,10 @@ fn parseHarness(
         } else if (std.mem.eql(u8, hdr.head, "dump")) {
             try directives.append(a, .dump);
         } else if (std.mem.eql(u8, hdr.head, "build")) {
-            try directives.append(a, .{
-                .build = std.meta.stringToEnum(BuildKind, effSym(&view, tree, idx, "kind")).?,
-            });
+            try directives.append(a, .{ .build = .{
+                .kind = std.meta.stringToEnum(BuildKind, effSym(&view, tree, idx, "kind")).?,
+                .cc = if (optInt(&view, tree, idx, "cc")) |n| @intCast(n) else null,
+            } });
         } else {
             // `unknown_form` is an error and an erroring document never
             // reaches here, so the head is one the manifest declares —
@@ -570,6 +578,18 @@ fn effInt(
     };
     std.debug.assert(n >= 0 and n == @floor(n));
     return @intFromFloat(n);
+}
+
+/// The same, for a key that is optional AND has no default: absent is a
+/// real answer, which `effInt`'s `.?` would turn into a panic.
+fn optInt(
+    view: *const sjon.EffectiveView.EffectiveView,
+    tree: *const Ast.Tree,
+    form: NodeIndex,
+    key: []const u8,
+) ?u64 {
+    _ = view.getEffectiveValue(form, key) orelse return null;
+    return effInt(view, tree, form, key);
 }
 
 /// The effective `:key` on `form` as a string — the author's literal, or
@@ -1279,6 +1299,13 @@ const Loaded = struct {
     /// The bytes an IT tier's opaque regions are offsets into, when this
     /// host could produce them. Null for every other document.
     it_source: ?[]const u8,
+    /// The document's own SOURCE — `doc.sjon` itself, or the wrapper the
+    /// runner wrote around a file. `build` packs the essence out of it,
+    /// so it is the text and not a re-print (plan 04).
+    source: [:0]const u8,
+    /// The timeline bundle, for the `build` and `dump` a `(build …)`
+    /// over a native document runs.
+    schema: *const Schema,
 
     fn deinit(self: *Loaded) void {
         self.derived.deinit();
@@ -1355,6 +1382,8 @@ fn loadDocument(
         .skeleton = skel,
         .derived = derived,
         .it_source = it_source,
+        .source = source,
+        .schema = env.schema,
     };
 }
 
@@ -1516,8 +1545,8 @@ fn renderDocDirective(
                 if (!try renderRawLine(w, line, rep)) return false;
             }
         },
-        .build => |kind| {
-            if (!try renderBuild(gpa, w, kind, loaded, rep)) return false;
+        .build => |ask| {
+            if (!try renderBuild(gpa, w, ask, loaded, rep)) return false;
         },
         // Everything `needsDocument` answers false for; the assertion
         // above is what makes this arm unreachable rather than a silent
@@ -1589,44 +1618,131 @@ fn renderOptIndex(w: *Io.Writer, index: ?u32) Error!void {
     if (index) |i| try p(w, "{d}", .{i}) else try pw(w, "none");
 }
 
-/// The document's inline tier through the canonical writer, and rung 1
-/// over what came out.
+/// The document as a file, and rung 1 over what came out.
 ///
-/// `build` here is the BRIDGE's half of plan 09's rung 3: the tier the
-/// document carries, written back to bytes. A native document — one with
-/// no anchor and so no tier — has nothing for a writer to write, and
-/// rendering its lanes into a file is P110's work (plan 08); the golden
-/// says so in as many words rather than inventing a file.
+/// Two paths, one verb. An ANCHORED document is its inline tier through
+/// the canonical writer — the document and the file said twice, which is
+/// what those cases are about, and the residue is not written over bytes
+/// a fixture pins. A NATIVE document has no tier, so it goes through
+/// `doc/pipeline.zig`'s `build`: plan 08's renderers, plan 04's carriers
+/// and the canonical writer, with rung 3 — the dump of what was just
+/// built, against the document that built it — beside rung 1.
 fn renderBuild(
     gpa: Allocator,
     w: *Io.Writer,
-    kind: BuildKind,
+    ask: BuildAsk,
     loaded: *Loaded,
     rep: Report,
 ) Error!bool {
     const d = &loaded.result.doc;
-    switch (kind) {
+    switch (ask.kind) {
         .mid => {
-            if (d.midi.len == 0) return try renderUnsupported(w, kind, "this document carries no (midi/smf …) tier; rendering a native timeline to bytes is P110's work (plan 08)");
+            if (d.midi.len == 0) return try renderRendered(gpa, w, ask, loaded, .smf, rep);
             var written = try smf.write(gpa, &d.midi[0].sequence, .{});
             defer written.deinit();
             var back = try smf.read(gpa, written.bytes);
             defer back.deinit();
             var again = try smf.write(gpa, &back.sequence, .{});
             defer again.deinit();
-            return try renderBuilt(w, kind, written.bytes, std.mem.eql(u8, again.bytes, written.bytes), &written.diags, rep);
+            return try renderBuilt(w, ask.kind, written.bytes, std.mem.eql(u8, again.bytes, written.bytes), &written.diags, rep);
         },
         .it => {
-            if (d.it.len == 0) return try renderUnsupported(w, kind, "this document carries no (it/module …) tier; rendering a native timeline to bytes is P110's work (plan 08)");
+            if (d.it.len == 0) return try renderRendered(gpa, w, ask, loaded, .it, rep);
             var written = try itf.write.write(gpa, &d.it[0].module, loaded.it_source, .{});
             defer written.deinit();
             var back = try itf.read.read(gpa, written.bytes);
             defer back.deinit();
             var again = try itf.write.write(gpa, &back.module, written.bytes, .{});
             defer again.deinit();
-            return try renderBuilt(w, kind, written.bytes, std.mem.eql(u8, again.bytes, written.bytes), &written.diags, rep);
+            return try renderBuilt(w, ask.kind, written.bytes, std.mem.eql(u8, again.bytes, written.bytes), &written.diags, rep);
         },
     }
+}
+
+/// A native timeline rendered into a file — plan 08 phase 5's whole
+/// chain, as the CLI's `build` verb runs it.
+///
+/// Four facts go in the golden: the bytes (length and hash — the
+/// determinism claim, the same on every host), what the residue cost,
+/// rung 1 over the bytes, and rung 3: the dump of what was just built,
+/// compared with the document that built it. Rung 3 is plan 09's
+/// essence-exactness gate, and a golden can say it in one flag because
+/// `Doc.eql` compares the two documents form for form with the FILE
+/// tiers lifted off — the anchor and the dump a build had to invent are
+/// the file's half, and the timeline tier is the half that has to come
+/// back.
+fn renderRendered(
+    gpa: Allocator,
+    w: *Io.Writer,
+    ask: BuildAsk,
+    loaded: *Loaded,
+    kind: doc.AnchorKind,
+    rep: Report,
+) Error!bool {
+    var built = try doc.pipeline.build(
+        gpa,
+        loaded.schema,
+        loaded.source,
+        &loaded.result.doc,
+        &loaded.derived,
+        kind,
+        .{ .cc = ask.cc },
+    );
+    defer built.deinit();
+
+    if (built.bytes.len == 0) {
+        try p(w, "(built :kind {s} :refused true", .{@tagName(ask.kind)});
+        if (!try renderDiags(w, "  ", &built.diags, rep)) return false;
+        try pw(w, ")\n");
+        return true;
+    }
+
+    try p(w, "(built :kind {s} :len {d} :sha256 \"", .{ @tagName(ask.kind), built.bytes.len });
+    try writeDigest(w, built.bytes);
+    try p(w, "\"\n  (rung1 :ok {})\n  (residue :essence {d} :lanes {d} :conductor {})\n  (rung3 :ok {})", .{
+        try rung1Of(gpa, kind, built.bytes),
+        built.essence_bytes,
+        built.lanes.len,
+        built.conductor != null,
+        try rung3Of(gpa, loaded, kind, built.bytes),
+    });
+    if (!try renderDiags(w, "  ", &built.diags, rep)) return false;
+    try pw(w, ")\n");
+    return true;
+}
+
+/// `write(read(bytes)) == bytes` over what a build produced.
+fn rung1Of(gpa: Allocator, kind: doc.AnchorKind, bytes: []const u8) Error!bool {
+    switch (kind) {
+        .smf => {
+            var back = try smf.read(gpa, bytes);
+            defer back.deinit();
+            var again = try smf.write(gpa, &back.sequence, .{});
+            defer again.deinit();
+            return std.mem.eql(u8, again.bytes, bytes);
+        },
+        .it => {
+            var back = try itf.read.read(gpa, bytes);
+            defer back.deinit();
+            var again = try itf.write.write(gpa, &back.module, bytes, .{});
+            defer again.deinit();
+            return std.mem.eql(u8, again.bytes, bytes);
+        },
+    }
+}
+
+/// `dump(build(doc))` against `doc`, timeline tier for timeline tier.
+fn rung3Of(gpa: Allocator, loaded: *Loaded, kind: doc.AnchorKind, bytes: []const u8) Error!bool {
+    var dumped = try doc.pipeline.dump(gpa, loaded.schema, bytes, kind, .{});
+    defer dumped.deinit();
+    if (dumped.diags.hasErrors()) return false;
+    // A shallow copy with the FILE tiers emptied — never deinitialised,
+    // because the arena it names is still the dumped document's.
+    var tier_free = dumped.doc;
+    tier_free.anchors = &.{};
+    tier_free.midi = &.{};
+    tier_free.it = &.{};
+    return tier_free.eql(&loaded.result.doc);
 }
 
 fn renderBuilt(
@@ -1642,11 +1758,6 @@ fn renderBuilt(
     try p(w, "\"\n  (rung1 :ok {})", .{rung1});
     if (!try renderDiags(w, "  ", diags, rep)) return false;
     try pw(w, ")\n");
-    return true;
-}
-
-fn renderUnsupported(w: *Io.Writer, kind: BuildKind, why: []const u8) Error!bool {
-    try p(w, "(built :kind {s} :unsupported \"{s}\")\n", .{ @tagName(kind), why });
     return true;
 }
 
@@ -2077,8 +2188,8 @@ test "corpus harness: the document half's directives read" {
     try t_.expectEqual(Playhead.SnapGrid.bar, d[3].snap.grid);
     try t_.expectEqual(@as(f64, 0.5), d[3].snap.swing);
     try t_.expectEqual(Directive.dump, d[4]);
-    try t_.expectEqual(BuildKind.mid, d[5].build);
-    try t_.expectEqual(BuildKind.it, d[6].build);
+    try t_.expectEqual(BuildKind.mid, d[5].build.kind);
+    try t_.expectEqual(BuildKind.it, d[6].build.kind);
 }
 
 test "corpus harness: the schema refuses the document half's malformed shapes" {
@@ -2476,19 +2587,26 @@ test "corpus: the two position queries agree wherever the seconds seam is exact"
     }
 }
 
-test "corpus render: a native document has no tier to build, and the golden says so" {
+test "corpus render: a native document is RENDERED into both kinds, with rung 1 and rung 3" {
+    // The half plan 08 phase 5 added: a document with no tier is not
+    // unanswerable any more, it is rendered — and the golden carries the
+    // bytes, what the residue cost, and both rungs.
     var arena = std.heap.ArenaAllocator.init(t_.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    const text = try testRender(a, testDocFixture(), &.{ .{ .build = .mid }, .{ .build = .it } });
-    try t_.expect(std.mem.indexOf(u8, text, "(built :kind mid :unsupported \"") != null);
-    try t_.expect(std.mem.indexOf(u8, text, "(built :kind it :unsupported \"") != null);
-    // Never a length or a hash: an invented file would be the one thing
-    // worse than an unanswered directive.
-    try t_.expect(std.mem.indexOf(u8, text, "(built :kind mid :len") == null);
-    try t_.expect(std.mem.indexOf(u8, text, "(built :kind it :len") == null);
-    try t_.expect(std.mem.indexOf(u8, text, "(rung1") == null);
+    const text = try testRender(a, testDocFixture(), &.{
+        .{ .build = .{ .kind = .mid, .cc = 74 } },
+        .{ .build = .{ .kind = .it, .cc = null } },
+    });
+    try t_.expect(std.mem.indexOf(u8, text, "(built :kind mid :len") != null);
+    try t_.expect(std.mem.indexOf(u8, text, "(built :kind it :len") != null);
+    try t_.expect(std.mem.indexOf(u8, text, ":unsupported") == null);
+    // Rung 3 is the gate this task exists for: what was built dumps back
+    // as the document that built it.
+    try t_.expect(std.mem.indexOf(u8, text, "(rung1 :ok true)") != null);
+    try t_.expect(std.mem.indexOf(u8, text, "(rung3 :ok true)") != null);
+    try t_.expect(std.mem.indexOf(u8, text, "(residue :essence ") != null);
 }
 
 test "corpus render: the snap grids the manifest offers are exactly the ones the playhead names" {

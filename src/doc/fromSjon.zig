@@ -2882,6 +2882,46 @@ test "fromSjon.mapOf: the map a Doc answers with is the map its load stored" {
     }
 }
 
+test "fromSjon: a conducted document with no :length ends where its anchor's material does" {
+    // Plan 02's `:length` default is "the end of the last event or clip,
+    // rounded up to a bar", and for a CONDUCTED document the events are
+    // the anchor's: `Conductor.end` is the other half of the rule, which
+    // `contentEnd` alone cannot see because it walks the DOCUMENT's own
+    // lanes. Both of this layer's answers — the map `fromSource` stores
+    // and the one `mapOf` rebuilds from the value — carry it, and a
+    // regression would show up here as a length of zero and a playhead
+    // that cannot leave tick 0.
+    const gpa = testing.allocator;
+
+    // SMF: the last event is at 1920 pulses of 480, which is four
+    // quarters — two bars of the file's own [3 4].
+    var smf_res = try load(gpa, conducted_smf, null);
+    defer smf_res.deinit();
+    try testing.expect(smf_res.doc.length == null);
+    try testing.expectEqual(@as(i64, 6 * Grid.TPQ), smf_res.map.length);
+    var smf_again = try mapOf(gpa, &smf_res.doc);
+    defer smf_again.deinit();
+    try testing.expectEqual(smf_res.map.length, smf_again.length);
+
+    // IT: 16 rows of speed 6 at 24 ticks to the quarter is four quarters,
+    // one bar of the highlight's [4 4].
+    var it_res = try load(gpa,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind it :file "x.it")
+        \\(it/module
+        \\  (it/timing :speed 6 :tempo 125 :highlight [4 16])
+        \\  (it/orders 0)
+        \\  (it/pattern 0 :rows 16
+        \\    (row 0 (ev 1 :note "C-5" :ins 1))))
+    , null);
+    defer it_res.deinit();
+    try testing.expect(it_res.doc.length == null);
+    try testing.expectEqual(@as(i64, 4 * Grid.TPQ), it_res.map.length);
+    var it_again = try mapOf(gpa, &it_res.doc);
+    defer it_again.deinit();
+    try testing.expectEqual(it_res.map.length, it_again.length);
+}
+
 test "fromSjon: a file with no tempo or meter event conducts at 120 in [4 4]" {
     const gpa = testing.allocator;
     var res = try load(gpa,

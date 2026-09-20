@@ -1,0 +1,30 @@
+; Plan 08 phase 5, the `.it` half: a NATIVE timeline rendered into an
+; Impulse Tracker module.
+;
+; Speed 6 and 24 IT ticks to the quarter make a row a 16th note, so a
+; 64-row pattern is four bars of [4 4] and the whole piece fits in one.
+; The chord takes three channels — one cell holds one note — and `lead`
+; sits one IT tick past row 0, which is `SD1` rather than a rounding.
+; The tempo change at 2q is a `Txx` at its row; the module carries no
+; instrument, so every cell names instrument 1 and says `it_no_instrument`
+; — the file holds the timing and a tracker brings the sound, and the
+; residue remembers. `glow` writes the volume column, sampled per row
+; across the `linear` segment and at its keyframes alone across the
+; `in-cubic` one. `hats` is `residue_only`.
+(timeline :title "render-it" :length 1bar)
+
+(tempo-point :at 0bar :qpm 125)
+(tempo-point :at 2q :qpm 150)
+(meter-point :at 0bar :sig [4 4])
+
+(lane :name chord :kind notes :target chord
+  (note :at 0bar :dur 1q :key 60 :vel 127)
+  (note :at 0bar :dur 1q :key 64 :vel 100)
+  (note :at 0bar :dur 1q :key 67 :vel 80))
+(lane :name lead :kind notes :target lead
+  (note :at 1921920t :dur 0.5q :key 72 :vel 96))
+(lane :name glow :kind curve :target glow :range [0 1]
+  (keyframe :at 0bar :value 0)
+  (keyframe :at 1q :value 1 :ease linear)
+  (keyframe :at 2q :value 0 :ease in-cubic))
+(lane :name hats :kind query :target hats :query (euclid 3 8 1))

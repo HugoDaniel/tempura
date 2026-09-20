@@ -1,0 +1,6 @@
+; Render the native timeline into a `.mid` with controller 74 for the
+; curve lane, then print the document's own timeline tier beside it: the
+; golden holds the bytes' hash, both rungs, and the text rung 3 says the
+; file gives back.
+(build :kind mid :cc 74)
+(dump)

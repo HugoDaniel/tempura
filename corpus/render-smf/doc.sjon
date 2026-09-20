@@ -1,0 +1,41 @@
+; Plan 08 phase 5, the `.mid` half: a NATIVE timeline rendered into a
+; Standard MIDI File, and the residue that makes the file a document
+; again.
+;
+; Track 0 is the conductor — the two tempo points (`:qpm` becomes
+; `round(60e6 / qpm)` and `:us` rides verbatim), the meter, and one
+; `marker` for the cue. Then one `MTrk` per native lane, named by the
+; lane: `kick` as note-on / note-off pairs on channel 10 (the drum
+; channel, `ch 9` on the wire), with the clip already expanded by
+; `time/derive.zig`; and `glow` as controller 74 — one event per keyframe
+; for the `hold` segment, one every 32nd for the `linear` one, and the
+; two endpoints alone for `in-cubic`, whose shape only the essence can
+; say. `hats` is a pattern query and a `.mid` holds none, so it is
+; `residue_only`.
+;
+; `(rung3 :ok true)` in the golden is the whole claim of plan 09's third
+; rung: the file dumps back as THIS document, form for form, with every
+; lane record's hash and the conductor record's hash matching.
+(timeline :title "render" :length 2bar :end loop)
+
+(tempo-point :at 0bar :qpm 120)
+(tempo-point :at 1bar :us 400000)
+(meter-point :at 0bar :sig [4 4])
+
+(section :name intro :at 0bar :dur 1bar)
+(cue :name "the drop" :at 1bar)
+
+(lane :name kick :kind notes :target kick
+  (note :at 0bar :dur 0.5q :key 36 :vel 110 :ch 10)
+  (note :at 1q :dur 0.5q :key 38 :vel 90 :ch 10)
+  (clip :at 1bar :phrase fill :repeat 2))
+(lane :name glow :kind curve :target glow :range [0 1]
+  (keyframe :at 0bar :value 0.2 :ease hold)
+  (keyframe :at 1bar :value 0.9 :ease linear)
+  (keyframe :at 2bar :value 0.1 :ease in-cubic))
+(lane :name hats :kind query :target hats :query (euclid 3 8 1))
+
+(phrase :name fill :length 0.5bar
+  (lane :name kick
+    (note :at 0q :dur 0.25q :key 42 :vel 100 :ch 10)
+    (note :at 0.5q :dur 0.25q :key 42 :vel 80 :ch 10)))

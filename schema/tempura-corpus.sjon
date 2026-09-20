@@ -66,6 +66,12 @@
       (member :name mid :description "A Standard MIDI File — the extension the file carries, so a case reads as the file it writes.")
       (member :name it :description "An Impulse Tracker module.")))
 
+  (value-kind :name cc-number
+    :description "A MIDI controller number, 0..127 — which controller a native curve lane renders onto when a (build …) writes a .mid (plan 08's --cc). A curve lane with none is render_cc_missing and rides in the residue alone, which is itself a golden worth pinning."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 127 :integer true)
+    :unit (unit-shape :reject true))
+
   (value-kind :name plan-op
     :description "Which edit operation to plan. Deliberately an unconstrained symbol: the operation set is the edit engine's and is enumerated there, so an unknown one is a runner diagnostic naming the case rather than a schema error in a file nobody edits by hand."
     :underlying symbol)
@@ -126,9 +132,11 @@
       :description "Cap on how many tempo segments to render, for a case whose walk produces thousands. Absent means all of them."))
 
   (form :name build
-    :description "Build the case's document into a file of the given kind and render the bytes' length and hash, then rung 1 over what was written. Same document must give the same bytes on x86_64, aarch64 and wasm32 — that is what the hash is for."
+    :description "Build the case's document into a file of the given kind and render the bytes' length and hash, then rung 1 over what was written. An ANCHORED document is its inline tier through the canonical writer; a NATIVE one goes through plan 08's renderers and plan 04's carriers, and the golden carries rung 3 — the dump of what was built, against the document that built it — beside rung 1. Same document must give the same bytes on x86_64, aarch64 and wasm32 — that is what the hash is for."
     (key :name kind :type build-kind
-      :description "Which file to write."))
+      :description "Which file to write.")
+    (key :name cc :type cc-number :optional true
+      :description "Which controller a native curve lane renders onto (plan 08's --cc). Only a .mid reads it."))
 
   (form :name dump
     :description "Re-dump the case's document and render its timeline tier, so a read-write round trip is a diff. Takes no rows."))
