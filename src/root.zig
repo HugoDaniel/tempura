@@ -33,9 +33,19 @@ pub const Diag = @import("Diag.zig");
 /// document is validated against, and the harness bundle beside them.
 pub const Schema = @import("Schema.zig");
 
+/// The SMF core (P100): `Sequence`, the bounded reader with its `SourceMap`,
+/// the canonical writer. Pure Zig, no SJON.
+pub const smf = @import("smf/smf.zig");
+
+/// The IT core (P101): `Module`, regions, patterns, the canonical writer and
+/// the timing walk. Pure Zig, no SJON.
+pub const itf = @import("itf/itf.zig");
+
 test {
     _ = Diag;
     _ = Schema;
+    _ = smf;
+    _ = itf;
 }
 
 test "version: src/root.zig and build.zig.zon spell the same version" {
