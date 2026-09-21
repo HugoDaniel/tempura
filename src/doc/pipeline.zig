@@ -1124,19 +1124,8 @@ fn buildIt(
         // Rule 3 again: a newer tempura's payload is COPIED THROUGH, so
         // this build shadows nothing. `--no-residue` asked for a file
         // that carries nothing and gets exactly that.
-        var plain = try itf.write.write(gpa, &rendered.module, source, .{
-            .loose = wopts.loose,
-            .preserve_history = wopts.preserve_history,
-            .tmpu = if (opts.no_residue) null else carried,
-        });
-        defer plain.deinit();
-        try copyDiags(diags, &plain.diags);
-        return .{
-            .bytes = try gpa.dupe(u8, plain.bytes),
-            .lanes = recs.lanes,
-            .conductor = recs.conductor,
-            .essence_bytes = 0,
-        };
+        const kept = if (opts.no_residue) null else carried;
+        return itPlain(gpa, &rendered.module, source, wopts, kept, recs, diags);
     }
     return itWithResidue(
         gpa,
@@ -1197,6 +1186,33 @@ fn itRecords(
             .{ .hash = records.hashItConductor(&back.module) }
         else
             null,
+    };
+}
+
+/// The `.it` with no residue of this build's own: `tmpu` is the anchor's
+/// chunk copied through (rule 3), or null for a file that carries
+/// nothing.
+fn itPlain(
+    gpa: Allocator,
+    module: *const itf.Module,
+    source: ?[]const u8,
+    wopts: itf.write.Options,
+    tmpu: ?[]const u8,
+    recs: Records,
+    diags: *Diag.List,
+) Error!Pieces {
+    var plain = try itf.write.write(gpa, module, source, .{
+        .loose = wopts.loose,
+        .preserve_history = wopts.preserve_history,
+        .tmpu = tmpu,
+    });
+    defer plain.deinit();
+    try copyDiags(diags, &plain.diags);
+    return .{
+        .bytes = try gpa.dupe(u8, plain.bytes),
+        .lanes = recs.lanes,
+        .conductor = recs.conductor,
+        .essence_bytes = 0,
     };
 }
 
