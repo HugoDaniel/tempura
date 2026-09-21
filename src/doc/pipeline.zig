@@ -240,32 +240,15 @@ fn dumpSmf(
     else
         &detached.sequence;
 
-    var tier = try bridge_smf.sequenceToForms(gpa, tier_seq, null, .{
-        .qualify = opts.qualify,
-    });
+    var tier = try bridge_smf.sequenceToForms(gpa, tier_seq, null, .{ .qualify = opts.qualify });
     defer gpa.free(tier);
-
-    // A residue the CARRIER could not read is rule 4, never rule 1: a
-    // split essence with a part missing comes back as no essence at all,
-    // and handing that on as `.payloads` would head the document "no
-    // residue found" while `detach` has already said `residue_corrupt`.
-    // The carrier names the loss; this only routes it. A newer wire
-    // version rides through as `.payloads`: `reconcile` is the one that
-    // asks the decoder, and it names the version when the decoder
-    // refuses.
-    const found: reconcile.Found = if (newer != null and newer.? == .envelope)
-        .{ .newer = newer.?.version() }
-    else if (detached.diags.count(.residue_corrupt) > 0)
-        .corrupt
-    else
-        .{ .payloads = detached.payloads };
 
     var rec = try reconcile.reconcile(gpa, schema, .{
         .tier = .{ .smf = tier_seq },
         .text = tier,
         .bytes = bytes,
         .name = name,
-    }, found, .{ .cues = opts.cues, .anchor_id = opts.anchor_id });
+    }, smfFound(newer, &detached), .{ .cues = opts.cues, .anchor_id = opts.anchor_id });
     errdefer rec.deinit();
 
     // The restored lanes' view, out of the tier — and the tier printed
@@ -273,12 +256,24 @@ fn dumpSmf(
     const consumed = reconcile.consumeSmf(tier_seq, &rec);
     if (consumed.any()) {
         gpa.free(tier);
-        tier = try bridge_smf.sequenceToForms(gpa, tier_seq, null, .{
-            .qualify = opts.qualify,
-        });
+        tier = try bridge_smf.sequenceToForms(gpa, tier_seq, null, .{ .qualify = opts.qualify });
     }
 
     return assemble(gpa, schema, bytes, name, diags, &rec, tier, consumed);
+}
+
+/// Which of plan 04's rules the carrier's findings on a `.mid` route
+/// to. A residue the CARRIER could not read is rule 4, never rule 1: a
+/// split essence with a part missing comes back as no essence at all,
+/// and handing that on as `.payloads` would head the document "no
+/// residue found" while `detach` has already said `residue_corrupt`.
+/// The carrier names the loss; this only routes it. A newer wire
+/// version rides through as `.payloads`: `reconcile` is the one that
+/// asks the decoder, and it names the version when the decoder refuses.
+fn smfFound(newer: ?Newer, detached: *const residue_smf.Detached) reconcile.Found {
+    if (newer != null and newer.? == .envelope) return .{ .newer = newer.?.version() };
+    if (detached.diags.count(.residue_corrupt) > 0) return .corrupt;
+    return .{ .payloads = detached.payloads };
 }
 
 fn dumpIt(
@@ -314,31 +309,80 @@ fn dumpIt(
     };
     defer if (tail_src) |t| gpa.free(t);
 
-    var tier = try bridge_it.moduleToForms(gpa, &read.module, .{
+    // The printer's own diagnostics are collected on the first print and
+    // not asked for again: fewer cells cannot add one.
+    var tier = try itTier(gpa, &read, opts, diags, &.{});
+    defer gpa.free(tier);
+
+    var rec = try reconcile.reconcile(gpa, schema, .{
+        .tier = .{ .it = &read.module },
+        .text = tier,
+        .bytes = bytes,
+        .name = name,
+    }, itFound(&chosen, newer, &carrier, tail_src), .{
+        .cues = opts.cues,
+        .anchor_id = opts.anchor_id,
+    });
+    errdefer rec.deinit();
+
+    // The restored lanes' cells and the conductor's `Txx`, out of the
+    // module — and the tier printed again without them. A pattern that
+    // lost a cell is printed as rows even under `--patterns=bin`, since
+    // the file's own bytes no longer describe it.
+    const consumed = try reconcile.consumeIt(rec.arena.allocator(), &read.module, &rec);
+    if (consumed.any()) {
+        gpa.free(tier);
+        tier = try itTier(gpa, &read, opts, null, consumed.patterns);
+    }
+
+    return assemble(gpa, schema, bytes, name, diags, &rec, tier, consumed);
+}
+
+/// The `it/` tier printed from the module as read. `diags` is where the
+/// printer reports what it could not spell, or null to drop that
+/// report; `rows_for` names the patterns printed as rows even under
+/// `--patterns=bin`. Caller frees the text.
+fn itTier(
+    gpa: Allocator,
+    read: *const itf.read.Result,
+    opts: Options,
+    diags: ?*Diag.List,
+    rows_for: []const u16,
+) Error![]u8 {
+    return bridge_it.moduleToForms(gpa, &read.module, .{
         .qualify = opts.qualify,
         .patterns_bin = opts.patterns_bin,
         .preserve_foreign = opts.preserve_foreign,
         .preserve_history = opts.preserve_history,
         .source_map = &read.source_map,
+        .rows_for = rows_for,
         .diags = diags,
     });
-    defer gpa.free(tier);
+}
 
-    // Plan 04's rule 5 decides the order, and `choose` has already
-    // applied it: the chunk wins when it is readable, and the TAIL wins
-    // over a chunk that is absent, corrupt or truncated — with
-    // `residue_partial` naming what the tail cannot carry. So a corrupt
-    // chunk beside a tail is rule 5, not rule 4, and only a corrupt
-    // chunk with NO tail falls through to the skeleton.
-    const found: reconcile.Found = switch (chosen) {
+/// Which of plan 04's rules the carriers' findings on a `.it` route to.
+/// Rule 5 decides the order, and `choose` has already applied it: the
+/// chunk wins when it is readable, and the TAIL wins over a chunk that
+/// is absent, corrupt or truncated — with `residue_partial` naming what
+/// the tail cannot carry. So a corrupt chunk beside a tail is rule 5,
+/// not rule 4, and only a corrupt chunk with NO tail falls through to
+/// the skeleton.
+///
+/// A chunk of a version this build does not read, with no tail to fall
+/// back on, is rule 3 and not rule 1: the payload is still in the file,
+/// as the opaque region the writer re-emits. One whose framing does not
+/// hold is rule 4, for the same reason — the file carried a residue,
+/// and saying "no residue found" over a `residue_corrupt` would be two
+/// surfaces disagreeing.
+fn itFound(
+    chosen: *const residue_it.Chosen,
+    newer: ?Newer,
+    carrier: *const Diag.List,
+    tail_src: ?[:0]u8,
+) reconcile.Found {
+    return switch (chosen.*) {
         .chunk => |p| .{ .payloads = p.payloads },
         .tail => .{ .tail = tail_src.? },
-        // A chunk of a version this build does not read, with no tail to
-        // fall back on, is rule 3 and not rule 1: the payload is still
-        // in the file, as the opaque region the writer re-emits. One
-        // whose framing does not hold is rule 4, for the same reason —
-        // the file carried a residue, and saying "no residue found" over
-        // a `residue_corrupt` would be two surfaces disagreeing.
         .none => if (newer) |v|
             .{ .newer = v.version() }
         else if (carrier.count(.residue_corrupt) > 0)
@@ -346,35 +390,6 @@ fn dumpIt(
         else
             .none,
     };
-
-    var rec = try reconcile.reconcile(gpa, schema, .{
-        .tier = .{ .it = &read.module },
-        .text = tier,
-        .bytes = bytes,
-        .name = name,
-    }, found, .{ .cues = opts.cues, .anchor_id = opts.anchor_id });
-    errdefer rec.deinit();
-
-    // The restored lanes' cells and the conductor's `Txx`, out of the
-    // module — and the tier printed again without them. A pattern that
-    // lost a cell is printed as rows even under `--patterns=bin`, since
-    // the file's own bytes no longer describe it. The printer's own
-    // diagnostics were collected on the first print and are not asked
-    // for again: fewer cells cannot add one.
-    const consumed = try reconcile.consumeIt(rec.arena.allocator(), &read.module, &rec);
-    if (consumed.any()) {
-        gpa.free(tier);
-        tier = try bridge_it.moduleToForms(gpa, &read.module, .{
-            .qualify = opts.qualify,
-            .patterns_bin = opts.patterns_bin,
-            .preserve_foreign = opts.preserve_foreign,
-            .preserve_history = opts.preserve_history,
-            .source_map = &read.source_map,
-            .rows_for = consumed.patterns,
-        });
-    }
-
-    return assemble(gpa, schema, bytes, name, diags, &rec, tier, consumed);
 }
 
 /// Splice and load — the half both kinds share once the tier is final.
@@ -910,6 +925,21 @@ fn keepRecord(arena: Allocator, src: records.LaneRecord, hash: [32]u8) Error!rec
     };
 }
 
+/// One kind's records, hashed over the FILE (see `build`): the lanes,
+/// into the caller's arena, and the conductor's when the render placed
+/// one.
+const Records = struct {
+    lanes: []const records.LaneRecord,
+    conductor: ?records.ConductorRecord,
+};
+
+/// The conductor record as its carrier body, or null when there is
+/// none.
+fn conductorBody(conductor: ?records.ConductorRecord) ?[32]u8 {
+    const c = conductor orelse return null;
+    return records.encodeConductor(c);
+}
+
 fn buildSmf(
     gpa: Allocator,
     arena: Allocator,
@@ -919,16 +949,7 @@ fn buildSmf(
     opts: BuildOptions,
     diags: *Diag.List,
 ) Error!Pieces {
-    // The anchor's own `Sequence`, when the document carries one: the
-    // lanes render INTO it and its tracks come out unchanged.
-    const base: ?*const smf.Sequence = blk: {
-        for (doc.midi) |*tier| {
-            const anchor = doc.anchorById(tier.anchor) orelse continue;
-            if (anchor.kind == .smf) break :blk &tier.sequence;
-        }
-        break :blk null;
-    };
-
+    const base = smfBase(doc);
     try missingTier(diags, doc, .smf, base != null);
 
     var rendered = try render_smf.renderSmf(gpa, doc, derived, base, .{
@@ -951,29 +972,7 @@ fn buildSmf(
         .ppq = if (base != null) opts.ppq else null,
         .round = opts.round,
     };
-
-    const lanes = try arena.alloc(records.LaneRecord, rendered.lanes.len);
-    var conductor: ?records.ConductorRecord = null;
-    {
-        var pass1 = try smf.write(gpa, &rendered.seq, wopts);
-        defer pass1.deinit();
-        var back = try smf.read(gpa, pass1.bytes);
-        defer back.deinit();
-
-        const ppq = back.sequence.division.pulsesPerQuarter();
-        for (rendered.lanes, lanes) |src, *dst| {
-            const address = src.address.smf;
-            dst.* = try keepRecord(arena, src, records.hashSmfLane(
-                &back.sequence,
-                address.track - 1,
-                address.ch.first(),
-                ppq,
-            ));
-        }
-        if (rendered.conductor != null) {
-            conductor = .{ .hash = records.hashSmfConductor(&back.sequence) };
-        }
-    }
+    const recs = try smfRecords(gpa, arena, &rendered, wopts);
 
     if (!try wantsResidue(diags, opts, if (base) |s| newerSmf(s) else null)) {
         var plain = try smf.write(gpa, &rendered.seq, wopts);
@@ -981,28 +980,82 @@ fn buildSmf(
         try copyDiags(diags, &plain.diags);
         return .{
             .bytes = try gpa.dupe(u8, plain.bytes),
-            .lanes = lanes,
-            .conductor = conductor,
+            .lanes = recs.lanes,
+            .conductor = recs.conductor,
             .essence_bytes = 0,
         };
     }
+    return smfWithResidue(gpa, doc, doc_source, &rendered.seq, wopts, recs, diags);
+}
 
+/// The anchor's own `Sequence`, when the document carries one: the
+/// lanes render INTO it and its tracks come out unchanged.
+fn smfBase(doc: *const Doc.Doc) ?*const smf.Sequence {
+    for (doc.midi) |*tier| {
+        const anchor = doc.anchorById(tier.anchor) orelse continue;
+        if (anchor.kind == .smf) return &tier.sequence;
+    }
+    return null;
+}
+
+/// Write `rendered` once WITHOUT its residue, read that back, and hash
+/// every lane's address and the conductor exactly as a `dump` of the
+/// finished bytes will (`build`'s header says why the file, not the
+/// render, is what is hashed).
+fn smfRecords(
+    gpa: Allocator,
+    arena: Allocator,
+    rendered: *const render_smf.Result,
+    wopts: smf.Options,
+) Error!Records {
+    const lanes = try arena.alloc(records.LaneRecord, rendered.lanes.len);
+    var pass1 = try smf.write(gpa, &rendered.seq, wopts);
+    defer pass1.deinit();
+    var back = try smf.read(gpa, pass1.bytes);
+    defer back.deinit();
+
+    const ppq = back.sequence.division.pulsesPerQuarter();
+    for (rendered.lanes, lanes) |src, *dst| {
+        const address = src.address.smf;
+        dst.* = try keepRecord(arena, src, records.hashSmfLane(
+            &back.sequence,
+            address.track - 1,
+            address.ch.first(),
+            ppq,
+        ));
+    }
+    return .{
+        .lanes = lanes,
+        .conductor = if (rendered.conductor != null)
+            .{ .hash = records.hashSmfConductor(&back.sequence) }
+        else
+            null,
+    };
+}
+
+/// The `.mid` with tempura's own residue in it: the essence packed from
+/// the document and the records as carrier bodies, attached to the
+/// rendered sequence and written.
+fn smfWithResidue(
+    gpa: Allocator,
+    doc: *const Doc.Doc,
+    doc_source: [:0]const u8,
+    seq: *const smf.Sequence,
+    wopts: smf.Options,
+    recs: Records,
+    diags: *Diag.List,
+) Error!Pieces {
     var packed_tier = try residue_essence.pack(gpa, doc, doc_source);
     defer packed_tier.deinit(gpa);
     try copyDiags(diags, &packed_tier.diags);
 
-    const bodies = try encodeLanes(gpa, lanes);
+    const bodies = try encodeLanes(gpa, recs.lanes);
     defer freeBodies(gpa, bodies);
+    const cond_body = conductorBody(recs.conductor);
 
-    var cond_body: [32]u8 = undefined;
-    const cond_slice: ?[]const u8 = if (conductor) |c| blk: {
-        cond_body = records.encodeConductor(c);
-        break :blk &cond_body;
-    } else null;
-
-    var carried = try residue_smf.attach(gpa, &rendered.seq, .{
+    var carried = try residue_smf.attach(gpa, seq, .{
         .essence = packed_tier.bytes,
-        .conductor = cond_slice,
+        .conductor = if (cond_body) |*b| b else null,
         .lanes = bodies,
     }, .{});
     defer carried.deinit();
@@ -1014,8 +1067,8 @@ fn buildSmf(
 
     return .{
         .bytes = try gpa.dupe(u8, file.bytes),
-        .lanes = lanes,
-        .conductor = conductor,
+        .lanes = recs.lanes,
+        .conductor = recs.conductor,
         .essence_bytes = packed_tier.bytes.len,
     };
 }
@@ -1029,14 +1082,7 @@ fn buildIt(
     opts: BuildOptions,
     diags: *Diag.List,
 ) Error!Pieces {
-    const base: ?*const itf.Module = blk: {
-        for (doc.it) |*tier| {
-            const anchor = doc.anchorById(tier.anchor) orelse continue;
-            if (anchor.kind == .it) break :blk &tier.module;
-        }
-        break :blk null;
-    };
-
+    const base = itBase(doc);
     try missingTier(diags, doc, .it, base != null);
 
     var rendered = try render_it.renderIt(gpa, doc, derived, base, .{
@@ -1061,33 +1107,7 @@ fn buildIt(
         // `dump --preserve-history` put it there.
         .preserve_history = rendered.module.edit_history != null,
     };
-
-    const lanes = try arena.alloc(records.LaneRecord, rendered.lanes.len);
-    var conductor: ?records.ConductorRecord = null;
-    {
-        var pass1 = try itf.write.write(gpa, &rendered.module, source, wopts);
-        defer pass1.deinit();
-        var back = try itf.read.read(gpa, pass1.bytes);
-        defer back.deinit();
-
-        var rows = try walk.derive(gpa, &back.module, .{});
-        defer rows.deinit();
-        var scratch: std.heap.ArenaAllocator = .init(gpa);
-        defer scratch.deinit();
-        const pats = try reconcile.playedPatterns(scratch.allocator(), &rows);
-
-        for (rendered.lanes, lanes) |src, *dst| {
-            dst.* = try keepRecord(arena, src, records.hashItLane(
-                &back.module,
-                &rows,
-                &[_]u8{src.address.it.channel},
-                pats,
-            ));
-        }
-        if (rendered.conductor != null) {
-            conductor = .{ .hash = records.hashItConductor(&back.module) };
-        }
-    }
+    const recs = try itRecords(gpa, arena, &rendered, source, wopts);
 
     // What the ANCHOR's own bytes still carry. The reader keeps a `TMPU`
     // chunk OUT of `Module.foreign` (it is tempura's, not another
@@ -1113,28 +1133,99 @@ fn buildIt(
         try copyDiags(diags, &plain.diags);
         return .{
             .bytes = try gpa.dupe(u8, plain.bytes),
-            .lanes = lanes,
-            .conductor = conductor,
+            .lanes = recs.lanes,
+            .conductor = recs.conductor,
             .essence_bytes = 0,
         };
     }
+    return itWithResidue(
+        gpa,
+        doc,
+        doc_source,
+        derived,
+        &rendered.module,
+        source,
+        wopts,
+        human,
+        recs,
+        diags,
+    );
+}
 
+/// The anchor's own `Module`, when the document carries one.
+fn itBase(doc: *const Doc.Doc) ?*const itf.Module {
+    for (doc.it) |*tier| {
+        const anchor = doc.anchorById(tier.anchor) orelse continue;
+        if (anchor.kind == .it) return &tier.module;
+    }
+    return null;
+}
+
+/// `smfRecords`' twin: write `rendered` once without its residue, read
+/// it back, walk it, and hash every lane's channel and the conductor
+/// exactly as a `dump` of the finished bytes will.
+fn itRecords(
+    gpa: Allocator,
+    arena: Allocator,
+    rendered: *const render_it.Result,
+    source: ?[]const u8,
+    wopts: itf.write.Options,
+) Error!Records {
+    const lanes = try arena.alloc(records.LaneRecord, rendered.lanes.len);
+    var pass1 = try itf.write.write(gpa, &rendered.module, source, wopts);
+    defer pass1.deinit();
+    var back = try itf.read.read(gpa, pass1.bytes);
+    defer back.deinit();
+
+    var rows = try walk.derive(gpa, &back.module, .{});
+    defer rows.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const pats = try reconcile.playedPatterns(scratch.allocator(), &rows);
+
+    for (rendered.lanes, lanes) |src, *dst| {
+        dst.* = try keepRecord(arena, src, records.hashItLane(
+            &back.module,
+            &rows,
+            &[_]u8{src.address.it.channel},
+            pats,
+        ));
+    }
+    return .{
+        .lanes = lanes,
+        .conductor = if (rendered.conductor != null)
+            .{ .hash = records.hashItConductor(&back.module) }
+        else
+            null,
+    };
+}
+
+/// The `.it` with tempura's own residue in it: the essence and the
+/// records as the `TMPU` chunk, the document's tail after the human
+/// half of the message, and the module written with both.
+fn itWithResidue(
+    gpa: Allocator,
+    doc: *const Doc.Doc,
+    doc_source: [:0]const u8,
+    derived: *const time_derive.Derived,
+    module: *const itf.Module,
+    source: ?[]const u8,
+    wopts: itf.write.Options,
+    human: []const u8,
+    recs: Records,
+    diags: *Diag.List,
+) Error!Pieces {
     var packed_tier = try residue_essence.pack(gpa, doc, doc_source);
     defer packed_tier.deinit(gpa);
     try copyDiags(diags, &packed_tier.diags);
 
-    const bodies = try encodeLanes(gpa, lanes);
+    const bodies = try encodeLanes(gpa, recs.lanes);
     defer freeBodies(gpa, bodies);
-
-    var cond_body: [32]u8 = undefined;
-    const cond_slice: ?[]const u8 = if (conductor) |c| blk: {
-        cond_body = records.encodeConductor(c);
-        break :blk &cond_body;
-    } else null;
+    const cond_body = conductorBody(recs.conductor);
 
     const payload = try residue_it.chunk(gpa, .{
         .essence = packed_tier.bytes,
-        .conductor = cond_slice,
+        .conductor = if (cond_body) |*b| b else null,
         .lanes = bodies,
     });
     defer gpa.free(payload);
@@ -1145,7 +1236,7 @@ fn buildIt(
     const whole = try residue_it.appendTail(gpa, human, tail.bytes);
     defer gpa.free(whole);
 
-    var file = try itf.write.write(gpa, &rendered.module, source, .{
+    var file = try itf.write.write(gpa, module, source, .{
         .loose = wopts.loose,
         .preserve_history = wopts.preserve_history,
         .tmpu = payload,
@@ -1156,8 +1247,8 @@ fn buildIt(
 
     return .{
         .bytes = try gpa.dupe(u8, file.bytes),
-        .lanes = lanes,
-        .conductor = conductor,
+        .lanes = recs.lanes,
+        .conductor = recs.conductor,
         .essence_bytes = packed_tier.bytes.len,
     };
 }
