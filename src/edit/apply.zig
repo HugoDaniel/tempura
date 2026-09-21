@@ -85,15 +85,22 @@ pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Er
     }
     var values: std.ArrayList(std.json.Value) = .empty;
     defer values.deinit(gpa);
+    // Both lists are sized before the first parse, so a parsed action is
+    // on `parsed` — and freed by its `defer` — the moment it exists: an
+    // append that ran out of memory after a parse used to drop one.
+    try parsed.ensureTotalCapacity(gpa, ordered.len);
+    try values.ensureTotalCapacity(gpa, ordered.len);
 
     for (ordered) |action| {
-        const one = std.json.parseFromSlice(std.json.Value, gpa, action.json, .{}) catch |e| switch (e) {
-            error.OutOfMemory => return error.OutOfMemory,
-            // Only this module writes an action, and it writes JSON.
-            else => unreachable,
-        };
-        try parsed.append(gpa, one);
-        try values.append(gpa, one.value);
+        const one = std.json.parseFromSlice(std.json.Value, gpa, action.json, .{}) catch |e|
+            switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // Every action is JSON: the builder writes it, and
+                // `fromActionsJson` keeps only text this same parse took.
+                else => unreachable,
+            };
+        parsed.appendAssumeCapacity(one);
+        values.appendAssumeCapacity(one.value);
     }
 
     const edited = sjon.Edit.applyEdits(gpa, text, values.items, .{ .layout = .preserve }) catch |e| switch (e) {
