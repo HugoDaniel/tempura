@@ -419,7 +419,7 @@ fn sameEvents(a: *const Sequence.Sequence, b: *const Sequence.Sequence) bool {
 fn laneBody(gpa: Allocator, name: []const u8, track: u16) ![]u8 {
     return records.encodeLane(gpa, .{
         .lane = name,
-        .address = .{ .smf = .{ .track = track, .ch = 3, .key = null, .curve = null } },
+        .address = .{ .smf = .{ .track = track, .ch = .single(3), .key = null, .curve = null } },
         .hash = @splat(0x11),
     });
 }

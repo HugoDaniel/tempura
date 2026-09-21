@@ -197,6 +197,16 @@
     :underlying union
     :union (union-shape :alternatives [cc-number cc-pair]))
 
+  (value-kind :name midi-channel-set
+    :description "Several MIDI channels of one track as a vector, [1 2] — each 1..16, and no channel twice (a repeat, or an empty vector, is address_invalid: the manifest bounds the elements and the host checks the set)."
+    :underlying vector
+    :vector (vector-shape :min-len 1 :max-len 16 :element midi-channel))
+
+  (value-kind :name midi-channels
+    :description "Which MIDI channels of one track a bound lane reads: one midi-channel, or a midi-channel-set of several."
+    :underlying union
+    :union (union-shape :alternatives [midi-channel midi-channel-set]))
+
   (value-kind :name curve-column
     :description "Which Impulse Tracker column a bound curve lane reads."
     :underlying symbol
@@ -429,8 +439,8 @@
       :description "The anchor this lane reads its content from. A lane with :from is BOUND: its content lives in the file, and children here are bound_lane_has_content. Only a notes or curve lane may bind — a query or formula lane that names one is bound_kind_invalid, which is a relation between :kind and :from and so cannot be a variant gate.")
     (key :name track :type track-index :optional true
       :description "Which track of a bound SMF anchor, 1-based in file order.")
-    (key :name ch :type midi-channel :optional true
-      :description "Which MIDI channel of a bound SMF anchor, 1..16.")
+    (key :name ch :type midi-channels :optional true
+      :description "Which MIDI channel of a bound SMF anchor, 1..16 — or which channels, as a vector: `:ch [1 2]` reads both channels of the one :track. The vector is what a dump writes when a native lane whose notes named several channels comes back bound (residue rule 2: the lane binds at its track and at every channel its records name). On a native lane a single channel is the default its notes take, and a vector is address_invalid.")
     (key :name channel :type it-channel :optional true
       :description "Which channel of a bound Impulse Tracker anchor, 1..64.")
 

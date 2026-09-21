@@ -305,8 +305,23 @@ const Printer = struct {
             .smf => |s| {
                 try self.raw(" :track ");
                 try self.int(s.track);
+                // One channel is `:ch 2`; several are `:ch [1 2]`, the
+                // spelling a dump writes for a lane that was rendered on
+                // more than one (`residue/reconcile.zig`, `bindLane`).
                 try self.raw(" :ch ");
-                try self.int(@as(u8, s.ch) + 1);
+                if (s.ch.count() == 1) {
+                    try self.int(@as(u8, s.ch.first()) + 1);
+                } else {
+                    try self.raw("[");
+                    var it = s.ch.iterator();
+                    var sep = false;
+                    while (it.next()) |c| {
+                        if (sep) try self.raw(" ");
+                        sep = true;
+                        try self.int(@as(u8, c) + 1);
+                    }
+                    try self.raw("]");
+                }
                 if (s.key) |k| {
                     try self.raw(" :key ");
                     try self.int(k);
@@ -975,6 +990,53 @@ test "toSjon: an anchored document with a (midi/smf …) dump round-trips too" {
         \\(lane :name kick :kind notes :from song :track 2 :ch 10)
         \\
     );
+}
+
+test "toSjon: a channel SET prints as `:ch [1 2]` and reads back as the same set" {
+    // What a dump writes for a lane rendered on two channels and bound
+    // back (`residue/reconcile.zig`, `bindLane`): `:ch [1 2]` loads,
+    // prints as itself, loads again as the same set — and a single
+    // channel written as a one-element vector prints as the number.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    try expectRoundTrip(gpa, &schema,
+        \\(timeline :conductor song)
+        \\
+        \\(anchor :id song :kind smf :file "drums.mid")
+        \\(midi/smf :format 1 :division 480)
+        \\(midi/mtrk
+        \\  (sequence-name :at 0 :text "conductor")
+        \\  (set-tempo :at 0 :us 500000)
+        \\  (end-of-track :at 1920))
+        \\(midi/mtrk
+        \\  (note-on :at 0 :ch 1 :key 36 :vel 110)
+        \\  (note-off :at 120 :ch 1 :key 36 :vel 0)
+        \\  (note-on :at 240 :ch 2 :key 38 :vel 90)
+        \\  (note-off :at 360 :ch 2 :key 38 :vel 0)
+        \\  (end-of-track :at 1920))
+        \\
+        \\(lane :name kit :kind notes :from song :track 2 :ch [1 2])
+        \\(lane :name snare :kind notes :from song :track 2 :ch [2] :key 38)
+        \\
+    );
+
+    var fx = try loaded(gpa, &schema,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind smf :file "drums.mid")
+        \\(midi/smf :format 1 :division 480)
+        \\(midi/mtrk
+        \\  (set-tempo :at 0 :us 500000)
+        \\  (end-of-track :at 0))
+        \\(lane :name kit :kind notes :from song :track 1 :ch [2 1 16])
+        \\(lane :name snare :kind notes :from song :track 1 :ch [2] :key 38)
+        \\
+    );
+    defer fx.deinit(gpa);
+    // Ascending, whatever order the author wrote; a one-element set is a
+    // number.
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":track 1 :ch [1 2 16])") != null);
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":track 1 :ch 2 :key 38)") != null);
 }
 
 test "toSjon: the skeleton of an anchored document names the lanes rule 1 owes it" {

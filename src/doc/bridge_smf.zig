@@ -715,6 +715,13 @@ pub const PairedNote = struct {
     /// A retrigger and an end-of-track end one WITHOUT a release, and
     /// say so with `null` rather than inventing a zero.
     off_vel: ?u7,
+    /// The MIDI channel the note sounded on, on the wire. A binding may
+    /// name several channels of one track (`Doc.Channels`), and an onset
+    /// carries its own so a render, a score and a materialised `(note
+    /// :ch …)` put it back where the file had it. Defaulted because IT
+    /// has no such thing: `bridge_it.zig` pairs by tracker channel,
+    /// which is the address and not the note's.
+    ch: u4 = 0,
 };
 
 /// What `pairNotes` returns.
@@ -736,18 +743,23 @@ pub const Paired = struct {
 /// for bound lanes").
 ///
 /// `track` is 1-BASED file order, the way `(lane :track …)` writes it;
-/// `ch` is the WIRE channel (0..15), the way `Doc.Address` stores it;
-/// `key` narrows to one key — a drum lane — and `null` takes every key.
+/// `chs` is the set of WIRE channels (0..15) the lane reads, the way
+/// `Doc.Address` stores it — one for a hand-written `:ch 2`, several for
+/// a `:ch [1 2]` a dump wrote; `key` narrows to one key — a drum lane —
+/// and `null` takes every key.
 ///
 /// The rules, each one plan 05's: a `note-on` of velocity 0 is a
 /// `note-off`; a second `note-on` on a held key ends the first at that
 /// tick and the whole pairing says `note_retrigger` ONCE; an unclosed
-/// note ends at the track's end-of-track. The result is in ONSET order.
+/// note ends at the track's end-of-track. A key is held PER CHANNEL:
+/// two channels of the set sounding the same key are two notes, not a
+/// retrigger, exactly as a synth hears them. The result is in ONSET
+/// order, the channels interleaved as the track interleaves them.
 pub fn pairNotes(
     gpa: Allocator,
     seq: *const smf.Sequence,
     track: u16,
-    ch: u4,
+    chs: Doc.Channels,
     key: ?u7,
 ) Error!Paired {
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -759,8 +771,11 @@ pub fn pairNotes(
     const a = arena.allocator();
     const events = trackEvents(seq, track);
 
-    // Which entry of `notes` is still sounding on each key, by key.
-    var open: [128]?usize = @splat(null);
+    // Which entry of `notes` is still sounding on each (channel, key).
+    // On the arena rather than the stack: sixteen channels of 128 slots
+    // is more than a wasm frame should carry.
+    const open = try a.alloc(?usize, 16 * 128);
+    @memset(open, null);
     var orphan_offs: u32 = 0;
     var retriggered = false;
     var track_end: i64 = 0;
@@ -772,7 +787,7 @@ pub fn pairNotes(
             else => continue,
         }
         const n = e.payload.note;
-        if (n.ch != @as(u8, ch)) continue;
+        if (!onChannels(chs, n.ch)) continue;
         if (key) |want| {
             if (n.key != @as(u8, want)) continue;
         }
@@ -782,7 +797,7 @@ pub fn pairNotes(
         // reader stored it as read and the pairing is what interprets it
         // (plan 05, "Events").
         const is_on = e.kind == .note_on and n.vel > 0;
-        const slot = &open[n.key];
+        const slot = &open[@as(usize, n.ch) * 128 + n.key];
 
         if (is_on) {
             if (slot.*) |held| {
@@ -807,6 +822,7 @@ pub fn pairNotes(
                 .key = @intCast(n.key),
                 .vel = @intCast(@min(n.vel, 127)),
                 .off_vel = null,
+                .ch = @intCast(n.ch),
             });
         } else if (slot.*) |held| {
             notes.items[held].dur = e.at - notes.items[held].at;
@@ -857,12 +873,14 @@ pub const Step = struct {
 /// `.cc14` pairs an MSB with an LSB by MIDI's own rule: an MSB message
 /// resets the LSB to zero and an LSB message refines the MSB in force,
 /// so a controller sent MSB-only reads as its coarse value and never as
-/// a stale fine one.
+/// a stale fine one. `chs` is the address's channel set, as `pairNotes`
+/// takes it; the MSB in force is kept per channel, since a coarse
+/// message on one channel says nothing about another's.
 pub fn curveSteps(
     gpa: Allocator,
     seq: *const smf.Sequence,
     track: u16,
-    ch: u4,
+    chs: Doc.Channels,
     address: Doc.SmfCurve,
 ) Error![]Step {
     var steps: std.ArrayList(Step) = .empty;
@@ -871,7 +889,7 @@ pub fn curveSteps(
     // `:velocity` is the paired notes' velocities at their onsets, not an
     // event stream of its own (plan 05, "Curve lanes").
     if (address == .velocity) {
-        var paired = try pairNotes(gpa, seq, track, ch, null);
+        var paired = try pairNotes(gpa, seq, track, chs, null);
         defer paired.deinit();
         for (paired.notes) |n| try steps.append(gpa, .{
             .at = n.at,
@@ -880,32 +898,33 @@ pub fn curveSteps(
         return steps.toOwnedSlice(gpa);
     }
 
-    var msb: u16 = 0;
+    var msb: [16]u16 = @splat(0);
     for (trackEvents(seq, track)) |e| switch (address) {
         .cc => |num| {
             if (e.kind != .control_change) continue;
             const c = e.payload.control;
-            if (c.ch != @as(u8, ch) or c.num != @as(u8, num)) continue;
+            if (!onChannels(chs, c.ch) or c.num != @as(u8, num)) continue;
             try steps.append(gpa, .{ .at = e.at, .value = norm7(c.val) });
         },
         .cc14 => |pair| {
             if (e.kind != .control_change) continue;
             const c = e.payload.control;
-            if (c.ch != @as(u8, ch)) continue;
+            if (!onChannels(chs, c.ch)) continue;
+            const coarse = &msb[c.ch & 0x0F];
             if (c.num == @as(u8, pair[0])) {
                 // An MSB message resets the fine half to zero, which is
                 // what makes an MSB-only controller read as its coarse
                 // value and never as a stale fine one (midi 04).
-                msb = @as(u16, c.val) << 7;
-                try steps.append(gpa, .{ .at = e.at, .value = norm14(msb) });
+                coarse.* = @as(u16, c.val) << 7;
+                try steps.append(gpa, .{ .at = e.at, .value = norm14(coarse.*) });
             } else if (c.num == @as(u8, pair[1])) {
-                try steps.append(gpa, .{ .at = e.at, .value = norm14(msb | c.val) });
+                try steps.append(gpa, .{ .at = e.at, .value = norm14(coarse.* | c.val) });
             }
         },
         .bend => {
             if (e.kind != .pitch_bend) continue;
             const b = e.payload.bend;
-            if (b.ch != @as(u8, ch)) continue;
+            if (!onChannels(chs, b.ch)) continue;
             // Centre 8192 is zero; the two halves are 8192 and 8191
             // wide, and the value is clamped so the top end reads 1.
             const centred = @as(f32, @floatFromInt(@as(i32, b.value) - 8192));
@@ -915,12 +934,18 @@ pub fn curveSteps(
         .pressure => {
             if (e.kind != .channel_pressure) continue;
             const p = e.payload.pressure;
-            if (p.ch != @as(u8, ch)) continue;
+            if (!onChannels(chs, p.ch)) continue;
             try steps.append(gpa, .{ .at = e.at, .value = norm7(p.val) });
         },
         .velocity => unreachable,
     };
     return steps.toOwnedSlice(gpa);
+}
+
+/// Whether an event's channel byte, as the reader stored it, is one of
+/// the address's. A byte past 15 is no channel at all.
+fn onChannels(chs: Doc.Channels, ch: u8) bool {
+    return ch <= 15 and chs.has(@intCast(ch));
 }
 
 fn norm7(v: u8) f32 {
@@ -1404,16 +1429,16 @@ test "bridge_smf.pairNotes: retriggers, orphan offs and the unclosed note" {
     var seq = try boundFixture(gpa);
     defer seq.deinit();
 
-    var paired = try pairNotes(gpa, &seq, 2, 9, null);
+    var paired = try pairNotes(gpa, &seq, 2, .single(9), null);
     defer paired.deinit();
 
     try testing.expectEqualSlices(PairedNote, &[_]PairedNote{
-        .{ .at = 0, .dur = 120, .key = 36, .vel = 110, .off_vel = 64 },
+        .{ .at = 0, .dur = 120, .key = 36, .vel = 110, .off_vel = 64, .ch = 9 },
         // Ended by the retrigger at 300: no release velocity was sent.
-        .{ .at = 240, .dur = 60, .key = 38, .vel = 90, .off_vel = null },
-        .{ .at = 300, .dur = 180, .key = 38, .vel = 100, .off_vel = 0 },
+        .{ .at = 240, .dur = 60, .key = 38, .vel = 90, .off_vel = null, .ch = 9 },
+        .{ .at = 300, .dur = 180, .key = 38, .vel = 100, .off_vel = 0, .ch = 9 },
         // Never closed: it ends at the track's end-of-track, tick 960.
-        .{ .at = 700, .dur = 260, .key = 41, .vel = 70, .off_vel = null },
+        .{ .at = 700, .dur = 260, .key = 41, .vel = 70, .off_vel = null, .ch = 9 },
     }, paired.notes);
 
     try testing.expectEqual(@as(u32, 1), paired.orphan_offs);
@@ -1427,7 +1452,7 @@ test "bridge_smf.pairNotes: :key narrows the address to one drum" {
     var seq = try boundFixture(gpa);
     defer seq.deinit();
 
-    var paired = try pairNotes(gpa, &seq, 2, 9, 38);
+    var paired = try pairNotes(gpa, &seq, 2, .single(9), 38);
     defer paired.deinit();
 
     try testing.expectEqual(@as(usize, 2), paired.notes.len);
@@ -1436,16 +1461,59 @@ test "bridge_smf.pairNotes: :key narrows the address to one drum" {
     try testing.expectEqual(@as(u32, 0), paired.orphan_offs);
 }
 
+test "bridge_smf.pairNotes: a channel SET reads every channel in it, each onset with its own" {
+    // A dump binds a lane that was rendered on several channels at all
+    // of them (`Doc.Channels`), and the notes come back interleaved as
+    // the track holds them, each saying which channel it sounded on.
+    const gpa = testing.allocator;
+    var seq = try boundFixture(gpa);
+    defer seq.deinit();
+
+    var both = try pairNotes(gpa, &seq, 2, Doc.Channels.single(9).with(0), null);
+    defer both.deinit();
+    try testing.expectEqual(@as(usize, 5), both.notes.len);
+    // Channel 1's note at 700 sits BETWEEN channel 10's, in track order,
+    // and is not a retrigger of anything: the key is held per channel.
+    try testing.expectEqual(@as(i64, 700), both.notes[3].at);
+    try testing.expectEqual(@as(u4, 9), both.notes[3].ch);
+    try testing.expectEqual(@as(u7, 41), both.notes[3].key);
+    try testing.expectEqual(@as(i64, 700), both.notes[4].at);
+    try testing.expectEqual(@as(u4, 0), both.notes[4].ch);
+    try testing.expectEqual(@as(u7, 60), both.notes[4].key);
+    try testing.expectEqual(@as(usize, 1), both.diags.count(.note_retrigger));
+
+    // The same key on two channels of the set is two notes, not one
+    // retriggered: a synth hears them apart, and so does this.
+    var b: smf.Builder = .init(gpa);
+    errdefer b.deinit();
+    const t = try b.addTrack();
+    try b.addEvent(t, 0, .note_on, .{ .note = .{ .ch = 0, .key = 60, .vel = 100 } });
+    try b.addEvent(t, 10, .note_on, .{ .note = .{ .ch = 1, .key = 60, .vel = 90 } });
+    try b.addEvent(t, 20, .note_off, .{ .note = .{ .ch = 0, .key = 60, .vel = 64 } });
+    try b.addEvent(t, 30, .note_off, .{ .note = .{ .ch = 1, .key = 60, .vel = 64 } });
+    try b.addEvent(t, 40, .end_of_track, .empty);
+    var two = try b.finish();
+    defer two.deinit();
+
+    var pair = try pairNotes(gpa, &two, 1, Doc.Channels.single(0).with(1), null);
+    defer pair.deinit();
+    try testing.expectEqualSlices(PairedNote, &[_]PairedNote{
+        .{ .at = 0, .dur = 20, .key = 60, .vel = 100, .off_vel = 64, .ch = 0 },
+        .{ .at = 10, .dur = 20, .key = 60, .vel = 90, .off_vel = 64, .ch = 1 },
+    }, pair.notes);
+    try testing.expectEqual(@as(usize, 0), pair.diags.count(.note_retrigger));
+}
+
 test "bridge_smf.pairNotes: a track out of range is empty, not a trap" {
     const gpa = testing.allocator;
     var seq = try boundFixture(gpa);
     defer seq.deinit();
 
-    var none = try pairNotes(gpa, &seq, 9, 9, null);
+    var none = try pairNotes(gpa, &seq, 9, .single(9), null);
     defer none.deinit();
     try testing.expectEqual(@as(usize, 0), none.notes.len);
 
-    var zero = try pairNotes(gpa, &seq, 0, 9, null);
+    var zero = try pairNotes(gpa, &seq, 0, .single(9), null);
     defer zero.deinit();
     try testing.expectEqual(@as(usize, 0), zero.notes.len);
 }
@@ -1455,7 +1523,7 @@ test "bridge_smf.curveSteps: cc, bend, pressure and velocity" {
     var seq = try boundFixture(gpa);
     defer seq.deinit();
 
-    const cc = try curveSteps(gpa, &seq, 2, 9, .{ .cc = 7 });
+    const cc = try curveSteps(gpa, &seq, 2, .single(9), .{ .cc = 7 });
     defer gpa.free(cc);
     try testing.expectEqual(@as(usize, 2), cc.len);
     try testing.expectEqual(@as(i64, 0), cc[0].at);
@@ -1464,7 +1532,7 @@ test "bridge_smf.curveSteps: cc, bend, pressure and velocity" {
     try testing.expectApproxEqAbs(@as(f32, 0), cc[1].value, 1e-6);
 
     // Velocity reads the PAIRED notes at their onsets.
-    const vel = try curveSteps(gpa, &seq, 2, 9, .velocity);
+    const vel = try curveSteps(gpa, &seq, 2, .single(9), .velocity);
     defer gpa.free(vel);
     try testing.expectEqual(@as(usize, 4), vel.len);
     try testing.expectApproxEqAbs(@as(f32, 110.0 / 127.0), vel[0].value, 1e-6);
@@ -1488,7 +1556,7 @@ test "bridge_smf.curveSteps: the 14-bit pair and the MSB-only rule" {
     };
     defer seq.deinit();
 
-    const steps = try curveSteps(gpa, &seq, 1, 0, .{ .cc14 = .{ 1, 33 } });
+    const steps = try curveSteps(gpa, &seq, 1, .single(0), .{ .cc14 = .{ 1, 33 } });
     defer gpa.free(steps);
     try testing.expectEqual(@as(usize, 3), steps.len);
     try testing.expectApproxEqAbs(@as(f32, 8192.0 / 16383.0), steps[0].value, 1e-6);
@@ -1513,14 +1581,14 @@ test "bridge_smf.curveSteps: bend is −1..1 around its centre" {
     };
     defer seq.deinit();
 
-    const bend = try curveSteps(gpa, &seq, 1, 3, .bend);
+    const bend = try curveSteps(gpa, &seq, 1, .single(3), .bend);
     defer gpa.free(bend);
     try testing.expectEqual(@as(usize, 3), bend.len);
     try testing.expectApproxEqAbs(@as(f32, 0), bend[0].value, 1e-6);
     try testing.expectApproxEqAbs(@as(f32, -1), bend[1].value, 1e-6);
     try testing.expectApproxEqAbs(@as(f32, 1), bend[2].value, 1e-3);
 
-    const press = try curveSteps(gpa, &seq, 1, 3, .pressure);
+    const press = try curveSteps(gpa, &seq, 1, .single(3), .pressure);
     defer gpa.free(press);
     try testing.expectEqual(@as(usize, 1), press.len);
     try testing.expectApproxEqAbs(@as(f32, 1), press[0].value, 1e-6);

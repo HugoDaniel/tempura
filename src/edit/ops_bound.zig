@@ -353,6 +353,10 @@ const Ctx = struct {
         key: u7,
         vel: u7,
         off_vel: ?u7,
+        /// The channel the pair sounded on, on the wire: an address may
+        /// name several (`Doc.Channels`), and a materialised `(note …)`
+        /// keeps each note's own.
+        ch: u4,
     };
 
     /// One controller value, as the single event that carries it.
@@ -389,25 +393,28 @@ const Ctx = struct {
     /// needs the two events' addresses, and a `PairedNote` has values
     /// alone. `bridge_smf.pairNotes` is the same walk over the same
     /// events, and a test here holds the two to the same answer.
-    fn pairs(self: *Ctx, evs: []const Ev, ch: u4, key: ?u7) Error![]const Pair {
+    fn pairs(self: *Ctx, evs: []const Ev, chs: doc.Channels, key: ?u7) Error![]const Pair {
         const arena = self.a();
         var out: std.ArrayList(Pair) = .empty;
-        var open: [128]?usize = @splat(null);
+        // A key is held per (channel, key), as the bridge holds it: an
+        // address may name several channels, and the same key on two of
+        // them is two notes.
+        const open = try arena.alloc(?usize, 16 * 128);
+        @memset(open, null);
         var track_end: i64 = 0;
 
         for (evs) |e| {
             track_end = @max(track_end, e.at);
             const is_on = std.mem.eql(u8, e.head, "note-on");
             if (!is_on and !std.mem.eql(u8, e.head, "note-off")) continue;
-            const on_ch = kvInt(self.tree, e.node, "ch") orelse continue;
-            if (on_ch - 1 != @as(i64, ch)) continue;
+            const on_ch = wireChannel(chs, kvInt(self.tree, e.node, "ch")) orelse continue;
             const on_key = kvInt(self.tree, e.node, "key") orelse continue;
             if (on_key < 0 or on_key > 127) continue;
             if (key) |want| {
                 if (on_key != @as(i64, want)) continue;
             }
             const vel = kvInt(self.tree, e.node, "vel") orelse 0;
-            const held = &open[@intCast(on_key)];
+            const held = &open[@as(usize, on_ch) * 128 + @as(usize, @intCast(on_key))];
 
             // A `note-on` of velocity 0 is a note off on the wire (plan
             // 05, "Events"): the reader stored it as read, and the
@@ -423,6 +430,7 @@ const Ctx = struct {
                     .key = @intCast(on_key),
                     .vel = @intCast(std.math.clamp(vel, 0, 127)),
                     .off_vel = null,
+                    .ch = on_ch,
                 });
             } else if (held.*) |i| {
                 out.items[i].end = e.at;
@@ -438,12 +446,11 @@ const Ctx = struct {
     }
 
     /// The single events a bound `curve` lane reads off one address.
-    fn steps(self: *Ctx, evs: []const Ev, ch: u4, curve: doc.SmfCurve) Error![]const Step {
+    fn steps(self: *Ctx, evs: []const Ev, chs: doc.Channels, curve: doc.SmfCurve) Error![]const Step {
         const arena = self.a();
         var out: std.ArrayList(Step) = .empty;
         for (evs) |e| {
-            const on_ch = kvInt(self.tree, e.node, "ch") orelse continue;
-            if (on_ch - 1 != @as(i64, ch)) continue;
+            _ = wireChannel(chs, kvInt(self.tree, e.node, "ch")) orelse continue;
             const val = kvInt(self.tree, e.node, "val") orelse continue;
             var v: f32 = 0;
             switch (curve) {
@@ -1294,8 +1301,10 @@ const Ctx = struct {
                 try form.integer("vel", pair.vel);
                 // The lane's `:ch` goes with its binding, and a note's
                 // own `:ch` defaults to channel 1: the key is written
-                // only when the file says something else.
-                if (addr.ch != 0) try form.integer("ch", @as(i64, addr.ch) + 1);
+                // only when the file says something else — and it is
+                // the NOTE's channel that is written, because an
+                // address may name several and each note keeps its own.
+                if (pair.ch != 0) try form.integer("ch", @as(i64, pair.ch) + 1);
                 if (pair.off_vel) |v| try form.integer("off-vel", v);
                 try self.b.insertPositional(lane_site, index, try form.done());
                 try gone.append(self.gpa, pair.on);
@@ -1443,6 +1452,17 @@ fn volumeOf(vel: u7) i64 {
 
 fn norm7(v: i64) f32 {
     return @as(f32, @floatFromInt(std.math.clamp(v, 0, 127))) / 127.0;
+}
+
+/// An event's `:ch` as the tier spells it (1-based) to the wire channel
+/// it names, when that channel is one of the address's; null for an
+/// event on another channel, or with no channel, or with one no MIDI
+/// file can carry.
+fn wireChannel(chs: doc.Channels, ch_1: ?i64) ?u4 {
+    const spelled = ch_1 orelse return null;
+    if (spelled < 1 or spelled > 16) return null;
+    const c: u4 = @intCast(spelled - 1);
+    return if (chs.has(c)) c else null;
 }
 
 fn ascending(_: void, x: u32, y: u32) bool {
@@ -1780,9 +1800,9 @@ test "bound SMF: the pairing here is the bridge's pairing" {
 
     var ctx: Ctx = .{ .gpa = gpa, .d = fx.doc_(), .tree = &fx.tree, .map = &map, .loc = &loc, .b = &b };
     const track = ctx.mtrkRoot("song", 1).?;
-    const mine = try ctx.pairs(try ctx.events(track), 0, null);
+    const mine = try ctx.pairs(try ctx.events(track), .single(0), null);
 
-    var theirs = try doc.bridge_smf.pairNotes(gpa, &fx.doc_().midi[0].sequence, 1, 0, null);
+    var theirs = try doc.bridge_smf.pairNotes(gpa, &fx.doc_().midi[0].sequence, 1, .single(0), null);
     defer theirs.deinit();
 
     try testing.expectEqual(theirs.notes.len, mine.len);
@@ -1792,6 +1812,7 @@ test "bound SMF: the pairing here is the bridge's pairing" {
         try testing.expectEqual(t.key, m.key);
         try testing.expectEqual(t.vel, m.vel);
         try testing.expectEqual(t.off_vel, m.off_vel);
+        try testing.expectEqual(t.ch, m.ch);
     }
 }
 

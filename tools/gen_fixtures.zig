@@ -100,6 +100,7 @@ const cases = [_]Case{
     .{ .name = "residue-newer-version", .file = "song.it", .build = residueNewerVersion },
     .{ .name = "residue-corrupt", .file = "song.mid", .build = residueCorrupt },
     .{ .name = "residue-stale-lane", .file = "song.mid", .build = residueStaleLane },
+    .{ .name = "residue-stale-lane-partial", .file = "song.mid", .build = residueStaleLanePartial },
     .{ .name = "residue-stale-conductor", .file = "song.mid", .build = residueStaleConductor },
     .{ .name = "residue-tail-only", .file = "song.it", .build = residueTailOnly },
     .{ .name = "edit-bound-smf-pair", .file = "x.mid", .build = boundSmfAnchor },
@@ -933,10 +934,10 @@ const Ready = struct {
     loaded: tempura.doc.Result,
     derived: tempura.time.derive.Derived,
 
-    fn init(gpa: Allocator) !Ready {
+    fn init(gpa: Allocator, source: [:0]const u8) !Ready {
         var schema = try tempura.Schema.load(gpa);
         errdefer schema.deinit();
-        var loaded = try tempura.doc.fromSource(gpa, &schema, residue_doc, null);
+        var loaded = try tempura.doc.fromSource(gpa, &schema, source, null);
         errdefer loaded.deinit();
         if (loaded.diags.hasErrors()) return Error.FixtureWriterRefused;
         const derived = try tempura.time.derive.derive(gpa, &loaded.doc);
@@ -950,16 +951,38 @@ const Ready = struct {
     }
 };
 
+/// The two-channel cousin of `residue_doc`: one lane whose notes name
+/// two MIDI channels, so the `.mid` carries ONE track for it and TWO
+/// lane records — one per channel, since a record's hash is over a
+/// `(track, ch)` pair (`export/render_smf.zig`).
+const residue_two_channel_doc: [:0]const u8 =
+    \\; residue — a lane rendered on two channels
+    \\(timeline :title "residue" :length 1bar)
+    \\
+    \\(tempo-point :at 0bar :qpm 120)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(lane :name kit :kind notes :target kit
+    \\  (note :at 0bar :dur 1q :key 36 :vel 100 :ch 1)
+    \\  (note :at 2q :dur 1q :key 38 :vel 80 :ch 2))
+    \\
+;
+
 /// `residue_doc` built into `kind`, residue attached — plan 04's rule 2,
 /// with every hash agreeing because nothing has touched the file since.
 fn residueExact(gpa: Allocator, kind: tempura.doc.AnchorKind) ![]u8 {
-    var r = try Ready.init(gpa);
+    return residueExactOf(gpa, residue_doc, kind);
+}
+
+/// `source` built into `kind` exactly as `tempura build` would build it.
+fn residueExactOf(gpa: Allocator, source: [:0]const u8, kind: tempura.doc.AnchorKind) ![]u8 {
+    var r = try Ready.init(gpa, source);
     defer r.deinit();
 
     var built = try tempura.doc.pipeline.build(
         gpa,
         &r.schema,
-        residue_doc,
+        source,
         &r.loaded.doc,
         &r.derived,
         kind,
@@ -1065,8 +1088,18 @@ fn residueCorrupt(gpa: Allocator) ![]u8 {
 /// re-writing carries it through untouched — which is exactly what a
 /// sequencer that respects RP-001 does, and exactly what makes the hash
 /// disagree afterwards.
-fn editedSmf(gpa: Allocator, comptime what: enum { lane, conductor }) ![]u8 {
-    const bytes = try residueExact(gpa, .smf);
+fn editedSmf(gpa: Allocator, comptime what: DawEdit) ![]u8 {
+    return editedSmfOf(gpa, residue_doc, what);
+}
+
+/// Which of the two things a DAW may have touched after tempura wrote
+/// the file.
+const DawEdit = enum { lane, conductor };
+
+/// `editedSmf` over any source: the one note a DAW re-velocitied is the
+/// one written at velocity 80, whichever channel it sits on.
+fn editedSmfOf(gpa: Allocator, source: [:0]const u8, comptime what: DawEdit) ![]u8 {
+    const bytes = try residueExactOf(gpa, source, .smf);
     defer gpa.free(bytes);
 
     var read = try smf.read(gpa, bytes);
@@ -1107,6 +1140,17 @@ fn residueStaleLane(gpa: Allocator) ![]u8 {
     return editedSmf(gpa, .lane);
 }
 
+/// `residue-stale-lane-partial` — the same branch over a lane that was
+/// rendered on TWO channels and edited on one: the second note, on
+/// channel 2, is re-velocitied and channel 1 is left as tempura wrote
+/// it. Two lane records, one stale; the lane binds at both channels
+/// (`:ch [1 2]`), the untouched channel's notes are read by it rather
+/// than left in the tier, and the verdict table shows both records as
+/// `became_bound`, each with its own hash verdict.
+fn residueStaleLanePartial(gpa: Allocator) ![]u8 {
+    return editedSmfOf(gpa, residue_two_channel_doc, .lane);
+}
+
 /// `residue-stale-conductor` — the same rule on the timing context: the
 /// file's tempo is not the one tempura wrote, so the FILE conducts and
 /// the document comes back with `:conductor` set to the anchor.
@@ -1122,7 +1166,7 @@ fn residueStaleConductor(gpa: Allocator) ![]u8 {
 /// every rendered lane stays bound" (plan 04, rule 5). Written by
 /// rendering the document and handing the writer the tail alone.
 fn residueTailOnly(gpa: Allocator) ![]u8 {
-    var r = try Ready.init(gpa);
+    var r = try Ready.init(gpa, residue_doc);
     defer r.deinit();
 
     var rendered = try tempura.exporter.renderIt(gpa, &r.loaded.doc, &r.derived, null, .{});

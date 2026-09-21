@@ -58,7 +58,7 @@
 //! | --- | --- | --- | --- |
 //! | 0 | 1 | `0` | `1` |
 //! | 1 | 2 | `track` u16, 1-based file order | `channel` u8 at +1, then a 0 |
-//! | 3 | 1 | `ch`, 0-based | `column` (`FF` none, else `vol` 0 / `pan` 1 / `fx` 2) |
+//! | 3 | 1 | `ch`, 0-based — ONE channel; a lane rendered on several writes one record each | `column` (`FF` none, else `vol` 0 / `pan` 1 / `fx` 2) |
 //! | 4 | 1 | `key` (`FF` none) | `fx` letter, ASCII, 0 none |
 //! | 5 | 1 | `curve` (`FF` none, else `cc` 0 / `cc14` 1 / `bend` 2 / `pressure` 3 / `velocity` 4) | 0 |
 //! | 6 | 1 | the `cc` number, or the MSB of a `cc14` pair | 0 |
@@ -419,7 +419,15 @@ fn encodeAddress(a: Doc.Address) [8]u8 {
         .smf => |s| {
             b[0] = 0;
             std.mem.writeInt(u16, b[1..3], s.track, .little);
-            b[3] = s.ch;
+            // ONE channel: the wire is frozen and a record has always
+            // named a `(track, ch)` pair, which is what its hash is
+            // over. A lane whose notes name several channels writes one
+            // record per channel (`export/render_smf.zig`, `notesLane`),
+            // each a single, so a set never reaches here from a build;
+            // a set that does (a bound lane's address, hashed for a
+            // table) is spelled by its lowest channel, deterministically,
+            // and decodes as that one channel.
+            b[3] = s.ch.first();
             b[4] = if (s.key) |k| k else 0xFF;
             if (s.curve) |curve| switch (curve) {
                 .cc => |n| {
@@ -467,7 +475,7 @@ fn decodeAddress(b: [8]u8) ?Doc.Address {
             };
             return .{ .smf = .{
                 .track = std.mem.readInt(u16, b[1..3], .little),
-                .ch = @intCast(b[3]),
+                .ch = .single(@intCast(b[3])),
                 .key = key,
                 .curve = curve,
             } };
@@ -997,7 +1005,7 @@ test "records: a lane record round-trips through its body, and rubbish is residu
     };
     const rec: LaneRecord = .{
         .lane = "bass-vol",
-        .address = .{ .smf = .{ .track = 3, .ch = 5, .key = null, .curve = .{ .cc14 = .{ 74, 106 } } } },
+        .address = .{ .smf = .{ .track = 3, .ch = .single(5), .key = null, .curve = .{ .cc14 = .{ 74, 106 } } } },
         .hash = @splat(0xAB),
         .steps_only = &segments,
     };
@@ -1010,7 +1018,7 @@ test "records: a lane record round-trips through its body, and rubbish is residu
     try testing.expectEqualStrings("bass-vol", got.ok.lane);
     try testing.expectEqual(rec.hash, got.ok.hash);
     try testing.expectEqual(@as(u16, 3), got.ok.address.smf.track);
-    try testing.expectEqual(@as(u4, 5), got.ok.address.smf.ch);
+    try testing.expect(got.ok.address.smf.ch.eql(.single(5)));
     try testing.expect(got.ok.address.smf.key == null);
     try testing.expectEqual([2]u7{ 74, 106 }, got.ok.address.smf.curve.?.cc14);
     try testing.expectEqual(@as(usize, 2), got.ok.steps_only.len);
@@ -1032,6 +1040,24 @@ test "records: a lane record round-trips through its body, and rubbish is residu
     try testing.expectEqual(Doc.ItColumn.vol, it_got.ok.address.it.column.?);
     try testing.expect(it_got.ok.address.it.fx == null);
     try testing.expectEqual(@as(usize, 0), it_got.ok.steps_only.len);
+
+    // A channel SET encodes as its FIRST channel, and decodes as that
+    // one channel alone. The wire is frozen (a record names a `(track,
+    // ch)` pair, which is its hash's scope) and a build never hands one
+    // over — a lane rendered on several channels writes one single-
+    // channel record each — so the only thing a set can mean here is
+    // "the lowest of them", said the same way every time.
+    const set_rec: LaneRecord = .{
+        .lane = "kit",
+        .address = .{ .smf = .{ .track = 2, .ch = Doc.Channels.single(9).with(3), .key = null, .curve = null } },
+        .hash = @splat(1),
+    };
+    const set_body = try encodeLane(gpa, set_rec);
+    defer gpa.free(set_body);
+    try testing.expectEqual(@as(u8, 3), set_body[32 + 3]);
+    var set_got = try decodeLane(gpa, set_body);
+    defer set_got.deinit(gpa);
+    try testing.expect(set_got.ok.address.smf.ch.eql(.single(3)));
 
     // Total on anything: a truncated body, a header that promises more
     // than it carries, and nothing at all.

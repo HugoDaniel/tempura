@@ -338,6 +338,20 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
     `export-score` refusing on it. Pinned by `corpus/tempo-by-reference-conductor/`, whose
     `(echo …)` header is byte-identical to the three `tempo-three-conductors*` cases'.
 
+- 2026-09-21 — **Ruled at the final review's fix wave: an SMF binding names a SET of
+  channels on one track.** A native `.mid` lane whose notes name several channels writes
+  one lane record per channel, and a DAW edit to one of them bound the lane at that
+  channel alone, leaving the other channel's notes in the tier and in no lane. The lane
+  now binds at its records' track and at the union of their channels — `:ch 2` stays a
+  single, `:ch [1 2]` is several (`Doc.Channels`, `midi-channels` in the manifest) — and
+  every record of a binding lane reports `became_bound` with its own hash verdict, so the
+  consumption never takes a bound lane's untouched channel out of the tier. The record
+  wire is unchanged: a record names one channel, and a set encodes as its lowest. Plan
+  04's log has the detail; `docs/residue.md` states the rule;
+  `corpus/residue-stale-lane-partial/` pins it. A native lane's `:ch` is NOT read as its
+  notes' default (`fromSjon`'s `default_note_ch` is 0 by ruling) even though `note`'s
+  manifest description says it is — filed here, not changed.
+
 ## Status board
 
 | Milestone | Item | Status |

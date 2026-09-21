@@ -70,6 +70,7 @@ pub const LaneKind = value.LaneKind;
 pub const Lane = value.Lane;
 pub const Binding = value.Binding;
 pub const Address = value.Address;
+pub const Channels = value.Channels;
 pub const SmfCurve = value.SmfCurve;
 pub const ItColumn = value.ItColumn;
 pub const Note = value.Note;

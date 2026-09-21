@@ -729,15 +729,42 @@ const Reader = struct {
             } else if (self.optBool(o.get("velocity")) orelse false) {
                 curve = .velocity;
             }
+            const chs = self.channels(o.get("ch")) orelse {
+                try self.fail("bind's \"ch\" is a channel 1..16, or an array of distinct ones", .{});
+                return null;
+            };
             return .{ .smf = .{
                 .track = @intCast(std.math.clamp(self.int(v) orelse 1, 1, 65535)),
-                .ch = @intCast(std.math.clamp((self.optInt(o.get("ch")) orelse 1) - 1, 0, 15)),
+                .ch = chs,
                 .key = if (self.optInt(o.get("key"))) |k| @intCast(std.math.clamp(k, 0, 127)) else null,
                 .curve = curve,
             } };
         }
         try self.fail("bind wants an address: \"track\" (and \"ch\") for a .mid anchor, \"channel\" for a .it one", .{});
         return null;
+    }
+
+    /// A bound SMF lane's channels — the JSON spelling of `:ch 2` /
+    /// `:ch [1 2]`: one number, or an array of them, each clamped into
+    /// 1..16 the way a single one always was. Absent is channel 1. An
+    /// empty array, a repeated channel or a non-number in the array is
+    /// not an address and answers null.
+    fn channels(self: *Reader, v: ?std.json.Value) ?doc.Channels {
+        const value = v orelse return .single(0);
+        switch (value) {
+            .array => |arr| {
+                if (arr.items.len == 0) return null;
+                var set: doc.Channels = .none;
+                for (arr.items) |item| {
+                    const n = self.int(item) orelse return null;
+                    const c: u4 = @intCast(std.math.clamp(n - 1, 0, 15));
+                    if (set.has(c)) return null;
+                    set = set.with(c);
+                }
+                return set;
+            },
+            else => return .single(@intCast(std.math.clamp((self.int(value) orelse 1) - 1, 0, 15))),
+        }
     }
 
     fn select(self: *Reader, v: ?std.json.Value) Error!Select {
@@ -938,6 +965,26 @@ fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
 
+/// A bound SMF lane's channels as the JSON value a `:ch` edit action
+/// carries — `2` for one channel, `[1,2]` for a set — the inverse of
+/// `Reader.channels`, and the spelling `ops_native.zig`'s `bind` writes.
+/// The slice is `a`'s to free.
+pub fn channelsJson(a: std.mem.Allocator, chs: doc.Channels) Error![]const u8 {
+    if (chs.count() == 1) return std.fmt.allocPrint(a, "{d}", .{@as(u8, chs.first()) + 1});
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    try out.append(a, '[');
+    var it = chs.iterator();
+    var sep = false;
+    while (it.next()) |c| {
+        if (sep) try out.append(a, ',');
+        sep = true;
+        try out.print(a, "{d}", .{@as(u8, c) + 1});
+    }
+    try out.append(a, ']');
+    return out.toOwnedSlice(a);
+}
+
 // ---------------------------------------------------------------------------
 
 fn parsed(text: []const u8) !Parsed {
@@ -1127,7 +1174,7 @@ test "Op.fromJson: the payload of every operation the CLI can spell" {
         defer p.deinit();
         const addr = p.op.?.bind.address.smf;
         try testing.expectEqual(@as(u16, 1), addr.track);
-        try testing.expectEqual(@as(u4, 1), addr.ch);
+        try testing.expect(addr.ch.eql(.single(1)));
         try testing.expectEqual(@as(u7, 36), addr.key.?);
 
         var q = try parsed(
@@ -1136,6 +1183,32 @@ test "Op.fromJson: the payload of every operation the CLI can spell" {
         defer q.deinit();
         try testing.expectEqual(@as(u6, 4), q.op.?.bind.address.it.channel);
         try testing.expectEqual(doc.ItColumn.vol, q.op.?.bind.address.it.column.?);
+
+        // A channel SET, the JSON spelling of `:ch [1 2]`, and its
+        // inverse; an empty or repeating one is refused.
+        var s = try parsed(
+            \\{"op":"bind","lane":"kit","anchor":"song","track":2,"ch":[2,1]}
+        );
+        defer s.deinit();
+        try testing.expect(s.op.?.bind.address.smf.ch.eql(doc.Channels.single(0).with(1)));
+        const spelled = try channelsJson(testing.allocator, s.op.?.bind.address.smf.ch);
+        defer testing.allocator.free(spelled);
+        try testing.expectEqualStrings("[1,2]", spelled);
+        const one = try channelsJson(testing.allocator, .single(1));
+        defer testing.allocator.free(one);
+        try testing.expectEqualStrings("2", one);
+        var empty = try fromJson(testing.allocator,
+            \\{"op":"bind","lane":"kit","anchor":"song","track":2,"ch":[]}
+        );
+        defer empty.deinit();
+        try testing.expect(empty.op == null);
+        try testing.expectEqual(@as(usize, 1), empty.diags.items().len);
+        var twice = try fromJson(testing.allocator,
+            \\{"op":"bind","lane":"kit","anchor":"song","track":2,"ch":[3,3]}
+        );
+        defer twice.deinit();
+        try testing.expect(twice.op == null);
+        try testing.expectEqual(@as(usize, 1), twice.diags.items().len);
     }
     {
         var p = try parsed(

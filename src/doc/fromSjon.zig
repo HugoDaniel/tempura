@@ -1187,6 +1187,20 @@ const Ctx = struct {
                     .{},
                 );
             }
+        } else if (kvNode(tree, children, "ch")) |node| {
+            // A NATIVE lane's `:ch` is the one channel its notes default
+            // to (the manifest's own description of `note`'s `:ch`), and
+            // a set is not a default: a note sounds on one channel. The
+            // vector spelling belongs to a bound lane alone — it is what
+            // a dump writes for a lane that was rendered on several
+            // channels — and the manifest, which types the key once for
+            // both shapes of lane, cannot say so.
+            if (tree.tagOf(node) == .vector) try self.emit(
+                .address_invalid,
+                span,
+                "a native lane's :ch is one channel, the default its notes take; :ch {s} names a set, which only a lane bound with :from reads",
+                .{try self.slice(node)},
+            );
         }
 
         // ---- the children ----
@@ -1305,9 +1319,10 @@ const Ctx = struct {
                     );
                     return null;
                 }
+                const chs = (try self.channelSet(ch_node.?, span, id)) orelse return null;
                 return .{ .anchor = anchor.id, .address = .{ .smf = .{
                     .track = castU16(readNumber(tree, track_node.?)),
-                    .ch = wireChannel(u4, readNumber(tree, ch_node.?)),
+                    .ch = chs,
                     .key = if (kvNode(tree, children, "key")) |n| try self.noteKey(n) else null,
                     .curve = curve,
                 } } };
@@ -1364,6 +1379,47 @@ const Ctx = struct {
                 } } };
             },
         }
+    }
+
+    /// A bound SMF lane's `:ch`: one channel (`:ch 2`) or a vector of
+    /// several (`:ch [1 2]`), each through `wireChannel` exactly as the
+    /// single always was, so `:ch [3]` and `:ch 3` are one address.
+    ///
+    /// The manifest already bounds each element to 1..16 and the vector
+    /// to 1..16 elements; what it cannot see is that a set is a SET —
+    /// an empty vector names no channel at all and a repeated one names
+    /// a channel twice, and both are `address_invalid` here, with the
+    /// lane's own span.
+    fn channelSet(self: *Ctx, node: NodeIndex, span: Ast.Span, id: []const u8) Error!?Doc.Channels {
+        const tree = self.tree;
+        if (tree.tagOf(node) != .vector) {
+            return Doc.Channels.single(wireChannel(u4, readNumber(tree, node)));
+        }
+        const elems = tree.vectorElements(node);
+        if (elems.len == 0) {
+            try self.emit(
+                .address_invalid,
+                span,
+                "a lane bound to the SMF anchor \"{s}\" reads at least one channel, and :ch [] names none",
+                .{id},
+            );
+            return null;
+        }
+        var set: Doc.Channels = .none;
+        for (elems) |e| {
+            const c = wireChannel(u4, readNumber(tree, e));
+            if (set.has(c)) {
+                try self.emit(
+                    .address_invalid,
+                    span,
+                    "a lane bound to the SMF anchor \"{s}\" names channel {d} twice in its :ch set",
+                    .{ id, @as(u8, c) + 1 },
+                );
+                return null;
+            }
+            set = set.with(c);
+        }
+        return set;
     }
 
     fn readNote(self: *Ctx, form: NodeIndex) Error!?Doc.Note {
@@ -2286,6 +2342,48 @@ test "fromSjon: address keys that do not fit the anchor's kind are address_inval
     , .address_invalid);
 }
 
+test "fromSjon: a bound SMF lane's :ch is one channel or a set of them" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var res = try fromSource(gpa, &schema, preamble ++
+        \\(anchor :id file :kind smf :file "x.mid")
+        \\(lane :name kit :kind notes :from file :track 2 :ch [1 2])
+        \\(lane :name one :kind notes :from file :track 2 :ch [3])
+        \\(lane :name high :kind notes :from file :track 2 :ch [16 10])
+    , null);
+    defer res.deinit();
+    try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+
+    // `[1 2]` is bits 0 and 1; `[3]` is exactly `:ch 3`; order in the
+    // vector is nothing, the set is what is kept.
+    try testing.expect(res.doc.lanes[0].binding.?.address.smf.ch.eql(Doc.Channels.single(0).with(1)));
+    try testing.expect(res.doc.lanes[1].binding.?.address.smf.ch.eql(.single(2)));
+    try testing.expect(res.doc.lanes[2].binding.?.address.smf.ch.eql(Doc.Channels.single(9).with(15)));
+
+    // A set with nothing in it, or with a channel twice, is not an
+    // address.
+    try expectCode(preamble ++
+        \\(anchor :id file :kind smf :file "x.mid")
+        \\(lane :name kit :kind notes :from file :track 2 :ch [])
+    , .address_invalid);
+    try expectCode(preamble ++
+        \\(anchor :id file :kind smf :file "x.mid")
+        \\(lane :name kit :kind notes :from file :track 2 :ch [2 2])
+    , .address_invalid);
+    // …and a NATIVE lane's `:ch` is its notes' default, which a set
+    // cannot be.
+    try expectCode(preamble ++
+        \\(lane :name kit :kind notes :ch [1 2]
+        \\  (note :at 0bar :dur 1q :key 36))
+    , .address_invalid);
+    try expectClean(preamble ++
+        \\(lane :name kit :kind notes :ch 2
+        \\  (note :at 0bar :dur 1q :key 36))
+    );
+}
+
 test "fromSjon: the two addresses that do fit read back as the wire values" {
     const gpa = testing.allocator;
     var schema = try Schema.load(gpa);
@@ -2303,7 +2401,7 @@ test "fromSjon: the two addresses that do fit read back as the wire values" {
 
     const drum = res.doc.lanes[0].binding.?.address.smf;
     try testing.expectEqual(@as(u16, 2), drum.track);
-    try testing.expectEqual(@as(u4, 9), drum.ch); // :ch 10 is 9 on the wire
+    try testing.expect(drum.ch.eql(.single(9))); // :ch 10 is 9 on the wire
     try testing.expectEqual(@as(u7, 60), drum.key.?); // "C4"
 
     const mod = res.doc.lanes[1].binding.?.address.smf;
@@ -3169,7 +3267,7 @@ test "fromSjon: an anchor :size no u64 can hold saturates and says anchor_mismat
         \\(tempo-point :at 0q :qpm 120)
         \\(meter-point :at 0bar :sig [4 4])
         \\(anchor :id song :kind it :file "x.it" :size 1e30 :sha256 "9f2a00000000000000000000000000000000000000000000000000000000abcd")
-        ,
+    ,
         Resolver.memory(&table),
     );
     defer res.deinit();

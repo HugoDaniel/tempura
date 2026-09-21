@@ -422,7 +422,7 @@ fn bound(
                             .dur = end - at,
                             .key = n.key,
                             .vel = n.vel,
-                            .ch = addr.ch,
+                            .ch = n.ch,
                             .off_vel = n.off_vel,
                         });
                     }
@@ -1566,7 +1566,7 @@ test "derive: a bound SMF notes lane, paired and converted to the grid" {
         .range = null,
         .binding = .{
             .anchor = "song",
-            .address = .{ .smf = .{ .track = 1, .ch = 0, .key = null, .curve = null } },
+            .address = .{ .smf = .{ .track = 1, .ch = .single(0), .key = null, .curve = null } },
         },
         .notes = &.{},
         .keyframes = &.{},
@@ -1582,7 +1582,7 @@ test "derive: a bound SMF notes lane, paired and converted to the grid" {
         .range = null,
         .binding = .{
             .anchor = "song",
-            .address = .{ .smf = .{ .track = 1, .ch = 0, .key = null, .curve = .{ .cc = 74 } } },
+            .address = .{ .smf = .{ .track = 1, .ch = .single(0), .key = null, .curve = .{ .cc = 74 } } },
         },
         .notes = &.{},
         .keyframes = &.{},

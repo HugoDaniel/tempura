@@ -1730,7 +1730,7 @@ const Ctx = struct {
         switch (x.address) {
             .smf => |a_| {
                 try self.b.setKeyword(w.site, "track", try self.intJson(a_.track));
-                try self.b.setKeyword(w.site, "ch", try self.intJson(@as(i64, a_.ch) + 1));
+                try self.b.setKeyword(w.site, "ch", try Op.channelsJson(self.a(), a_.ch));
                 if (a_.key) |key| try self.b.setKeyword(w.site, "key", try self.intJson(key));
                 if (a_.curve) |curve| switch (curve) {
                     .cc => |n| try self.b.setKeyword(w.site, "cc", try self.intJson(n)),

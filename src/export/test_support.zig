@@ -89,13 +89,18 @@ pub const native_source: [:0]const u8 =
 
 /// The native fixture, loaded through the real bridge.
 pub fn native(gpa: Allocator) !Fixture {
+    return fromText(gpa, native_source);
+}
+
+/// Any document, loaded through the real bridge and derived.
+pub fn fromText(gpa: Allocator, source: [:0]const u8) !Fixture {
     var schema = try Schema.load(gpa);
     defer schema.deinit();
 
-    var loaded = try doc.fromSource(gpa, &schema, native_source, null);
+    var loaded = try doc.fromSource(gpa, &schema, source, null);
     errdefer loaded.deinit();
     if (loaded.diags.hasErrors()) {
-        for (loaded.diags.items()) |d| std.debug.print("native fixture: {t}: {s}\n", .{ d.code, d.message });
+        for (loaded.diags.items()) |d| std.debug.print("fixture: {t}: {s}\n", .{ d.code, d.message });
         return error.FixtureDoesNotLoad;
     }
     // The map `fromSource` returns is the bridge's; `derive` builds its
@@ -152,11 +157,11 @@ pub fn smfConducted(gpa: Allocator) !Fixture {
     d.length = 2 * bar;
 
     const lanes = try a.alloc(doc.Lane, 2);
-    lanes[0] = bound("kick", .notes, .{ .smf = .{ .track = 2, .ch = 1, .key = null, .curve = null } }, null);
+    lanes[0] = bound("kick", .notes, .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = null } }, null);
     lanes[1] = bound(
         "filter",
         .curve,
-        .{ .smf = .{ .track = 2, .ch = 1, .key = null, .curve = .{ .cc = 74 } } },
+        .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .{ .cc = 74 } } },
         .{ 0, 1 },
     );
     d.lanes = lanes;

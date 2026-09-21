@@ -406,7 +406,7 @@ fn boundLane(name: []const u8, range: ?[2]f32) doc.Lane {
         .kind = .curve,
         .target = name,
         .range = range,
-        .binding = .{ .anchor = "song", .address = .{ .smf = .{ .track = 1, .ch = 0, .key = null, .curve = .{ .cc = 74 } } } },
+        .binding = .{ .anchor = "song", .address = .{ .smf = .{ .track = 1, .ch = .single(0), .key = null, .curve = .{ .cc = 74 } } } },
         .notes = &.{},
         .keyframes = &.{},
         .clips = &.{},

@@ -133,19 +133,106 @@ pub const SmfCurve = union(enum) {
 /// Which column of a bound Impulse Tracker channel a curve lane reads.
 pub const ItColumn = enum { vol, pan, fx };
 
+/// A SET of MIDI channels on one track, on the WIRE: bit `c` set means
+/// wire channel `c`, so `:ch 1` is bit 0 and `:ch [1 2]` is bits 0 and 1.
+///
+/// A bound SMF lane names one or several channels of one track. One is
+/// the usual case and the only one an author writes by hand; several is
+/// what a dump writes when a native lane whose notes named more than one
+/// channel comes back BOUND (plan 04, rule 2): its rendering is one track
+/// and one lane record PER CHANNEL, and a lane whose records are stale
+/// binds at every channel those records name, or the untouched channel's
+/// notes would be in the tier and in no lane (`residue/reconcile.zig`,
+/// `bindLane`). A lane RECORD names exactly one channel, because a hash
+/// is over a `(track, ch)` pair and the wire is frozen — so a set only
+/// ever reaches the wire as its `first()`, and only in the one place
+/// that is documented (`residue/records.zig`, `encodeAddress`).
+///
+/// Two bytes, pinned as a build break: sixteen channels is MIDI's whole
+/// domain, so a mask that had to grow would mean the type had stopped
+/// meaning what this header says.
+pub const Channels = struct {
+    mask: u16,
+
+    comptime {
+        std.debug.assert(@sizeOf(Channels) == 2);
+    }
+
+    /// No channel at all. Never a valid address — `fromSjon` refuses an
+    /// empty vector — but the zero a set is built up from.
+    pub const none: Channels = .{ .mask = 0 };
+
+    /// The set holding `c` alone: what every hand-written `:ch N`, every
+    /// skeleton lane and every decoded record is.
+    pub fn single(c: u4) Channels {
+        return .{ .mask = @as(u16, 1) << c };
+    }
+
+    pub fn has(self: Channels, c: u4) bool {
+        return self.mask & (@as(u16, 1) << c) != 0;
+    }
+
+    /// `self` with `c` in it.
+    pub fn with(self: Channels, c: u4) Channels {
+        return .{ .mask = self.mask | (@as(u16, 1) << c) };
+    }
+
+    /// The union of the two sets.
+    pub fn merge(self: Channels, other: Channels) Channels {
+        return .{ .mask = self.mask | other.mask };
+    }
+
+    pub fn isEmpty(self: Channels) bool {
+        return self.mask == 0;
+    }
+
+    pub fn count(self: Channels) u8 {
+        return @popCount(self.mask);
+    }
+
+    /// The lowest channel in the set — THE channel of a single, and what
+    /// the frozen record wire carries of a set. Channel 0 for an empty
+    /// set, which no caller hands over.
+    pub fn first(self: Channels) u4 {
+        if (self.mask == 0) return 0;
+        return @intCast(@ctz(self.mask));
+    }
+
+    pub fn eql(self: Channels, other: Channels) bool {
+        return self.mask == other.mask;
+    }
+
+    /// The channels in ascending order, one per `next()`.
+    pub fn iterator(self: Channels) Iterator {
+        return .{ .left = self.mask };
+    }
+
+    pub const Iterator = struct {
+        left: u16,
+
+        pub fn next(self: *Iterator) ?u4 {
+            if (self.left == 0) return null;
+            const c: u4 = @intCast(@ctz(self.left));
+            self.left &= self.left - 1;
+            return c;
+        }
+    };
+};
+
 /// A bound lane's address. The key set depends on the anchor's KIND,
 /// which is why the mismatch is a host check (`address_invalid`) and not
 /// a shape the manifest could carry: the schema sees the lane and the
 /// anchor one at a time.
 ///
-/// Channels are stored on the WIRE: `:ch 1` is `ch == 0` and
-/// `:channel 1` is `channel == 0`, so `u4` and `u6` are exactly the
-/// domains. The printer adds the one back.
+/// Channels are stored on the WIRE: `:ch 1` is channel 0 and
+/// `:channel 1` is `channel == 0`, so `Channels`' bits and `u6` are
+/// exactly the domains. The printer adds the one back.
 pub const Address = union(enum) {
     smf: struct {
         /// 1-based file order, as written.
         track: u16,
-        ch: u4,
+        /// One channel (`:ch 2`) or several of this track (`:ch [1 2]`).
+        ch: Channels,
         /// One key — a drum lane. Null takes every key on the address.
         key: ?u7,
         curve: ?SmfCurve,
@@ -554,7 +641,7 @@ fn lanesEql(a: []const Lane, b: []const Lane) bool {
             switch (bx.address) {
                 .smf => |s| {
                     const o = by.address.smf;
-                    if (s.track != o.track or s.ch != o.ch) return false;
+                    if (s.track != o.track or !s.ch.eql(o.ch)) return false;
                     if (!optEql(u7, s.key, o.key)) return false;
                     if ((s.curve == null) != (o.curve == null)) return false;
                     if (s.curve) |c| if (!std.meta.eql(c, o.curve.?)) return false;
@@ -616,6 +703,32 @@ test "Doc: an empty document owns an arena and frees it" {
 test "Doc.spellingOf: the union's tag IS the authored spelling" {
     try testing.expectEqual(Spelling.us, spellingOf(.{ .tick = 0, .tempo = .{ .us = 400_000 } }));
     try testing.expectEqual(Spelling.qpm, spellingOf(.{ .tick = 0, .tempo = .{ .qpm = 125 } }));
+}
+
+test "Doc.Channels: a single, a set, its first, its count and its walk" {
+    const one: Channels = .single(1);
+    try testing.expect(one.has(1));
+    try testing.expect(!one.has(0));
+    try testing.expectEqual(@as(u4, 1), one.first());
+    try testing.expectEqual(@as(u8, 1), one.count());
+    try testing.expect(!one.isEmpty());
+    try testing.expect(Channels.none.isEmpty());
+    try testing.expectEqual(@as(u4, 0), Channels.none.first());
+
+    // The union is order-free, and `first` is the LOWEST channel in it
+    // whatever order it was built in — which is what makes the record
+    // wire deterministic.
+    const set = Channels.single(9).with(2).merge(.single(15));
+    try testing.expectEqual(@as(u4, 2), set.first());
+    try testing.expectEqual(@as(u8, 3), set.count());
+    try testing.expect(set.eql(Channels.single(2).with(15).with(9)));
+    try testing.expect(!set.eql(one));
+
+    var it = set.iterator();
+    try testing.expectEqual(@as(?u4, 2), it.next());
+    try testing.expectEqual(@as(?u4, 9), it.next());
+    try testing.expectEqual(@as(?u4, 15), it.next());
+    try testing.expectEqual(@as(?u4, null), it.next());
 }
 
 test "Doc.eql: ignores spans and notices every other field" {

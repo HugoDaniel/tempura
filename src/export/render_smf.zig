@@ -169,7 +169,7 @@ pub fn renderSmf(
     // way to mean it is to hash what was written.
     for (r.lanes.items) |*rec| {
         const address = rec.address.smf;
-        rec.hash = records.hashSmfLane(&seq, address.track - 1, address.ch, r.ppq);
+        rec.hash = records.hashSmfLane(&seq, address.track - 1, address.ch.first(), r.ppq);
     }
     const conductor: ?records.ConductorRecord = if (doc.conductor == null)
         .{ .hash = records.hashSmfConductor(&seq) }
@@ -450,7 +450,7 @@ const Render = struct {
             .lane = try self.a.dupe(u8, lane.name),
             .address = .{ .smf = .{
                 .track = @intCast(track + 1),
-                .ch = ch,
+                .ch = .single(ch),
                 .key = null,
                 .curve = null,
             } },
@@ -501,7 +501,7 @@ const Render = struct {
             .lane = try self.a.dupe(u8, lane.name),
             .address = .{ .smf = .{
                 .track = @intCast(track + 1),
-                .ch = 0,
+                .ch = .single(0),
                 .key = null,
                 .curve = .{ .cc = num },
             } },
@@ -784,7 +784,7 @@ test "renderSmf: a notes lane becomes a named track of pairs, with a lane record
     try testing.expectEqual(@as(usize, 1), out.lanes.len);
     try testing.expectEqualStrings("kick", out.lanes[0].lane);
     try testing.expectEqual(@as(u16, 2), out.lanes[0].address.smf.track);
-    try testing.expectEqual(@as(u4, 2), out.lanes[0].address.smf.ch);
+    try testing.expect(out.lanes[0].address.smf.ch.eql(.single(2)));
 }
 
 test "renderSmf: a pair is on its own note's :ch with its own :off-vel" {
@@ -821,8 +821,8 @@ test "renderSmf: a pair is on its own note's :ch with its own :off-vel" {
     try testing.expectEqual(@as(usize, 2), out.lanes.len);
     try testing.expectEqualStrings("kit", out.lanes[0].lane);
     try testing.expectEqualStrings("kit", out.lanes[1].lane);
-    try testing.expectEqual(@as(u4, 0), out.lanes[0].address.smf.ch);
-    try testing.expectEqual(@as(u4, 9), out.lanes[1].address.smf.ch);
+    try testing.expect(out.lanes[0].address.smf.ch.eql(.single(0)));
+    try testing.expect(out.lanes[1].address.smf.ch.eql(.single(9)));
     try testing.expectEqual(@as(u16, 2), out.lanes[0].address.smf.track);
     try testing.expectEqual(@as(u16, 2), out.lanes[1].address.smf.track);
 }
@@ -846,7 +846,7 @@ test "renderSmf: the lane record's hash is the hash of the file that comes back"
         const now = records.hashSmfLane(
             &back.sequence,
             address.track - 1,
-            address.ch,
+            address.ch.first(),
             back.sequence.division.pulsesPerQuarter(),
         );
         try testing.expectEqualSlices(u8, &rec.hash, &now);

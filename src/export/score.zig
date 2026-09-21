@@ -694,6 +694,51 @@ test "score.exportScore: the native golden — plan 08's shape, line for line" {
     try testing.expectEqual(@as(u32, 0), out.counter.rounded);
 }
 
+test "score.exportScore: a lane bound at a channel SET reads every channel into one trigger" {
+    // What a dump writes for a lane rendered on two channels and edited
+    // on one (`residue/reconcile.zig`, `bindLane`): `:ch [1 2]`. Both
+    // channels' notes reach `derive`'s onsets — each with its own
+    // channel — and both reach the score, on the one lane.
+    const gpa = testing.allocator;
+    var fx = try support.fromText(gpa,
+        \\(timeline :length 1bar :conductor song)
+        \\
+        \\(anchor :id song :kind smf :file "kit.mid")
+        \\(midi/smf :format 1 :division 96)
+        \\(midi/mtrk
+        \\  (set-tempo :at 0 :us 500000)
+        \\  (time-signature :at 0 :num 4 :denom 4 :clocks 24 :thirty-seconds 8)
+        \\  (end-of-track :at 384))
+        \\(midi/mtrk
+        \\  (note-on :at 0 :ch 1 :key 36 :vel 100)
+        \\  (note-off :at 96 :ch 1 :key 36 :vel 64)
+        \\  (note-on :at 96 :ch 2 :key 38 :vel 80)
+        \\  (note-off :at 192 :ch 2 :key 38 :vel 64)
+        \\  (note-on :at 192 :ch 3 :key 42 :vel 70)
+        \\  (note-off :at 288 :ch 3 :key 42 :vel 64)
+        \\  (end-of-track :at 384))
+        \\
+        \\(lane :name kit :kind notes :from song :track 2 :ch [1 2])
+        \\
+    );
+    defer fx.deinit();
+
+    const onsets = fx.derived.lanes[0].onsets;
+    try testing.expectEqual(@as(usize, 2), onsets.len);
+    try testing.expectEqual(@as(u7, 36), onsets[0].key);
+    try testing.expectEqual(@as(u4, 0), onsets[0].ch);
+    try testing.expectEqual(@as(u7, 38), onsets[1].key);
+    try testing.expectEqual(@as(u4, 1), onsets[1].ch);
+    try testing.expectEqual(@as(i64, q), onsets[1].tick);
+
+    var out = try exportScore(gpa, &fx.doc, &fx.derived, &.{}, .{ .source_name = "kit.sjon" });
+    defer out.deinit();
+    // Two onsets, one trigger — and channel 3's note, outside the set,
+    // is nobody's.
+    try testing.expect(std.mem.indexOf(u8, out.text, "(trigger :target kit :at [0bar 1b])") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.text, "(trigger "));
+}
+
 test "score.exportScore: --velocity writes a sibling -vel track with the loudest velocity" {
     const gpa = testing.allocator;
     var fx = try support.native(gpa);

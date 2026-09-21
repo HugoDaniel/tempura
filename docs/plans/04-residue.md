@@ -340,3 +340,33 @@ Two defects the final review reproduced, both in this plan's rule 2 and rule 3.
   read off the essence's header (`essence.newerWire`) before the tier is printed,
   `newerSmf` / `newerIt` answer envelope OR wire, `wantsResidue` refuses either,
   and `check-residue` names which.
+
+### 2026-09-21 — a stale lane binds at EVERY channel its records name (the final review's D2)
+
+A native `.mid` lane whose notes name several channels is rendered onto one track
+with one lane record PER CHANNEL (a hash is over a `(track, ch)` pair). A DAW edit
+to one of those channels made `reconcile.bindLane` rewrite the lane as bound at
+the stale record's channel alone, and the other channel's rendered notes stayed
+in the tier belonging to no lane — gone from every timeline query and from the
+score. "Reconciliation must preserve every address belonging to the lane."
+
+- **An SMF binding names a SET of channels on one track.** `Doc.Address.smf.ch`
+  is a `Doc.Channels` (a `u16` mask on the wire, two bytes pinned); `:ch 2` is a
+  single and `:ch [1 2]` several. `fromSjon` reads either (an empty vector or a
+  repeated channel is `address_invalid`, a vector on a NATIVE lane too — a set
+  cannot be a note's default); `toSjon`, the IT tail and `reconcile`'s own
+  binding keys print the set the same way; `bridge_smf.pairNotes` / `curveSteps`
+  filter by the set and a `PairedNote` carries its own `ch`, which `derive`,
+  the renderer and a materialised `(note :ch …)` keep. `schema/tempura.sjon`
+  gains `midi-channel-set` and `midi-channels` (the union), mirroring
+  `cc-address`.
+- **The record wire does not change.** A record still names one channel;
+  `encodeAddress` writes a set's `first()` (a build never hands one over — the
+  renderer's records are singles), and `decodeAddress` makes a single.
+- **Rule 2 over several records.** The lane binds when ANY of its records is
+  stale, at the records' track and at the UNION of their channels; every record
+  of a binding lane reports `became_bound` with its own `hash_ok`, so the table
+  never says a lane was restored native when it was not, and `consumeSmf` —
+  which keys on `restored_native` — leaves every channel of a bound lane in the
+  tier for it to read. `residue_stale` names the set (`track 2 ch 1,2`).
+  `corpus/residue-stale-lane-partial/` pins it; `docs/residue.md` states it.

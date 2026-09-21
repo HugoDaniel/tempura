@@ -15,10 +15,20 @@
 //!      `residue_stale`), then one lane record at a time (match: the
 //!      lane is restored native and its address is CONSUMED — the
 //!      rendered events are never also imported as a bound lane;
-//!      mismatch: the lane becomes BOUND at that address, keeping its
-//!      name, target, range and, for a curve, the easing hints the
-//!      file's own steps confirm, and `residue_stale` names what the
-//!      exact content cost).
+//!      mismatch: the lane becomes BOUND, keeping its name, target,
+//!      range and, for a curve, the easing hints the file's own steps
+//!      confirm, and `residue_stale` names what the exact content
+//!      cost). A lane may hold SEVERAL records — a `.mid` lane whose
+//!      notes named more than one channel writes one per channel, since
+//!      a hash is over a `(track, ch)` pair — and the lane is one thing:
+//!      if ANY of its records is stale it binds, at the records' track
+//!      and at the UNION of every channel they name (`:ch [1 2]`), so
+//!      the channel nobody edited is read by the lane rather than left
+//!      in the tier belonging to nothing; and every record of a lane
+//!      that binds reports `became_bound` with its own `hash_ok`, so the
+//!      table never says a lane was restored native when it was not,
+//!      and the consumption (below) leaves every channel of a bound
+//!      lane in the tier for it to read.
 //!   3. **A newer envelope or wire version** — the payloads stay where
 //!      they are, unparsed (plain `sequencer-specific` events in a
 //!      `.mid`, the opaque `TMPU` region in a `.it`) and the skeleton is
@@ -793,14 +803,15 @@ const Run = struct {
                 }
             }
 
-            // A lane whose record's hash no longer matches: the file's
-            // events win, and the lane reads them.
+            // A lane ANY of whose records' hashes no longer matches: the
+            // file's events win, and the lane reads them — at every
+            // address its records name.
             if (isForm(tree, idx, "lane")) {
                 if (keyValue(tree, idx, "name")) |v| {
                     if (atomText(tree, v)) |name| {
-                        if (staleRecord(recs, name)) |rec| {
+                        if (laneIsStale(recs, name)) {
                             try out.appendSlice(self.a, lead);
-                            try self.bindLane(&out, tree, source, idx, rec, anchor_id);
+                            try self.bindLane(&out, tree, source, idx, recs, name, anchor_id);
                             continue;
                         }
                     }
@@ -845,13 +856,22 @@ const Run = struct {
         );
 
         // The verdicts, in the order the records rode in the file, so the
-        // same bytes always report the same table.
+        // same bytes always report the same table — one line PER RECORD,
+        // so a lane rendered on two channels shows two.
         //
         // A record whose lane the essence does not declare gets NO
         // verdict: a verdict is a statement about a lane in the document
         // that came out, and `became_bound` over a lane nobody can find
         // in the text would be one more contradiction between two
         // surfaces. The record is still a loss, so it is named.
+        //
+        // The ACTION is the lane's, not the record's: a lane binds when
+        // any of its records is stale, and then every record of it says
+        // `became_bound` — with its own `hash_ok`, which is the fact the
+        // table exists to show. A record that still matched inside a
+        // lane that bound is exactly the untouched channel, and calling
+        // it `restored_native` would have `consumeSmf` take its events
+        // out of the tier the bound lane is about to read.
         for (recs) |rec| {
             if (!hasLane(tree, rec.lane)) {
                 try self.diags.add(
@@ -863,13 +883,14 @@ const Run = struct {
                 );
                 continue;
             }
+            const bound = laneIsStale(recs, rec.lane);
             var hints: []const Hint = &.{};
-            if (!rec.hash_ok) hints = try self.verifiedHints(rec);
+            if (bound) hints = try self.verifiedHints(rec);
             try self.verdicts.append(self.a, .{
                 .lane = rec.lane,
                 .address = rec.address,
                 .hash_ok = rec.hash_ok,
-                .action = if (rec.hash_ok) .restored_native else .became_bound,
+                .action = if (bound) .became_bound else .restored_native,
                 .hints = hints,
             });
         }
@@ -898,25 +919,32 @@ const Run = struct {
         return std.fmt.allocPrint(self.a, "{s} :{s} {s}", .{ head, key, lit });
     }
 
-    /// A native lane, rewritten as a BOUND one at the record's address:
+    /// A native lane, rewritten as a BOUND one at its records' address:
     /// its name, kind, target and range kept, its content dropped, and
     /// `residue_stale` naming what that cost.
+    ///
+    /// `recs` is every record in the file and `name` picks the lane's;
+    /// the address written is `laneAddress`'s union of them, so a lane
+    /// rendered on two channels and edited on one binds at both. The
+    /// caller has already established that at least one is stale.
     fn bindLane(
         self: *Run,
         out: *std.ArrayList(u8),
         tree: *const Ast.Tree,
         source: []const u8,
         idx: NodeIndex,
-        rec: Record,
+        recs: []const Record,
+        name: []const u8,
         anchor_id: []const u8,
     ) Error!void {
         const kind_text = blk: {
             const v = keyValue(tree, idx, "kind") orelse break :blk "notes";
             break :blk atomText(tree, v) orelse "notes";
         };
+        const address = laneAddress(recs, name) orelse return;
 
         try out.appendSlice(self.a, "(lane :name ");
-        try out.appendSlice(self.a, rec.lane);
+        try out.appendSlice(self.a, name);
         try out.appendSlice(self.a, " :kind ");
         try out.appendSlice(self.a, kind_text);
         if (keyLiteral(tree, source, idx, "target")) |t| {
@@ -925,7 +953,7 @@ const Run = struct {
         }
         try out.appendSlice(self.a, " :from ");
         try out.appendSlice(self.a, anchor_id);
-        try self.addressKeys(out, rec.address);
+        try self.addressKeys(out, address);
         if (std.mem.eql(u8, kind_text, "curve")) {
             if (keyLiteral(tree, source, idx, "range")) |r| {
                 try out.appendSlice(self.a, " :range ");
@@ -972,8 +1000,8 @@ const Run = struct {
             .{ .start = 0, .end = 0 },
             "lane {s} at {s}: the file's events are not the ones this residue recorded, so the file wins and the lane is bound there; dropped {s}",
             .{
-                rec.lane,
-                try self.addressText(rec.address),
+                name,
+                try self.addressText(address),
                 if (parts.items.len == 0)
                     "nothing but the lane's own nativeness"
                 else
@@ -1083,7 +1111,8 @@ const Run = struct {
 pub fn addressKeysInto(a: Allocator, out: *std.ArrayList(u8), address: Doc.Address) Error!void {
     switch (address) {
         .smf => |s| {
-            try out.print(a, " :track {d} :ch {d}", .{ s.track, @as(u8, s.ch) + 1 });
+            try out.print(a, " :track {d} :ch ", .{s.track});
+            try channelsInto(a, out, s.ch, "[", " ", "]");
             if (s.key) |k| try out.print(a, " :key {d}", .{k});
             if (s.curve) |c| switch (c) {
                 .cc => |n| try out.print(a, " :cc {d}", .{n}),
@@ -1117,7 +1146,10 @@ pub fn addressProse(a: Allocator, address: Doc.Address) Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     switch (address) {
         .smf => |s| {
-            try out.print(a, "track {d} ch {d}", .{ s.track, @as(u8, s.ch) + 1 });
+            // A set reads `ch 1,2` — the channels, and nothing that could
+            // be taken for arithmetic between them.
+            try out.print(a, "track {d} ch ", .{s.track});
+            try channelsInto(a, &out, s.ch, "", ",", "");
             if (s.key) |k| try out.print(a, " key {d}", .{k});
             if (s.curve) |c| switch (c) {
                 .cc => |n| try out.print(a, " cc {d}", .{n}),
@@ -1134,6 +1166,29 @@ pub fn addressProse(a: Allocator, address: Doc.Address) Error![]const u8 {
         },
     }
     return out.items;
+}
+
+/// A channel set, 1-based, into `out`: the number alone for a single,
+/// or `open`, the channels ascending with `sep` between them, and
+/// `close` for several — `[1 2]` as a document key, `1,2` in prose.
+fn channelsInto(
+    a: Allocator,
+    out: *std.ArrayList(u8),
+    chs: Doc.Channels,
+    open: []const u8,
+    sep: []const u8,
+    close: []const u8,
+) Error!void {
+    if (chs.count() == 1) return out.print(a, "{d}", .{@as(u8, chs.first()) + 1});
+    try out.appendSlice(a, open);
+    var it = chs.iterator();
+    var first = true;
+    while (it.next()) |c| {
+        if (!first) try out.appendSlice(a, sep);
+        first = false;
+        try out.print(a, "{d}", .{@as(u8, c) + 1});
+    }
+    try out.appendSlice(a, close);
 }
 
 // ---------------------------------------------------------------------
@@ -1195,6 +1250,9 @@ pub fn consumeSmf(seq: *Sequence.Sequence, result: *const Result) Consumed {
     if (result.rule != .restored) return out;
 
     for (result.verdicts) |v| {
+        // `became_bound` is the LANE's verdict, so a record whose own
+        // hash still matched inside a lane that bound is skipped here
+        // with the rest of its lane: the bound lane reads that channel.
         if (v.action != .restored_native) continue;
         const s = switch (v.address) {
             .smf => |x| x,
@@ -1202,7 +1260,11 @@ pub fn consumeSmf(seq: *Sequence.Sequence, result: *const Result) Consumed {
         };
         const ti: usize = if (s.track == 0) 0 else s.track - 1;
         if (ti >= seq.tracks.len) continue;
-        out.events += dropChannel(&seq.tracks[ti], s.ch);
+        // A verdict's address is a record's, which names one channel;
+        // the walk is over the set all the same, so a verdict that ever
+        // carried several would consume them all.
+        var chs = s.ch.iterator();
+        while (chs.next()) |ch| out.events += dropChannel(&seq.tracks[ti], ch);
     }
 
     if (result.conductor) |c| {
@@ -1366,7 +1428,7 @@ pub const Hasher = struct {
                     .it => return @splat(0),
                 };
                 const track: u32 = if (s.track == 0) 0 else s.track - 1;
-                return records.hashSmfLane(seq, track, s.ch, seq.division.pulsesPerQuarter());
+                return records.hashSmfLane(seq, track, s.ch.first(), seq.division.pulsesPerQuarter());
             },
             .it => |m| {
                 const s = switch (address) {
@@ -1529,13 +1591,44 @@ fn hasLane(tree: *const Ast.Tree, name: []const u8) bool {
     return false;
 }
 
-/// The record for `name`, when its hash no longer matches — the one
-/// verdict that rewrites a lane.
-fn staleRecord(recs: []const Record, name: []const u8) ?Record {
+/// Whether ANY record of the lane called `name` no longer matches — the
+/// one verdict that rewrites a lane. A `.mid` lane whose notes named
+/// several channels has several records, one per channel, and it is one
+/// lane: a DAW edit to any of its channels binds the whole of it.
+fn laneIsStale(recs: []const Record, name: []const u8) bool {
     for (recs) |r| {
-        if (!r.hash_ok and std.mem.eql(u8, r.lane, name)) return r;
+        if (!r.hash_ok and std.mem.eql(u8, r.lane, name)) return true;
     }
-    return null;
+    return false;
+}
+
+/// The address the lane called `name` binds at: the first record's
+/// track, key and curve, with the UNION of every channel the lane's
+/// records name — `:ch [1 2]` for a lane rendered on two channels —
+/// so that the channel nobody edited is read by the lane rather than
+/// left in the tier belonging to nothing. Null for a name no record
+/// carries.
+///
+/// A lane's records all name one track and one shape by construction
+/// (`export/render_smf.zig` writes them from one `notesLane` call), so
+/// the first record's track and shape are the lane's; a record that
+/// disagreed would be a torn residue, and its channel still joins the
+/// set rather than being lost.
+fn laneAddress(recs: []const Record, name: []const u8) ?Doc.Address {
+    var found: ?Doc.Address = null;
+    for (recs) |r| {
+        if (!std.mem.eql(u8, r.lane, name)) continue;
+        if (found) |*have| {
+            switch (have.*) {
+                .smf => |*s| switch (r.address) {
+                    .smf => |o| s.ch = s.ch.merge(o.ch),
+                    .it => {},
+                },
+                .it => {},
+            }
+        } else found = r.address;
+    }
+    return found;
 }
 
 /// Every pattern the walk played, ascending and deduplicated.
@@ -1565,8 +1658,21 @@ fn addressOf(tree: *const Ast.Tree, form: NodeIndex, kind: Doc.AnchorKind) ?Doc.
     switch (kind) {
         .smf => {
             const track: u16 = @intCast(@max(1, intValue(tree, form, "track") orelse 1));
-            const ch_1 = intValue(tree, form, "ch") orelse 1;
-            const ch: u4 = @intCast(@min(15, @max(0, ch_1 - 1)));
+            // `:ch 2`, or `:ch [1 2]` — the set the tail (which prints
+            // through `residue/it.zig`'s `Tailer`, the printer's own
+            // spelling) wrote for a lane bound at several channels.
+            var ch: Doc.Channels = .none;
+            if (keyValue(tree, form, "ch")) |v| {
+                if (tree.tagOf(v) == .vector) {
+                    for (tree.vectorElements(v)) |e| {
+                        const c_1 = numberOf(tree, e) orelse continue;
+                        ch = ch.with(@intCast(@min(15, @max(0, c_1 - 1))));
+                    }
+                } else if (numberOf(tree, v)) |c_1| {
+                    ch = .single(@intCast(@min(15, @max(0, c_1 - 1))));
+                }
+            }
+            if (ch.isEmpty()) ch = .single(0);
             const key: ?u7 = if (intValue(tree, form, "key")) |k|
                 @intCast(@min(127, @max(0, k)))
             else
@@ -1893,7 +1999,7 @@ fn smfCase(gpa: Allocator, carry: SmfCarry) !SmfCase {
 
     const kick = try records.encodeLane(gpa, .{
         .lane = carry.kick_name,
-        .address = .{ .smf = .{ .track = 2, .ch = 0, .key = 36, .curve = null } },
+        .address = .{ .smf = .{ .track = 2, .ch = .single(0), .key = 36, .curve = null } },
         .hash = records.hashSmfLane(&written, 1, 0, carry.written.ppq),
     });
     defer gpa.free(kick);
@@ -1905,7 +2011,7 @@ fn smfCase(gpa: Allocator, carry: SmfCarry) !SmfCase {
     };
     const cutoff = try records.encodeLane(gpa, .{
         .lane = "cutoff",
-        .address = .{ .smf = .{ .track = 2, .ch = 1, .key = null, .curve = .{ .cc = 74 } } },
+        .address = .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .{ .cc = 74 } } },
         .hash = records.hashSmfLane(&written, 1, 1, carry.written.ppq),
         .steps_only = &segments,
     });
@@ -2096,6 +2202,200 @@ test "reconcile: rule 2 — a velocity edit makes one lane bound and leaves the 
     // comment with it, which the conductor's test below pins.
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "; the author's own note") != null);
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "; the kick, as the author") != null);
+}
+
+/// A `.mid` tempura built from a lane whose notes name TWO channels —
+/// one track for the lane and one record PER CHANNEL, since a lane hash
+/// is over a `(track, ch)` pair — plus a second lane on a track of its
+/// own, read back the way `dump` reads it. With `edited`, the channel-2
+/// note is one velocity lighter than the records were computed over: a
+/// DAW's edit to one of the lane's two channels.
+fn kitCase(gpa: Allocator, edited: bool) !SmfCase {
+    const source: [:0]const u8 =
+        \\(timeline :title "kit" :length 1bar)
+        \\
+        \\(anchor :id song :kind smf :file "song.mid" :size 1 :sha256 "9f2a")
+        \\
+        \\(tempo-point :at 0bar :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\
+        \\(lane :name kit :kind notes :target drums
+        \\  (note :at 0bar :dur 1q :key 36 :vel 100 :ch 1)
+        \\  (note :at 1q :dur 1q :key 38 :vel 80 :ch 2))
+        \\
+        \\(lane :name hat :kind notes
+        \\  (note :at 2q :dur 1q :key 42 :vel 70))
+        \\
+    ;
+
+    var b: Sequence.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.format = 1;
+    b.division = .{ .ppq = 96 };
+    const t0 = try b.addTrack();
+    try b.addEvent(t0, 0, .set_tempo, .{ .tempo = 500_000 });
+    try b.addEvent(t0, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(t0, 384, .end_of_track, .empty);
+    const t1 = try b.addTrack();
+    try b.addEvent(t1, 0, .sequence_name, .{ .bytes = try b.addBytes("kit") });
+    try b.addEvent(t1, 0, .note_on, .{ .note = .{ .ch = 0, .key = 36, .vel = 100 } });
+    try b.addEvent(t1, 96, .note_off, .{ .note = .{ .ch = 0, .key = 36, .vel = 64 } });
+    try b.addEvent(t1, 96, .note_on, .{ .note = .{ .ch = 1, .key = 38, .vel = 80 } });
+    try b.addEvent(t1, 192, .note_off, .{ .note = .{ .ch = 1, .key = 38, .vel = 64 } });
+    try b.addEvent(t1, 384, .end_of_track, .empty);
+    const t2 = try b.addTrack();
+    try b.addEvent(t2, 0, .sequence_name, .{ .bytes = try b.addBytes("hat") });
+    try b.addEvent(t2, 192, .note_on, .{ .note = .{ .ch = 0, .key = 42, .vel = 70 } });
+    try b.addEvent(t2, 288, .note_off, .{ .note = .{ .ch = 0, .key = 42, .vel = 64 } });
+    try b.addEvent(t2, 384, .end_of_track, .empty);
+    var written = try b.finish();
+    defer written.deinit();
+
+    // The records, over the file as tempura wrote it.
+    const kit_1 = try records.encodeLane(gpa, .{
+        .lane = "kit",
+        .address = .{ .smf = .{ .track = 2, .ch = .single(0), .key = null, .curve = null } },
+        .hash = records.hashSmfLane(&written, 1, 0, 96),
+    });
+    defer gpa.free(kit_1);
+    const kit_2 = try records.encodeLane(gpa, .{
+        .lane = "kit",
+        .address = .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = null } },
+        .hash = records.hashSmfLane(&written, 1, 1, 96),
+    });
+    defer gpa.free(kit_2);
+    const hat = try records.encodeLane(gpa, .{
+        .lane = "hat",
+        .address = .{ .smf = .{ .track = 3, .ch = .single(0), .key = null, .curve = null } },
+        .hash = records.hashSmfLane(&written, 2, 0, 96),
+    });
+    defer gpa.free(hat);
+    const conductor = records.encodeConductor(.{ .hash = records.hashSmfConductor(&written) });
+
+    var packed_tier = try essence.packFor(gpa, source, "song");
+    defer packed_tier.deinit(gpa);
+    try testing.expect(!packed_tier.diags.hasErrors());
+
+    // The DAW's edit, AFTER the records were taken: channel 2's note.
+    if (edited) {
+        for (written.tracks[1].events) |*e| {
+            if (e.kind == .note_on and e.payload.note.ch == 1) e.payload.note.vel = 79;
+        }
+    }
+
+    var carried = try carrier_smf.attach(gpa, &written, .{
+        .essence = packed_tier.bytes,
+        .conductor = &conductor,
+        .lanes = &.{ kit_1, kit_2, hat },
+    }, .{});
+    defer carried.deinit();
+    try testing.expect(!carried.diags.hasErrors());
+
+    var file = try smf_write.write(gpa, &carried.sequence, .{});
+    defer file.deinit();
+    try testing.expect(!file.diags.hasErrors());
+    const bytes = try gpa.dupe(u8, file.bytes);
+    errdefer gpa.free(bytes);
+
+    var read_back = try smf_read.read(gpa, bytes);
+    errdefer read_back.deinit();
+    try testing.expect(!read_back.diags.hasErrors());
+
+    var detached = try carrier_smf.detach(gpa, &read_back.sequence);
+    errdefer detached.deinit();
+
+    const text = try bridge_smf.sequenceToForms(gpa, &detached.sequence, null, .{});
+    return .{
+        .gpa = gpa,
+        .bytes = bytes,
+        .file = read_back,
+        .detached = detached,
+        .text = text,
+    };
+}
+
+test "reconcile: rule 2 — a lane rendered on two channels and edited on one binds at both" {
+    // The reviewer's sentence: "Reconciliation must preserve every
+    // address belonging to the lane." The kit's channel-1 notes were
+    // untouched, and a lane bound at channel 2 alone would leave them
+    // in the tier belonging to no lane — gone from every query and
+    // from the score.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var case = try kitCase(gpa, true);
+    defer case.deinit();
+
+    var got = try reconcile(gpa, &schema, case.input(), case.found(), .{});
+    defer got.deinit();
+
+    try testing.expectEqual(Rule.restored, got.rule);
+    try testing.expect(got.conductor.?.hash_ok);
+
+    // One verdict PER RECORD, in record order: the kit's two both say
+    // `became_bound` — the LANE's verdict — each with its own hash's
+    // answer; the hat is the essence's own.
+    try testing.expectEqual(@as(usize, 3), got.verdicts.len);
+    try testing.expectEqualStrings("kit", got.verdicts[0].lane);
+    try testing.expect(got.verdicts[0].hash_ok);
+    try testing.expectEqual(Action.became_bound, got.verdicts[0].action);
+    try testing.expect(got.verdicts[0].address.smf.ch.eql(.single(0)));
+    try testing.expectEqualStrings("kit", got.verdicts[1].lane);
+    try testing.expect(!got.verdicts[1].hash_ok);
+    try testing.expectEqual(Action.became_bound, got.verdicts[1].action);
+    try testing.expect(got.verdicts[1].address.smf.ch.eql(.single(1)));
+    const hat = got.verdictFor("hat").?;
+    try testing.expect(hat.hash_ok);
+    try testing.expectEqual(Action.restored_native, hat.action);
+
+    // The kit binds at its track and at BOTH channels, keeping its
+    // target; the hat is untouched and still native.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        got.doc_text,
+        "(lane :name kit :kind notes :target drums :from song :track 2 :ch [1 2])",
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, got.doc_text, ":key 36") == null);
+    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(note :at 2q :dur 1q :key 42 :vel 70)") != null);
+
+    // `residue_stale` names the SET, and the two notes it cost.
+    try testing.expectEqual(@as(usize, 1), got.diags.count(.residue_stale));
+    const d = got.diags.items()[0];
+    try testing.expectEqual(Diag.Code.residue_stale, d.code);
+    try testing.expect(std.mem.indexOf(u8, d.message, "lane kit at track 2 ch 1,2:") != null);
+    try testing.expect(std.mem.indexOf(u8, d.message, "dropped 2 notes") != null);
+
+    // The consumption takes the hat's pair and the conductor's events,
+    // and leaves EVERY channel of the kit in the tier — the untouched
+    // one included — for the bound lane to read.
+    const c = consumeSmf(&case.detached.sequence, &got);
+    try testing.expectEqual(@as(usize, 2), c.events);
+    try testing.expectEqual(@as(usize, 2), c.conductor);
+    const kit_track = case.detached.sequence.tracks[1];
+    try testing.expectEqual(@as(usize, 2), countKind(kit_track, .note_on));
+    try testing.expectEqual(@as(usize, 0), countKind(case.detached.sequence.tracks[2], .note_on));
+
+    // …and the same file untouched restores every lane native, three
+    // matching verdicts and nothing bound.
+    var exact = try kitCase(gpa, false);
+    defer exact.deinit();
+    var again = try reconcile(gpa, &schema, exact.input(), exact.found(), .{});
+    defer again.deinit();
+    try testing.expectEqual(@as(usize, 3), again.verdicts.len);
+    for (again.verdicts) |v| {
+        try testing.expect(v.hash_ok);
+        try testing.expectEqual(Action.restored_native, v.action);
+    }
+    try testing.expectEqual(@as(usize, 0), again.diags.count(.residue_stale));
+    try testing.expect(std.mem.indexOf(u8, again.doc_text, ":from song") == null);
+}
+
+fn countKind(track: Sequence.Track, kind: Sequence.Kind) usize {
+    var n: usize = 0;
+    for (track.events) |e| {
+        if (e.kind == kind) n += 1;
+    }
+    return n;
 }
 
 test "reconcile: rule 2 — a tempo edit gives the file the baton and names every loss" {
@@ -2823,13 +3123,13 @@ test "reconcile: the binding keys it writes are the ones the printer writes back
 
     const Case = struct { kind: []const u8, address: Doc.Address };
     const cases = [_]Case{
-        .{ .kind = "notes", .address = .{ .smf = .{ .track = 2, .ch = 0, .key = 36, .curve = null } } },
-        .{ .kind = "notes", .address = .{ .smf = .{ .track = 1, .ch = 15, .key = null, .curve = null } } },
-        .{ .kind = "curve", .address = .{ .smf = .{ .track = 3, .ch = 4, .key = null, .curve = .{ .cc = 74 } } } },
-        .{ .kind = "curve", .address = .{ .smf = .{ .track = 3, .ch = 4, .key = null, .curve = .{ .cc14 = .{ 74, 106 } } } } },
-        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = 1, .key = null, .curve = .bend } } },
-        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = 1, .key = null, .curve = .pressure } } },
-        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = 1, .key = null, .curve = .velocity } } },
+        .{ .kind = "notes", .address = .{ .smf = .{ .track = 2, .ch = .single(0), .key = 36, .curve = null } } },
+        .{ .kind = "notes", .address = .{ .smf = .{ .track = 1, .ch = .single(15), .key = null, .curve = null } } },
+        .{ .kind = "curve", .address = .{ .smf = .{ .track = 3, .ch = .single(4), .key = null, .curve = .{ .cc = 74 } } } },
+        .{ .kind = "curve", .address = .{ .smf = .{ .track = 3, .ch = .single(4), .key = null, .curve = .{ .cc14 = .{ 74, 106 } } } } },
+        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .bend } } },
+        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .pressure } } },
+        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .velocity } } },
         .{ .kind = "notes", .address = .{ .it = .{ .channel = 3, .column = null, .fx = null } } },
         .{ .kind = "curve", .address = .{ .it = .{ .channel = 5, .column = .vol, .fx = null } } },
         .{ .kind = "curve", .address = .{ .it = .{ .channel = 5, .column = .fx, .fx = 'T' } } },

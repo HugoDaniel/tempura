@@ -966,7 +966,7 @@ fn buildSmf(
             dst.* = try keepRecord(a, src, records.hashSmfLane(
                 &back.sequence,
                 address.track - 1,
-                address.ch,
+                address.ch.first(),
                 ppq,
             ));
         }
@@ -1237,7 +1237,7 @@ fn smfBytesWith(gpa: Allocator, ver: u8, residue: bool, bump_wire: bool) ![]u8 {
 
     const lane = try records.encodeLane(gpa, .{
         .lane = "kick",
-        .address = .{ .smf = .{ .track = 2, .ch = 0, .key = 36, .curve = null } },
+        .address = .{ .smf = .{ .track = 2, .ch = .single(0), .key = 36, .curve = null } },
         .hash = records.hashSmfLane(&seq, 1, 0, 96),
     });
     defer gpa.free(lane);
@@ -1457,7 +1457,7 @@ test "pipeline: checkResidue reports what a file carries, and what it does not" 
         defer seq.deinit();
         const lane = try records.encodeLane(gpa, .{
             .lane = "kick",
-            .address = .{ .smf = .{ .track = 2, .ch = 0, .key = 36, .curve = null } },
+            .address = .{ .smf = .{ .track = 2, .ch = .single(0), .key = 36, .curve = null } },
             .hash = records.hashSmfLane(&seq, 1, 0, 96),
         });
         defer gpa.free(lane);
@@ -2092,7 +2092,7 @@ test "pipeline.build: build → dump → build → dump is a fixed point for a .
     for (b1.lanes, b2.lanes) |x, y| {
         try testing.expectEqualStrings(x.lane, y.lane);
         try testing.expectEqual(x.address.smf.track, y.address.smf.track);
-        try testing.expectEqual(x.address.smf.ch, y.address.smf.ch);
+        try testing.expect(x.address.smf.ch.eql(y.address.smf.ch));
     }
 
     // The music in the two files is the same music: one track per lane,
@@ -2193,6 +2193,84 @@ test "pipeline.build: a note edited after restoration renders once, onto the tra
     try testing.expectEqual(reconcile.Rule.restored, d2.rule);
     try testing.expectEqual(@as(usize, 1), countIn(d2.text, ":key 41"));
     try testing.expectEqual(@as(usize, 0), countIn(d2.text, ":key 36"));
+}
+
+test "pipeline: a lane rendered on two channels and edited on one dumps bound at both, and derive reads both" {
+    // The reviewer's defect: a lane whose notes name two channels is one
+    // track and two records; a DAW edit to channel 2 made the lane bind
+    // at channel 2 alone, and channel 1's notes were in the tier and in
+    // no lane. Now the lane binds at `:ch [1 2]`, nothing of it is
+    // consumed, and `derive` reads both channels back.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const two: [:0]const u8 =
+        \\(timeline :title "kit" :length 1bar)
+        \\
+        \\(tempo-point :at 0bar :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\
+        \\(lane :name kit :kind notes
+        \\  (note :at 0bar :dur 1q :key 36 :vel 100 :ch 1)
+        \\  (note :at 1q :dur 1q :key 38 :vel 80 :ch 2))
+        \\
+    ;
+    var fx = try ready(gpa, &schema, two);
+    defer fx.deinit();
+    var built = try build(gpa, &schema, two, &fx.res.doc, &fx.derived, .smf, .{});
+    defer built.deinit();
+    try testing.expect(!built.diags.hasErrors());
+    // One track, one record per channel.
+    try testing.expectEqual(@as(usize, 2), built.lanes.len);
+    try testing.expect(built.lanes[0].address.smf.ch.eql(.single(0)));
+    try testing.expect(built.lanes[1].address.smf.ch.eql(.single(1)));
+    try testing.expectEqual(built.lanes[0].address.smf.track, built.lanes[1].address.smf.track);
+
+    // The DAW's edit: the channel-2 note, one velocity lighter. The
+    // residue rides through a read and a write untouched.
+    var r = try smf.read(gpa, built.bytes);
+    defer r.deinit();
+    var touched = false;
+    for (r.sequence.tracks) |t| {
+        for (t.events) |*e| {
+            if (e.kind == .note_on and e.payload.note.ch == 1 and e.payload.note.vel == 80) {
+                e.payload.note.vel = 64;
+                touched = true;
+            }
+        }
+    }
+    try testing.expect(touched);
+    var edited = try smf.write(gpa, &r.sequence, .{});
+    defer edited.deinit();
+
+    var d = try dump(gpa, &schema, edited.bytes, .smf, .{});
+    defer d.deinit();
+    try testing.expectEqual(reconcile.Rule.restored, d.rule);
+    try testing.expect(!d.diags.hasErrors());
+    try testing.expectEqual(@as(usize, 2), d.verdicts.len);
+    try testing.expect(d.verdicts[0].hash_ok);
+    try testing.expect(!d.verdicts[1].hash_ok);
+    for (d.verdicts) |v| try testing.expectEqual(reconcile.Action.became_bound, v.action);
+    // Bound at BOTH channels, and nothing of the lane consumed: the tier
+    // keeps every note event for the bound lane to read.
+    try testing.expectEqual(@as(usize, 1), countIn(d.text, ":from song :track 2 :ch [1 2])"));
+    try testing.expectEqual(@as(usize, 0), d.consumed.events);
+    try testing.expectEqual(@as(usize, 2), d.consumed.conductor);
+    try testing.expectEqual(@as(usize, 2), countIn(d.text, "note-on"));
+    try testing.expect(d.doc.lanes[0].binding.?.address.smf.ch.eql(Doc.Channels.single(0).with(1)));
+
+    // …and the lane reads both channels, each onset on its own, with the
+    // DAW's velocity where the DAW put it.
+    var derived = try time_derive.derive(gpa, &d.doc);
+    defer derived.deinit();
+    const onsets = derived.lanes[0].onsets;
+    try testing.expectEqual(@as(usize, 2), onsets.len);
+    try testing.expectEqual(@as(u7, 36), onsets[0].key);
+    try testing.expectEqual(@as(u4, 0), onsets[0].ch);
+    try testing.expectEqual(@as(u7, 100), onsets[0].vel);
+    try testing.expectEqual(@as(u7, 38), onsets[1].key);
+    try testing.expectEqual(@as(u4, 1), onsets[1].ch);
+    try testing.expectEqual(@as(u7, 64), onsets[1].vel);
 }
 
 test "pipeline: a newer Binary IR wire version keeps its payloads in the tier, and a build keeps them" {

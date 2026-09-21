@@ -214,7 +214,7 @@ const Deriver = struct {
         try self.lanes.append(self.a, lane(try self.a.dupe(u8, anchor), name, kind, .{
             .smf = .{
                 .track = track,
-                .ch = ch,
+                .ch = .single(ch),
                 // One lane per ADDRESS: splitting a drum track by key is an
                 // edit an author makes, not one a derivation guesses.
                 .key = null,
@@ -405,7 +405,7 @@ test "skeleton: an SMF tier names one notes lane per address and one curve per m
     try testing.expectEqualStrings("t2-ch10", notes.target);
     try testing.expectEqualStrings("song", notes.binding.?.anchor);
     try testing.expectEqual(@as(u16, 2), notes.binding.?.address.smf.track);
-    try testing.expectEqual(@as(u4, 9), notes.binding.?.address.smf.ch);
+    try testing.expect(notes.binding.?.address.smf.ch.eql(.single(9)));
     // One lane per ADDRESS, never per key: a drum split is the author's.
     try testing.expect(notes.binding.?.address.smf.key == null);
     try testing.expect(notes.binding.?.address.smf.curve == null);

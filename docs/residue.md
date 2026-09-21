@@ -443,12 +443,25 @@ What a reader does after the format core has read the file and built the `midi/`
      restored as a native lane from the essence, and its address is **consumed** —
      the rendered events are *not* also imported as a bound lane.
    * **Hash differs**: somebody edited the rendered events. The native events win
-     for what they can say: the lane becomes a **bound** lane at that address,
-     keeping its name, target, range and, for a curve, the easing hints the file's
-     own steps confirm — a hint the steps contradict is dropped with
-     `ease_hint_mismatch`. The exact native content from the essence is discarded
-     with `residue_stale`, which names the lane, the address and what it cost
-     (values beyond 7 bits, clip structure, transposition).
+     for what they can say: the lane becomes a **bound** lane at the record's track
+     and at **the set of every channel the lane's records name**, keeping its name,
+     target, range and, for a curve, the easing hints the file's own steps confirm —
+     a hint the steps contradict is dropped with `ease_hint_mismatch`. The exact
+     native content from the essence is discarded with `residue_stale`, which names
+     the lane, the address (the whole set) and what it cost (values beyond 7 bits,
+     clip structure, transposition).
+
+   **A lane may hold several records.** A `.mid` lane whose notes name more than one
+   channel is rendered onto one track and writes one record per channel it used,
+   because a lane hash is over a `(track, ch)` pair. The lane is one thing: if
+   *any* of its records is stale the lane binds, and it binds at every channel its
+   records name — `(lane … :from song :track 2 :ch [1 2])` — so the channel nobody
+   edited is read by the lane rather than left in the tier belonging to nothing.
+   The verdict table shows one line per record, every one of a binding lane's
+   reading `became_bound` with its own `hash_ok`; a record is never reported
+   `restored_native` inside a lane that bound, because that would have the
+   consumption below take its channel out of the tier the lane is about to read.
+   (Until 2026-09-21 a dump bound such a lane at the stale record's channel alone.)
 
    **Consumed means taken out.** What a match consumes leaves the dumped document's
    file tier: a restored lane's channel events on its track (a `.mid`) or its

@@ -1,0 +1,27 @@
+; Plan 04's RULE 2, second branch, over a lane that was rendered on TWO
+; MIDI channels and edited on ONE.
+;
+; The document behind this fixture has one notes lane, `kit`, whose two
+; notes name `:ch 1` and `:ch 2`. `tempura build` renders such a lane
+; onto ONE track and writes ONE LANE RECORD PER CHANNEL, because a lane
+; hash is over a `(track, ch)` pair (docs/residue.md, "The hashes"). So
+; the file carries two records for `kit`, both naming track 2.
+;
+; `tools/gen_fixtures.zig` then re-velocities the channel-2 note the way
+; a DAW would and writes the file back with the residue untouched.
+; Channel 2's record is stale; channel 1's still matches.
+;
+; The lane is ONE thing, so it binds — and it binds at every address its
+; records name: `:from song :track 2 :ch [1 2]`. Until this case existed a
+; dump bound the lane at the stale record's channel alone, and channel
+; 1's rendered notes stayed in the tier belonging to no lane: gone from
+; every timeline query and from the score. The verdict table shows one
+; line PER RECORD, both `became_bound` — the lane's verdict — each with
+; its own `:hash-ok`, and the `(consumed …)` line counts only the
+; conductor's events: a bound lane's channels stay in the tier for it to
+; read, the untouched one included.
+;
+; `(export-score)` is the proof that both channels reach the score: two
+; triggers, one per note, on a lane that reads two channels.
+(dump)
+(export-score)

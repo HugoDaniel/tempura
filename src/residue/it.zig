@@ -523,8 +523,22 @@ const Tailer = struct {
                 .smf => |s| {
                     try self.raw(" :track ");
                     try self.int(s.track);
+                    // The canonical printer's spelling: `:ch 2`, or
+                    // `:ch [1 2]` for a set.
                     try self.raw(" :ch ");
-                    try self.int(@as(u8, s.ch) + 1);
+                    if (s.ch.count() == 1) {
+                        try self.int(@as(u8, s.ch.first()) + 1);
+                    } else {
+                        try self.raw("[");
+                        var it = s.ch.iterator();
+                        var sep = false;
+                        while (it.next()) |c| {
+                            if (sep) try self.raw(" ");
+                            sep = true;
+                            try self.int(@as(u8, c) + 1);
+                        }
+                        try self.raw("]");
+                    }
                     if (s.key) |k| {
                         try self.raw(" :key ");
                         try self.int(k);

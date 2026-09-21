@@ -93,7 +93,7 @@ One stream of content driving one pacer target. :kind is the discriminant and de
 | `:target` | `symbol` | no | — | The pacer name this lane drives at export. Defaults to :name. |
 | `:from` | `ref → (anchor :id …)` | no | — | The anchor this lane reads its content from. A lane with :from is BOUND: its content lives in the file, and children here are bound_lane_has_content. Only a notes or curve lane may bind — a query or formula lane that names one is bound_kind_invalid, which is a relation between :kind and :from and so cannot be a variant gate. |
 | `:track` | `number` | no | — | integer; min 1<br>Which track of a bound SMF anchor, 1-based in file order. |
-| `:ch` | `number` | no | — | integer; min 1; max 16<br>Which MIDI channel of a bound SMF anchor, 1..16. |
+| `:ch` | `midi-channel \| midi-channel-set` | no | — | integer; min 1; max 16; min-len 1; max-len 16; integer; min 1; max 16<br>Which MIDI channel of a bound SMF anchor, 1..16 — or which channels, as a vector: `:ch [1 2]` reads both channels of the one :track. The vector is what a dump writes when a native lane whose notes named several channels comes back bound (residue rule 2: the lane binds at its track and at every channel its records name). On a native lane a single channel is the default its notes take, and a vector is address_invalid. |
 | `:channel` | `number` | no | — | integer; min 1; max 64<br>Which channel of a bound Impulse Tracker anchor, 1..64. |
 
 Positional children: `form: (note …, local) | (keyframe …, local) | (clip …, local)`.
@@ -318,6 +318,18 @@ Type: `vector<number>` — len 2; integer; min 0; max 127.
 A controller address: one number for a 7-bit controller, or an [msb lsb] pair for a 14-bit one.
 
 Type: `cc-number | cc-pair` — integer; min 0; max 127; len 2; integer; min 0; max 127.
+
+### midi-channel-set
+
+Several MIDI channels of one track as a vector, [1 2] — each 1..16, and no channel twice (a repeat, or an empty vector, is address_invalid: the manifest bounds the elements and the host checks the set).
+
+Type: `vector<number>` — min-len 1; max-len 16; integer; min 1; max 16.
+
+### midi-channels
+
+Which MIDI channels of one track a bound lane reads: one midi-channel, or a midi-channel-set of several.
+
+Type: `midi-channel | midi-channel-set` — integer; min 1; max 16; min-len 1; max-len 16; integer; min 1; max 16.
 
 ### curve-column
 
