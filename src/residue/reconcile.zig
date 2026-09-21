@@ -631,7 +631,8 @@ const Run = struct {
                     code,
                     .warning,
                     .{ .start = 0, .end = 0 },
-                    "a lane record's body ({d} bytes) does not decode; the timeline tier is derived instead",
+                    "a lane record's body ({d} bytes) does not decode; " ++
+                        "the timeline tier is derived instead",
                     .{body.len},
                 );
                 return null;
@@ -647,7 +648,8 @@ const Run = struct {
                 .residue_corrupt,
                 .warning,
                 .{ .start = 0, .end = 0 },
-                "the conductor record is {d} bytes and a SHA-256 is 32; the timeline tier is derived instead",
+                "the conductor record is {d} bytes and a SHA-256 is 32; " ++
+                    "the timeline tier is derived instead",
                 .{body.len},
             );
             return null;
@@ -757,7 +759,9 @@ const Run = struct {
                     cursor.eat_newline = true;
                 },
                 // Dropped whole, its lead with it, and named as a loss.
-                .drop => |what| try dropped.append(self.arena, try self.dropLabel(tree, source, idx, what)),
+                .drop => |what| {
+                    try dropped.append(self.arena, try self.dropLabel(tree, source, idx, what));
+                },
                 .conduct => {
                     try out.appendSlice(self.arena, root.lead);
                     try self.conductorKey(&out, source, span, anchor_id);
@@ -807,7 +811,9 @@ const Run = struct {
 
         fn rest(self: *const Cursor) []const u8 {
             var tail_text = self.source[@min(self.cut, self.source.len)..];
-            if (self.eat_newline and std.mem.startsWith(u8, tail_text, "\n")) tail_text = tail_text[1..];
+            if (self.eat_newline and std.mem.startsWith(u8, tail_text, "\n")) {
+                tail_text = tail_text[1..];
+            }
             return tail_text;
         }
     };
@@ -1050,7 +1056,8 @@ const Run = struct {
             .residue_stale,
             .warning,
             .{ .start = 0, .end = 0 },
-            "lane {s} at {s}: the file's events are not the ones this residue recorded, so the file wins and the lane is bound there; dropped {s}",
+            "lane {s} at {s}: the file's events are not the ones this residue recorded, " ++
+                "so the file wins and the lane is bound there; dropped {s}",
             .{ name, try self.addressText(address), try self.lossProse(loss) },
         );
     }
@@ -1117,7 +1124,11 @@ const Run = struct {
     fn lossProse(self: *Run, loss: Loss) Error![]const u8 {
         var parts: std.ArrayList([]const u8) = .empty;
         if (loss.notes > 0) {
-            try parts.append(self.arena, try std.fmt.allocPrint(self.arena, "{d} notes", .{loss.notes}));
+            try parts.append(self.arena, try std.fmt.allocPrint(
+                self.arena,
+                "{d} notes",
+                .{loss.notes},
+            ));
         }
         if (loss.keyframes > 0) try parts.append(self.arena, try std.fmt.allocPrint(
             self.arena,

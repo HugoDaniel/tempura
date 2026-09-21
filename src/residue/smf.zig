@@ -163,7 +163,8 @@ fn essenceParts(diags: *Diag.List, essence: ?[]const u8, cap: usize) Error!usize
             .residue_unencodable,
             .err,
             .{ .start = 0, .end = 0 },
-            "the essence handed to this carrier is empty; the timeline tier could not be packed, so this .mid would carry nothing the format cannot say itself",
+            "the essence handed to this carrier is empty; the timeline tier could not be " ++
+                "packed, so this .mid would carry nothing the format cannot say itself",
             .{},
         );
         return 0;
@@ -174,7 +175,8 @@ fn essenceParts(diags: *Diag.List, essence: ?[]const u8, cap: usize) Error!usize
             .residue_partial,
             .warning,
             .{ .start = 0, .end = 0 },
-            "the essence is {d} bytes and one .mid carries at most {d} ({d} events of {d}); none of it was written, because half an essence only reads as corrupt",
+            "the essence is {d} bytes and one .mid carries at most {d} ({d} events of {d}); " ++
+                "none of it was written, because half an essence only reads as corrupt",
             .{ body.len, max_parts * cap, max_parts, cap },
         );
         return 0;
@@ -265,7 +267,9 @@ pub fn detach(gpa: Allocator, seq: *const Sequence.Sequence) Error!Detached {
     for (seq.tracks) |t| {
         const track = try b.addTrack();
         for (t.events) |e| {
-            if (e.kind == .tempura_residue and try takeEvent(&taken, arena.allocator(), seq, e, &diags)) continue;
+            if (e.kind == .tempura_residue) {
+                if (try takeEvent(&taken, arena.allocator(), seq, e, &diags)) continue;
+            }
             try copyEvent(&b, seq, e, track);
         }
     }
@@ -319,7 +323,8 @@ fn takeEvent(
             .residue_version,
             .warning,
             .{ .start = 0, .end = 0 },
-            "a residue payload of envelope version {d} (this build writes {d}); it stays in the file, unparsed",
+            "a residue payload of envelope version {d} (this build writes {d}); " ++
+                "it stays in the file, unparsed",
             .{ r.ver, records.version },
         );
         return false;
