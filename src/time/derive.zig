@@ -2029,6 +2029,139 @@ test "derive: one clip with :repeat, :offset, :length and :transpose at once" {
     try testing.expectEqual(@as(i64, 4 * bar44), d.map.length);
 }
 
+// ---- tests: allocation failure ----
+
+/// The OOM sweep over `derive` for one document: at EVERY allocation
+/// index the call fails with `error.OutOfMemory` and `testing.allocator`
+/// sees no leak, and past the last one the derivation is whole. Bounded
+/// by the number of allocations the call makes, which the loop discovers
+/// and hands back.
+fn expectDeriveOomClean(doc: *const Doc) !usize {
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(
+            testing.allocator,
+            .{ .fail_index = fail_index },
+        );
+        const result = derive(failing.allocator(), doc);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var derived = try result;
+            derived.deinit();
+            return fail_index;
+        }
+    }
+}
+
+/// A native document with every kind of content a derivation copies: two
+/// tempo segments, a meter change, a section, a cue, a notes lane with a
+/// clip to expand, a curve lane, and no `:length`, so the default is
+/// worked out through a probe map of its own.
+const sweep_native =
+    \\(timeline)
+    \\(tempo-point :at 0q :qpm 120)
+    \\(tempo-point :at 1bar :qpm 97.3)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\(meter-point :at 2bar :sig [3 4])
+    \\(section :name intro :at 0bar :dur 2bar)
+    \\(cue :name "drop" :at 1bar)
+    \\(phrase :name fill :length 1bar
+    \\  (lane :name flash
+    \\    (note :at 0q :dur 0.25q :key 38 :vel 100)))
+    \\(lane :name flash :kind notes :target flash
+    \\  (note :at 0q :dur 0.5q :key 36 :vel 110)
+    \\  (clip :at 2bar :phrase fill :repeat 2 :offset 0.5q :length 1q :transpose 12))
+    \\(lane :name glow :kind curve :target glow
+    \\  (keyframe :at 0q :value 0.2 :ease hold)
+    \\  (keyframe :at 1bar :value 0.9 :ease in-cubic))
+;
+
+/// An inline `.mid` that conducts, with a notes lane and a curve lane
+/// bound to it: the conductor's copy-out and relay, and both SMF bridges.
+const sweep_smf =
+    \\(timeline :conductor song)
+    \\(anchor :id song :kind smf :file "x.mid")
+    \\(midi/smf :format 0 :division 480)
+    \\(midi/mtrk
+    \\  (set-tempo      :at 0    :us 500000)
+    \\  (control-change :at 0    :ch 1 :num 74 :val 10)
+    \\  (note-on        :at 0    :ch 1 :key 36 :vel 100)
+    \\  (note-off       :at 240  :ch 1 :key 36 :vel 64)
+    \\  (control-change :at 960  :ch 1 :num 74 :val 100)
+    \\  (note-on        :at 960  :ch 1 :key 41 :vel 80)
+    \\  (note-off       :at 1200 :ch 1 :key 41 :vel 64)
+    \\  (end-of-track   :at 1920))
+    \\(lane :name kick :kind notes :from song :track 1 :ch 1)
+    \\(lane :name filter :kind curve :from song :track 1 :ch 1 :cc 74)
+;
+
+/// An inline `.it` with a notes lane and a curve lane bound to it, under
+/// a head (`{s}`) that says who keeps time. Conducted by the module, the
+/// lanes read the conductor's own walk; timed by the document, each walks
+/// the module for itself.
+const sweep_it =
+    \\{s}
+    \\(anchor :id mod :kind it :file "x.it")
+    \\(it/module :title "bound"
+    \\  (it/timing :speed 24 :tempo 125)
+    \\  (it/orders 0 1 2 2 end)
+    \\  (it/pattern 0 :rows 4
+    \\    (row 0 (ev 1 "C-5" :ins 1 :vol 64 :fx "G01"))
+    \\    (row 2 (ev 1 "E-5" :ins 1)))
+    \\  (it/pattern 1 :rows 4
+    \\    (row 0 (ev 1 "G-5" :ins 1)))
+    \\  (it/pattern 2 :rows 4))
+    \\(lane :name lead :kind notes :from mod :channel 1)
+    \\(lane :name loud :kind curve :from mod :channel 1 :column vol)
+;
+
+test "derive: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit" — the derivation's arena, its report, the
+    // conductor's walk moved into it, and every bridge's scratch — over
+    // five documents that between them reach every allocating path here:
+    // native content and clips, both conductors, both bound bridges, the
+    // IT lane's walk of its own, and the placeholder said out loud.
+    const gpa = testing.allocator;
+
+    const conducted_head = "(timeline :conductor mod)";
+    const it_conducted = try std.fmt.allocPrintSentinel(gpa, sweep_it, .{conducted_head}, 0);
+    defer gpa.free(it_conducted);
+    const native_head = "(timeline)\n(tempo-point :at 0q :qpm 125)\n" ++
+        "(meter-point :at 0bar :sig [4 4])";
+    const it_native = try std.fmt.allocPrintSentinel(gpa, sweep_it, .{native_head}, 0);
+    defer gpa.free(it_native);
+
+    for ([_][:0]const u8{ sweep_native, sweep_smf, it_conducted, it_native }) |source| {
+        var res = try test_support.load(gpa, source);
+        defer res.deinit();
+        if (res.diags.hasErrors()) {
+            for (res.diags.items()) |d| std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
+            return error.TestSweepFixtureDoesNotLoad;
+        }
+        // A sweep that fails nothing proves nothing: the derivation's
+        // arena and its map's are each asked for memory, at the least.
+        try testing.expect(try expectDeriveOomClean(&res.doc) >= 2);
+    }
+
+    // The placeholder, with the document's own points refused: a `Doc`
+    // built the way a host might, since a load says the conflict first.
+    var doc: Doc = .empty(gpa);
+    defer doc.deinit();
+    const arena = doc.arena.allocator();
+    const tempo = try arena.alloc(tm.TempoPoint, 1);
+    tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
+    const meter = try arena.alloc(tm.MeterPoint, 1);
+    meter[0] = .{ .tick = 0, .n = 3, .d = 4 };
+    doc.tempo = tempo;
+    doc.meter = meter;
+    doc.anchors = try anchorsOf(&doc, .it);
+    doc.conductor = "song";
+    doc.length = bar44;
+    try testing.expect(try expectDeriveOomClean(&doc) >= 2);
+}
+
 // ---- tests: the two layers derive one map ----
 
 test "derive: an SMF-anchored document's map is the one fromSource built" {

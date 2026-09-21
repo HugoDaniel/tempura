@@ -1162,6 +1162,49 @@ test "TimeMap.derive: the segment table builds in plan 03's op order" {
     );
 }
 
+test "TimeMap.derive: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers.
+    //
+    // The fixture makes all three tables AND the report allocate: no
+    // tempo point at tick 0 (the fallback, said), a meter point 2q into
+    // a [3 4] bar (dropped, said), a meter change on bar 2 and a bar table
+    // six bars long.
+    const tempo = [_]TempoPoint{
+        .{ .tick = 46_126_080, .tempo = .{ .qpm = 120 } },
+        .{ .tick = 184_504_320, .tempo = .{ .qpm = 97.3 } },
+    };
+    const meter = [_]MeterPoint{
+        .{ .tick = 0, .n = 3, .d = 4 },
+        .{ .tick = 92_252_160, .n = 5, .d = 4 },
+        .{ .tick = 276_756_480, .n = 4, .d = 4 },
+    };
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(
+            testing.allocator,
+            .{ .fail_index = fail_index },
+        );
+        const result = derive(failing.allocator(), &tempo, &meter, 1_014_773_760, .loop);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var r = try result;
+            defer r.deinit();
+            try testing.expectEqual(@as(usize, 2), r.diags.items().len);
+            try testing.expectEqual(@as(usize, 7), r.map.bars.len);
+            break;
+        }
+    }
+    // The sweep swept: the map's arena and the report's are each asked
+    // for memory (an arena asks its backing allocator for whole nodes,
+    // not once per table, so this is a floor and not a count).
+    try testing.expect(fail_index >= 2);
+}
+
 /// The fixture of plan 03's op-order table: 120 qpm, 240 qpm at 4q,
 /// 97.3 qpm at 12q. `:length` is 16q, two bars of `[4 4]`.
 fn threeSegmentMap() error{OutOfMemory}!Result {
