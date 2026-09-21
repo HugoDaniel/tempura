@@ -2417,9 +2417,20 @@ fn wireChannel(comptime T: type, v: ?f64) T {
     return if (x >= 0 and x <= max) @intFromFloat(x) else 0;
 }
 
-/// `"C4"` is 60: a letter A-G, any number of `#` or `b`, then the
-/// octave, which may be negative (`"C-1"` is 0). Total — an unreadable
-/// spelling answers null and the caller says so with a span.
+/// The most a note name's `#`/`b` run may move its letter: an octave.
+/// Past it no spelling names a key a shorter one could not.
+const max_accidental = 12;
+
+/// `"C4"` is 60: a letter A-G, a run of `#` or `b` moving it at most an
+/// octave, then the octave, which may be negative (`"C-1"` is 0). Total —
+/// an unreadable spelling answers null and the caller says so with a
+/// span.
+///
+/// Both numbers are bounded BEFORE the arithmetic, because the text is
+/// the document's: `"C300000000"` overflowed `(octave + 1) * 12`. With
+/// the accidental inside ±12, only octaves -2..10 can land on 0..127 at
+/// all (`"C############-2"` is 0, `"Gbbbbbbbbbbbb10"` is 127), so any
+/// other octave is null before it is multiplied.
 fn parseNoteName(text: []const u8) ?u7 {
     if (text.len < 2) return null;
     const step: i32 = switch (std.ascii.toUpper(text[0])) {
@@ -2434,15 +2445,19 @@ fn parseNoteName(text: []const u8) ?u7 {
     };
     var i: usize = 1;
     var accidental: i32 = 0;
+    // Bounded by the text's length, and the running sum by the octave's
+    // worth checked on every step.
     while (i < text.len) : (i += 1) {
         switch (text[i]) {
             '#' => accidental += 1,
             'b' => accidental -= 1,
             else => break,
         }
+        if (@abs(accidental) > max_accidental) return null;
     }
     if (i == text.len) return null;
     const octave = std.fmt.parseInt(i32, text[i..], 10) catch return null;
+    if (octave < -2 or octave > 10) return null;
     const key = (octave + 1) * 12 + step + accidental;
     return if (key >= 0 and key <= 127) @intCast(key) else null;
 }
@@ -3269,6 +3284,26 @@ test "fromSjon.parseNoteName: the midi set's convention, middle C is C4" {
     try testing.expect(parseNoteName("C#") == null);
     try testing.expect(parseNoteName("G10") == null); // past 127
     try testing.expect(parseNoteName("C-2") == null); // below 0
+}
+
+test "fromSjon.parseNoteName: an octave past any key is null, never an overflow" {
+    // `(octave + 1) * 12` was i32 arithmetic on an unbounded `parseInt`:
+    // `"C300000000"` overflowed it on text any document can carry.
+    try testing.expect(parseNoteName("C300000000") == null);
+    try testing.expect(parseNoteName("C2147483647") == null);
+    try testing.expect(parseNoteName("B#-2147483648") == null);
+    try testing.expect(parseNoteName("C99999999999999999999") == null);
+    // An enharmonic spelling outside octaves -1..9 still reads: B#-2 is
+    // C-1, and the bounds are the ones every key can be spelled inside.
+    try testing.expectEqual(@as(u7, 0), parseNoteName("B#-2").?);
+    try testing.expectEqual(@as(u7, 0), parseNoteName("C############-2").?);
+    try testing.expectEqual(@as(u7, 127), parseNoteName("Gbbbbbbbbbbbb10").?);
+    // More than an octave of accidentals is not a spelling of a key.
+    try testing.expect(parseNoteName("C#############4") == null);
+    try expectCode(preamble ++
+        \\(lane :name flash :kind notes
+        \\  (note :at 0q :dur 1q :key "C300000000"))
+    , .note_key_invalid);
 }
 
 test "fromSjon: the slot-local defaults restated here are the manifest's" {
