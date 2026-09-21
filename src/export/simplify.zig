@@ -96,8 +96,13 @@ pub fn rdp(gpa: Allocator, keys: []const Key, eps: f32, tpb: i64) Error![]Key {
     const per_beat: f64 = @floatFromInt(tpb);
     for (keys, xs) |key, *x| x.* = @as(f64, @floatFromInt(key.tick)) / per_beat;
 
+    // The divide's pending frames are disjoint intervals of the keys, so
+    // `keys.len` of them is a bound it never reaches (see `divide`).
+    const stack = try gpa.alloc(Frame, keys.len);
+    defer gpa.free(stack);
+
     const eps2 = @as(f64, eps) * @as(f64, eps);
-    divide(keys, xs, keep, 0, keys.len - 1, eps2);
+    divide(keys, xs, keep, stack, eps2);
 
     var out: std.ArrayList(Key) = .empty;
     errdefer out.deinit(gpa);
@@ -141,13 +146,56 @@ pub fn budget(gpa: Allocator, keys: []const Key, mode: Mode, eps: f32, tpb: i64)
     };
 }
 
-// ---- the recursion ----
+// ---- the divide ----
 
-/// `[lo, hi]` with both ends kept: find the interior point furthest
-/// from the chord and, if it is past `eps`, keep it and recurse into
-/// both halves — LEFT first, always, so the recursion order is fixed.
-fn divide(keys: []const Key, xs: []const f64, keep: []bool, lo: usize, hi: usize, eps2: f64) void {
-    if (hi <= lo + 1) return;
+/// One pending `[lo, hi]` of `divide`, both ends already kept.
+const Frame = struct { lo: usize, hi: usize };
+
+/// Ramer-Douglas-Peucker over `[0, keys.len - 1]` with both ends kept:
+/// find the interior point furthest from the chord and, if it is past
+/// `eps`, keep it and divide both halves — LEFT first, always, so the
+/// order the splits are found in is fixed.
+///
+/// An explicit stack, not recursion: a curve lane may carry thousands
+/// of keys and the textbook form recurses as deep as the key count in
+/// the worst case (a monotone ramp that keeps every key), which is not
+/// a stack a wasm host can be asked for. The pending frames are
+/// intervals of the keys that overlap only at their ends, so there are
+/// never more than `keys.len - 1` of them; and every split keeps one
+/// interior key, so there are at most `keys.len - 2` splits and fewer
+/// than `2 · keys.len` pops in all.
+fn divide(keys: []const Key, xs: []const f64, keep: []bool, stack: []Frame, eps2: f64) void {
+    std.debug.assert(keys.len >= 3);
+    std.debug.assert(stack.len >= keys.len);
+    std.debug.assert(keep[0] and keep[keys.len - 1]);
+
+    stack[0] = .{ .lo = 0, .hi = keys.len - 1 };
+    var pending: usize = 1;
+    for (0..2 * keys.len) |_| {
+        if (pending == 0) break;
+        pending -= 1;
+        const frame = stack[pending];
+        const at = furthestFromChord(keys, xs, frame.lo, frame.hi, eps2) orelse continue;
+
+        keep[at] = true;
+        // RIGHT pushed first so that LEFT pops first.
+        std.debug.assert(pending + 2 < stack.len);
+        stack[pending] = .{ .lo = at, .hi = frame.hi };
+        stack[pending + 1] = .{ .lo = frame.lo, .hi = at };
+        pending += 2;
+    } else unreachable;
+
+    std.debug.assert(pending == 0);
+    std.debug.assert(keep[0] and keep[keys.len - 1]);
+}
+
+/// The interior key of `[lo, hi]` furthest from the chord `lo → hi`, if
+/// it is further than `eps` — null when the interval has no interior or
+/// every key in it lies within `eps` of the chord.
+fn furthestFromChord(keys: []const Key, xs: []const f64, lo: usize, hi: usize, eps2: f64) ?usize {
+    std.debug.assert(lo <= hi);
+    std.debug.assert(hi < keys.len);
+    if (hi <= lo + 1) return null;
 
     var best: f64 = 0;
     var at: usize = 0;
@@ -161,11 +209,9 @@ fn divide(keys: []const Key, xs: []const f64, keep: []bool, lo: usize, hi: usize
             at = i;
         }
     }
-    if (at == 0 or best <= eps2) return;
-
-    keep[at] = true;
-    divide(keys, xs, keep, lo, at, eps2);
-    divide(keys, xs, keep, at, hi, eps2);
+    if (at == 0 or best <= eps2) return null;
+    std.debug.assert(lo < at and at < hi);
+    return at;
 }
 
 /// The squared perpendicular distance from key `i` to the chord
