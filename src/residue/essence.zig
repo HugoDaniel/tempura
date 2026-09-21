@@ -139,6 +139,7 @@ pub const Packed = struct {
 /// The carrying anchor is `carrierOf(doc)`; `packFor` takes it when the
 /// caller knows better.
 pub fn pack(gpa: Allocator, doc: *const Doc.Doc, source: [:0]const u8) Error!Packed {
+    doc.invariants();
     return packFor(gpa, source, carrierOf(doc));
 }
 

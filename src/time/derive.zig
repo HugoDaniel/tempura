@@ -190,6 +190,7 @@ pub const Derived = struct {
 /// a diagnostic on the returned value and the derivation is still built,
 /// because an editor has to show something.
 pub fn derive(gpa: std.mem.Allocator, doc: *const Doc) Error!Derived {
+    doc.invariants();
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     var diags: Diag.List = .init(gpa);
     var rowmap: ?walk.RowMap = null;

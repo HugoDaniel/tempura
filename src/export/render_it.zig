@@ -109,6 +109,8 @@ pub fn renderIt(
     base: ?*const itf.Module,
     opts: Options,
 ) Error!Result {
+    doc.invariants();
+    derived.invariants();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);

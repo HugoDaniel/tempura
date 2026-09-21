@@ -168,6 +168,8 @@ pub fn exportScore(
     hints: []const EaseHint,
     opts: Options,
 ) Error!Result {
+    d.invariants();
+    derived.invariants();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);

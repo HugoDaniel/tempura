@@ -304,6 +304,7 @@ pub fn timelineEncodedLen(d: *const Derived) usize {
 /// `pos = …` and the sum is checked against `timelineEncodedLen` at the
 /// end.
 pub fn encodeTimeline(d: *const Derived, dest: []u8) Error![]u8 {
+    d.invariants();
     if (dest.len < timelineEncodedLen(d)) return error.BufferTooSmall;
 
     var pos = writeTimelineHeader(dest, &d.map);

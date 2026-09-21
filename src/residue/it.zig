@@ -261,6 +261,8 @@ pub const Tail = struct {
 /// question only a bar table can answer, exactly as for the canonical
 /// printer.
 pub fn tail(gpa: Allocator, doc: *const Doc.Doc, map: *const TimeMap.TimeMap) Error!Tail {
+    doc.invariants();
+    map.invariants();
     var t: Tailer = .{
         .gpa = gpa,
         .doc = doc,
