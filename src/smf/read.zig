@@ -144,11 +144,11 @@ pub fn read(gpa: std.mem.Allocator, bytes: []const u8) Error!Result {
 
     try r.run();
 
-    const a = r.arena.allocator();
+    const arena = r.arena.allocator();
     const map: SourceMap = .{
-        .chunks = try r.chunks.toOwnedSlice(a),
-        .tracks = try r.tracks.toOwnedSlice(a),
-        .foreign = try r.foreign.toOwnedSlice(a),
+        .chunks = try r.chunks.toOwnedSlice(arena),
+        .tracks = try r.tracks.toOwnedSlice(arena),
+        .foreign = try r.foreign.toOwnedSlice(arena),
         .smpte = r.smpte,
         .riff = r.riff,
         .arena = r.arena,

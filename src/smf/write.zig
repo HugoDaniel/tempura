@@ -90,12 +90,12 @@ pub const Written = struct {
 /// of each track's events.
 pub fn write(gpa: std.mem.Allocator, seq: *const Sequence, opts: Options) Error!Written {
     seq.invariants();
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
 
-    const a = arena.allocator();
+    const arena = arena_state.allocator();
     const grid = seq.division.pulsesPerQuarter();
 
     // `--ppq 0` asks for a division no file can carry and no tick can
@@ -120,17 +120,17 @@ pub fn write(gpa: std.mem.Allocator, seq: *const Sequence, opts: Options) Error!
         .seq = seq,
         .opts = opts,
         .diags = &diags,
-        .a = a,
+        .arena = arena,
         .from_ppq = grid,
         .to_ppq = to_ppq,
-        .out = .init(a),
+        .out = .init(arena),
     };
     emit.run() catch |err| switch (err) {
         // An `Allocating` writer fails one way only.
         error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
     };
 
-    return .{ .arena = arena, .bytes = emit.out.written(), .diags = diags };
+    return .{ .arena = arena_state, .bytes = emit.out.written(), .diags = diags };
 }
 
 /// One pass over one sequence.
@@ -138,7 +138,9 @@ const Emit = struct {
     seq: *const Sequence,
     opts: Options,
     diags: *Diag.List,
-    a: std.mem.Allocator,
+    /// The `Written`'s arena: the track copies and the output live in
+    /// it and are freed with it, never one by one.
+    arena: std.mem.Allocator,
     from_ppq: u15,
     to_ppq: u15,
     out: Writer.Allocating,
@@ -198,13 +200,13 @@ const Emit = struct {
                         ends_at = @max(ends_at orelse e.at, e.at);
                         continue;
                     }
-                    try merged.append(self.a, e);
+                    try merged.append(self.arena, e);
                 }
             }
             try self.track(merged.items, ends_at);
         } else {
             for (self.seq.tracks) |t| {
-                const copy = try self.a.dupe(Event, t.events);
+                const copy = try self.arena.dupe(Event, t.events);
                 try self.track(copy, null);
             }
         }
@@ -219,7 +221,7 @@ const Emit = struct {
     fn track(self: *Emit, events: []Event, ends_at: ?i64) Fail!void {
         std.mem.sort(Event, events, {}, byTick);
 
-        var body: Writer.Allocating = .init(self.a);
+        var body: Writer.Allocating = .init(self.arena);
         const w = &body.writer;
         // Where this body will land in the file, so a diagnostic's span
         // is a file offset and not a track offset.
