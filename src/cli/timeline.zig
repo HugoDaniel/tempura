@@ -16,6 +16,14 @@
 //! rendering cannot say that. A studio wants a number. So the JSON
 //! carries both: `tps` is the number and `tps_bits` is the pattern, and a
 //! consumer that cares about exactness reads the one that can carry it.
+//!
+//! **A float that is not finite is a string.** JSON has no literal for
+//! one, and a map can hold one: `TimeMap`'s invariants let a rate reach
+//! +inf (a `:qpm` near f64's ceiling), and a seconds sum can overflow the
+//! same way. So `inf`, `-inf` and `nan` ride as the JSON strings `"inf"`,
+//! `"-inf"` and `"nan"` (`std.json` already quoted a NaN; it printed a
+//! bare, unparseable `inf`), and the `_bits` beside each is exact either
+//! way.
 
 const std = @import("std");
 const tempura = @import("tempura");
@@ -199,13 +207,13 @@ fn writeSegments(j: *Stringify, segments: []const tempura.time.TimeMap.Segment) 
         try j.objectField("tick");
         try j.write(s.tick);
         try j.objectField("us");
-        try j.write(s.us);
+        try writeFloat(j, s.us);
         try j.objectField("tps");
-        try j.write(s.tps);
+        try writeFloat(j, s.tps);
         try j.objectField("tps_bits");
         try writeBits(j, s.tps);
         try j.objectField("start_sec");
-        try j.write(s.start_sec);
+        try writeFloat(j, s.start_sec);
         try j.objectField("start_sec_bits");
         try writeBits(j, s.start_sec);
         try j.endObject();
@@ -244,7 +252,7 @@ fn writeLength(j: *Stringify, map: *const tempura.time.TimeMap.TimeMap) Cli.Erro
     try j.objectField("end");
     try j.write(@tagName(map.end));
     try j.objectField("loop_secs");
-    try j.write(map.loop_secs);
+    try writeFloat(j, map.loop_secs);
     try j.objectField("loop_secs_bits");
     try writeBits(j, map.loop_secs);
     try j.endObject();
@@ -331,13 +339,22 @@ fn writeSteps(j: *Stringify, steps: []const tempura.time.derive.Step) Cli.Error!
         try j.write(s.tick);
         try j.objectField("value");
         try j.beginArray();
-        for (s.value[0..s.ncomp]) |v| try j.write(v);
+        for (s.value[0..s.ncomp]) |v| try writeFloat(j, v);
         try j.endArray();
         try j.objectField("ease");
         try j.write(s.ease_src);
         try j.endObject();
     }
     try j.endArray();
+}
+
+/// One float as JSON: the number when it is finite, else the string
+/// `"inf"`, `"-inf"` or `"nan"` (the header says why). Every float field
+/// goes through here; a finite one prints exactly as `Stringify` would.
+fn writeFloat(j: *Stringify, x: f64) Cli.Error!void {
+    if (std.math.isFinite(x)) return j.write(x);
+    if (std.math.isNan(x)) return j.write("nan");
+    return j.write(if (x > 0) "inf" else "-inf");
 }
 
 /// One f64's bits, spelled exactly as `TimeMap.echo` spells them, so the
@@ -474,6 +491,51 @@ test "timeline -o: the artifact goes to the file and stdout stays empty" {
     const written = try tmp.dir.readFileAlloc(std.testing.io, "map.sjon", a, .limited(1 << 20));
     defer a.free(written);
     try t.expect(std.mem.startsWith(u8, written, "(segment :tick 0 :us 480000"));
+}
+
+test "timeline --json: a rate that overflows to +inf is the string \"inf\", and the JSON parses" {
+    // `:qpm 1e308` makes a `us` of 6e-301, and TPQ·1e6 over that is past
+    // f64: the map's invariants allow the +inf, so the envelope has to
+    // carry it. A bare `inf` would make the whole document unparseable.
+    const gpa = t.allocator;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "fast.sjon",
+        .data =
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :qpm 1e308)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\
+        ,
+    });
+    const path = try std.fmt.allocPrintSentinel(
+        gpa,
+        ".zig-cache/tmp/{s}/fast.sjon",
+        .{tmp.sub_path},
+        0,
+    );
+    defer gpa.free(path);
+
+    var c = try Cli.invoke(&.{ "tempura", "timeline", path, "--json" });
+    defer c.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, c.out.written(), .{});
+    defer parsed.deinit();
+    const tl = parsed.value.object.get("timeline").?.object;
+    const seg = tl.get("segments").?.array.items[0].object;
+    try t.expectEqualStrings("inf", seg.get("tps").?.string);
+    try t.expectEqualStrings("7FF0000000000000", seg.get("tps_bits").?.string);
+}
+
+test "timeline writeFloat: a finite float is a number, the three others are strings" {
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    var j: Stringify = .{ .writer = &out.writer };
+    try j.beginArray();
+    const xs = [_]f64{ 1.5, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64) };
+    for (xs) |x| try writeFloat(&j, x);
+    try j.endArray();
+    try t.expectEqualStrings("[1.5,\"inf\",\"-inf\",\"nan\"]", out.written());
 }
 
 test "timeline: a defective document still echoes a map, and exits 1" {
