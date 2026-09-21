@@ -206,8 +206,34 @@ pub const Payloads = struct {
 
 /// Write the eight envelope bytes of `p` into `out`.
 pub fn writeHead(out: *std.ArrayList(u8), gpa: Allocator, p: Payload) Error!void {
+    assertWritable(p);
+    const before = out.items.len;
     try out.appendSlice(gpa, &magic);
     try out.appendSlice(gpa, &[_]u8{ p.ver, p.kind, p.seq, p.total });
+    std.debug.assert(out.items.len - before == head_len);
+}
+
+/// What a WRITER of this build seats, asserted at the write side: its
+/// own envelope version, a kind it writes, a split of at least one part
+/// and a `seq` inside it. Both carriers call it before an envelope goes
+/// out (`writeHead` here, `smf.addPayload` for the SMF core's typed
+/// event). The READER diagnoses the same four and never asserts them —
+/// a payload off a file is somebody's bytes, not this build's promise.
+pub fn assertWritable(p: Payload) void {
+    std.debug.assert(p.ver == version);
+    std.debug.assert(isWritten(p.kind));
+    std.debug.assert(p.total >= 1);
+    std.debug.assert(p.seq < p.total);
+}
+
+/// Whether `kind` is one this build writes: the essence, a lane record
+/// or the conductor record. `reserved` is midivia's and the rest are
+/// nobody's, and neither is ever seated by tempura.
+fn isWritten(kind: u8) bool {
+    return switch (@as(Kind, @enumFromInt(kind))) {
+        .essence, .lane, .conductor => true,
+        .reserved, _ => false,
+    };
 }
 
 /// Read an envelope head at `bytes[0..8]`, or null when the bytes are

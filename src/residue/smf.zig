@@ -206,6 +206,9 @@ fn leadTrackZero(
     cap: usize,
     conductor: ?[]const u8,
 ) Error!void {
+    // `essenceParts` capped the count, which is what makes `seq` and
+    // `total` fit their byte below.
+    std.debug.assert(parts <= max_parts);
     for (0..parts) |part| {
         const from = part * cap;
         const to = @min(from + cap, essence.len);
@@ -332,6 +335,7 @@ fn takeEvent(
 
 /// One `FF 7F` event, its body copied into the builder's pool.
 fn addPayload(b: *Sequence.Builder, track: u32, p: records.Payload) Error!void {
+    records.assertWritable(p);
     const body = try b.addBytes(p.body);
     try b.addEvent(track, 0, .tempura_residue, .{ .residue = .{
         .ver = p.ver,
