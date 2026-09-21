@@ -419,6 +419,18 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
     named), and `materialize` keeps `:cc`, so a materialized curve rebuilds onto the
     controller it came from. `corpus/native-curve-cc/` pins it. Still dropped on a native
     lane: `:bend`, `:pressure` and `:velocity`, surfaces no renderer writes.
+- 2026-09-21 — **The Zig mastery wave** ([12](12-zig-mastery.md)): the tree audited
+  against `~/llm/mastery/zig/` and brought to it — an `invariants()` on every core value at
+  its write and read sides, every production function under 70 lines, every line under 100
+  columns, arena/gpa allocator names, bounded loops, a proof on every `catch unreachable`,
+  a `FailingAllocator` sweep on every allocating entry point, and the fuzz gate carried on
+  through `derive`, the playhead and the score exporter. Fifteen defects in shipped code
+  came out of it and are fixed with tests, three of them reachable from a document: the
+  integer tempo accumulator trapped `fromSource` on `:qpm 1e-30`; a refused meter `[4 17]`
+  reached `Grid.beatTicks` in the IT renderer through `tpr_build`; a `:qpm 1e300` overflowed
+  the score's bpm spelling. The wire surfaces, the corpus and the CLI goldens are
+  byte-identical, and the wasm is 10 KB smaller (93% of its ceiling to 92%). Plan 12 lists the follow-ups; one is a ruling for plan 10 — `tpr_build`
+  builds a document that loaded with errors where the CLI refuses.
 
 ## Status board
 

@@ -16,7 +16,7 @@ the verdict after every task: the corpus goldens make every change byte-identica
 | Every public entry point takes `gpa` and returns an owned struct with arena-backed `deinit`; the struct never retains the caller's GPA (`CLAUDE.md`, pacer plan 01) | met: the `gpa: Allocator` fields that exist are on transient WORKERS (`Reader`, `Writer`, `Run`, `Tailer`) that die inside the call, never on a returned value | met — kept; the OOM sweeps below are what PROVE the `errdefer` discipline behind it |
 | No recursion (ZIG_MASTERY, NASA-10 rule 1) | one unbounded recursion in a value path: `export/simplify.divide`, Ramer–Douglas–Peucker over a curve lane's keys, depth up to the key count on a wasm stack; tree walks over an SJON `Ast.Tree` (`edit/value.node`, the corpus runner's `jsonOfNode`) recurse to the tree's depth, which SJON's parser bounds at `MAX_PARSE_DEPTH = 1024` | **adopted** for `divide` (an explicit stack, bounded by the key count); the SJON-tree walks are ACCEPTED as bounded by the substrate and say so in their doc comments |
 | Every loop has an upper bound (rule 2) | six `while (true)` in the core: `smf/vlq.read` (bounded by `MAX_LEN` inside the body), `itf/walk.run` (the `seen` set), `TimeMap.barTable` (`MAX_BARS` via the diagnostic), `edit/Plan` (the action list's own length), `doc/Value.passthroughEql` (the token count), `export/pos` (`MAX_FRAC_DIGITS`) | **adopted** — a constant bound becomes `for (0..bound)` with the doctrine's `else unreachable`; an input-length bound stays a `while` and names its bound in a comment |
-| Two assertions per function, positive and negative space, paired at write and read (rule 5) | **near zero**: 3,800-line `fromSjon` has none, `reconcile` none, `ops_native` none, `ops_bound` none; the ones that exist are in `TimeMap`, `Module`, `Sequence`, `TprAbi`, `wasm_entry` | **adopted at the seams, not per function** — `CLAUDE.md` forbids asserting on user input, so the discipline lands as one `invariants()` per core VALUE (`TimeMap`, `Derived`, `Doc`, `Sequence`, `Module`, `Diag.List`) called at the write side (the end of the constructor) and at the read side (the entry of each consumer), plus pre- and post-conditions in the leaf math (`Pos`, `Grid`, `vlq`, `TprAbi`). Never on a byte a reader has not yet diagnosed; the never-panic fuzz gate (`tools/zt fuzz`) is what proves that line was not crossed |
+| Two assertions per function, positive and negative space, paired at write and read (rule 5) | **near zero**: 3,800-line `fromSjon` has none, `reconcile` none, `ops_native` none, `ops_bound` none; the ones that exist are in `TimeMap`, `Module`, `Sequence`, `TprAbi`, `wasm_entry` | **adopted at the seams, not per function** — `CLAUDE.md` forbids asserting on user input, so the discipline lands as one `invariants()` per core VALUE (`TimeMap`, `Derived`, `Doc`, `Sequence`, `Module`, `Diag.List`) called at the write side (the end of the constructor) and at the read side (the entry of each consumer), plus pre- and post-conditions in the leaf math (`Pos`, `Grid`, `vlq`, `TprAbi`). Never on a byte a reader has not yet diagnosed — in `ReleaseSmall` a violated assertion is undefined behaviour — and the never-panic fuzz gate (`tools/zt fuzz`) is what proves that line was not crossed |
 | Functions ≤ 70 lines, push `if`s up and `for`s down, leaf functions pure (rule 6) | **55 functions over 70 lines, 20 of them over 100**: `Args.parse` 237, `timeline.writeJson` 217, `reconcile.emit` 193, `Op.op` 190, `fromSjon.walk` 188, `smf/read.track` 166, `ops_bound.materialize` 159, `pipeline.buildIt` 141, `fromSjon.readLane` 136, `readBinding` 125, `itf/write.run` 121, `bridge_smf.event` 120, `ops_bound.smfLane` 111, `corpus_runner.renderSmfCase` 110, `pipeline.buildSmf` 109, `corpus_runner.parseHarness` 109, `residue/smf.attach` 105, `reconcile.kitCase` 103, `itf/pattern.unpack` 101, `ops_native.moveInLane` 101 | **adopted**: every production function over 100 lines is decomposed in this wave — the parent keeps the control flow and the helpers become pure leaves that compute and return; the 70–100 band is decomposed where the seam is obvious and otherwise logged below as the follow-up. Test bodies and fixture builders are not functions in this sense |
 | 100 columns, `zig fmt` clean (Formatting) | `zig fmt` clean; **857 lines over 100 columns**, 423 of them production code, 2 comments | **adopted** — wrapped, mechanically where a trailing comma lets `zig fmt` do it and by `++` where a string literal is the long thing. The two long comments are re-flowed |
 | No `catch unreachable` without proof (rule 8) | 43 sites: 38 are `std.fmt.bufPrint` of a bounded number into a buffer sized for its widest spelling, 1 is `utf8Encode` of a table codepoint, 4 are test fixtures allocating from an arena | **adopted** — every production site keeps the `catch unreachable` and STATES its proof in the line above (the buffer's width against the widest value); the test fixtures use `try` |
@@ -33,29 +33,49 @@ the verdict after every task: the corpus goldens make every change byte-identica
 
 ## The invariants, value by value
 
-What each `invariants()` asserts. Every clause is a property OUR code establishes, never one
-the input promised: a reader that meets a bad byte diagnoses and drops it, and the value it
-returns satisfies these anyway. `std.debug.assert` compiles out of `ReleaseSmall`, so the
-wasm pays nothing; Debug tests and the fuzz gate pay once per construction and once per
-consumer entry, never per query.
+What each `invariants()` asserts, as the wave established it against the code rather than
+as this plan first guessed. Every clause is a property OUR code establishes, never one the
+input promised: a reader that meets a bad byte diagnoses and drops it, and the value it
+returns satisfies these anyway. Where a producer other than the reader (a `Builder`, the
+bridge, the residue's rebuild) may legitimately hand in less, the reader's stronger promise
+is a separate POSTCONDITION asserted at the end of the reader only.
 
-- **`TimeMap`** — `segments.len ≥ 1`, `segments[0].tick == 0`, ticks strictly ascending and
-  ≤ `Grid.MAX_TICK`, every `tps` finite and positive, `us` non-decreasing; `meters` likewise
-  with `n ≥ 1`, `d` a power of two; `bars[0] == 0`, strictly ascending, `len ≤ MAX_BARS`;
-  `loop_secs ≥ 0`. Queries assert their own `tick` is in `[0, MAX_TICK]` and their result is
-  finite.
-- **`Derived`** — the map's invariants; every lane table sorted by `at`, every onset and
-  keyframe tick inside `[0, MAX_TICK]`.
-- **`Doc`** — every span has `start ≤ end`; every keyframe's `ncomp` is `1..4`; every note's
-  `dur ≥ 0`; every clip's `repeat ≥ 1`; `anchors` ids distinct; a phrase's lanes carry no
-  binding.
-- **`Sequence`** — `division` non-zero; every track's events in non-decreasing absolute tick;
-  every channel event's data bytes < `0x80`; a `Kind` with a `status()` has one that
-  `fromStatus` maps back.
-- **`Module`** — `orders.len ≤ 256`, every pattern index an order names is a pattern or the
-  two markers; every pattern `1..200` rows and `≤ 64` channels; every cell's note, instrument,
-  volume and effect inside IT's byte domains.
-- **`Diag.List`** — every span `start ≤ end`; every code's ordinal inside `code_order`.
+`std.debug.assert` costs nothing in `ReleaseSmall`, but it does not vanish: a violated
+assertion there is undefined behaviour, an optimiser hint, not a trap. That — more than
+Debug's panic — is why no clause may be reachable from a host's input, and why `tools/zt
+fuzz` drives arbitrary bytes and text through every reader and, since this wave, through
+`derive`, the playhead and the score exporter too.
+
+- **`TimeMap`** — at least one segment, the first at tick 0; segment ticks strictly
+  ascending and `≤ Grid.MAX_TICK`; `start_sec` and the integral origins non-decreasing;
+  `tps` positive (it may be `+inf` for a `:qpm` near f64's ceiling, so not "finite"); meters
+  likewise, `n` in 1..64 and `d` a power of two ≤ 32; `bars[0] == 0`, strictly ascending,
+  `len ≤ MAX_BARS`; `loop_secs ≥ 0` when the length is. Plan 12's "`us` non-decreasing"
+  was wrong — a tempo map may slow down. Queries assert their ANSWER, not their argument:
+  `tpr_atTick` hands a host's i64 straight in.
+- **`Derived`** — the map's invariants; every lane table sorted the way `Playhead`
+  searches it; native content inside `[0, MAX_TICK]`, bound content within `|tick| ≤
+  MAX_TICK` (an inline SMF dump keeps a negative `:at`, with `at_not_monotone`).
+- **`Doc`** — every span runs forward; every keyframe's `ncomp` in 1..4; every note's and
+  section's `dur ≥ 0`; a phrase's lanes carry no binding; a native `:cc` never beside a
+  binding and only `.cc` or `.cc14`; a bound SMF address names a channel. NOT asserted:
+  `repeat ≥ 1` and distinct anchor ids — the loader keeps both with a diagnostic.
+- **`Sequence`** — every pool run and foreign chunk lies inside the pool, for every
+  producer. The reader's postconditions add: ticks non-negative and non-decreasing,
+  channel 0..15, channel data bytes < 0x80, the source map parallel to the sequence.
+  `status`/`fromStatus` is a comptime check. NOT asserted: `division` non-zero — the reader
+  keeps a zero or absent division with a diagnostic.
+- **`Module`** — every pattern's cell grid dense, `rows × 64`, for every producer. The
+  reader's postconditions add: counts within its caps, 1..1024 rows, a note a pitch or one
+  of the four sentinels, `fx ≤ 26`, a 4896-byte MIDI configuration, every mapped region
+  inside the file. NOT asserted: that an order names a pattern (the walk guards), rows
+  1..200 (the reader accepts 1024 with a warning), the raw ins/vol/param domains.
+- **`Diag.List`** — every span `start ≤ end`, asserted at the write side in `add` and at
+  the read side in `invariantsOf`; every code's ordinal one `code_order` pins. The span
+  clause went in only after the IT reader stopped producing inverted truncation spans.
+- **`Plan`** (the edit engine's) — a refusal has no actions and an error diagnostic, an
+  accepted plan has none; the summary counts every action once; every action is one JSON
+  object; asserted where a plan is finished and where one is applied.
 
 ## The tasks
 
@@ -101,17 +121,67 @@ wrap, the docs) ran last on `main`. Each task is one commit shape:
 
 ## Follow-ups (not in this wave)
 
-- The 70–100-line band that was not decomposed here (`smf/read.run` 81, `itf/walk.readRow`
-  78, `residue/it.lane` 87, `fuzz.checkRecords` 73, and the corpus runner's `main` 89,
-  `renderDocDirective` 87, `itDifference` 84): each is one seam away.
-- A `tools/zt lint` verb that fails on a function over 70 lines or a line over 100 columns,
-  so the two rules are gates rather than reviews. Written in Zig, per the set's "scripts in
-  Zig" rule, once the tree is clean enough that it would pass.
-- `std.testing.random_seed`-driven property tests for `simplify.budget` (a random monotone
-  curve: the budgeted keys are a subsequence and every dropped key is within `eps` of the
-  chord) and for `Pos.spell ∘ parse`.
+- **A `tools/zt lint` verb** that fails on a function over 70 lines or a line over 100
+  columns outside the two exemptions (a test's name, a raw `\\` line of test data), so the
+  rules are gates rather than reviews. Written in Zig, per the set's "scripts in Zig" rule.
+  The tree now passes both, so the verb can land green.
+- **Two test fixtures over 70 lines**, `reconcile.zig`'s `kitCase` (103) and `itCase` (89),
+  exempt as fixture builders; one seam each if the lint verb is made to count them.
+- **`tpr_build` builds a document that loaded with errors**, where the CLI's `build`
+  refuses. The renderer no longer traps on what such a document holds (the `[4 17]` fix), so
+  this is parity, not safety: a host gets bytes the CLI would have refused. A ruling for
+  plan 10 — refuse with a diagnostic, or keep building and say so.
+- **`doc/bridge_smf.zig`'s `sniffSequencerSpecific` restates `smf/read`'s `7D 'tem'` /
+  `7D 'pau'` sniffing**; the two can drift. One owner, in `smf/`.
+- **`smf/smf.zig` does not re-export `Note`**, so the bridge spells it
+  `@FieldType(smf.Payload, "note")`.
+- **Property tests** driven by `std.testing.random_seed`: `simplify.budget` over a random
+  monotone curve (the kept keys are a subsequence and every dropped key lies within `eps` of
+  its chord) and `Pos.spell ∘ parse`.
 
 ## Progress log
 
 - 2026-09-21 — Audit done against `ed0e059`; the table above is its verdict. The wave
   started with task 1.
+- 2026-09-21 — **The wave landed on `main`** (`36bbfb7..` — 72 commits): task 1 by hand,
+  tasks 2–7 by one agent per part in its own worktree, each branch rebased and fast-forwarded
+  behind `tools/zt verify`, then the cross-part read sides, the border splits, the column
+  wrap and these docs. Measured against the audit:
+
+  | Rule | Before | After |
+  |---|---|---|
+  | functions over 70 lines | 55 (20 over 100) | 2, both test fixtures |
+  | lines over 100 columns | 857 | 63, all exempt (14 test names, 49 raw test-data lines) |
+  | bare `a` allocators in production code | 67 | 0 |
+  | unbounded recursion in a value path | 1 (`simplify.divide`) | 0 |
+  | `catch unreachable` without its proof | 43 | 0 (24 remain, each proven) |
+  | `invariants()` on core values | 0 | 7 (`TimeMap`, `Derived`, `Doc`, `Sequence`, `Module`, `Diag.List`, `Plan`) |
+  | allocating entry points with an OOM sweep | 0 | every one in the table's list |
+
+  The wasm went from 1,391,784 bytes (93% of its frozen ceiling) to 1,381,255 (92%); the
+  corpus, the CLI goldens, the fixtures and the four wire surfaces are byte-identical.
+
+  **What the discipline found — fifteen defects in shipped code, each fixed with a test:**
+
+  - *Traps on a document.* `(tempo-point :at 0q :qpm 1e-30)` plus a second point overflowed
+    the integer tempo accumulator and trapped `fromSource` itself (`4f6fbd0`). A meter the
+    map refuses, `[4 17]`, still reached `Grid.beatTicks` in the IT renderer through
+    `tpr_build`: a panic natively, undefined behaviour in the wasm (`80d21e7`). A `:qpm
+    1e300` the reader keeps overflowed `@intFromFloat` to i128 in the score's bpm spelling
+    (`e6d3986`) — found by proving a `catch unreachable` beside it.
+  - *Wrong answers.* `:dur 0s` at an interior tick resolved to −1 (`3156300`). A tempo or
+    meter point past the grid ceiling was kept and let a later query leave i64 (`8269f59`).
+    The IT reader produced inverted spans for a truncated file whose header declared an
+    offset past its end (`bced3dc`).
+  - *Memory, found by the `FailingAllocator` sweeps.* `fromSource` leaked every inline tier
+    on a failure after `readTiers`; `readMeterPoints` leaked its working map; `dumpSmf` and
+    `dumpIt` freed the tier text twice; `encodeLanes` leaked a lane body (`8e34cd0`, four
+    fixes). `residue/it.tail` freed its line twice (`d5d7535`). The edit engine's
+    `Plan.Builder` leaked a pathed action's scratch text and freed a root action's twice
+    (`9ffefc8`); `apply` dropped a parsed action (`368cc69`); an inserted phrase's inner
+    lane text was lost (`625389d`); `locate.whereOfRow` leaked its step list on a null
+    return.
+
+  One NEW assertion was narrowed before it shipped: a window's `span ≥ 0` holds in beats
+  mode and not in seconds mode, where a non-finite wall clock rounds to tick 0 (`bc77ad3`).
+  That is the rule working — an assertion is written only where the code establishes it.

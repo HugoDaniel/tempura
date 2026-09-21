@@ -250,6 +250,49 @@ its header: `tools/pacer_schema_drift.sh` (folded into `tools/zt verify`) diffs 
 whole against the sibling checkout when one exists, and passes with a note when it
 does not. To update it, re-copy the file and review the diff.
 
+## Zig mastery (plan 12)
+
+The house discipline beyond the conventions above is the Zig mastery set at
+`~/llm/mastery/zig/` (`00-INDEX.md` and its documents), audited in
+`docs/plans/12-zig-mastery.md` — its table says what is met, what is adopted and
+what is declined with the reason. The rules a reviewer applies:
+
+- **The seams carry the assertions.** `std.debug.assert` is for what OUR code
+  establishes, never for a byte or a form a reader has not diagnosed. In
+  `ReleaseSmall` a violated assertion is undefined behaviour, not a trap, so an
+  assertion reachable from a host's input is a wasm bug even when Debug would
+  merely panic. Each core value (`TimeMap`, `Derived`, `Doc`, `Sequence`,
+  `Module`, `Diag.List`, `Plan`) has an `invariants()` holding what EVERY
+  producer guarantees, called at the write side (the end of its constructor) and
+  the read side (the entry of each consumer that takes the whole value); what
+  only the reader guarantees is a separate postcondition at the end of the
+  reader. Leaf math carries O(1) pre- and post-conditions. `tools/zt fuzz`,
+  which drives arbitrary bytes and text through every reader and on through
+  `derive`, the playhead and the exporter, is the proof no assertion is
+  reachable from input.
+- **Functions ≤ 70 lines, lines ≤ 100 columns.** The parent keeps the control
+  flow; the leaves compute and return. A condition is never split inside its own
+  parentheses — name the sub-expression in a local. The only lines past 100 are
+  a test's name and a raw `\\` line of test data, whose bytes are the test.
+- **Allocators are named by what the code may assume**: `gpa` (it returns or
+  frees what it allocates) or `arena` (it leaves allocations for an arena to
+  free). Never a bare `a` or `allocator` in production code.
+- **Loops are bounded.** A constant bound is `for (0..bound) … else unreachable`;
+  an input-length bound is a `while` whose comment names it. No recursion in a
+  value path; the walks over an SJON tree are bounded by SJON's
+  `Parser.MAX_PARSE_DEPTH` and say so.
+- **`catch unreachable` states its proof** on the line above — the buffer's
+  width against the widest value, pinned at comptime where it can be. Test
+  helpers use `try`.
+- **Every allocating entry point has a `FailingAllocator` sweep** proving
+  `error.OutOfMemory` at every allocation index with nothing leaked. The sweeps
+  found eight of the wave's fifteen defects; a new entry point gets one.
+- **IO at the borders.** The core (`smf/`, `itf/`, `doc/`, `time/`, `edit/`,
+  `export/`, `residue/`) reaches no filesystem, clock, process or thread outside
+  a `test` block; a `std.Io.Writer` there is a formatting sink over a caller's
+  buffer, not I/O. The borders are `cli/`, `corpus_runner.zig`, `tools/` and the
+  static zones of `wasm_entry.zig`.
+
 ## Licenses
 
 tempura is CC0-1.0 (`LICENSE`). What may be ported from where, and under which
