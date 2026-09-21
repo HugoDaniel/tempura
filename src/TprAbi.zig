@@ -85,6 +85,13 @@
 //!       computed here so a host never walks an onset list to draw a
 //!       lane's extent.
 //!
+//! A name's length is a `u16`, and nothing upstream bounds a name to it:
+//! a `(cue :name "…")` is a string in a document the doc zone holds a
+//! megabyte of, and a `.mid` marker is as long as its file says. So a
+//! name past 65 535 bytes rides CUT, at the last UTF-8 boundary that fits
+//! (`wireName`) — the one spelling of "too long" a fixed-width length
+//! has, and never a wrapped length or a record that lies about its size.
+//!
 //! ## `'TPPH'` — one playhead out
 //!
 //! A single fixed record, 80 bytes plus its section-id tail:
@@ -96,6 +103,10 @@
 //!     [tick_in_row i64]
 //!     section_count × { section_id u32 }
 //!
+//!     section_count: sections may overlap, so a tick can sit in any
+//!              number of them; past 65 535 the record carries the FIRST
+//!              65 535 in document order (`wireSections`), for the same
+//!              reason a name is cut.
 //!     flags:   bit0 = prev_cue present, bit1 = next_cue present,
 //!              bit2 = the tracker position (order/row/tick_in_row) present.
 //!     refused: 0 = a real position, 1 = tick-overflow, 2 = non-finite-time
@@ -280,17 +291,43 @@ pub fn timelineEncodedLen(d: *const Derived) usize {
         len += SECTION_HEADER_LEN + BARS_PAYLOAD_LEN;
     if (d.sections.len > 0) {
         len += SECTION_HEADER_LEN + 4;
-        for (d.sections) |s| len += SECTION_REC_LEN + s.name.len;
+        for (d.sections) |s| len += SECTION_REC_LEN + wireName(s.name).len;
     }
     if (d.cues.len > 0) {
         len += SECTION_HEADER_LEN + 4;
-        for (d.cues) |c| len += CUE_REC_LEN + c.name.len;
+        for (d.cues) |c| len += CUE_REC_LEN + wireName(c.name).len;
     }
     if (d.lanes.len > 0) {
         len += SECTION_HEADER_LEN + 4;
-        for (d.lanes) |l| len += LANE_REC_LEN + l.name.len;
+        for (d.lanes) |l| len += LANE_REC_LEN + wireName(l.name).len;
     }
     return len;
+}
+
+/// The most bytes a record's `u16` name length can say.
+pub const MAX_WIRE_NAME: usize = std.math.maxInt(u16);
+
+/// A name as the wire carries it: whole when its length fits the
+/// record's `u16`, else cut to at most `MAX_WIRE_NAME` bytes at a UTF-8
+/// boundary (the header says why). Borrowed from `name`. The ONE place a
+/// name's wire length is decided — `timelineEncodedLen` and every writer
+/// read it, so the sum and the stream cannot disagree.
+///
+/// The cut backs off a split codepoint: a UTF-8 sequence is at most four
+/// bytes, so its lead byte is at most three before the cut. Bytes that
+/// are not UTF-8 there (a `.mid` marker is whatever its file says) have
+/// no boundary to find, and the cut stays within those three.
+pub fn wireName(name: []const u8) []const u8 {
+    if (name.len <= MAX_WIRE_NAME) return name;
+    var end: usize = MAX_WIRE_NAME;
+    // `name[end]` is the first byte cut off; while it continues a
+    // sequence, the kept prefix would end inside that sequence.
+    for (0..3) |_| {
+        if (name[end] & 0xC0 != 0x80) break;
+        end -= 1;
+    }
+    std.debug.assert(end <= MAX_WIRE_NAME);
+    return name[0..end];
 }
 
 /// Encode a derivation as a `'TPTL'` blob. Never partial: a `dest` that
@@ -406,9 +443,10 @@ fn writeCues(dest: []u8, at: usize, cues: []const time.derive.Cue) usize {
 fn writeLanes(dest: []u8, at: usize, lanes: []const time.derive.LaneIndex) usize {
     var body = openSection(dest, at, LANES_SECTION_ID, lanes.len);
     for (lanes) |l| {
+        const name = wireName(l.name);
         dest[body] = @intFromEnum(l.kind);
         dest[body + 1] = @intFromBool(l.bound);
-        std.mem.writeInt(u16, dest[body + 2 ..][0..2], @intCast(l.name.len), .little);
+        std.mem.writeInt(u16, dest[body + 2 ..][0..2], @intCast(name.len), .little);
         std.mem.writeInt(u32, dest[body + 4 ..][0..4], @intCast(l.onsets.len), .little);
         std.mem.writeInt(u32, dest[body + 8 ..][0..4], @intCast(l.steps.len), .little);
         const first: i64 = if (l.onsets.len == 0) 0 else l.onsets[0].tick;
@@ -416,8 +454,8 @@ fn writeLanes(dest: []u8, at: usize, lanes: []const time.derive.LaneIndex) usize
         std.mem.writeInt(i64, dest[body + 12 ..][0..8], first, .little);
         std.mem.writeInt(i64, dest[body + 20 ..][0..8], last, .little);
         std.mem.writeInt(u32, dest[body + 28 ..][0..4], 0, .little);
-        @memcpy(dest[body + LANE_REC_LEN ..][0..l.name.len], l.name);
-        body += LANE_REC_LEN + l.name.len;
+        @memcpy(dest[body + LANE_REC_LEN ..][0..name.len], name);
+        body += LANE_REC_LEN + name.len;
     }
     return closeSection(dest, at, body);
 }
@@ -442,13 +480,12 @@ fn closeSection(dest: []u8, at: usize, end: usize) usize {
     return end;
 }
 
-/// `[name_len u16][rsv u16][name bytes]` at `at`; returns the bytes
-/// written. A name longer than a u16 cannot be spelled on the wire, and
-/// nothing in a document can produce one (a lane, section or cue name is
-/// a symbol or a string in a source bounded by the doc zone), so it is
-/// asserted rather than diagnosed.
-fn writeName(dest: []u8, at: usize, name: []const u8) usize {
-    std.debug.assert(name.len <= std.math.maxInt(u16));
+/// `[name_len u16][rsv u16][name bytes]` at `at`, the name as
+/// `wireName` cuts it; returns the bytes written. A name is as long as a
+/// document or a file makes it, and the `u16` is the wire's, so the cut
+/// is here and not an assumption about the input.
+fn writeName(dest: []u8, at: usize, full: []const u8) usize {
+    const name = wireName(full);
     std.mem.writeInt(u16, dest[at..][0..2], @intCast(name.len), .little);
     std.mem.writeInt(u16, dest[at + 2 ..][0..2], 0, .little);
     @memcpy(dest[at + 4 ..][0..name.len], name);
@@ -466,13 +503,21 @@ fn writeF64(dest: *[8]u8, x: f64) void {
 /// Exact encoded size of one position: the fixed record and its
 /// section-id tail.
 pub fn playheadEncodedLen(pos: Playhead.Position) usize {
-    return PLAYHEAD_LEN + pos.section_ids.len * 4;
+    return PLAYHEAD_LEN + wireSections(pos).len * 4;
+}
+
+/// The section ids a record carries: all of them, or the first 65 535
+/// when more sections than its `u16` count can say overlap the tick (the
+/// header's `section_count`). Sections may overlap, so the count is the
+/// document's and not a thing any reader bounds. Borrowed from `pos`.
+pub fn wireSections(pos: Playhead.Position) []const u32 {
+    return pos.section_ids[0..@min(pos.section_ids.len, std.math.maxInt(u16))];
 }
 
 /// Encode one position. Never partial — see `encodeTimeline`.
 pub fn encodePlayhead(pos: Playhead.Position, dest: []u8) Error![]u8 {
     if (dest.len < playheadEncodedLen(pos)) return error.BufferTooSmall;
-    std.debug.assert(pos.section_ids.len <= std.math.maxInt(u16));
+    const ids = wireSections(pos);
 
     var flags: u8 = 0;
     if (pos.prev_cue != null) flags |= 1;
@@ -488,7 +533,7 @@ pub fn encodePlayhead(pos: Playhead.Position, dest: []u8) Error![]u8 {
     writeF64(dest[40..48], pos.seconds_into_bar);
     dest[48] = flags;
     dest[49] = @intFromEnum(Refusal.none);
-    std.mem.writeInt(u16, dest[50..52], @intCast(pos.section_ids.len), .little);
+    std.mem.writeInt(u16, dest[50..52], @intCast(ids.len), .little);
     std.mem.writeInt(u32, dest[52..56], pos.prev_cue orelse 0, .little);
     std.mem.writeInt(u32, dest[56..60], pos.next_cue orelse 0, .little);
     const orow = pos.order_row orelse no_tracker_position;
@@ -496,7 +541,7 @@ pub fn encodePlayhead(pos: Playhead.Position, dest: []u8) Error![]u8 {
     std.mem.writeInt(u32, dest[64..68], @intCast(orow.row), .little);
     std.mem.writeInt(u32, dest[68..72], 0, .little);
     std.mem.writeInt(i64, dest[72..80], @intCast(orow.tick_in_row), .little);
-    for (pos.section_ids, 0..) |id, i| {
+    for (ids, 0..) |id, i| {
         std.mem.writeInt(u32, dest[PLAYHEAD_LEN + i * 4 ..][0..4], id, .little);
     }
     return dest[0..playheadEncodedLen(pos)];
@@ -729,6 +774,88 @@ test "TprAbi: 'TPTL' — one byte short is a refusal, never a partial blob" {
     try testing.expectError(error.BufferTooSmall, encodeTimeline(&d, buf[0 .. exact - 1]));
     // Nothing was written: half a timeline is a wrong timeline.
     for (buf) |b| try testing.expectEqual(@as(u8, 0xaa), b);
+}
+
+test "TprAbi: 'TPTL' — a 70 000-byte cue name rides cut at a UTF-8 boundary, never wrapped" {
+    // A `(cue :name …)` is a string in a document the doc zone holds a
+    // megabyte of, so a name past the record's u16 length is INPUT, and
+    // `tpr_load` → `tpr_timeline` reaches this encoder with it. Every
+    // character is `é` (two bytes), so the 65 535-byte cut lands inside
+    // one and backs off to the boundary before it.
+    const gpa = testing.allocator;
+    const name = try gpa.alloc(u8, 70_000);
+    defer gpa.free(name);
+    for (0..35_000) |i| @memcpy(name[2 * i ..][0..2], "é");
+    const source = try std.fmt.allocPrintSentinel(
+        gpa,
+        "(timeline :length 1bar)\n(cue :name \"{s}\" :at 0bar)\n",
+        .{name},
+        0,
+    );
+    defer gpa.free(source);
+
+    var loaded = try deriveDoc(gpa, source);
+    defer loaded.result.deinit();
+    var d = loaded.derived;
+    defer d.deinit();
+    try testing.expectEqual(@as(usize, 70_000), d.cues[0].name.len);
+
+    const buf = try gpa.alloc(u8, timelineEncodedLen(&d));
+    defer gpa.free(buf);
+    const blob = try encodeTimeline(&d, buf);
+    try testing.expectEqual(buf.len, blob.len);
+
+    const cues = Walked.of(blob).find(CUES_SECTION_ID).?;
+    const name_len = std.mem.readInt(u16, cues[12..14], .little);
+    try testing.expectEqual(@as(u16, 65_534), name_len);
+    const cut = cues[16..][0..name_len];
+    try testing.expect(std.unicode.utf8ValidateSlice(cut));
+    try testing.expectEqualSlices(u8, name[0..name_len], cut);
+}
+
+test "TprAbi.wireName: whole when it fits, and a cut backs off at most three bytes" {
+    const gpa = testing.allocator;
+    try testing.expectEqualStrings("flash", wireName("flash"));
+
+    const long = try gpa.alloc(u8, MAX_WIRE_NAME + 8);
+    defer gpa.free(long);
+    // ASCII: every byte is a boundary, so the cut is the ceiling itself.
+    @memset(long, 'x');
+    try testing.expectEqual(MAX_WIRE_NAME, wireName(long).len);
+    // Not UTF-8 at all — continuation bytes as far as the eye can see, as
+    // a `.mid` marker may be: there is no boundary to find, and the
+    // back-off stops at its bound rather than walking the name.
+    @memset(long, 0x80);
+    try testing.expectEqual(MAX_WIRE_NAME - 3, wireName(long).len);
+}
+
+test "TprAbi: 'TPPH' — past 65 535 overlapping sections the tail carries the first 65 535" {
+    // Sections may overlap, so how many hold one tick is the document's
+    // number; the record's count is a u16, and a native host encoding
+    // into its own buffer (not the wasm's 4 KiB zone) reaches this.
+    const gpa = testing.allocator;
+    const ids = try gpa.alloc(u32, 70_000);
+    defer gpa.free(ids);
+    for (ids, 0..) |*id, i| id.* = @intCast(i);
+    const pos: Playhead.Position = .{
+        .tick = 0,
+        .bar = 0,
+        .beat = 0,
+        .sub_ticks = 0,
+        .seconds_into_bar = 0,
+        .section_ids = ids,
+        .prev_cue = null,
+        .next_cue = null,
+        .order_row = null,
+    };
+
+    const buf = try gpa.alloc(u8, playheadEncodedLen(pos));
+    defer gpa.free(buf);
+    try testing.expectEqual(PLAYHEAD_LEN + 65_535 * 4, buf.len);
+    const blob = try encodePlayhead(pos, buf);
+    try testing.expectEqual(@as(u16, 65_535), std.mem.readInt(u16, blob[50..52], .little));
+    const last = blob[PLAYHEAD_LEN + 65_534 * 4 ..][0..4];
+    try testing.expectEqual(@as(u32, 65_534), std.mem.readInt(u32, last, .little));
 }
 
 test "TprAbi: 'TPPH' — one position, its flags and its section-id tail" {
