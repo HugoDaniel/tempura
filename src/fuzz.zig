@@ -1428,6 +1428,10 @@ const bad_ops = [_][]const u8{
     ,
     \\{"op":"insert","lane":"flash","note":{"at":1e30,"dur":1e30,"key":1e30}}
     ,
+    // …and a STRING where a tick goes, which read as the field's default
+    // — tick 0 — and planned a point nobody asked for, with no complaint.
+    \\{"op":"insert-tempo","at":"4q","qpm":110}
+    ,
     \\[{"op":"set_keyword","root":4294967296,"path":[0],"key":"at","value":{"$num":[1e30,"q"]}}]
     ,
 };

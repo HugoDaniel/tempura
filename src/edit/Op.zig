@@ -396,6 +396,19 @@ pub fn fromJson(gpa: std.mem.Allocator, text: []const u8) Error!Parsed {
         );
         return .{ .op = null, .diags = diags, .arena = arena };
     }
+    // The same funnel for a number that is not one: `{"at":"4q"}` read
+    // as the field's default — tick 0 — and inserted a point nobody
+    // asked for there. A position in this grammar is an integer tick
+    // (the CLI's `at` verb spells one from a literal); a string is
+    // refused, not defaulted. Only when the operation otherwise read,
+    // so one malformed text keeps giving one complaint.
+    if (op != null) if (reader.mistyped) |what| {
+        try reader.fail(
+            "a {s} was written where this operation wants a number (a position is an integer tick; 4q is 184504320); this operation names no edit",
+            .{what},
+        );
+        return .{ .op = null, .diags = diags, .arena = arena };
+    };
     return .{ .op = op, .diags = diags, .arena = arena };
 }
 
@@ -415,6 +428,11 @@ const Reader = struct {
     /// diagnostic, and a cast that panicked on user input was the whole
     /// defect (`root.zig`: "user input is never asserted on").
     out_of_range: ?f64 = null,
+    /// The JSON type of the first value that reached `int` and was not
+    /// a number at all — `"4q"` where a tick goes. Recorded and refused
+    /// as `out_of_range` is: the field's DEFAULT is not what was asked
+    /// for either.
+    mistyped: ?[]const u8 = null,
 
     fn fail(self: *Reader, comptime fmt: []const u8, args: anytype) Error!void {
         try self.diags.add(.sjon_diagnostic, .err, self.span, fmt, args);
@@ -821,7 +839,14 @@ const Reader = struct {
                 if (self.out_of_range == null) self.out_of_range = f;
                 return null;
             },
-            else => return null,
+            // An explicit null is the field left out.
+            .null => return null,
+            // A string, a bool, an array or an object where a number
+            // goes: recorded, and refused once by `fromJson`.
+            else => {
+                if (self.mistyped == null) self.mistyped = @tagName(v);
+                return null;
+            },
         }
     }
 
@@ -1227,6 +1252,45 @@ test "Op.fromJson: a number no field can hold is refused, never truncated" {
         try testing.expect(p.diags.hasErrors());
         try testing.expectEqual(Diag.Code.sjon_diagnostic, p.diags.items()[p.diags.items().len - 1].code);
     }
+}
+
+test "Op.fromJson: a string where a tick goes is refused, never read as the field's default" {
+    // `{"at":"4q"}` read as `at = 0` — a tempo point at tick 0 nobody
+    // asked for, with no diagnostic. A position in this grammar is an
+    // integer tick, and a string is a refusal like a float past `i64`.
+    const refused = [_][]const u8{
+        \\{"op":"insert-tempo","at":"4q","qpm":110}
+        ,
+        \\{"op":"insert-meter","at":"1bar","sig":[3,4]}
+        ,
+        \\{"op":"insert","lane":"flash","note":{"at":"0q","dur":1,"key":60}}
+        ,
+        \\{"op":"stretch","from":"0","to":184504320,"p":3,"q":2}
+        ,
+        \\{"op":"resize","sel":{},"dur":true}
+        ,
+        \\{"op":"remove","sel":{"lanes":["flash"],"range":["0q","4q"]}}
+        ,
+    };
+    for (refused) |text| {
+        var p = try fromJson(testing.allocator, text);
+        defer p.deinit();
+        if (p.op != null) {
+            std.debug.print("not refused: {s}\n", .{text});
+            return error.StringNotRefused;
+        }
+        try testing.expect(p.diags.hasErrors());
+        // One complaint per malformed text.
+        try testing.expectEqual(@as(usize, 1), p.diags.items().len);
+        try testing.expectEqual(Diag.Code.sjon_diagnostic, p.diags.items()[0].code);
+    }
+
+    // …and an explicit JSON null is the field left out, as before.
+    var p = try parsed(
+        \\{"op":"insert-tempo","at":null,"qpm":110}
+    );
+    defer p.deinit();
+    try testing.expectEqual(@as(i64, 0), p.op.?.insert_tempo.point.tick);
 }
 
 test "Op.fromJson: :strength and :swing are clamped onto the range their rule has" {
