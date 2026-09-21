@@ -84,6 +84,7 @@ const Grid = @import("../time/Grid.zig");
 const derive = @import("../time/derive.zig");
 const Sequence = @import("../smf/Sequence.zig");
 const records = @import("../residue/records.zig");
+const tempo = @import("tempo.zig");
 
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
@@ -420,20 +421,20 @@ const Render = struct {
         if (self.doc.conductor != null) return;
 
         var off_grid: usize = 0;
-        for (self.doc.meter) |m| {
-            if (m.d == 0 or !std.math.isPowerOfTwo(m.d)) continue;
+        // The MAP's meters and tempo segments, never the raw points: the
+        // map is the one owner of which points count (`TimeMap.meterOk`
+        // and its ordering rules), and a point it refused is not part of
+        // the piece.
+        for (self.derived.map.meters) |m| {
             const at = self.pulse(m.tick, &off_grid);
             try b.addEvent(track, at, .time_signature, .{ .time_sig = .{
                 .nn = m.n,
-                .dd = @intCast(std.math.log2_int(u8, m.d)),
+                .dd = std.math.log2_int(u8, m.d),
                 .cc = 24,
                 .bb = 8,
             } });
         }
-        for (self.doc.tempo) |t| {
-            const at = self.pulse(t.tick, &off_grid);
-            try b.addEvent(track, at, .set_tempo, .{ .tempo = microseconds(t) });
-        }
+        try self.tempoEvents(b, track, &off_grid);
         if (self.opts.section_markers) {
             for (self.derived.sections) |s| {
                 const at = self.pulse(s.at, &off_grid);
@@ -445,6 +446,27 @@ const Render = struct {
             try b.addEvent(track, at, .marker, .{ .bytes = try b.addBytes(c.name) });
         }
         if (off_grid > 0) try self.rounded("the conductor track", off_grid);
+    }
+
+    /// One `set-tempo` per segment of the map (`tempo.zig`), clamped to
+    /// the 24 bits the event holds, with `tempo_inexact` when that moved
+    /// it.
+    fn tempoEvents(self: *Render, b: *Sequence.Builder, track: u32, off_grid: *usize) Error!void {
+        var walk: tempo.Walk = .init(&self.derived.map, self.doc.tempo);
+        // Bounded by the map's segments.
+        while (walk.next()) |kept| {
+            const t = setTempo(kept.us);
+            if (t.clamped) try self.diags.add(
+                .tempo_inexact,
+                .warning,
+                kept.span,
+                "a set-tempo holds 1..{d} microseconds a quarter note (24 bits) and this point " ++
+                    "is {d} quarter notes per minute; it was written as {d} and the residue " ++
+                    "keeps the tempo the document states",
+                .{ Sequence.max_tempo_us, kept.qpm, t.us },
+            );
+            try b.addEvent(track, self.pulse(kept.tick, off_grid), .set_tempo, .{ .tempo = t.us });
+        }
     }
 
     // ---- a notes lane ----
@@ -677,19 +699,19 @@ fn toPulse(tick: i64, ppq: u15) struct { at: i64, exact: bool } {
     return .{ .at = @intCast(if (up) whole + 1 else whole), .exact = false };
 }
 
-/// A tempo point as microseconds per quarter note: `:us` verbatim, and
-/// `:qpm` as `round(60e6 / qpm)` (plan 08).
-fn microseconds(point: Doc.TempoPoint) u32 {
-    return switch (point.tempo) {
-        .us => |us| us,
-        .qpm => |qpm| blk: {
-            if (!(qpm > 0)) break :blk 500_000;
-            const us = @round(60_000_000.0 / qpm);
-            if (!(us >= 1)) break :blk 1;
-            if (us > @as(f64, std.math.maxInt(u32))) break :blk std.math.maxInt(u32);
-            break :blk @intFromFloat(us);
-        },
-    };
+/// A tempo segment's microseconds per quarter note as a `set-tempo`
+/// says them: rounded to a whole microsecond — plan 08's `:us` verbatim
+/// and `round(60e6 / qpm)`, since a segment's `us` IS the point's `:us`
+/// or `60e6 / qpm` — and clamped to 1..`Sequence.max_tempo_us`, the 24
+/// bits the event holds. `clamped` when that moved it: `:qpm 2` is
+/// 30 000 000 µs, which three bytes would have truncated to about 4.5
+/// quarter notes a minute with no word said.
+fn setTempo(us: f64) struct { us: u32, clamped: bool } {
+    const rounded = @round(us);
+    if (!(rounded >= 1)) return .{ .us = 1, .clamped = true };
+    const ceiling: f64 = @floatFromInt(Sequence.max_tempo_us);
+    if (rounded > ceiling) return .{ .us = Sequence.max_tempo_us, .clamped = true };
+    return .{ .us = @intFromFloat(rounded), .clamped = false };
 }
 
 /// `round((v − lo) / (hi − lo) · 127)`, clamped to the controller's
@@ -798,20 +820,96 @@ test "toPulse: exact when the division divides the tick, nearest otherwise" {
     try testing.expectEqual(@as(i64, 2), toPulse(48_048 + 24_024, 960).at);
 }
 
-test "microseconds: :us verbatim, :qpm rounded" {
-    try testing.expectEqual(
-        @as(u32, 400_000),
-        microseconds(.{ .tick = 0, .tempo = .{ .us = 400_000 } }),
+test "setTempo: whole microseconds, clamped to the 24 bits a set-tempo holds" {
+    try testing.expectEqual(@as(u32, 400_000), setTempo(400_000).us);
+    try testing.expect(!setTempo(400_000).clamped);
+    // `:qpm 125` is 480 000 µs exactly.
+    try testing.expectEqual(@as(u32, 480_000), setTempo(60_000_000.0 / 125.0).us);
+    // 60e6 / 130 = 461538.46…, which rounds to the nearest microsecond.
+    try testing.expectEqual(@as(u32, 461_538), setTempo(60_000_000.0 / 130.0).us);
+    // `:qpm 2` is 30 000 000 µs: past 24 bits, so the ceiling, said.
+    const slow = setTempo(60_000_000.0 / 2.0);
+    try testing.expectEqual(@as(u32, 0xFF_FFFF), slow.us);
+    try testing.expect(slow.clamped);
+    // Faster than a microsecond a quarter: the floor, said.
+    try testing.expectEqual(@as(u32, 1), setTempo(0.25).us);
+    try testing.expect(setTempo(0.25).clamped);
+}
+
+test "renderSmf: a :qpm 2 tempo is clamped to the set-tempo's 24 bits and tempo_inexact" {
+    const gpa = testing.allocator;
+    var fx = try load(gpa,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :qpm 2)
+        \\(meter-point :at 0bar :sig [4 4])
     );
-    try testing.expectEqual(
-        @as(u32, 480_000),
-        microseconds(.{ .tick = 0, .tempo = .{ .qpm = 125 } }),
-    );
-    // 60e6 / 130 = 461538.46…, which rounds up.
-    try testing.expectEqual(
-        @as(u32, 461_538),
-        microseconds(.{ .tick = 0, .tempo = .{ .qpm = 130 } }),
-    );
+    defer fx.deinit();
+
+    var out = try renderSmf(gpa, &fx.doc, &fx.derived, null, .{});
+    defer out.deinit();
+    try testing.expectEqual(@as(usize, 1), out.diags.count(.tempo_inexact));
+    const tempo_event = out.seq.tracks[0].events[1];
+    try testing.expectEqual(Sequence.Kind.set_tempo, tempo_event.kind);
+    try testing.expectEqual(Sequence.max_tempo_us, tempo_event.payload.tempo);
+
+    // What the renderer clamped, the writer has nothing more to say about.
+    var file = try smf.write(gpa, &out.seq, .{});
+    defer file.deinit();
+    try testing.expectEqual(@as(usize, 0), file.diags.count(.tempo_inexact));
+}
+
+test "renderSmf: a tempo point the map refused is not written" {
+    // A `:qpm -5` names no tempo: the map drops it (and supplies 120 QPM
+    // at tick 0), and the conductor is the map's, so neither the refused
+    // point nor its old 500 000 µs stand-in is written for it.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var loaded = try fromSjon.fromSource(gpa, &schema,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :qpm 125)
+        \\(tempo-point :at 1q :qpm -5)
+        \\(tempo-point :at 2q :qpm 150)
+        \\(meter-point :at 0bar :sig [4 4])
+    , null);
+    defer loaded.deinit();
+    try testing.expect(loaded.diags.hasErrors());
+    var derived = try derive.derive(gpa, &loaded.doc);
+    defer derived.deinit();
+
+    var out = try renderSmf(gpa, &loaded.doc, &derived, null, .{});
+    defer out.deinit();
+    try testing.expectEqual(@as(usize, 2), countKind(&out.seq, 0, .set_tempo));
+    for (out.seq.tracks[0].events) |e| {
+        if (e.kind == .set_tempo) try testing.expect(e.payload.tempo != 500_000);
+    }
+}
+
+test "renderSmf: a meter the map refused is not a time signature" {
+    // `[4 128]` passed the old power-of-two test and is no meter the map
+    // (or `TimeMap.meterOk`) admits; `[65 4]` neither. The map supplies
+    // `[4 4]` at 0 for the first, and the second is dropped.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var loaded = try fromSjon.fromSource(gpa, &schema,
+        \\(timeline :length 2bar)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [4 128])
+        \\(meter-point :at 1bar :sig [65 4])
+    , null);
+    defer loaded.deinit();
+    var derived = try derive.derive(gpa, &loaded.doc);
+    defer derived.deinit();
+
+    var out = try renderSmf(gpa, &loaded.doc, &derived, null, .{});
+    defer out.deinit();
+    try testing.expectEqual(@as(usize, 1), countKind(&out.seq, 0, .time_signature));
+    for (out.seq.tracks[0].events) |e| {
+        if (e.kind != .time_signature) continue;
+        try testing.expectEqual(@as(u8, 4), e.payload.time_sig.nn);
+        try testing.expectEqual(@as(u8, 2), e.payload.time_sig.dd);
+    }
 }
 
 test "renderSmf: the conductor track carries the tempo, the meter and a marker per cue" {

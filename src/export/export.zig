@@ -20,6 +20,10 @@ pub const lanes = @import("lanes.zig");
 /// `exportScore` — the one door from tempura to pacer.
 pub const score = @import("score.zig");
 
+/// The tempo a renderer writes: the map's segments, each with the
+/// document point that made it.
+pub const tempo = @import("tempo.zig");
+
 /// `renderSmf` — a native timeline as a Standard MIDI File.
 pub const render_smf = @import("render_smf.zig");
 
@@ -47,6 +51,7 @@ test {
     _ = simplify;
     _ = lanes;
     _ = score;
+    _ = tempo;
     _ = render_smf;
     _ = render_it;
     _ = test_support;

@@ -43,11 +43,11 @@ const std = @import("std");
 const Diag = @import("../Diag.zig");
 const Doc = @import("../doc/Value.zig");
 const Grid = @import("../time/Grid.zig");
-const TimeMap = @import("../time/TimeMap.zig");
 const derive = @import("../time/derive.zig");
 const itf = @import("../itf/itf.zig");
 const records = @import("../residue/records.zig");
 const reconcile = @import("../residue/reconcile.zig");
+const tempo = @import("tempo.zig");
 
 const Allocator = std.mem.Allocator;
 const model = itf.model;
@@ -65,8 +65,8 @@ const sd: u8 = 0xD0;
 
 /// IT's own tempo domain (it 04): the header floors at 31, a `Txx`
 /// clamps to 32.
-const tempo_min: u32 = 32;
-const tempo_max: u32 = 255;
+const tempo_min: u8 = 32;
+const tempo_max: u8 = 255;
 
 /// The strict pattern ceiling (it 05). A document longer than this is
 /// truncated rather than allowed to allocate without bound.
@@ -331,81 +331,73 @@ const Render = struct {
             for (l.onsets) |o| end = @max(end, o.tick +| @max(o.dur, 0));
             for (l.steps) |s| end = @max(end, s.tick);
         }
-        for (self.doc.tempo) |t| end = @max(end, t.tick);
+        for (self.derived.map.segments) |seg| end = @max(end, seg.tick);
         return end;
     }
 
     /// A fresh module's header: the speed, the initial tempo from the
-    /// document's own first tempo point, and the highlight from its first
-    /// meter point.
+    /// map's first tempo segment, and the highlight from its first meter
+    /// — the MAP's, never the raw points: a point the map refused is not
+    /// part of the piece (`tempo.zig`), and a meter it kept is one
+    /// `TimeMap.meterOk` admits, so `beatTicks` always has a beat.
     fn header(self: *Render, b: *itf.Builder) Error!void {
         b.module.header.initial_speed = self.speed;
         if (self.doc.title) |t| b.setTitle(t);
 
-        if (self.doc.tempo.len > 0 and self.doc.conductor == null) {
-            b.module.header.initial_tempo = try self.tempoByte(self.doc.tempo[0]);
+        if (self.doc.conductor == null) {
+            var walk: tempo.Walk = .init(&self.derived.map, self.doc.tempo);
+            // Segment 0 is at tick 0 and always there: the map's own
+            // invariant, asserted at `renderIt`'s entry.
+            b.module.header.initial_tempo = try self.tempoByte(walk.next().?);
         }
-        if (self.doc.meter.len > 0) {
-            const m = self.doc.meter[0];
-            // The document keeps a `:sig` the map refused, and a host may
-            // build a document that loaded with errors, so the raw point
-            // is asked the map's own question before `beatTicks` divides
-            // by it: `[4 17]` has no beat on the grid.
-            if (TimeMap.meterOk(m)) {
-                const beat = Grid.beatTicks(m.d);
-                const bar = Grid.barTicks(m.n, m.d);
-                if (@rem(beat, self.row_ticks) == 0 and @rem(bar, self.row_ticks) == 0) {
-                    const minor = @divExact(beat, self.row_ticks);
-                    const major = @divExact(bar, self.row_ticks);
-                    if (minor >= 1 and minor <= 255 and major >= 1 and major <= 255) {
-                        b.module.header.highlight_minor = @intCast(minor);
-                        b.module.header.highlight_major = @intCast(major);
-                        b.module.header.special |= model.special.highlight;
-                    }
-                }
-            }
-        }
+        const m = self.derived.map.meters[0];
+        const beat = Grid.beatTicks(m.d);
+        const bar = Grid.barTicks(m.n, m.d);
+        if (@rem(beat, self.row_ticks) != 0 or @rem(bar, self.row_ticks) != 0) return;
+        const minor = @divExact(beat, self.row_ticks);
+        const major = @divExact(bar, self.row_ticks);
+        if (minor < 1 or minor > 255 or major < 1 or major > 255) return;
+        b.module.header.highlight_minor = @intCast(minor);
+        b.module.header.highlight_major = @intCast(major);
+        b.module.header.special |= model.special.highlight;
     }
 
-    /// One tempo point as an IT tempo byte. IT's tempo IS the quarter
-    /// notes per minute under the 24-ticks-per-quarter convention (plan
-    /// 06), so the only question is whether the number is an integer in
-    /// 32..255 — and `tempo_inexact` is the answer when it is not.
-    fn tempoByte(self: *Render, point: Doc.TempoPoint) Error!u8 {
-        const qpm: f64 = switch (point.tempo) {
-            .qpm => |v| v,
-            .us => |us| if (us == 0) 0 else 60_000_000.0 / @as(f64, @floatFromInt(us)),
-        };
-        const rounded = @round(qpm);
-        const clamped = std.math.clamp(rounded, @as(f64, tempo_min), @as(f64, tempo_max));
-        if (rounded != qpm or clamped != rounded) try self.diags.add(
+    /// One tempo segment as an IT tempo byte, and `tempo_inexact`, at the
+    /// point's own span, when the byte is not the tempo the document
+    /// states.
+    fn tempoByte(self: *Render, kept: tempo.Kept) Error!u8 {
+        const t = itTempo(kept.qpm);
+        if (!t.exact) try self.diags.add(
             .tempo_inexact,
             .warning,
-            point.span,
+            kept.span,
             "an Impulse Tracker tempo is a whole number 32..255 and this point is {d} quarter " ++
                 "notes per minute; it was written as {d} and the residue keeps the tempo the " ++
                 "document states",
-            .{ qpm, clamped },
+            .{ kept.qpm, t.byte },
         );
-        return @intFromFloat(clamped);
+        return t.byte;
     }
 
-    /// `Txx` for every tempo point past the first, at the row it falls
+    /// `Txx` for every tempo segment past the first, at the row it falls
     /// on. Only for a document that conducts itself: a `:conductor`
     /// names the anchor as the owner of time and its cells are already
     /// there (plan 03).
     fn conductorCells(self: *Render) Error!void {
         if (self.doc.conductor != null) return;
-        for (self.doc.tempo, 0..) |point, i| {
-            // The first point IS the header's initial tempo when it sits
-            // at tick 0; anywhere else it is a change like any other.
-            if (i == 0 and point.tick == 0 and self.base == null) continue;
-            const slot = self.slotAt(point.tick) orelse continue;
-            const param = try self.tempoByte(point);
+        var walk: tempo.Walk = .init(&self.derived.map, self.doc.tempo);
+        // The first segment, at tick 0, IS a fresh module's initial tempo
+        // (`header`); into an anchor, whose header is its own, it is a
+        // change like any other.
+        if (self.base == null) _ = walk.next();
+        // Bounded by the map's segments.
+        while (walk.next()) |kept| {
+            const slot = self.slotAt(kept.tick) orelse continue;
+            const param = try self.tempoByte(kept);
             if (!self.placeFx(slot, fx_t, param)) try self.diags.add(
                 .render_inexact,
                 .warning,
-                point.span,
+                kept.span,
                 "every effect column of row {d} of pattern {d} is taken, so this tempo point " ++
                     "could not be written there",
                 .{ slot.row, slot.pattern },
@@ -776,6 +768,18 @@ fn stillSounding(ends: []i64, tick: i64) usize {
     return kept;
 }
 
+/// A tempo as an IT tempo byte. IT's tempo IS the quarter notes per
+/// minute under the 24-ticks-per-quarter convention (plan 06), so the
+/// byte is the number rounded and clamped to 32..255, and `exact` only
+/// when neither moved it. A NaN (which no tempo the map kept is) is the
+/// floor, inexact.
+fn itTempo(qpm: f64) struct { byte: u8, exact: bool } {
+    if (std.math.isNan(qpm)) return .{ .byte = tempo_min, .exact = false };
+    const rounded = @round(qpm);
+    const clamped = std.math.clamp(rounded, @as(f64, tempo_min), @as(f64, tempo_max));
+    return .{ .byte = @intFromFloat(clamped), .exact = rounded == qpm and clamped == rounded };
+}
+
 /// A velocity as IT's volume column: `round(vel × 64 / 127)`, the
 /// inverse of `doc/bridge_it.zig`'s `velocityOf`.
 fn volumeOf(vel: u7) u8 {
@@ -1018,6 +1022,44 @@ test "renderIt: a fractional tempo is tempo_inexact and the residue keeps it" {
     try testing.expectEqual(@as(u8, 126), out.module.header.initial_tempo);
 }
 
+test "itTempo: a whole number in 32..255 is exact, anything else is rounded and clamped" {
+    try testing.expectEqual(@as(u8, 125), itTempo(125).byte);
+    try testing.expect(itTempo(125).exact);
+    try testing.expectEqual(@as(u8, 126), itTempo(125.5).byte);
+    try testing.expect(!itTempo(125.5).exact);
+    try testing.expectEqual(@as(u8, 32), itTempo(2).byte);
+    try testing.expect(!itTempo(2).exact);
+    try testing.expectEqual(@as(u8, 255), itTempo(1e300).byte);
+    try testing.expectEqual(@as(u8, 32), itTempo(std.math.nan(f64)).byte);
+}
+
+test "renderIt: the conductor is the map's — a refused point is no Txx and is said once" {
+    // `:qpm -5` names no tempo and the map refuses it; `:qpm 102` is a
+    // whole number the map's `60e6 / qpm` does not give back to the last
+    // bit, and still exact here, because the byte is read off the point.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var loaded = try fromSjon.fromSource(gpa, &schema,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :qpm 102)
+        \\(tempo-point :at 1q :qpm -5)
+        \\(tempo-point :at 2q :qpm 150.5)
+        \\(meter-point :at 0bar :sig [4 4])
+    , null);
+    defer loaded.deinit();
+    var derived = try derive.derive(gpa, &loaded.doc);
+    defer derived.deinit();
+
+    var out = try renderIt(gpa, &loaded.doc, &derived, null, .{});
+    defer out.deinit();
+    try testing.expectEqual(@as(u8, 102), out.module.header.initial_tempo);
+    // Row 4 (1q) is nobody's tempo; row 8 (2q) is 150.5, rounded, once.
+    try testing.expect(cellOf(&out.module, 0, 4, 0).fx != fx_t);
+    try testing.expectEqual(@as(u8, 151), cellOf(&out.module, 0, 8, 0).param);
+    try testing.expectEqual(@as(usize, 1), out.diags.count(.tempo_inexact));
+}
+
 test "renderIt: a tempo change becomes a Txx at its row" {
     const gpa = testing.allocator;
     var fx = try load(gpa,
@@ -1118,9 +1160,9 @@ fn chordFixture(gpa: Allocator, n: usize) !Fixture {
     var d: Doc.Doc = .empty(gpa);
     errdefer d.deinit();
     const arena = d.arena.allocator();
-    const tempo = try arena.alloc(Doc.TempoPoint, 1);
-    tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
-    d.tempo = tempo;
+    const points = try arena.alloc(Doc.TempoPoint, 1);
+    points[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
+    d.tempo = points;
     const meter = try arena.alloc(Doc.MeterPoint, 1);
     meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
     d.meter = meter;
