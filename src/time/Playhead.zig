@@ -191,13 +191,18 @@ pub fn snap(d: *const Derived, tick: i64, grid: SnapGrid, swing: f64) i64 {
 }
 
 /// The notes of `lane` whose `[at, at + dur)` contains `tick`, in onset
-/// order. Allocated with `gpa`; a zero-length note sounds nowhere.
+/// order. Allocated with `gpa`, the caller's to free; a zero-length note
+/// sounds nowhere.
+///
+/// The error set is `atTick`'s, narrower than this module's: a tick is
+/// already on the grid and the lane's list is already built, so only the
+/// answer's allocation can fail.
 pub fn sounding(
     gpa: std.mem.Allocator,
     d: *const Derived,
     lane: []const u8,
     tick: i64,
-) Error![]Onset {
+) error{OutOfMemory}![]Onset {
     var out: std.ArrayList(Onset) = .empty;
     errdefer out.deinit(gpa);
     if (d.laneByName(lane)) |l| {

@@ -178,13 +178,7 @@ fn render(
     // What is SOUNDING, lane by lane in document order — the one part of
     // this answer that is about content rather than about time.
     for (derived.lanes) |lane| {
-        // `sounding` shares `Playhead.Error` with the queries that
-        // convert a clock reading; it walks a list it already has and
-        // raises neither guard.
-        const notes = Playhead.sounding(gpa, derived, lane.name, pos.tick) catch |e| switch (e) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.TickOverflow, error.NonFiniteTime => unreachable,
-        };
+        const notes = try Playhead.sounding(gpa, derived, lane.name, pos.tick);
         defer gpa.free(notes);
         for (notes) |n| try w.print(
             "(sounding :lane {s} :at {d} :dur {d} :key {d} :vel {d})\n",
