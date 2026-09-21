@@ -395,6 +395,7 @@ const Printer = struct {
 
     fn hexByte(self: *Printer, byte: u8) Error!void {
         var buf: [2]u8 = undefined;
+        // `{X:0>2}` of a u8 is exactly two digits, and the buffer is two.
         _ = std.fmt.bufPrint(&buf, "{X:0>2}", .{byte}) catch unreachable;
         try self.raw(&buf);
     }
@@ -405,6 +406,8 @@ const Printer = struct {
 
     fn int(self: *Printer, v: anytype) Error!void {
         var buf: [32]u8 = undefined;
+        // The widest integer printed here is an i64 tick: a sign and 19
+        // digits, 20 bytes, into 32.
         const text = std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable;
         return self.raw(text);
     }

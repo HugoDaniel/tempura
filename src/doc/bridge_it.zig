@@ -344,6 +344,7 @@ const Printer = struct {
         try self.raw(key);
         try self.raw(" 0x");
         var buf: [4]u8 = undefined;
+        // `{X:0>4}` of a u16 is exactly four digits, and the buffer is four.
         _ = std.fmt.bufPrint(&buf, "{X:0>4}", .{value}) catch unreachable;
         try self.raw(&buf);
     }
@@ -590,6 +591,7 @@ const Printer = struct {
             try self.raw(" :fx \"");
             try self.raw(&[_]u8{'@' + c.fx});
             var buf: [2]u8 = undefined;
+            // `{X:0>2}` of a u8 is exactly two digits, and the buffer is two.
             _ = std.fmt.bufPrint(&buf, "{X:0>2}", .{c.param}) catch unreachable;
             try self.raw(&buf);
             try self.raw("\"");
@@ -647,6 +649,7 @@ const Printer = struct {
 
     fn hex(self: *Printer, v: u32) Error!void {
         var buf: [8]u8 = undefined;
+        // `{X}` of a u32 is at most eight digits, and the buffer is eight.
         const text = std.fmt.bufPrint(&buf, "{X}", .{v}) catch unreachable;
         try self.raw(text);
     }
@@ -661,6 +664,8 @@ const Printer = struct {
 
     fn int(self: *Printer, v: anytype) Error!void {
         var buf: [32]u8 = undefined;
+        // The widest integer printed here is a u32 offset or an i64 tick:
+        // a sign and 19 digits, 20 bytes, into 32.
         const text = std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable;
         return self.raw(text);
     }

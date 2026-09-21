@@ -568,6 +568,9 @@ pub const Doc = struct {
 fn passthroughEql(a: []const u8, b: []const u8) bool {
     var x: Tokens = .{ .src = a };
     var y: Tokens = .{ .src = b };
+    // Bounded by the shorter source's length: every `next` that answers
+    // a token advances its scanner by at least one byte, and the loop
+    // returns the moment either scanner runs out.
     while (true) {
         const ta = x.next();
         const tb = y.next();

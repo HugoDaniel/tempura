@@ -2737,7 +2737,7 @@ test "fromSjon: bytes that match are honoured and the anchor is resolved" {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     var hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    _ = try std.fmt.bufPrint(&hex, "{x}", .{&digest});
 
     const source = try std.fmt.allocPrintSentinel(gpa, preamble ++
         \\(anchor :id song :kind it :file "x.it" :size {d} :sha256 "{s}")
@@ -3120,7 +3120,7 @@ const ByReference = struct {
         std.crypto.hash.sha2.Sha256.hash(written.bytes, &digest, .{});
         var hex: [64]u8 = undefined;
         for (digest, 0..) |b, i| {
-            _ = std.fmt.bufPrint(hex[i * 2 ..][0..2], "{x:0>2}", .{b}) catch unreachable;
+            _ = try std.fmt.bufPrint(hex[i * 2 ..][0..2], "{x:0>2}", .{b});
         }
 
         const source = try std.fmt.allocPrintSentinel(gpa,
@@ -3243,7 +3243,7 @@ test "fromSjon: a conductor's file that verifies but is not that kind is anchor_
     std.crypto.hash.sha2.Sha256.hash(junk, &digest, .{});
     var hex: [64]u8 = undefined;
     for (digest, 0..) |b, i| {
-        _ = std.fmt.bufPrint(hex[i * 2 ..][0..2], "{x:0>2}", .{b}) catch unreachable;
+        _ = try std.fmt.bufPrint(hex[i * 2 ..][0..2], "{x:0>2}", .{b});
     }
     const source = try std.fmt.allocPrintSentinel(gpa,
         \\(timeline :conductor song)
@@ -3557,7 +3557,7 @@ test "fromSjon: an anchor whose bytes do not match its :sha256 is anchor_mismatc
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     var right: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&right, "{x}", .{&digest}) catch unreachable;
+    _ = try std.fmt.bufPrint(&right, "{x}", .{&digest});
 
     const store: Resolver.Memory = .{ .entries = &.{.{ .path = "x.mid", .bytes = bytes }} };
 
@@ -3653,7 +3653,7 @@ test "fromSjon: an inline module's (bin …) is checked against the anchor's ver
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     var hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    _ = try std.fmt.bufPrint(&hex, "{x}", .{&digest});
     const store: Resolver.Memory = .{ .entries = &.{.{ .path = "x.it", .bytes = bytes }} };
 
     // 64 bytes of anchor: a region ending at 64 fits, one ending at 65
@@ -3680,7 +3680,7 @@ test "fromSjon: an inline dump's anchor is verified too, and says so when it can
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     var hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    _ = try std.fmt.bufPrint(&hex, "{x}", .{&digest});
     const store: Resolver.Memory = .{ .entries = &.{.{ .path = "x.it", .bytes = bytes }} };
 
     const dump = "(it/module (it/instrument 1 :name \"bass\" :raw (bin :at 0x0 :len 0x10)))";

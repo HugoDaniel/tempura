@@ -518,12 +518,17 @@ const Printer = struct {
     fn dur(self: *Printer, ticks: i64, at: i64) Error!void {
         var buf: [64]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
+        // `spellDuration` writes what `spell` does — a sign, at most 19
+        // digits and a unit — so the fixed writer's one failure, a full
+        // buffer, is out of reach at 64 bytes.
         self.map.spellDuration(&w, ticks, at) catch unreachable;
         return self.raw(w.buffered());
     }
 
     fn int(self: *Printer, v: anytype) Error!void {
         var buf: [32]u8 = undefined;
+        // The widest integer printed here is an i64: a sign and 19 digits,
+        // 20 bytes, into 32.
         const text = std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable;
         return self.raw(text);
     }
@@ -550,8 +555,13 @@ fn formatF64(buf: []u8, x: f64) []const u8 {
     if (std.math.isInf(x)) return if (x > 0) "inf" else "-inf";
     const safe_int_max: f64 = @floatFromInt(@as(i64, 1) << 53);
     if (@floor(x) == x and @abs(x) < safe_int_max) {
+        // An integer under 2^53 is at most 16 digits and a sign, and every
+        // caller's buffer is `bufferSize(.decimal, f64)` bytes, which is
+        // wider than that.
         return std.fmt.bufPrint(buf, "{d}", .{@as(i64, @intFromFloat(x))}) catch unreachable;
     }
+    // `bufferSize(.decimal, f64)` IS the bound on a decimal f64: the
+    // buffer was sized by the formatter for its own widest output.
     return std.fmt.bufPrint(buf, "{d}", .{x}) catch unreachable;
 }
 
@@ -566,8 +576,12 @@ fn formatF32(buf: []u8, x: f32) []const u8 {
     if (std.math.isInf(x)) return if (x > 0) "inf" else "-inf";
     const safe_int_max: f32 = @floatFromInt(@as(i32, 1) << 24);
     if (@floor(x) == x and @abs(x) < safe_int_max) {
+        // An integer under 2^24 is at most 8 digits and a sign, into a
+        // buffer sized for a decimal f64.
         return std.fmt.bufPrint(buf, "{d}", .{@as(i32, @intFromFloat(x))}) catch unreachable;
     }
+    // A decimal f32 is never wider than a decimal f64, and the buffer is
+    // `bufferSize(.decimal, f64)`.
     return std.fmt.bufPrint(buf, "{d}", .{x}) catch unreachable;
 }
 
