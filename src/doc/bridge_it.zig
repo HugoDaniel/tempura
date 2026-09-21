@@ -931,23 +931,26 @@ const Reader = struct {
         }
     }
 
+    /// The order list, up to the 256 entries `itf.read` honours: the
+    /// manifest bounds each entry and not their count, and past it the
+    /// rest are dropped with `it_count_exceeds_spec` — the reader's own
+    /// answer to a header that declares more.
     fn orders(self: *Reader, form: NodeIndex) Error!void {
         const tree = self.tree;
         for (tree.formHeader(form).children) |child| {
-            switch (tree.tagOf(child)) {
-                .symbol => {
-                    const text = tree.symbolText(child);
-                    if (std.mem.eql(u8, text, "skip")) {
-                        try self.b.addOrder(walk.order_skip);
-                    } else if (std.mem.eql(u8, text, "end")) {
-                        try self.b.addOrder(walk.order_end);
-                    }
-                },
-                .number, .number_i64, .number_u64 => {
-                    try self.b.addOrder(castInt(u8, numberOf(tree, child), 0));
-                },
-                else => {},
+            const entry = orderEntry(tree, child) orelse continue;
+            if (self.b.orders.items.len >= itf.read.max_orders) {
+                try self.diags.add(
+                    .it_count_exceeds_spec,
+                    .warning,
+                    spanOf(tree, form),
+                    "the order list is longer than the {d} entries a reader honours; the rest " ++
+                        "are dropped",
+                    .{itf.read.max_orders},
+                );
+                return;
             }
+            try self.b.addOrder(entry);
         }
     }
 
@@ -1132,11 +1135,10 @@ const Reader = struct {
         const tree = self.tree;
         const children = tree.formHeader(form).children;
         const number = positionalNumber(tree, children) orelse return;
-        const rows = castInt(u16, kvNumber(tree, children, "rows"), defaults.rows);
-
         // A pattern is numbered from 0, so its id is its index.
-        if (number < 0 or number > max_pattern) return;
-        const index: usize = @intFromFloat(number);
+        if (!(number >= 0)) return;
+        const index = try self.patternIndex(form, number) orelse return;
+        const rows = try self.patternRows(form, children);
         while (self.b.patterns.items.len <= index) _ = try self.b.addPattern(rows);
         // The pattern this number names may have been grown as a filler
         // at another height; re-seat it at the one the form declares.
@@ -1169,6 +1171,41 @@ const Reader = struct {
             if (!std.mem.eql(u8, head, "row")) continue;
             try self.row(pat, child);
         }
+    }
+
+    /// A pattern number as its index, or null past the 240 patterns
+    /// `itf.read` honours (the manifest's own ids stop at 199) — named
+    /// with `it_count_exceeds_spec`, because every pattern below it is
+    /// grown as a filler first.
+    fn patternIndex(self: *Reader, form: NodeIndex, number: f64) Error!?usize {
+        if (number < itf.read.max_patterns) return @intFromFloat(number);
+        try self.diags.add(
+            .it_count_exceeds_spec,
+            .warning,
+            spanOf(self.tree, form),
+            "pattern {d} is past the {d} patterns a reader honours; it is not seated",
+            .{ number, itf.read.max_patterns },
+        );
+        return null;
+    }
+
+    /// A pattern's `:rows`, onto the 1..1024 `itf.read` honours (the
+    /// manifest's `rows-count`). Past it the height is clamped and named
+    /// with `it_pattern_rows_out_of_range`: every filler below the
+    /// pattern is grown at this height, and `(it/pattern 1023 :rows
+    /// 65535)` asked for about 21 GB of cells.
+    fn patternRows(self: *Reader, form: NodeIndex, children: []const NodeIndex) Error!u16 {
+        const spelled = kvNumber(self.tree, children, "rows");
+        const declared = castInt(u16, spelled, defaults.rows);
+        const rows = std.math.clamp(declared, 1, itf.read.max_pattern_rows);
+        if (rows != declared) try self.diags.add(
+            .it_pattern_rows_out_of_range,
+            .err,
+            spanOf(self.tree, form),
+            "a pattern of {d} rows is outside the 1–{d} a reader honours; read as {d}",
+            .{ spelled orelse @as(f64, @floatFromInt(declared)), itf.read.max_pattern_rows, rows },
+        );
+        return rows;
     }
 
     fn row(self: *Reader, pat: model.Pattern, form: NodeIndex) Error!void {
@@ -1307,15 +1344,31 @@ const Reader = struct {
 };
 
 /// The highest instrument or sample number the vocabulary admits (it 02:
-/// 1..99), and the highest pattern id (0..199 in the manifest, up to
-/// OpenMPT's itEx 239 in the wild).
+/// 1..99). A pattern id's bound is `itf.read.max_patterns` (0..199 in
+/// the manifest, up to OpenMPT's itEx 239 in the wild), which
+/// `Reader.patternIndex` holds.
 ///
-/// They are BOUNDS, not validation: the manifest already refused a
-/// number outside them, and these are what keep an unvalidated tree from
-/// asking for a hundred million records or trapping on the narrowing
-/// cast (plan 01: user input is never asserted on).
+/// A BOUND, not validation: the manifest already refused a number
+/// outside it, and this is what keeps an unvalidated tree from asking
+/// for a hundred million records or trapping on the narrowing cast
+/// (plan 01: user input is never asserted on).
 const max_record: f64 = 255;
-const max_pattern: f64 = 1023;
+
+/// One `(orders …)` child as the byte it is in the file: a pattern
+/// number, or `skip` / `end`; null for anything else, which seats
+/// nothing.
+fn orderEntry(tree: *const Ast.Tree, child: NodeIndex) ?u8 {
+    return switch (tree.tagOf(child)) {
+        .symbol => {
+            const text = tree.symbolText(child);
+            if (std.mem.eql(u8, text, "skip")) return walk.order_skip;
+            if (std.mem.eql(u8, text, "end")) return walk.order_end;
+            return null;
+        },
+        .number, .number_i64, .number_u64 => castInt(u8, numberOf(tree, child), 0),
+        else => null,
+    };
+}
 
 /// A 1-based record number to its index, or null when the number is not
 /// one this reader will seat.
@@ -2284,6 +2337,48 @@ test "bridge_it: a record number no vocabulary admits is skipped, never trapped 
     try testing.expectEqual(@as(usize, 0), read.module.instruments.len);
     try testing.expectEqual(@as(usize, 0), read.module.samples.len);
     try testing.expectEqual(@as(usize, 0), read.module.patterns.len);
+}
+
+test "bridge_it: a pattern past the reader's caps is clamped or skipped, and says so" {
+    // `(it/pattern 1023 :rows 65535)` grew 1,023 fillers at the DECLARED
+    // height first — about 21 GB of cells from a 30-byte form. The bridge
+    // now honours what `itf.read` honours: 240 patterns of 1..1024 rows.
+    const gpa = testing.allocator;
+    var p = try parse(gpa,
+        \\(it/module
+        \\  (it/pattern 1023 :rows 65535)
+        \\  (it/pattern 2 :rows 65535)
+        \\  (it/pattern 4 :rows 0))
+    );
+    defer p.deinit();
+
+    var read = try formsToModule(gpa, &p.tree, p.roots, null);
+    defer read.deinit();
+    try testing.expectEqual(@as(usize, 5), read.module.patterns.len);
+    try testing.expectEqual(@as(u16, 1024), read.module.patterns[2].rows);
+    try testing.expectEqual(@as(u16, 1), read.module.patterns[4].rows);
+    try testing.expectEqual(@as(usize, 1), read.diags.count(.it_count_exceeds_spec));
+    try testing.expectEqual(@as(usize, 2), read.diags.count(.it_pattern_rows_out_of_range));
+}
+
+test "bridge_it: an order list past 256 entries keeps 256 and says so once" {
+    // 65,536 orders reached `Module.Builder.finish`, whose count is a u16
+    // on the wire. `itf.read` honours 256; so does the bridge.
+    const gpa = testing.allocator;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    try text.appendSlice(gpa, "(it/module (it/orders");
+    for (0..300) |_| try text.appendSlice(gpa, " 0");
+    try text.appendSlice(gpa, ") (it/pattern 0 :rows 32))");
+    const source = try gpa.dupeZ(u8, text.items);
+    defer gpa.free(source);
+
+    var p = try parse(gpa, source);
+    defer p.deinit();
+    var read = try formsToModule(gpa, &p.tree, p.roots, null);
+    defer read.deinit();
+    try testing.expectEqual(@as(usize, itf.read.max_orders), read.module.orders.len);
+    try testing.expectEqual(@as(usize, 1), read.diags.count(.it_count_exceeds_spec));
 }
 
 test "bridge_it: :qualify false spells the module's own children bare" {
