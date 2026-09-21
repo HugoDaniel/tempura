@@ -896,6 +896,28 @@ test "score.exportScore: past 512 segments, tempo_eps coalesces — and failing 
     for (ticks[1..], ticks[0 .. ticks.len - 1]) |next, prev| try testing.expect(next > prev);
 }
 
+test "score.exportScore: in seconds mode a window whose end is past f64's clock spans forward" {
+    // The chain, as it ran: a `:qpm` of 3.4e-301 is a tempo the map
+    // accepts, and a few quarter notes after it the wall clock is +inf.
+    // In the seconds fallback `nearest(+inf)` answered tick 0, so the
+    // second scene — starting before the stall, ending after it —
+    // spanned BACKWARDS and `spellSeconds` asserted on the negative
+    // tick. An infinite clock now lands on the grid's ceiling, which is
+    // at or after every finite one, so a span is never negative.
+    const gpa = testing.allocator;
+    var fx = try support.slideStalled(gpa);
+    defer fx.deinit();
+
+    var out = try exportScore(gpa, &fx.doc, &fx.derived, &.{}, .{});
+    defer out.deinit();
+    try testing.expect(out.seconds_mode);
+    try testing.expect(std.mem.indexOf(u8, out.text, "(scene :name two :at ") != null);
+    // Every note past the stall lands on the ceiling, and none on zero.
+    const hits = out.landings[0].ticks;
+    try testing.expect(hits[hits.len - 1] == Grid.MAX_TICK);
+    for (hits[1..]) |tick| try testing.expect(tick > 0);
+}
+
 test "score.exportScore: in seconds mode a scene's :dur is its OWN span, not the seconds from zero" {
     const gpa = testing.allocator;
     // The 512 fallback over a tempo that doubles at bar 1: a scene on

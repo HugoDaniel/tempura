@@ -249,13 +249,16 @@ pub const Mapper = struct {
         const a = self.rawPosition(from);
         const b = self.rawPosition(to);
         const span = b - a;
+        // `to >= from`, and both conversions are monotone: `pacerTick` is
+        // integer rounding, and the wall clock is `secondsFromTick` (one
+        // monotone formula per segment, each segment starting where the
+        // one before it ends) times a positive rate, read by `nearest`,
+        // which is monotone over the whole extended line — an infinite
+        // clock is the grid's ceiling, at or after every finite one. So
+        // a window never spans backwards, in either mode.
+        std.debug.assert(span >= 0);
         switch (self.mode) {
             .beats => |m| {
-                // `pacerTick` is integer rounding, monotone, and `to >=
-                // from`: a window never spans backwards on the lattice.
-                // Not asserted for seconds, whose `nearest` reads a
-                // non-finite wall clock as tick 0 — a clamp, not an order.
-                std.debug.assert(span >= 0);
                 const divisor = Grid.pacerDivisor(m.n, m.d).?;
                 const off = (to - from) - span * divisor;
                 if (off != 0) self.counter.noteDuration(errorInBeats(off, m.d));
@@ -298,8 +301,16 @@ pub const Mapper = struct {
 
 /// Nearest integer, ties DOWN — the tie rule `pacerTick` uses, so the
 /// two modes round the same way.
+///
+/// Total, and monotone over the extended line: a `:qpm` near f64's
+/// floor is a tempo the map accepts whose wall clock overflows to +inf
+/// a few beats on, and +inf is the grid's CEILING — never tick 0, which
+/// would put the end of a window before its start. A NaN (which no
+/// finite rate produces from a clock that is never one) and -inf (a
+/// clock behind second 0, which a position never reads) are tick 0.
 fn nearest(x: f64) i64 {
-    if (!std.math.isFinite(x)) return 0;
+    if (std.math.isNan(x)) return 0;
+    if (std.math.isInf(x)) return if (x > 0) Grid.MAX_TICK else 0;
     const lo = @floor(x);
     return pacerFloor(if (x - lo > 0.5) lo + 1 else lo, 1.0);
 }

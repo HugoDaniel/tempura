@@ -248,27 +248,43 @@ pub fn itConducted(gpa: Allocator) !Fixture {
 /// notes lane on the quarters give the emitted score something to get
 /// right, and the `(target …)` roots let it load standalone.
 pub fn slideConducted(gpa: Allocator) !Fixture {
+    return slide(gpa, false);
+}
+
+/// `slideConducted` with one more tempo point after the slide: at
+/// `10q`, a `:qpm` of 3.4e-301 — a tempo the map accepts (its `us` is
+/// still a finite f64) whose seconds overflow to +inf within a few
+/// quarter notes. The second section runs on to `8bar`, so its window
+/// starts on a finite wall clock and ends on an infinite one, which is
+/// the seconds fallback's one way to be asked for a span past f64.
+pub fn slideStalled(gpa: Allocator) !Fixture {
+    return slide(gpa, true);
+}
+
+fn slide(gpa: Allocator, stall: bool) !Fixture {
     var d: doc.Doc = .empty(gpa);
     errdefer d.deinit();
     const arena = d.arena.allocator();
 
-    const points = try arena.alloc(doc.TempoPoint, 600);
-    for (points, 0..) |*t, i| t.* = .{
+    const points = try arena.alloc(doc.TempoPoint, if (stall) 601 else 600);
+    for (points[0..600], 0..) |*t, i| t.* = .{
         .tick = @as(i64, @intCast(i)) * @divExact(q, 64),
         .tempo = .{ .qpm = 60 + @as(f64, @floatFromInt(i)) },
     };
+    if (stall) points[600] = .{ .tick = 10 * q, .tempo = .{ .qpm = 3.4e-301 } };
     d.tempo = points;
     const meter = try arena.alloc(doc.MeterPoint, 1);
     meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
     d.meter = meter;
-    d.length = 2 * bar;
+    d.length = if (stall) 8 * bar else 2 * bar;
 
     const sections = try arena.alloc(doc.Section, 2);
+    const two_dur: i64 = if (stall) 7 * bar else bar;
     sections[0] = .{ .name = "one", .at = 0, .dur = bar, .span = .{ .start = 0, .end = 1 } };
-    sections[1] = .{ .name = "two", .at = bar, .dur = bar, .span = .{ .start = 0, .end = 1 } };
+    sections[1] = .{ .name = "two", .at = bar, .dur = two_dur, .span = .{ .start = 0, .end = 1 } };
     d.sections = sections;
 
-    const notes = try arena.alloc(doc.Note, 8);
+    const notes = try arena.alloc(doc.Note, if (stall) 32 else 8);
     for (notes, 0..) |*n, i| n.* = .{
         .at = @as(i64, @intCast(i)) * q,
         .dur = @divExact(q, 2),
