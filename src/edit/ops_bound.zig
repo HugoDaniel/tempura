@@ -127,6 +127,12 @@ pub fn planWith(
 
     var b: Plan.Builder = .init(gpa);
     errdefer b.deinit();
+    // Plan 03's ceiling over what the operation NAMES, before anything
+    // is planned. `Op.offGrid` is the rule and `ops_native` raises it;
+    // this is the second of the two plan entries, so it asks too — an
+    // operation that reaches an anchor's content is user input like any
+    // other.
+    if (try ops_native.refuseOffGrid(&b, op)) return b.finish();
 
     var loc: locate.Map = try .init(gpa, tree);
     defer loc.deinit();

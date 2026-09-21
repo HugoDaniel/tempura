@@ -228,10 +228,15 @@ PRELOADED once per host (pacer's `Schema.zig` arrangement), so validation works 
 wasm32-freestanding with no filesystem and every diagnostic span is a document
 coordinate by construction. `src/Schema.zig` owns both preloads: `load` composes
 the four timeline manifests into one bundle, `loadCorpus` takes the harness one
-ALONE. The harness vocabulary is never composed with the timeline one — both
-declare a `timing` form, so a shared schema would make every unqualified
-`(timing …)` `ambiguous_form` in documents and in harness files alike. Two
-bundles, never a shared schema.
+ALONE. The harness vocabulary is never composed with the timeline one: a harness
+file is an ordered script of verbs and not a document, so a shared schema would
+put the harness's own `read` / `write` / `plan` / `snap` / `roundtrip` into a
+document's scope and every document form into a `times.sjon`'s. `src/Schema.zig`'s
+"never composed" test pins exactly that — those five verbs are unreachable in the
+timeline bundle and all five resolve in a composed one. (Until 2026-09-21 the
+proof was a COLLISION: both manifests declared a `timing` form. The harness verb
+is gone, because nothing ever implemented it; the `it/` tier's still resolves.)
+Two bundles, never a shared schema.
 
 `sjon-project.sjon` composes the same four for `sjon-lsp` and the `sjon` CLI, and
 a test in `src/Schema.zig` compares its vocabulary against the preloaded one head

@@ -17,6 +17,7 @@ const select_file = @import("Select.zig");
 const Select = select_file.Select;
 const Kind = select_file.Kind;
 const Kinds = select_file.Kinds;
+const Grid = @import("../time/Grid.zig");
 const Snap = @import("Snap.zig");
 
 const testing = std.testing;
@@ -263,7 +264,76 @@ pub const Op = union(enum) {
     bind: Bind,
     unbind: Unbind,
     materialize: Materialize,
+
+    /// The first tick this operation NAMES that is off the grid, or null.
+    ///
+    /// Plan 03: `MAX_TICK = 2^53`, and "past it is a `tick_overflow`
+    /// diagnostic, never a wrap". This is that rule over an operation's
+    /// own numbers — one place, so no operation can be added without
+    /// it, and checked at plan entry so the refusal arrives before any
+    /// work: a `{"from":-9223372036854775808}` used to reach
+    /// `ops_native.stretched` and overflow there, and a
+    /// `{"delta":9223372036854775807}` used to plan an `:at` that the
+    /// document could not load back (plan 07's contract is that an
+    /// accepted plan is applicable).
+    ///
+    /// SELECTION ranges are deliberately not here: a `:range` only
+    /// filters what is already in the document and lands nothing, so
+    /// `[0 maxInt]` is "everything from the start" and not a position.
+    /// A `count` of steps is not here either — it is a number of grid
+    /// LINES, and `ops_quantize.nudged` walks them with `+|`.
+    ///
+    /// Destinations the plan COMPUTES are bounded separately, where they
+    /// become text (`ops_native.Ctx.positionJson`): the two halves
+    /// together are what make an accepted plan applicable.
+    pub fn offGrid(self: Op) ?i64 {
+        return switch (self) {
+            .insert => |x| switch (x.what) {
+                .note => |n| off(n.at) orelse off(n.dur),
+                .keyframe => |k| off(k.at),
+                .clip => |c| off(c.at) orelse offOpt(c.offset) orelse offOpt(c.length),
+                .section => |s| off(s.at) orelse off(s.dur),
+                .cue => |c| off(c.at),
+                .phrase => |p| off(p.length),
+                .lane => null,
+            },
+            .retime => |x| offOpt(x.delta) orelse offOpt(x.to),
+            .resize => |x| offOpt(x.dur),
+            .split => |x| off(x.at),
+            .duplicate => |x| offOpt(x.delta) orelse offOpt(x.to),
+            .nudge => |x| switch (x.delta) {
+                .ticks => |d| off(d),
+                .steps => null,
+            },
+            .stretch => |x| off(x.from) orelse off(x.to),
+            .insert_tempo => |x| off(x.point.tick),
+            .insert_meter => |x| off(x.point.tick),
+            .remove,
+            .revalue,
+            .ease,
+            .velocity,
+            .merge,
+            .quantize,
+            .transpose,
+            .rename,
+            .bind,
+            .unbind,
+            .materialize,
+            => null,
+        };
+    }
 };
+
+/// `v` when it is off the grid, null when it is on it. `@abs` on an
+/// `i64` answers a `u64`, so `minInt` has a magnitude here rather than
+/// an overflow.
+fn off(v: i64) ?i64 {
+    return if (@abs(v) > Grid.MAX_TICK) v else null;
+}
+
+fn offOpt(v: ?i64) ?i64 {
+    return off(v orelse return null);
+}
 
 /// What `fromJson` answers: the operation, or the reasons it is not one.
 pub const Parsed = struct {

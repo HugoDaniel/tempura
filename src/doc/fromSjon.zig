@@ -1003,31 +1003,45 @@ const Ctx = struct {
         // `conductor_bytes`). `resolved` is the verdict `readAnchors`
         // already reached through `checks.anchorBytes`, so nothing is
         // verified twice and nothing is reported twice.
+        var candidate: ?[]const u8 = null;
         if (!anchor.inline_dump and anchor.resolved) {
-            if (self.resolver) |r| {
-                if (r.read(anchor.file)) |bytes| {
-                    doc.conductor_bytes = try self.a.dupe(u8, bytes);
-                }
-            }
+            if (self.resolver) |r| candidate = r.read(anchor.file);
         }
 
-        var built: Conductor = (try conductorOf(self.gpa, doc, id, doc.conductor_bytes)) orelse {
-            // Neither a tier nor a file: the placeholder stays, and says
-            // so. Plan 03 makes no inline/by-reference distinction, so a
-            // conducted document whose file is not here is not merely an
-            // unresolved anchor — every position it answers is 120
-            // quarter notes per minute in [4 4], and a score exported
-            // from it is wrong rather than approximate.
-            if (conductedPlaceholder(doc)) try self.diags.add(
+        var built: Conductor = (try conductorOf(self.gpa, doc, id, candidate)) orelse {
+            // No conductor: the placeholder stays, and says so. Plan 03
+            // makes no inline/by-reference distinction, so a conducted
+            // document whose file is not here — or is here and is not a
+            // file of that kind — is not merely an unresolved anchor:
+            // every position it answers is 120 quarter notes per minute
+            // in [4 4], and a score exported from it is wrong rather
+            // than approximate.
+            //
+            // The two cases are told apart because the remedies differ:
+            // a file that is absent is `tempura inline`'s business, and
+            // a file that does not read is the wrong file.
+            if (candidate == null) try self.diags.add(
                 .anchor_unavailable,
                 .err,
                 anchor.span,
                 "the anchor '{s}' conducts this document and its file ({s}) is not here, so every position is the placeholder's 120 quarter notes per minute in [4 4]: inline the tier (`tempura inline`) or hand the host the file",
                 .{ id, anchor.file },
+            ) else try self.diags.add(
+                .anchor_unavailable,
+                .err,
+                anchor.span,
+                "the anchor '{s}' conducts this document and its file ({s}) verifies but is not a readable {t}, so every position is the placeholder's 120 quarter notes per minute in [4 4]: `tempura inspect` says what those bytes are",
+                .{ id, anchor.file, anchor.kind },
             );
             return;
         };
         defer built.deinit();
+        // The bytes really do conduct, so they travel with the document:
+        // `mapOf` and `time/derive.conduct` build these same tables off
+        // them with no resolver of their own, and
+        // `conductedPlaceholder` is then a field test rather than a
+        // second read.
+        if (candidate) |bytes| doc.conductor_bytes = try self.a.dupe(u8, bytes);
 
         for (built.diags.items()) |d| {
             try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
@@ -1704,11 +1718,20 @@ pub const Conductor = struct {
 /// The transient read is released before returning, which is sound
 /// because `Conductor` copies both tables into an arena of its own and
 /// an IT `RowMap` is arena-backed with nothing borrowed from the module
-/// it walked. The READER's own report is not forwarded: these bytes were
-/// verified byte for byte against what the anchor declared, how the file
-/// parses is `tempura dump`'s question, and what matters for TIME —
-/// format 2, an inexact division, a walk past the ceiling — is said by
-/// `smfConductor` / `itConductor` themselves.
+/// it walked.
+///
+/// A read that came back with an ERROR is `null` — those bytes are not a
+/// readable file of the anchor's kind, whatever their `:size` and
+/// `:sha256` say, and timing a document off the empty value a total
+/// reader hands back would be worse than the placeholder. `:sha256`
+/// answers "is this the file the document was written against"; it
+/// cannot answer "is this a `.mid`". The reader's individual complaints
+/// are NOT forwarded (they index the anchor's bytes, and a map is not
+/// where a file is diagnosed — `tempura dump` and `tempura inspect`
+/// are); the caller says `anchor_unavailable` naming the kind instead.
+/// What matters for TIME on a file that DID read — format 2, an inexact
+/// division, a walk past the ceiling — is said by `smfConductor` /
+/// `itConductor` themselves.
 ///
 /// Caller releases with `deinit()`.
 pub fn conductorOf(
@@ -1733,11 +1756,13 @@ pub fn conductorOf(
         .smf => {
             var read = try smf.read(gpa, raw);
             defer read.deinit();
+            if (read.diags.hasErrors()) return null;
             return try smfConductor(gpa, &read.sequence, anchor.span);
         },
         .it => {
             var read = try itf.read.read(gpa, raw);
             defer read.deinit();
+            if (read.diags.hasErrors()) return null;
             return try itConductor(gpa, &read.module, anchor.span);
         },
     }
@@ -3082,6 +3107,51 @@ test "fromSjon: a by-reference conductor nobody can read is anchor_unavailable, 
     try testing.expectEqual(@as(usize, 1), res.map.segments.len);
     try testing.expectEqual(@as(f64, 500_000), res.map.segments[0].us);
     try testing.expectEqual(@as(i64, 4 * Grid.TPQ), res.doc.cues[0].at);
+}
+
+test "fromSjon: a conductor's file that verifies but is not that kind is anchor_unavailable" {
+    // The re-review's Minor 1. `:size` and `:sha256` answer "is this the
+    // file the document was written against"; they cannot answer "is
+    // this a `.mid`". Both readers are TOTAL, so a verified blob of
+    // nothing came back as an empty `Sequence` and conducted the
+    // document at the placeholder in silence — `validate` clean,
+    // `export-score` at `:bpm 120`.
+    const gpa = testing.allocator;
+
+    const junk = "not a midi file at all";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(junk, &digest, .{});
+    var hex: [64]u8 = undefined;
+    for (digest, 0..) |b, i| {
+        _ = std.fmt.bufPrint(hex[i * 2 ..][0..2], "{x:0>2}", .{b}) catch unreachable;
+    }
+    const source = try std.fmt.allocPrintSentinel(gpa,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind smf :file "x.mid" :size {d} :sha256 "{s}")
+        \\(cue :name "two" :at 1bar)
+        \\
+    , .{ junk.len, hex }, 0);
+    defer gpa.free(source);
+
+    const entries = [_]Resolver.Memory.Entry{.{ .path = "x.mid", .bytes = junk }};
+    const table: Resolver.Memory = .{ .entries = &entries };
+    var res = try load(gpa, source, Resolver.memory(&table));
+    defer res.deinit();
+
+    // The anchor VERIFIED — that is the whole point of the case — and
+    // the conductor still refused it, naming the kind.
+    try testing.expect(res.doc.anchors[0].resolved);
+    try testing.expectEqual(@as(usize, 0), res.diags.count(.anchor_mismatch));
+    try testing.expectEqual(@as(usize, 1), res.diags.count(.anchor_unavailable));
+    const d = res.findDiag(.anchor_unavailable).?;
+    try testing.expect(std.mem.indexOf(u8, d.message, "not a readable smf") != null);
+
+    // …and the bytes are NOT kept on the document, so the two layers
+    // above and `export-score` all see the placeholder for what it is.
+    try testing.expect(res.doc.conductor_bytes == null);
+    try testing.expect(conductedPlaceholder(&res.doc));
+    try testing.expectEqual(@as(usize, 1), res.map.segments.len);
+    try testing.expectEqual(@as(f64, 500_000), res.map.segments[0].us);
 }
 
 test "fromSjon: an anchor :size no u64 can hold saturates and says anchor_mismatch" {

@@ -52,6 +52,30 @@ pub fn plan(
     return planWith(gpa, d, tree, &map, op);
 }
 
+/// Plan 03's ceiling over the numbers an operation NAMES, refused
+/// before a single action is planned. True = refused.
+///
+/// Public because there are two plan entries — this file's and
+/// `ops_bound`'s, which takes the four operations that reach an
+/// anchor's content — and the rule is `Op.offGrid`'s either way. An
+/// accepted plan has to be applicable (plan 07's contract), so an
+/// operation naming a tick no document could hold is a diagnostic here
+/// rather than a panic downstream or an unloadable document afterwards.
+pub fn refuseOffGrid(b: *Plan.Builder, op: Op.Op) Error!bool {
+    const tick = op.offGrid() orelse return false;
+    try refuse(b, tick, "names");
+    return true;
+}
+
+fn refuse(b: *Plan.Builder, tick: i64, verb: []const u8) Error!void {
+    try b.refuse(
+        .tick_overflow,
+        .{ .start = 0, .end = 0 },
+        "this operation {s} tick {d}, which is off the grid (±{d}): plan 03 makes a position past the ceiling a diagnostic and never a wrap",
+        .{ verb, tick, Grid.MAX_TICK },
+    );
+}
+
 /// `plan`, for a caller that already has the document's map.
 ///
 /// `map` must be the map `d` resolved its positions against —
@@ -66,6 +90,7 @@ pub fn planWith(
 ) Error!Plan.Plan {
     var b: Plan.Builder = .init(gpa);
     errdefer b.deinit();
+    if (try refuseOffGrid(&b, op)) return b.finish();
 
     var loc: locate.Map = try .init(gpa, tree);
     defer loc.deinit();
@@ -79,6 +104,9 @@ pub fn planWith(
         .b = &b,
     };
     try ctx.run(op);
+    // A destination the plan COMPUTED that is off the grid — recorded
+    // where it was met, refused here (see `Ctx.off_grid`).
+    if (ctx.off_grid) |tick| try refuse(&b, tick, "would put a position at");
     return b.finish();
 }
 
@@ -104,6 +132,17 @@ const Ctx = struct {
     /// index is a slot in the document the plan PRODUCES, so the second
     /// one after a given head lands one further along than the first.
     root_inserts: u32 = 0,
+    /// The first destination tick this plan would have WRITTEN that is
+    /// off the grid (plan 03's `MAX_TICK`).
+    ///
+    /// Recorded rather than raised where it is met, for `Op.Reader`'s
+    /// reason: every writer sits inside a loop or a list builder with no
+    /// room for a refusal, and `planWith` turns it into the one refusal
+    /// the plan gets. `Op.offGrid` bounds what the operation NAMED; this
+    /// bounds what the plan COMPUTED from it, which is the other half of
+    /// "an accepted plan is applicable" — a `retime` whose delta is
+    /// itself on the grid still moves a note at 4q past the ceiling.
+    off_grid: ?i64 = null,
 
     fn a(self: *Ctx) std.mem.Allocator {
         return self.b.allocator();
@@ -285,10 +324,23 @@ const Ctx = struct {
 
     // ---- the value writers ----
 
+    /// A destination tick as the document's own spelling.
+    ///
+    /// The ONE place a tick this plan computed becomes document text, so
+    /// plan 03's ceiling is checked here rather than once per operation.
+    /// An off-grid destination is recorded (`off_grid`) and the tick is
+    /// clamped for the spelling alone: the actions are about to be
+    /// discarded by the refusal `planWith` raises, and a clamp keeps the
+    /// printer inside the domain it was built for on the way there.
     fn positionJson(self: *Ctx, tick: i64) Error![]const u8 {
+        var at = tick;
+        if (@abs(tick) > Grid.MAX_TICK) {
+            if (self.off_grid == null) self.off_grid = tick;
+            at = if (tick > 0) Grid.MAX_TICK else -Grid.MAX_TICK;
+        }
         var out: value.Buf = .empty;
         defer out.deinit(self.gpa);
-        try value.position(self.gpa, &out, self.map, tick);
+        try value.position(self.gpa, &out, self.map, at);
         return self.a().dupe(u8, out.items);
     }
 
@@ -1695,10 +1747,16 @@ fn byDocumentOrder(_: void, x: Ctx.Write, y: Ctx.Write) bool {
 
 /// Where a stretch puts one tick: before the range it stays, inside it
 /// it scales from the range's start, after it it moves by the growth.
+/// Saturating throughout: `from`, `to` and the ratio are user numbers,
+/// and `tick - x.from` alone overflowed for a `from` of `minInt`
+/// (`Op.offGrid` refuses that at the entry now, and this is the second
+/// belt: a defect of the ARITHMETIC is fixed in the arithmetic). A
+/// saturated answer is then off the grid, which `positionJson` records
+/// and `planWith` refuses.
 fn stretched(x: Op.Stretch, growth: i64, tick: i64, inexact: *u32) i64 {
     if (tick < x.from) return tick;
     if (tick >= x.to) return tick +| growth;
-    return x.from + scaleTicks(tick - x.from, x.p, x.q, inexact);
+    return x.from +| scaleTicks(tick -| x.from, x.p, x.q, inexact);
 }
 
 /// `n · p / q`, rounded to NEAREST with ties to EVEN, counting the
@@ -2260,6 +2318,83 @@ test "ops: a stretch that would leave the grid is tick_overflow, not a panic" {
     defer fine.deinit();
     try testing.expect(fine.findDiag(.tick_overflow) == null);
     try testing.expect(fine.actions.len > 0);
+}
+
+test "ops: a stretch whose range is off the grid is refused before it is computed" {
+    // The re-review's residual. `span = to -| from` saturated for a
+    // `from` of `minInt`, so `grown` stayed under the ceiling and the
+    // up-front refusal did not fire; `stretched` then overflowed on
+    // `tick - x.from` before the per-target check could run.
+    //
+    // Two belts, and the test wants both: `Op.offGrid` refuses at the
+    // ENTRY (no action is planned, and the arithmetic is never reached),
+    // and `stretched` saturates so a defect of the arithmetic is fixed
+    // in the arithmetic.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.native);
+    defer fx.deinit();
+
+    for ([_]Op.Stretch{
+        .{ .from = std.math.minInt(i64), .to = 1, .p = 1, .q = 4_000_000_000 },
+        .{ .from = 0, .to = std.math.maxInt(i64), .p = 1, .q = 1 },
+        .{ .from = -Grid.MAX_TICK - 1, .to = 0, .p = 1, .q = 1 },
+    }) |x| {
+        var p = try plan(gpa, fx.doc_(), &fx.tree, .{ .stretch = x });
+        defer p.deinit();
+        try testing.expectEqual(@as(usize, 0), p.actions.len);
+        try testing.expect(p.summary.refused);
+        try testing.expect(p.findDiag(.tick_overflow) != null);
+    }
+
+    // …and the arithmetic on its own, with the entry guard bypassed: a
+    // saturating `stretched` ANSWERS for the worst input there is.
+    var inexact: u32 = 0;
+    const wild: Op.Stretch = .{ .from = std.math.minInt(i64), .to = 1, .p = 1, .q = 4_000_000_000 };
+    for ([_]i64{ std.math.minInt(i64), -1, 0, std.math.maxInt(i64) }) |tick| {
+        _ = stretched(wild, std.math.maxInt(i64), tick, &inexact);
+    }
+}
+
+test "ops: a retime whose destination leaves the grid is refused, not written" {
+    // The other half of "an accepted plan is applicable" (plan 07). A
+    // `delta` of `maxInt` is off the grid and refused at the entry; a
+    // delta that is ON the grid can still move a note past the ceiling,
+    // and that is caught where the destination becomes text
+    // (`Ctx.positionJson`). Before this, both planned an `:at` the
+    // document could not load back: `tempura validate` on the applied
+    // text said `tick_overflow` three times.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.native);
+    defer fx.deinit();
+
+    const sel: Select.Select = .{ .lanes = &.{"flash"}, .kinds = .notes };
+    for ([_]Op.Op{
+        // Named off the grid: `Op.offGrid`.
+        .{ .retime = .{ .sel = sel, .delta = std.math.maxInt(i64) } },
+        .{ .retime = .{ .sel = sel, .to = std.math.minInt(i64) } },
+        .{ .duplicate = .{ .sel = sel, .delta = std.math.maxInt(i64) } },
+        .{ .nudge = .{ .sel = sel, .delta = .{ .ticks = std.math.maxInt(i64) } } },
+        .{ .insert_tempo = .{ .point = .{ .tick = Grid.MAX_TICK + 1, .tempo = .{ .qpm = 140 } } } },
+        // Computed off the grid: `Ctx.positionJson`. The delta itself is
+        // exactly the ceiling, and every note in the fixture sits past
+        // tick 0.
+        .{ .retime = .{ .sel = sel, .delta = Grid.MAX_TICK } },
+    }) |op| {
+        var p = try plan(gpa, fx.doc_(), &fx.tree, op);
+        defer p.deinit();
+        try testing.expectEqual(@as(usize, 0), p.actions.len);
+        try testing.expect(p.summary.refused);
+        try testing.expect(p.findDiag(.tick_overflow) != null);
+    }
+
+    // A delta that lands inside the grid is not refused, so the guard is
+    // the ceiling's and not the delta's size.
+    var ok = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .retime = .{ .sel = sel, .delta = 2 * TPQ },
+    });
+    defer ok.deinit();
+    try testing.expect(ok.findDiag(.tick_overflow) == null);
+    try testing.expect(ok.actions.len > 0);
 }
 
 test "ops: rename a phrase, and every clip that places it" {

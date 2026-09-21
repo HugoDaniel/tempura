@@ -1414,6 +1414,14 @@ const bad_ops = [_][]const u8{
     ,
     \\{"op":"stretch","from":0,"to":9223372036854775807,"p":4294967295,"q":1}
     ,
+    // The re-review's residual: `to -| from` saturated, so the ratio
+    // ceiling did not fire and `stretched` overflowed on `tick - from`.
+    \\{"op":"stretch","from":-9223372036854775808,"to":1,"p":1,"q":4000000000}
+    ,
+    // …and the other half of "an accepted plan is applicable": this
+    // planned an `:at` the document could not load back.
+    \\{"op":"retime","sel":{"lanes":["flash"],"kinds":["note"]},"delta":9223372036854775807}
+    ,
     \\{"op":"quantize","sel":{},"grid":"1/8","swing":-1e300}
     ,
     \\{"op":"quantize","sel":{},"grid":"1/8","strength":1e300,"swing":1e300}
@@ -1436,14 +1444,44 @@ test "fuzz edit.Op.fromJson bites: every number of the review's table is refused
         try testing.expect(seen.diags > 0 or seen.hits == 1);
     }
 
-    var wild = try edit.fromJson(gpa, bad_ops[0]);
+    // Looked up by CONTENT and not by index, so a row added to the table
+    // cannot quietly move which claim is made about what.
+    var wild = try edit.fromJson(gpa, opNamed("\"delta\":1e30"));
     defer wild.deinit();
     try testing.expect(wild.op == null);
     try testing.expect(wild.diags.hasErrors());
 
-    var swung = try edit.fromJson(gpa, bad_ops[6]);
+    var swung = try edit.fromJson(gpa, opNamed("\"swing\":-1e300"));
     defer swung.deinit();
     try testing.expectEqual(@as(f64, -1), swung.op.?.quantize.swing);
+
+    // The two the re-review found: each READS as an operation (the
+    // numbers fit an `i64`) and is refused by the PLANNER with
+    // `tick_overflow`, before the arithmetic that used to overflow and
+    // before a document nothing could load back.
+    for ([_][]const u8{
+        opNamed("\"from\":-9223372036854775808"),
+        opNamed("\"delta\":9223372036854775807"),
+    }) |text| {
+        var parsed = try edit.fromJson(gpa, text);
+        defer parsed.deinit();
+        try testing.expect(parsed.op != null);
+
+        var planned = try edit.plan(gpa, fx.doc_(), &fx.tree, parsed.op.?);
+        defer planned.deinit();
+        try testing.expectEqual(@as(usize, 0), planned.actions.len);
+        try testing.expect(planned.summary.refused);
+        try testing.expect(planned.findDiag(.tick_overflow) != null);
+    }
+}
+
+/// The entry of `bad_ops` that holds `needle`. A lookup by content, so
+/// the bite test's claims cannot drift onto the wrong row.
+fn opNamed(comptime needle: []const u8) []const u8 {
+    for (bad_ops) |text| {
+        if (std.mem.indexOf(u8, text, needle) != null) return text;
+    }
+    unreachable;
 }
 
 test "fuzz edit.Op.fromJson: arbitrary JSON-ish text is an operation or a refusal" {
