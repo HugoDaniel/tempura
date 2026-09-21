@@ -273,6 +273,9 @@ pub const List = struct {
         comptime fmt: []const u8,
         args: anytype,
     ) Error!void {
+        // The write side of `invariantsOf`'s span clause: a producer that
+        // hands in an inverted span has a bug, whatever the input was.
+        std.debug.assert(span.start <= span.end);
         const arena = self.arena.allocator();
         const message = try std.fmt.allocPrint(arena, fmt, args);
         try self.entries.append(arena, .{
@@ -317,21 +320,17 @@ pub const List = struct {
 };
 
 /// What a consumer may assume of any run of diagnostics, wherever they
-/// came from: every code's ordinal is one `code_order` pins, so what goes
-/// on the wire as a `u16` is a code a decoder with this enum can name.
-/// Compiles out of `ReleaseSmall`, so the wasm pays nothing.
+/// came from: every span runs forward (`start <= end`, asserted at the
+/// write side in `add` too), and every code's ordinal is one `code_order`
+/// pins, so what goes on the wire as a `u16` is a code a decoder with this
+/// enum can name. Compiles out of `ReleaseSmall`, so the wasm pays nothing.
 ///
-/// Plan 12 also names `span.start <= span.end`, and it is NOT asserted
-/// yet, because it is not yet a property our producers establish: the IT
-/// reader spans a truncation from the offset the header DECLARED to the
-/// file's end (`itf/read.zig`, `readMessage` and five siblings), and a
-/// declared offset past the end inverts the span — the pseudo-random
-/// read test in `itf/write.zig` finds one within its first seeds. An
-/// assertion here would panic a Debug `tempura dump` on a truncated
-/// `.it`, which is asserting on user input. Once the reader clamps its
-/// `start` to the file's length, the clause goes in here and in `add`.
+/// The span clause holds because the readers clamp: the IT reader spans a
+/// truncation from a DECLARED offset, which may lie past the file's end,
+/// and `itf/read.zig`'s `toEnd` clamps it to the length.
 pub fn invariantsOf(diags: []const Diagnostic) void {
     for (diags) |d| {
+        std.debug.assert(d.span.start <= d.span.end);
         const ordinal = @intFromEnum(d.code);
         std.debug.assert(ordinal < code_order.len);
         std.debug.assert(code_order[ordinal] == d.code);

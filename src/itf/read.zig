@@ -182,6 +182,28 @@ const Reader = struct {
         return @intCast(self.src.len);
     }
 
+    /// The span a truncation diagnostic points at: from `from` to the end
+    /// of the file. The offset is one a header DECLARED, and a truncated
+    /// file's header still names where things were, so it may lie past
+    /// the end; the start is clamped so the span is never inverted.
+    fn toEnd(self: *const Reader, from: u32) Diag.Span {
+        const span: Diag.Span = .{ .start = @min(from, self.len()), .end = self.len() };
+        std.debug.assert(span.start <= span.end);
+        std.debug.assert(span.end == self.len());
+        return span;
+    }
+
+    /// Up to `n` bytes at `from`, clipped to the file the same way.
+    fn window(self: *const Reader, from: u32, n: u32) Diag.Span {
+        const span: Diag.Span = .{
+            .start = @min(from, self.len()),
+            .end = @min(from +| n, self.len()),
+        };
+        std.debug.assert(span.start <= span.end);
+        std.debug.assert(span.end - span.start <= n);
+        return span;
+    }
+
     fn byteAt(self: *const Reader, off: u32) u8 {
         return if (off < self.src.len) self.src[off] else 0;
     }
@@ -294,7 +316,7 @@ const Reader = struct {
         const available: u32 = if (self.len() > hdr.orders) self.len() - hdr.orders else 0;
         const take: u32 = @min(want, available);
         if (take < want) {
-            try self.note(.it_truncated, .err, .{ .start = hdr.orders, .end = self.len() }, "the order list wants {d} bytes; {d} are there", .{ want, available });
+            try self.note(.it_truncated, .err, self.toEnd(hdr.orders), "the order list wants {d} bytes; {d} are there", .{ want, available });
         }
         if (take > 0) {
             self.module.orders = try self.arena.dupe(u8, self.src[hdr.orders..][0..take]);
@@ -330,7 +352,7 @@ const Reader = struct {
         const end: u32 = @intCast(@min(@as(u64, at) + declared, self.len()));
         if (declared > 0) {
             if (@as(u64, at) + declared > self.len()) {
-                try self.note(.it_truncated, .err, .{ .start = at, .end = self.len() }, "the parapointer arrays want {d} bytes; the file ends first", .{declared});
+                try self.note(.it_truncated, .err, self.toEnd(at), "the parapointer arrays want {d} bytes; the file ends first", .{declared});
             }
             try self.mark(.parapointers, 0, .{ .off = at, .len = end - at });
         }
@@ -362,7 +384,7 @@ const Reader = struct {
                 try self.note(
                     .it_history_flag_without_block,
                     .warning,
-                    .{ .start = p.end, .end = @min(p.end + 2, self.len()) },
+                    self.window(p.end, 2),
                     "Special b1 claims an edit-history block that does not fit before offset {d}; read as absent",
                     .{p.min_ptr},
                 );
@@ -384,7 +406,7 @@ const Reader = struct {
             .truncated => try self.note(
                 .it_truncated,
                 .err,
-                .{ .start = at, .end = self.len() },
+                self.toEnd(at),
                 "an embedded MIDI configuration is flagged at offset {d}; the file ends first",
                 .{at},
             ),
@@ -409,7 +431,7 @@ const Reader = struct {
         const want = h.message_length;
         const declared: Region = .{ .off = h.message_offset, .len = want };
         if (declared.end() > self.len()) {
-            try self.note(.it_truncated, .warning, .{ .start = h.message_offset, .end = self.len() }, "the song message wants {d} bytes at offset {d}; the file ends first", .{ want, h.message_offset });
+            try self.note(.it_truncated, .warning, self.toEnd(h.message_offset), "the song message wants {d} bytes at offset {d}; the file ends first", .{ want, h.message_offset });
         }
         if (h.message_offset >= self.len()) return;
 
@@ -494,7 +516,7 @@ const Reader = struct {
                 try self.note(
                     .it_sample_extent_truncated,
                     .warning,
-                    .{ .start = data_at, .end = self.len() },
+                    self.toEnd(data_at),
                     "sample {d}'s data runs past the end of the file; kept at {d} bytes",
                     .{ i, extent.region.len },
                 );
@@ -554,7 +576,7 @@ const Reader = struct {
                 try self.note(
                     .it_truncated,
                     .warning,
-                    .{ .start = data_at, .end = self.len() },
+                    self.toEnd(data_at),
                     "pattern {d} declares {d} packed bytes; the file ends first",
                     .{ i, packed_len },
                 );
@@ -932,6 +954,35 @@ test "read: the message is read at MsgOffset, CR kept, NUL terminating" {
     defer r.deinit();
     try testing.expectEqualStrings("hello\rworld", r.module.message);
     try testing.expectEqual(Region{ .off = message_at, .len = 20 }, r.source_map.find(.message, 0).?);
+}
+
+test "read: a message declared past the end of the file is truncated, its span never inverted" {
+    // A truncated file's header still names where the message WAS. The
+    // span runs from that declared offset to the end, clamped: an inverted
+    // span would trip `Diag.List.add`'s assertion on user input.
+    const gpa = testing.allocator;
+    var f: Fixture = .init(gpa);
+    defer f.deinit();
+
+    try f.header(.{ .ord = 2, .special = model.special.message });
+    try f.blob(&.{ 0, 255 });
+    const past_end = f.here() + 1000;
+    f.patchWord(hdr.message_length, 20);
+    f.patchDword(hdr.message_offset, past_end);
+    const bytes = try f.toOwned();
+    defer gpa.free(bytes);
+
+    var r = try read(gpa, bytes);
+    defer r.deinit();
+    var seen: u32 = 0;
+    for (r.diags.items()) |d| {
+        if (d.code != .it_truncated) continue;
+        seen += 1;
+        try testing.expectEqual(@as(u32, @intCast(bytes.len)), d.span.start);
+        try testing.expectEqual(@as(u32, @intCast(bytes.len)), d.span.end);
+    }
+    try testing.expectEqual(@as(u32, 1), seen);
+    try testing.expectEqualStrings("", r.module.message);
 }
 
 test "read: sample extents dispatch on the encoding, truncation is recorded" {
