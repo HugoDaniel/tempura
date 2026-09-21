@@ -72,20 +72,20 @@ pub const Result = struct {
 
 /// Derive the skeleton of `doc`'s inline tiers.
 pub fn derive(gpa: Allocator, doc: *const Doc.Doc, opts: Options) Error!Result {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
-    const a = arena.allocator();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
 
-    var d: Deriver = .{ .gpa = gpa, .a = a, .opts = opts };
+    var d: Deriver = .{ .gpa = gpa, .arena = arena, .opts = opts };
     // The tiers in document order, so the FIRST inline dump is the
     // conductor: rule 1 is written for one file per document, and a
     // second would need an author to say which of them keeps time.
     for (doc.midi) |*tier| {
-        if (d.conductor == null) d.conductor = try a.dupe(u8, tier.anchor);
+        if (d.conductor == null) d.conductor = try arena.dupe(u8, tier.anchor);
         try d.smfTier(tier);
     }
     for (doc.it) |*tier| {
-        if (d.conductor == null) d.conductor = try a.dupe(u8, tier.anchor);
+        if (d.conductor == null) d.conductor = try arena.dupe(u8, tier.anchor);
         try d.itTier(tier);
     }
 
@@ -96,7 +96,7 @@ pub fn derive(gpa: Allocator, doc: *const Doc.Doc, opts: Options) Error!Result {
         .lanes = d.lanes.items,
         .cues = d.cues.items,
         .conductor = d.conductor,
-        .arena = arena,
+        .arena = arena_state,
     };
 }
 
@@ -126,7 +126,7 @@ const Seen = struct {
 const Deriver = struct {
     gpa: Allocator,
     /// The result's arena — every name and every slice lands here.
-    a: Allocator,
+    arena: Allocator,
     opts: Options,
     lanes: std.ArrayList(Doc.Lane) = .empty,
     cues: std.ArrayList(Doc.Cue) = .empty,
@@ -169,13 +169,13 @@ const Deriver = struct {
             const number: u16 = @intCast(index + 1);
             for (0..16) |ch| {
                 const wire: u4 = @intCast(ch);
-                const base = try std.fmt.allocPrint(self.a, "t{d}-ch{d}", .{ number, ch + 1 });
+                const base = try std.fmt.allocPrint(self.arena, "t{d}-ch{d}", .{ number, ch + 1 });
                 if (sounds[ch]) try self.smfLane(tier.anchor, base, .notes, number, wire, null);
                 for (0..128) |num| {
                     if (!cc[ch * 128 + num].moved()) continue;
                     try self.smfLane(
                         tier.anchor,
-                        try std.fmt.allocPrint(self.a, "{s}-cc{d}", .{ base, num }),
+                        try std.fmt.allocPrint(self.arena, "{s}-cc{d}", .{ base, num }),
                         .curve,
                         number,
                         wire,
@@ -184,7 +184,7 @@ const Deriver = struct {
                 }
                 if (bend[ch].moved()) try self.smfLane(
                     tier.anchor,
-                    try std.fmt.allocPrint(self.a, "{s}-bend", .{base}),
+                    try std.fmt.allocPrint(self.arena, "{s}-bend", .{base}),
                     .curve,
                     number,
                     wire,
@@ -192,7 +192,7 @@ const Deriver = struct {
                 );
                 if (pressure[ch].moved()) try self.smfLane(
                     tier.anchor,
-                    try std.fmt.allocPrint(self.a, "{s}-pressure", .{base}),
+                    try std.fmt.allocPrint(self.arena, "{s}-pressure", .{base}),
                     .curve,
                     number,
                     wire,
@@ -211,7 +211,7 @@ const Deriver = struct {
         ch: u4,
         curve: ?Doc.SmfCurve,
     ) Error!void {
-        try self.lanes.append(self.a, lane(try self.a.dupe(u8, anchor), name, kind, .{
+        try self.lanes.append(self.arena, lane(try self.arena.dupe(u8, anchor), name, kind, .{
             .smf = .{
                 .track = track,
                 .ch = .single(ch),
@@ -228,8 +228,8 @@ const Deriver = struct {
         // A marker whose bytes are not UTF-8 has no name a document can
         // spell; it stays in the `midi/` tier, where it is exact.
         if (!std.unicode.utf8ValidateSlice(text)) return;
-        try self.cues.append(self.a, .{
-            .name = try self.a.dupe(u8, text),
+        try self.cues.append(self.arena, .{
+            .name = try self.arena.dupe(u8, text),
             .at = Grid.smfToTicks(e.at, ppq).tick,
             .span = .{ .start = 0, .end = 0 },
         });
@@ -259,18 +259,18 @@ const Deriver = struct {
             }
 
             const wire: u6 = @intCast(ch);
-            const base = try std.fmt.allocPrint(self.a, "ch{d}", .{ch + 1});
+            const base = try std.fmt.allocPrint(self.arena, "ch{d}", .{ch + 1});
             if (sounds) try self.itLane(tier.anchor, base, .notes, wire, null);
             if (vol.moved()) try self.itLane(
                 tier.anchor,
-                try std.fmt.allocPrint(self.a, "{s}-vol", .{base}),
+                try std.fmt.allocPrint(self.arena, "{s}-vol", .{base}),
                 .curve,
                 wire,
                 .vol,
             );
             if (pan.moved()) try self.itLane(
                 tier.anchor,
-                try std.fmt.allocPrint(self.a, "{s}-pan", .{base}),
+                try std.fmt.allocPrint(self.arena, "{s}-pan", .{base}),
                 .curve,
                 wire,
                 .pan,
@@ -282,8 +282,8 @@ const Deriver = struct {
         defer rowmap.deinit();
         var order_cues = try bridge_it.orderCues(self.gpa, &rowmap);
         defer order_cues.deinit();
-        for (order_cues.items) |c| try self.cues.append(self.a, .{
-            .name = try self.a.dupe(u8, c.name),
+        for (order_cues.items) |c| try self.cues.append(self.arena, .{
+            .name = try self.arena.dupe(u8, c.name),
             // IT ticks into tempura's own grid (plan 03, "The grid").
             .at = c.at * Grid.IT_TICK,
             .span = .{ .start = 0, .end = 0 },
@@ -298,7 +298,7 @@ const Deriver = struct {
         channel: u6,
         column: ?Doc.ItColumn,
     ) Error!void {
-        try self.lanes.append(self.a, lane(try self.a.dupe(u8, anchor), name, kind, .{
+        try self.lanes.append(self.arena, lane(try self.arena.dupe(u8, anchor), name, kind, .{
             .it = .{
                 .channel = channel,
                 .column = column,

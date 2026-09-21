@@ -896,14 +896,14 @@ fn freeBodies(gpa: Allocator, bodies: []const []const u8) void {
 
 /// A rendered record into the caller's arena, with the hash the file
 /// itself answers.
-fn keepRecord(a: Allocator, src: records.LaneRecord, hash: [32]u8) Error!records.LaneRecord {
-    const segments = try a.alloc(records.Segment, src.steps_only.len);
+fn keepRecord(arena: Allocator, src: records.LaneRecord, hash: [32]u8) Error!records.LaneRecord {
+    const segments = try arena.alloc(records.Segment, src.steps_only.len);
     for (src.steps_only, segments) |from, *to| to.* = .{
         .at = from.at,
-        .ease = try a.dupe(u8, from.ease),
+        .ease = try arena.dupe(u8, from.ease),
     };
     return .{
-        .lane = try a.dupe(u8, src.lane),
+        .lane = try arena.dupe(u8, src.lane),
         .address = src.address,
         .hash = hash,
         .steps_only = segments,
@@ -912,7 +912,7 @@ fn keepRecord(a: Allocator, src: records.LaneRecord, hash: [32]u8) Error!records
 
 fn buildSmf(
     gpa: Allocator,
-    a: Allocator,
+    arena: Allocator,
     doc_source: [:0]const u8,
     doc: *const Doc.Doc,
     derived: *const time_derive.Derived,
@@ -952,7 +952,7 @@ fn buildSmf(
         .round = opts.round,
     };
 
-    const lanes = try a.alloc(records.LaneRecord, rendered.lanes.len);
+    const lanes = try arena.alloc(records.LaneRecord, rendered.lanes.len);
     var conductor: ?records.ConductorRecord = null;
     {
         var pass1 = try smf.write(gpa, &rendered.seq, wopts);
@@ -963,7 +963,7 @@ fn buildSmf(
         const ppq = back.sequence.division.pulsesPerQuarter();
         for (rendered.lanes, lanes) |src, *dst| {
             const address = src.address.smf;
-            dst.* = try keepRecord(a, src, records.hashSmfLane(
+            dst.* = try keepRecord(arena, src, records.hashSmfLane(
                 &back.sequence,
                 address.track - 1,
                 address.ch.first(),
@@ -1022,7 +1022,7 @@ fn buildSmf(
 
 fn buildIt(
     gpa: Allocator,
-    a: Allocator,
+    arena: Allocator,
     doc_source: [:0]const u8,
     doc: *const Doc.Doc,
     derived: *const time_derive.Derived,
@@ -1062,7 +1062,7 @@ fn buildIt(
         .preserve_history = rendered.module.edit_history != null,
     };
 
-    const lanes = try a.alloc(records.LaneRecord, rendered.lanes.len);
+    const lanes = try arena.alloc(records.LaneRecord, rendered.lanes.len);
     var conductor: ?records.ConductorRecord = null;
     {
         var pass1 = try itf.write.write(gpa, &rendered.module, source, wopts);
@@ -1077,7 +1077,7 @@ fn buildIt(
         const pats = try reconcile.playedPatterns(scratch.allocator(), &rows);
 
         for (rendered.lanes, lanes) |src, *dst| {
-            dst.* = try keepRecord(a, src, records.hashItLane(
+            dst.* = try keepRecord(arena, src, records.hashItLane(
                 &back.module,
                 &rows,
                 &[_]u8{src.address.it.channel},
@@ -1994,16 +1994,16 @@ fn countIn(text: []const u8, needle: []const u8) usize {
 /// tail carrier, and the tail is the DOCUMENT's shape — which gains an
 /// anchor the moment the document has been dumped once — so it is the
 /// one line of an `it/` tier a rebuild is allowed to move.
-fn withoutMessage(a: Allocator, text: []const u8) ![]u8 {
+fn withoutMessage(gpa: Allocator, text: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(a);
+    errdefer out.deinit(gpa);
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "(it/message")) continue;
-        try out.appendSlice(a, line);
-        try out.append(a, '\n');
+        try out.appendSlice(gpa, line);
+        try out.append(gpa, '\n');
     }
-    return out.toOwnedSlice(a);
+    return out.toOwnedSlice(gpa);
 }
 
 /// How many `note-on`s of `key` a sequence holds, over every track.

@@ -152,7 +152,7 @@ pub fn fromSource(
 
     var ctx: Ctx = .{
         .gpa = gpa,
-        .a = arena.allocator(),
+        .arena = arena.allocator(),
         .tree = &validated.tree,
         .source = source,
         .view = .init(&validated.tree, &validated.materialized_defaults),
@@ -328,7 +328,7 @@ const Ctx = struct {
     gpa: Allocator,
     /// The document's arena. Every name, slice and source copy lands
     /// here; nothing outlives `Doc.deinit`.
-    a: Allocator,
+    arena: Allocator,
     tree: *const Ast.Tree,
     source: [:0]const u8,
     /// Author value first, the manifest's `:default` second — for the
@@ -705,14 +705,14 @@ const Ctx = struct {
             // A `:sig` that is not a meter still goes in: `TimeMap` is
             // the one place that says `meter_map_invalid`, and it says it
             // with this span.
-            try out.append(self.a, .{
+            try out.append(self.arena, .{
                 .tick = tick,
                 .n = n,
                 .d = d,
                 .span = .{ .start = span.start, .end = span.end },
             });
         }
-        self.meter = try out.toOwnedSlice(self.a);
+        self.meter = try out.toOwnedSlice(self.arena);
         self.dropMap();
     }
 
@@ -740,13 +740,13 @@ const Ctx = struct {
                 // and `TimeMap` turns the zero into `tempo_map_invalid`.
                 break :blk .{ .us = 0 };
             };
-            try out.append(self.a, .{
+            try out.append(self.arena, .{
                 .tick = tick,
                 .tempo = tempo,
                 .span = .{ .start = span.start, .end = span.end },
             });
         }
-        self.tempo = try out.toOwnedSlice(self.a);
+        self.tempo = try out.toOwnedSlice(self.arena);
     }
 
     /// A `grid-position` `:at` — `q`, `t`, `bar` or `b`, never `s`.
@@ -816,9 +816,9 @@ const Ctx = struct {
                 .span = .{ .start = span.start, .end = span.end },
             };
             try checks.anchorBytes(self.diags, &anchor, self.resolver);
-            try out.append(self.a, anchor);
+            try out.append(self.arena, anchor);
         }
-        return out.toOwnedSlice(self.a);
+        return out.toOwnedSlice(self.arena);
     }
 
     // ---- the inline tiers ---------------------------------------------
@@ -868,7 +868,7 @@ const Ctx = struct {
                     for (read.diags.items()) |d| {
                         try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
                     }
-                    try midi.append(self.a, .{ .anchor = anchor_id, .sequence = read.sequence });
+                    try midi.append(self.arena, .{ .anchor = anchor_id, .sequence = read.sequence });
                 },
                 .it => {
                     var read = try bridge_it.formsToModule(self.gpa, self.tree, roots, anchor_bytes);
@@ -878,13 +878,13 @@ const Ctx = struct {
                         try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
                     }
                     try self.sourceAgrees(doc, anchor_id, read.source);
-                    try it.append(self.a, .{ .anchor = anchor_id, .module = read.module });
+                    try it.append(self.arena, .{ .anchor = anchor_id, .module = read.module });
                 },
             }
         }
 
-        doc.midi = try midi.toOwnedSlice(self.a);
-        doc.it = try it.toOwnedSlice(self.a);
+        doc.midi = try midi.toOwnedSlice(self.arena);
+        doc.it = try it.toOwnedSlice(self.arena);
     }
 
     /// The anchor's bytes, VERIFIED, or null — and a diagnostic at the
@@ -1041,7 +1041,7 @@ const Ctx = struct {
         // them with no resolver of their own, and
         // `conductedPlaceholder` is then a field test rather than a
         // second read.
-        if (candidate) |bytes| doc.conductor_bytes = try self.a.dupe(u8, bytes);
+        if (candidate) |bytes| doc.conductor_bytes = try self.arena.dupe(u8, bytes);
 
         for (built.diags.items()) |d| {
             try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
@@ -1049,8 +1049,8 @@ const Ctx = struct {
         // Into the DOCUMENT's arena: the tables outlive the derivation
         // that made them, because every position in the document
         // resolves against them.
-        self.cond_tempo = try self.a.dupe(Doc.TempoPoint, built.tempo);
-        self.cond_meter = try self.a.dupe(Doc.MeterPoint, built.meter);
+        self.cond_tempo = try self.arena.dupe(Doc.TempoPoint, built.tempo);
+        self.cond_meter = try self.arena.dupe(Doc.MeterPoint, built.meter);
         self.cond_live = true;
         self.cond_end = built.end;
     }
@@ -1069,14 +1069,14 @@ const Ctx = struct {
             const at = (try self.resolve(at_node)) orelse continue;
             const dur = (try self.duration(dur_node, at)) orelse continue;
 
-            try out.append(self.a, .{
+            try out.append(self.arena, .{
                 .name = try self.symbol(name_node),
                 .at = at,
                 .dur = dur,
                 .span = .{ .start = span.start, .end = span.end },
             });
         }
-        return out.toOwnedSlice(self.a);
+        return out.toOwnedSlice(self.arena);
     }
 
     fn readCues(self: *Ctx, forms: []const NodeIndex) Error![]Doc.Cue {
@@ -1089,13 +1089,13 @@ const Ctx = struct {
             const at_node = kvNode(self.tree, children, "at") orelse continue;
             const at = (try self.resolve(at_node)) orelse continue;
 
-            try out.append(self.a, .{
+            try out.append(self.arena, .{
                 .name = try self.text(name_node),
                 .at = at,
                 .span = .{ .start = span.start, .end = span.end },
             });
         }
-        return out.toOwnedSlice(self.a);
+        return out.toOwnedSlice(self.arena);
     }
 
     // ---- lanes --------------------------------------------------------
@@ -1103,9 +1103,9 @@ const Ctx = struct {
     fn readLanes(self: *Ctx, forms: []const NodeIndex, doc: *const Doc.Doc) Error![]Doc.Lane {
         var out: std.ArrayList(Doc.Lane) = .empty;
         for (forms) |form| {
-            try out.append(self.a, try self.readLane(form, doc));
+            try out.append(self.arena, try self.readLane(form, doc));
         }
-        return out.toOwnedSlice(self.a);
+        return out.toOwnedSlice(self.arena);
     }
 
     /// One `(lane …)`. `doc` is the document the lane's `:from` joins
@@ -1219,9 +1219,9 @@ const Ctx = struct {
             const head = tree.formHeader(child).head;
             content += 1;
             if (std.mem.eql(u8, head, "note")) {
-                if (try self.readNote(child)) |n| try notes.append(self.a, n);
+                if (try self.readNote(child)) |n| try notes.append(self.arena, n);
             } else if (std.mem.eql(u8, head, "keyframe")) {
-                if (try self.readKeyframe(child)) |k| try keyframes.append(self.a, k);
+                if (try self.readKeyframe(child)) |k| try keyframes.append(self.arena, k);
             } else if (std.mem.eql(u8, head, "clip")) {
                 if (in_phrase) {
                     try self.emit(
@@ -1231,7 +1231,7 @@ const Ctx = struct {
                         .{},
                     );
                 } else if (try self.readClip(child)) |c| {
-                    try clips.append(self.a, c);
+                    try clips.append(self.arena, c);
                 }
             }
         }
@@ -1243,9 +1243,9 @@ const Ctx = struct {
                 .{},
             );
         }
-        lane.notes = try notes.toOwnedSlice(self.a);
-        lane.keyframes = try keyframes.toOwnedSlice(self.a);
-        lane.clips = try clips.toOwnedSlice(self.a);
+        lane.notes = try notes.toOwnedSlice(self.arena);
+        lane.keyframes = try keyframes.toOwnedSlice(self.arena);
+        lane.clips = try clips.toOwnedSlice(self.arena);
 
         try checks.noteOverlap(self.diags, &lane);
         return lane;
@@ -1536,17 +1536,17 @@ const Ctx = struct {
                 // where that clip puts them, so nothing inside one moves
                 // `max_end` on its own — the clip does, in `checkClips`.
                 const before = self.max_end;
-                try lanes.append(self.a, try self.readLane(child, null));
+                try lanes.append(self.arena, try self.readLane(child, null));
                 self.max_end = before;
             }
-            try out.append(self.a, .{
+            try out.append(self.arena, .{
                 .name = try self.symbol(name_node),
                 .length = length,
-                .lanes = try lanes.toOwnedSlice(self.a),
+                .lanes = try lanes.toOwnedSlice(self.arena),
                 .span = .{ .start = span.start, .end = span.end },
             });
         }
-        return out.toOwnedSlice(self.a);
+        return out.toOwnedSlice(self.arena);
     }
 
     // ---- pass-through -------------------------------------------------
@@ -1572,17 +1572,17 @@ const Ctx = struct {
 
             var comments: std.ArrayList([]const u8) = .empty;
             for (tree.commentSpans(tree.leading_comments_index[form.raw()])) |c| {
-                try comments.append(self.a, try self.a.dupe(u8, self.source[c.start..c.end]));
+                try comments.append(self.arena, try self.arena.dupe(u8, self.source[c.start..c.end]));
             }
 
-            try out.append(self.a, .{
-                .head = try self.a.dupe(u8, hdr.head),
-                .text = try self.a.dupe(u8, self.source[span.start..span.end]),
-                .comments = try comments.toOwnedSlice(self.a),
+            try out.append(self.arena, .{
+                .head = try self.arena.dupe(u8, hdr.head),
+                .text = try self.arena.dupe(u8, self.source[span.start..span.end]),
+                .comments = try comments.toOwnedSlice(self.arena),
                 .span = .{ .start = span.start, .end = span.end },
             });
         }
-        return out.toOwnedSlice(self.a);
+        return out.toOwnedSlice(self.arena);
     }
 
     // ---- readers ------------------------------------------------------
@@ -1685,13 +1685,13 @@ const Ctx = struct {
     /// A string value, copied into the document's arena.
     fn text(self: *Ctx, node: NodeIndex) Error![]const u8 {
         if (self.tree.tagOf(node) != .string) return "";
-        return self.a.dupe(u8, self.tree.stringText(node));
+        return self.arena.dupe(u8, self.tree.stringText(node));
     }
 
     /// A symbol value, copied into the document's arena.
     fn symbol(self: *Ctx, node: NodeIndex) Error![]const u8 {
         if (self.tree.tagOf(node) != .symbol) return "";
-        return self.a.dupe(u8, self.tree.symbolText(node));
+        return self.arena.dupe(u8, self.tree.symbolText(node));
     }
 
     /// A node's own SOURCE TEXT, copied — what `:ease`, `:query` and
@@ -1699,7 +1699,7 @@ const Ctx = struct {
     /// and tempura carries them rather than re-spelling them.
     fn slice(self: *Ctx, node: NodeIndex) Error![]const u8 {
         const span = self.tree.spanOf(node);
-        return self.a.dupe(u8, self.source[span.start..span.end]);
+        return self.arena.dupe(u8, self.source[span.start..span.end]);
     }
 };
 
@@ -1863,11 +1863,11 @@ pub fn conductedPlaceholder(doc: *const Doc.Doc) bool {
 /// `span` is what every diagnostic carries: the anchor's, for a
 /// document, and the caller's choice otherwise.
 pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) Error!Conductor {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
-    const a = arena.allocator();
+    const arena = arena_state.allocator();
 
     if (seq.format == 2) try diags.add(
         .smf_format2,
@@ -1905,7 +1905,7 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
                 // Zero microseconds a quarter has no meaning and the
                 // reader already said so with its own span.
                 if (e.payload.tempo == 0) continue;
-                try tempo.append(a, .{
+                try tempo.append(arena, .{
                     .tick = Grid.smfToTicks(e.at, ppq).tick,
                     .tempo = .{ .us = e.payload.tempo },
                     .span = span,
@@ -1913,7 +1913,7 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
             },
             .time_signature => {
                 const t = e.payload.time_sig;
-                try meter.append(a, .{
+                try meter.append(arena, .{
                     .tick = Grid.smfToTicks(e.at, ppq).tick,
                     .n = t.nn,
                     // RP-001 writes the denominator as its power of two.
@@ -1940,17 +1940,17 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
     // per minute, an integer, so the one SMPTE segment keeps plan 03's
     // integer path — and the number the writer and the bridge put on
     // every `set-tempo` of that grid (`Division.tempoOnGrid`): one owner.
-    if (smpte) try tempo.append(a, .{
+    if (smpte) try tempo.append(arena, .{
         .tick = 0,
         .tempo = .{ .us = smf.Division.smpte_tempo_us },
         .span = span,
     });
 
     return .{
-        .tempo = try seedTempo(a, try mergeByTick(a, Doc.TempoPoint, tempo.items), span),
-        .meter = try seedMeter(a, try mergeByTick(a, Doc.MeterPoint, meter.items), span),
+        .tempo = try seedTempo(arena, try mergeByTick(arena, Doc.TempoPoint, tempo.items), span),
+        .meter = try seedMeter(arena, try mergeByTick(arena, Doc.MeterPoint, meter.items), span),
         .diags = diags,
-        .arena = arena,
+        .arena = arena_state,
         .end = end,
     };
 }
@@ -1961,11 +1961,11 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
 /// module's highlight `[minor major]` as one `[major / minor, 4]` meter
 /// point at tick 0, and `[4 4]` when the module states none.
 pub fn itConductor(gpa: Allocator, module: *const itf.Module, span: Diag.Span) Error!Conductor {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
-    const a = arena.allocator();
+    const arena = arena_state.allocator();
 
     var rowmap = try itf.walk.derive(gpa, module, .{});
     errdefer rowmap.deinit();
@@ -1984,7 +1984,7 @@ pub fn itConductor(gpa: Allocator, module: *const itf.Module, span: Diag.Span) E
             over = true;
             break;
         }
-        try tempo.append(a, .{
+        try tempo.append(arena, .{
             .tick = @intCast(tick),
             .tempo = .{ .qpm = @floatFromInt(seg.tempo) },
             .span = span,
@@ -2006,10 +2006,10 @@ pub fn itConductor(gpa: Allocator, module: *const itf.Module, span: Diag.Span) E
     const n: u8 = if (beats >= 1 and beats <= 64) @intCast(beats) else 4;
 
     return .{
-        .tempo = try seedTempo(a, try mergeByTick(a, Doc.TempoPoint, tempo.items), span),
-        .meter = try a.dupe(Doc.MeterPoint, &[_]Doc.MeterPoint{.{ .tick = 0, .n = n, .d = 4, .span = span }}),
+        .tempo = try seedTempo(arena, try mergeByTick(arena, Doc.TempoPoint, tempo.items), span),
+        .meter = try arena.dupe(Doc.MeterPoint, &[_]Doc.MeterPoint{.{ .tick = 0, .n = n, .d = 4, .span = span }}),
         .diags = diags,
-        .arena = arena,
+        .arena = arena_state,
         .end = end: {
             const total = @as(i128, rowmap.total_ticks) * Grid.IT_TICK;
             break :end if (total > Grid.MAX_TICK) Grid.MAX_TICK else @intCast(total);
@@ -2021,7 +2021,7 @@ pub fn itConductor(gpa: Allocator, module: *const itf.Module, span: Diag.Span) E
 /// Merge conductor points by tick — STABLE, so equal ticks keep the
 /// order the tracks were read in, and the LAST of them wins (plan 03,
 /// "Three conductors", rule 2).
-fn mergeByTick(a: Allocator, comptime T: type, points: []T) Error![]T {
+fn mergeByTick(arena: Allocator, comptime T: type, points: []T) Error![]T {
     const Order = struct {
         fn before(_: void, x: T, y: T) bool {
             return x.tick < y.tick;
@@ -2032,17 +2032,17 @@ fn mergeByTick(a: Allocator, comptime T: type, points: []T) Error![]T {
     var out: std.ArrayList(T) = .empty;
     for (points, 0..) |p, i| {
         if (i + 1 < points.len and points[i + 1].tick == p.tick) continue;
-        try out.append(a, p);
+        try out.append(arena, p);
     }
-    return out.toOwnedSlice(a);
+    return out.toOwnedSlice(arena);
 }
 
 /// A conductor's table starts at tick 0 or it is not a map. A file with
 /// no tempo event before its first note is playing at SMF's own default,
 /// 120 quarter notes per minute, and saying so is not a guess.
-fn seedTempo(a: Allocator, points: []Doc.TempoPoint, span: Diag.Span) Error![]Doc.TempoPoint {
+fn seedTempo(arena: Allocator, points: []Doc.TempoPoint, span: Diag.Span) Error![]Doc.TempoPoint {
     if (points.len > 0 and points[0].tick == 0) return points;
-    const out = try a.alloc(Doc.TempoPoint, points.len + 1);
+    const out = try arena.alloc(Doc.TempoPoint, points.len + 1);
     out[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 }, .span = span };
     @memcpy(out[1..], points);
     return out;
@@ -2050,9 +2050,9 @@ fn seedTempo(a: Allocator, points: []Doc.TempoPoint, span: Diag.Span) Error![]Do
 
 /// The same for the meter: a file with no time signature is in `[4 4]`,
 /// which is what every sequencer shows it as.
-fn seedMeter(a: Allocator, points: []Doc.MeterPoint, span: Diag.Span) Error![]Doc.MeterPoint {
+fn seedMeter(arena: Allocator, points: []Doc.MeterPoint, span: Diag.Span) Error![]Doc.MeterPoint {
     if (points.len > 0 and points[0].tick == 0) return points;
-    const out = try a.alloc(Doc.MeterPoint, points.len + 1);
+    const out = try arena.alloc(Doc.MeterPoint, points.len + 1);
     out[0] = .{ .tick = 0, .n = 4, .d = 4, .span = span };
     @memcpy(out[1..], points);
     return out;
