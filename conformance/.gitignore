@@ -1,0 +1,4 @@
+# The OpenMPT wiki IT test cases carry no explicit licence and are never
+# vendored (docs/plans/09-conformance.md, "License discipline").
+# `fetch_wiki_cases.sh` downloads them here, hash-pinned, on request.
+wiki-cases/
