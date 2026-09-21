@@ -716,6 +716,33 @@ test "read: a hand-built minimal module parses" {
     try testing.expectEqual(Region{ .off = 0xC6, .len = 8 + minimal_stream.len }, r.source_map.find(.pattern, 0).?);
 }
 
+test "read: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails
+    // with error.OutOfMemory and testing.allocator sees no leak; past
+    // the last index it succeeds. Bounded by the number of allocations
+    // the call makes, which the loop discovers.
+    const gpa = testing.allocator;
+    const bytes = try minimal(gpa);
+    defer gpa.free(bytes);
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = read(failing.allocator(), bytes);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var value = try result;
+            value.deinit();
+            break;
+        }
+    }
+    // Small, since an arena takes chunks and not slices; more than one,
+    // or the sweep proved nothing.
+    try testing.expect(fail_index > 1);
+}
+
 test "read: IMPM is the gate, and a short file is truncated, never a crash" {
     const gpa = testing.allocator;
 

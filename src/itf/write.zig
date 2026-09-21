@@ -1067,6 +1067,41 @@ test "write: the opaque regions come back byte-equal after read → write" {
     try testing.expect(back.module.patterns[1].isEmpty());
 }
 
+test "write: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails
+    // with error.OutOfMemory and testing.allocator sees no leak; past
+    // the last index it succeeds. Bounded by the number of allocations
+    // the call makes, which the loop discovers. The module is the rich
+    // fixture as read, against its own bytes, so every section — the
+    // history, the message, the records, the pattern packer's own
+    // transient results — is on the path.
+    const gpa = testing.allocator;
+    const bytes = try richFixture(gpa);
+    defer gpa.free(bytes);
+    var r = try read_it.read(gpa, bytes);
+    defer r.deinit();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const written = write(failing.allocator(), &r.module, bytes, .{
+            .preserve_history = true,
+            .message_tail = "\rtail",
+        });
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, written);
+        } else {
+            var value = try written;
+            value.deinit();
+            break;
+        }
+    }
+    // Small, since an arena takes chunks and not slices; more than one,
+    // or the sweep proved nothing.
+    try testing.expect(fail_index > 1);
+}
+
 test "write: write(read(bytes)) == bytes on the writer's own output" {
     const gpa = testing.allocator;
     const source = try richFixture(gpa);
