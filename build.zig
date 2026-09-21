@@ -148,8 +148,33 @@ pub fn build(b: *std.Build) void {
     wasm.entry = .disabled;
     wasm.rdynamic = true;
     const install_wasm = b.addInstallArtifact(wasm, .{});
+
+    // …and a second copy INTO `npm/tempura/`, beside the glue that loads
+    // it. pacer does this from an npm script; here it rides the build
+    // verb, because `node --test` is part of `verify` and a gate that
+    // compared the glue against a stale artifact would pass on anything.
+    // `.custom = "../npm/tempura"` is relative to the install prefix, so
+    // the file lands in the source tree (it is gitignored, regenerated,
+    // and never committed).
+    const copy_wasm = b.addInstallFileWithDir(
+        wasm.getEmittedBin(),
+        .{ .custom = "../npm/tempura" },
+        "tempura.wasm",
+    );
     const wasm_step = b.step("wasm", "Build tempura.wasm (freestanding, ReleaseSmall)");
     wasm_step.dependOn(&install_wasm.step);
+    wasm_step.dependOn(&copy_wasm.step);
+
+    // The size budget (plan 10: "the E3 gate pins the size at what it
+    // measures and `verify` fails on growth past it"). The ceiling is
+    // frozen inside the script, which is also where the reason for every
+    // change to it lives. It MEASURES and never builds, so it is wired
+    // onto the installed artifact and joined to `verify` below.
+    const wasm_budget = b.addSystemCommand(&.{"tools/wasm_budget.sh"});
+    wasm_budget.setCwd(b.path("."));
+    wasm_budget.addFileArg(wasm.getEmittedBin());
+    const wasm_budget_step = b.step("wasm-budget", "Check tempura.wasm against its frozen size ceiling");
+    wasm_budget_step.dependOn(&wasm_budget.step);
 
     // `zig build corpus` — the native golden gate. `-- --update`
     // regenerates and the diff is reviewed; a golden is never hand-edited.
@@ -363,12 +388,17 @@ pub fn build(b: *std.Build) void {
     const run_corpus_verify = b.addRunArtifact(corpus_runner);
     run_corpus_verify.addDirectoryArg(b.path("corpus"));
     run_corpus_verify.has_side_effects = true;
-    const verify_step = b.step("verify", "test + the CLI goldens + native corpus + the pacer-schema drift check + the generated-docs drift check");
+    const verify_step = b.step("verify", "test + the CLI goldens + native corpus + node --test + the wasm size budget + the pacer-schema drift check + the generated-docs drift check");
     verify_step.dependOn(&run_tests.step);
     verify_step.dependOn(&run_cli_tests.step);
     verify_step.dependOn(&cli_golden_check.step);
     verify_step.dependOn(&run_corpus_verify.step);
     verify_step.dependOn(&pacer_drift.step);
+    // The wasm's size budget. Unconditional — it needs no `node`, no
+    // sibling checkout and no `npm install`, only the artifact, which it
+    // takes as a build-graph dependency so the gate measures what this
+    // tree produces rather than whatever `zig-out` happens to hold.
+    verify_step.dependOn(&wasm_budget.step);
 
     // …and the landing proof, through the REAL `pacer.wasm` (pacer's
     // `node_test` shape). tempura's own tests cannot catch its model of
@@ -390,6 +420,18 @@ pub fn build(b: *std.Build) void {
             const node_test = b.addSystemCommand(&.{ "node", "--test" });
             node_test.setCwd(b.path("npm/tempura"));
             node_test.has_side_effects = true;
+            // The suite drives `npm/tempura/tempura.wasm` — the exports
+            // test, the blob decoders, the corpus parity walk and the
+            // fresh-instance round trip all instantiate it — so the copy
+            // runs FIRST. A gate that read a stale artifact would pass on
+            // anything, which is the same rule the landing fixtures'
+            // `--check` leg is written to.
+            node_test.step.dependOn(&copy_wasm.step);
+            // …and the round trip's native leg compares the wasm's bytes
+            // against the CLI's, so the binary it looks for is built too
+            // (it degrades to a printed skip without one, and a gate that
+            // skips silently is not a gate).
+            node_test.step.dependOn(&install_cli.step);
             verify_step.dependOn(&node_test.step);
         } else |_| {
             std.debug.print(

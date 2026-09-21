@@ -2,8 +2,7 @@
   "name": "tempura",
   "version": "0.1.0",
   "type": "module",
-  "private": true,
-  "description": "The pacer landing proof for tempura's score exporter — every printed position read back by the real pacer.wasm",
+  "description": "JS glue for tempura.wasm — the timeline as a value: SJON documents, .mid and .it",
   "keywords": [
     "tempura",
     "pacer",
@@ -11,7 +10,9 @@
     "timeline",
     "midi",
     "impulse-tracker",
-    "deterministic"
+    "deterministic",
+    "wasm",
+    "webassembly"
   ],
   "author": "Hugo Daniel <mail@hugodaniel.pt>",
   "license": "CC0-1.0",
@@ -20,21 +21,57 @@
     "url": "git+https://git.hugodaniel.com/hugo/tempura.git",
     "directory": "npm/tempura"
   },
+  "publishConfig": {
+    "registry": "https://git.hugodaniel.com/api/packages/hugo/npm/"
+  },
   "engines": {
     "node": ">=20"
   },
   "sideEffects": false,
+  "main": "./src/index.js",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./ops": {
+      "types": "./types/ops.d.ts",
+      "default": "./src/ops.js"
+    },
+    "./blobs": {
+      "types": "./types/blobs.d.ts",
+      "default": "./src/blobs.js"
+    },
+    "./tempura.wasm": "./tempura.wasm",
+    "./package.json": "./package.json"
+  },
   "files": [
-    "test"
+    "src",
+    "types",
+    "tempura.wasm",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build:fixtures": "cd ../.. && zig build landing",
-    "build:wasm": "cd ../../../pacer && zig build wasm",
-    "build:wasm-copy": "node -e \"require('node:fs').copyFileSync('../../../pacer/zig-out/bin/pacer.wasm','../../../pacer/npm/pacer/pacer.wasm')\"",
-    "pretest": "npm run build:fixtures && npm run build:wasm && npm run build:wasm-copy",
-    "test": "node --test"
+    "build:wasm": "cd ../.. && zig build wasm",
+    "build:pacer-wasm": "cd ../../../pacer && zig build wasm",
+    "build:pacer-wasm-copy": "node -e \"require('node:fs').copyFileSync('../../../pacer/zig-out/bin/pacer.wasm','../../../pacer/npm/pacer/pacer.wasm')\"",
+    "build:types": "tsc",
+    "build": "npm run build:wasm && npm run build:types",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src test",
+    "format": "biome check --write src test",
+    "clean": "node -e \"const fs=require('node:fs');fs.rmSync('types',{recursive:true,force:true});fs.rmSync('tempura.wasm',{force:true})\"",
+    "pretest": "npm run build:wasm && npm run build:fixtures && npm run build:pacer-wasm && npm run build:pacer-wasm-copy",
+    "test": "node --test",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm test"
   },
   "devDependencies": {
-    "pacer": "file:../../../pacer/npm/pacer"
+    "@biomejs/biome": "^2.5.0",
+    "pacer": "file:../../../pacer/npm/pacer",
+    "typescript": "^5.9.0"
   }
 }

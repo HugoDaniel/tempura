@@ -60,6 +60,13 @@ pub const edit = @import("edit/edit.zig");
 /// Named `exporter` because `export` is a Zig keyword.
 pub const exporter = @import("export/export.zig");
 
+/// The wasm boundary blobs (P108, plan 10): `'TPTL'`, `'TPPH'` and
+/// `'TPDG'`, the packed little-endian formats `tempura.wasm` writes and
+/// `npm/tempura`'s `./blobs` mirrors. Here, not in `wasm_entry.zig`, so
+/// both directions are natively testable (pacer's `Abi.zig` discipline)
+/// — and exported, so a native host can encode the same bytes.
+pub const TprAbi = @import("TprAbi.zig");
+
 test {
     _ = Diag;
     _ = Schema;
@@ -70,6 +77,7 @@ test {
     _ = residue;
     _ = edit;
     _ = exporter;
+    _ = TprAbi;
     // Not part of the `tempura` module — the corpus runner is its own
     // executable root, built against these same sources — but its
     // harness vocabulary, its canonical renderer and its verdict earn
