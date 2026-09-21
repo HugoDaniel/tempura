@@ -204,7 +204,11 @@ pub const Mapper = struct {
     ///
     /// Never negative, whatever `tick` is: both conversions clamp the
     /// tempura tick at zero first, which is what lets the spellers
-    /// assert the same of what they print.
+    /// assert the same of what they print. Never past `MAX_TICK`
+    /// either: the seconds path saturates there (`pacerFloor`), and a
+    /// beat is at least one tempura tick while every tick the exporter
+    /// is handed is already inside the grid — the reader drops a
+    /// position past it (`tick_overflow`) and `derive` saturates.
     pub fn position(self: *Mapper, tick: i64) i64 {
         const landed = switch (self.mode) {
             .beats => |b| self.counter.convert(@max(tick, 0), b.n, b.d),
@@ -236,11 +240,13 @@ pub const Mapper = struct {
         const a = self.rawPosition(from);
         const b = self.rawPosition(to);
         const span = b - a;
-        // Both conversions are monotone and `to >= from`, so a window
-        // never spans backwards.
-        std.debug.assert(span >= 0);
         switch (self.mode) {
             .beats => |m| {
+                // `pacerTick` is integer rounding, monotone, and `to >=
+                // from`: a window never spans backwards on the lattice.
+                // Not asserted for seconds, whose `nearest` reads a
+                // non-finite wall clock as tick 0 — a clamp, not an order.
+                std.debug.assert(span >= 0);
                 const divisor = Grid.pacerDivisor(m.n, m.d).?;
                 const off = (to - from) - span * divisor;
                 if (off != 0) self.counter.noteDuration(errorInBeats(off, m.d));
