@@ -640,6 +640,7 @@ const Tailer = struct {
         // it is ASCII already: nothing was lost and nothing is reported.
         if (c != '%') self.lossy = true;
         var buf: [3]u8 = undefined;
+        // `%` and the two hex digits of one byte: exactly three.
         const text = std.fmt.bufPrint(&buf, "%{X:0>2}", .{c}) catch unreachable;
         try self.line.appendSlice(self.gpa, text);
     }
@@ -678,11 +679,18 @@ const Tailer = struct {
     fn pos(self: *Tailer, tick: i64) Error!void {
         var buf: [64]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
+        // `Pos.spell`'s widest line is 25 bytes, against 64: an i64 with
+        // `bar` is 23 and with `t` 21, and a quarter decimal is a sign,
+        // at most twelve digits (`maxInt(i64) / 9009 / 5120`), the point,
+        // ten decimals and `q`.
         self.map.spell(&w, tick) catch unreachable;
         try self.raw(w.buffered());
     }
 
     fn int(self: *Tailer, v: anytype) Error!void {
+        // The widest integer this is asked for is 64 bits: twenty digits
+        // and a sign, against 32.
+        comptime std.debug.assert(@bitSizeOf(@TypeOf(v)) <= 64);
         var buf: [32]u8 = undefined;
         try self.raw(std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable);
     }
@@ -690,8 +698,13 @@ const Tailer = struct {
     fn float(self: *Tailer, x: f32) Error!void {
         var buf: [std.fmt.float.bufferSize(.decimal, f64)]u8 = undefined;
         if (@floor(x) == x and @abs(x) < 16_777_216) {
-            try self.raw(std.fmt.bufPrint(&buf, "{d}", .{@as(i32, @intFromFloat(x))}) catch unreachable);
+            // A whole number below 2^24: eight digits and a sign, into
+            // a buffer sized for the widest f64 decimal.
+            const whole: i32 = @intFromFloat(x);
+            try self.raw(std.fmt.bufPrint(&buf, "{d}", .{whole}) catch unreachable);
         } else {
+            // `bufferSize`'s bound for an f64 in decimal: an f32 has
+            // fewer digits and a smaller exponent, so it is narrower.
             try self.raw(std.fmt.bufPrint(&buf, "{d}", .{x}) catch unreachable);
         }
     }
@@ -982,7 +995,11 @@ test "it: the 4096 budget drops whole lines and says what fell off" {
     try src.appendSlice(gpa, "(timeline :title \"big\" :conductor song)\n(anchor :id song :kind it :file \"big.it\")\n");
     for (0..200) |i| {
         var line: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&line, "(section :name s{d} :at {d}bar :dur 1bar)\n", .{ i, i }) catch unreachable;
+        const text = try std.fmt.bufPrint(
+            &line,
+            "(section :name s{d} :at {d}bar :dur 1bar)\n",
+            .{ i, i },
+        );
         try src.appendSlice(gpa, text);
     }
     const source = try src.toOwnedSliceSentinel(gpa, 0);

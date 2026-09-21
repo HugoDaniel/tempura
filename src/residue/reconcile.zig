@@ -1610,6 +1610,7 @@ fn hexDigest(bytes: []const u8) [64]u8 {
     var digest: [32]u8 = undefined;
     Sha256.hash(bytes, &digest, .{});
     var hex: [64]u8 = undefined;
+    // `{x}` of 32 bytes is exactly 64 hex digits: the buffer's width.
     _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
     return hex;
 }

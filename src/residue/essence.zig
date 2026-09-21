@@ -597,7 +597,7 @@ test "essence: a tier past SJON's limits is residue_unencodable, never a silent 
     defer src.deinit(gpa);
     for (0..257) |i| {
         var line: [32]u8 = undefined;
-        try src.appendSlice(gpa, std.fmt.bufPrint(&line, "; comment {d}\n", .{i}) catch unreachable);
+        try src.appendSlice(gpa, try std.fmt.bufPrint(&line, "; comment {d}\n", .{i}));
     }
     try src.appendSlice(gpa, "(timeline :title \"buried\")\n");
     const source = try src.toOwnedSliceSentinel(gpa, 0);
