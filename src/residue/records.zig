@@ -235,6 +235,44 @@ pub const Part = struct {
     body: []const u8,
 };
 
+/// The payloads of this build's envelope version, gathered one record
+/// at a time as a carrier walks its file — `smf.detach` off the events,
+/// `it.parseChunk` off the framed list. Every body is copied into the
+/// `arena` the caller passes, which owns the lot.
+pub const Gathered = struct {
+    parts: std.ArrayList(Part) = .empty,
+    lanes: std.ArrayList([]const u8) = .empty,
+    conductor: ?[]const u8 = null,
+
+    /// Whether `p` was taken: an essence part, a lane record, or a
+    /// conductor record — the first one; a second is taken and dropped,
+    /// because two conductors are one torn residue. `kind 04` is
+    /// midivia's and anything else is nobody's this build knows, and
+    /// neither is taken: what the caller does with the record then —
+    /// copy the event back, step over the framed bytes — is the
+    /// carrier's own business. The caller has already checked `ver`.
+    pub fn take(self: *Gathered, arena: Allocator, p: Payload) Error!bool {
+        switch (@as(Kind, @enumFromInt(p.kind))) {
+            .essence => try self.parts.append(arena, .{
+                .seq = p.seq,
+                .total = p.total,
+                .body = try arena.dupe(u8, p.body),
+            }),
+            .lane => try self.lanes.append(arena, try arena.dupe(u8, p.body)),
+            .conductor => if (self.conductor == null) {
+                self.conductor = try arena.dupe(u8, p.body);
+            },
+            .reserved, _ => return false,
+        }
+        return true;
+    }
+
+    /// Nothing of this version was gathered at all.
+    pub fn isEmpty(self: *const Gathered) bool {
+        return self.parts.items.len == 0 and self.lanes.items.len == 0 and self.conductor == null;
+    }
+};
+
 /// The parts back into one body, or nothing at all.
 ///
 /// A split essence is all or none: a body with a hole in it is not a

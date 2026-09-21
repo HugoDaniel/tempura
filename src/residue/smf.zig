@@ -119,65 +119,17 @@ pub fn attach(
 
     const cap = @max(opts.max_event, 1);
     const essence = payloads.essence orelse &.{};
-    // An essence OFFERED and empty is `pack` reporting that the tier is
-    // past SJON's wire limits (`essence.Packed`). Writing the file
-    // anyway would leave it holding nothing the format cannot say, so
-    // the loss is restated here rather than passing in silence — a
-    // caller that means to carry no essence passes none.
-    if (payloads.essence != null and essence.len == 0) try diags.add(
-        .residue_unencodable,
-        .err,
-        .{ .start = 0, .end = 0 },
-        "the essence handed to this carrier is empty; the timeline tier could not be packed, so this .mid would carry nothing the format cannot say itself",
-        .{},
-    );
+    const parts = try essenceParts(&diags, payloads.essence, cap);
 
-    var parts: usize = if (essence.len == 0) 0 else (essence.len + cap - 1) / cap;
-    if (parts > max_parts) {
-        try diags.add(
-            .residue_partial,
-            .warning,
-            .{ .start = 0, .end = 0 },
-            "the essence is {d} bytes and one .mid carries at most {d} ({d} events of {d}); none of it was written, because half an essence only reads as corrupt",
-            .{ essence.len, max_parts * cap, max_parts, cap },
-        );
-        parts = 0;
-    }
-
-    // Where each lane record goes: the track its own address names,
-    // 1-based as the file counts them. A record that names a track this
-    // file has not got — or an IT address in a `.mid` — rides on track
-    // 0 beside the essence; the address in the BODY is what a reader
-    // acts on, so placement is a courtesy to a DAW's track view.
+    // A `.mid` with no track at all still gets one to carry the residue.
     const carrying = parts > 0 or payloads.conductor != null or payloads.lanes.len > 0;
     const track_count = if (seq.tracks.len == 0 and carrying) 1 else seq.tracks.len;
-    const lane_track = try gpa.alloc(usize, payloads.lanes.len);
+    const lane_track = try laneTracks(gpa, payloads.lanes, track_count);
     defer gpa.free(lane_track);
-    for (payloads.lanes, lane_track) |body, *slot| {
-        slot.* = @min(try laneTrack(gpa, body), track_count -| 1);
-    }
 
     for (0..track_count) |ti| {
         const track = try b.addTrack();
-
-        if (ti == 0) {
-            var part: usize = 0;
-            while (part < parts) : (part += 1) {
-                const from = part * cap;
-                const to = @min(from + cap, essence.len);
-                try addPayload(&b, track, .{
-                    .kind = @intFromEnum(records.Kind.essence),
-                    .seq = @intCast(part),
-                    .total = @intCast(parts),
-                    .body = essence[from..to],
-                });
-            }
-            if (payloads.conductor) |body| try addPayload(&b, track, .{
-                .kind = @intFromEnum(records.Kind.conductor),
-                .body = body,
-            });
-        }
-
+        if (ti == 0) try leadTrackZero(&b, track, essence, parts, cap, payloads.conductor);
         for (payloads.lanes, lane_track) |body, at| {
             if (at != ti) continue;
             try addPayload(&b, track, .{
@@ -185,21 +137,7 @@ pub fn attach(
                 .body = body,
             });
         }
-
-        if (ti < seq.tracks.len) {
-            for (seq.tracks[ti].events) |e| {
-                // A payload of this build's OWN envelope version already
-                // in the sequence is the residue this one replaces — a
-                // `--force-residue` over an essence of a wire version
-                // this substrate does not decode, or a build of a tier
-                // that was inlined with its carrier events still in it.
-                // Two essences under one version would only ever read
-                // back as a torn one (`reassemble`). Any other version's
-                // payloads are a newer tempura's and stay (rule 3).
-                if (e.kind == .tempura_residue and e.payload.residue.ver == records.version) continue;
-                try copyEvent(&b, seq, e, track);
-            }
-        }
+        if (ti < seq.tracks.len) try copyTrack(&b, seq, seq.tracks[ti], track);
     }
 
     for (seq.foreign) |chunk| {
@@ -207,6 +145,100 @@ pub fn attach(
     }
 
     return .{ .sequence = try b.finish(), .diags = diags };
+}
+
+/// How many events of at most `cap` bytes the essence is cut into: none
+/// for no essence, and none — `residue_partial` raised — for one past
+/// `max_parts × cap`, because half an essence only reads as corrupt.
+///
+/// An essence OFFERED and empty is `pack` reporting that the tier is
+/// past SJON's wire limits (`essence.Packed`). Writing the file anyway
+/// would leave it holding nothing the format cannot say, so the loss is
+/// restated here as `residue_unencodable` rather than passing in
+/// silence — a caller that means to carry no essence passes none.
+fn essenceParts(diags: *Diag.List, essence: ?[]const u8, cap: usize) Error!usize {
+    const body = essence orelse return 0;
+    if (body.len == 0) {
+        try diags.add(
+            .residue_unencodable,
+            .err,
+            .{ .start = 0, .end = 0 },
+            "the essence handed to this carrier is empty; the timeline tier could not be packed, so this .mid would carry nothing the format cannot say itself",
+            .{},
+        );
+        return 0;
+    }
+    const parts = (body.len + cap - 1) / cap;
+    if (parts > max_parts) {
+        try diags.add(
+            .residue_partial,
+            .warning,
+            .{ .start = 0, .end = 0 },
+            "the essence is {d} bytes and one .mid carries at most {d} ({d} events of {d}); none of it was written, because half an essence only reads as corrupt",
+            .{ body.len, max_parts * cap, max_parts, cap },
+        );
+        return 0;
+    }
+    return parts;
+}
+
+/// Where each lane record goes: the track its own address names,
+/// 1-based as the file counts them. A record that names a track this
+/// file has not got — or an IT address in a `.mid` — rides on track 0
+/// beside the essence; the address in the BODY is what a reader acts
+/// on, so placement is a courtesy to a DAW's track view. Caller frees.
+fn laneTracks(gpa: Allocator, lanes: []const []const u8, track_count: usize) Error![]usize {
+    const out = try gpa.alloc(usize, lanes.len);
+    errdefer gpa.free(out);
+    for (lanes, out) |body, *slot| {
+        slot.* = @min(try laneTrack(gpa, body), track_count -| 1);
+    }
+    return out;
+}
+
+/// What leads track 0: the essence, cut into `parts` events of at most
+/// `cap` bytes numbered `seq = 0 … parts - 1`, then the conductor record.
+fn leadTrackZero(
+    b: *Sequence.Builder,
+    track: u32,
+    essence: []const u8,
+    parts: usize,
+    cap: usize,
+    conductor: ?[]const u8,
+) Error!void {
+    for (0..parts) |part| {
+        const from = part * cap;
+        const to = @min(from + cap, essence.len);
+        try addPayload(b, track, .{
+            .kind = @intFromEnum(records.Kind.essence),
+            .seq = @intCast(part),
+            .total = @intCast(parts),
+            .body = essence[from..to],
+        });
+    }
+    if (conductor) |body| try addPayload(b, track, .{
+        .kind = @intFromEnum(records.Kind.conductor),
+        .body = body,
+    });
+}
+
+/// Every event of `src` into `track` but one: a payload of this build's
+/// OWN envelope version already in the sequence is the residue this one
+/// replaces — a `--force-residue` over an essence of a wire version this
+/// substrate does not decode, or a build of a tier that was inlined with
+/// its carrier events still in it. Two essences under one version would
+/// only ever read back as a torn one (`reassemble`). Any other version's
+/// payloads are a newer tempura's and stay (rule 3).
+fn copyTrack(
+    b: *Sequence.Builder,
+    seq: *const Sequence.Sequence,
+    src: Sequence.Track,
+    track: u32,
+) Error!void {
+    for (src.events) |e| {
+        if (e.kind == .tempura_residue and e.payload.residue.ver == records.version) continue;
+        try copyEvent(b, seq, e, track);
+    }
 }
 
 /// Take every payload this build understands out of `seq`.
@@ -227,42 +259,11 @@ pub fn detach(gpa: Allocator, seq: *const Sequence.Sequence) Error!Detached {
     b.format = seq.format;
     b.division = seq.division;
 
-    var parts: std.ArrayList(records.Part) = .empty;
-    var lanes: std.ArrayList([]const u8) = .empty;
-    var conductor: ?[]const u8 = null;
-
+    var taken: records.Gathered = .{};
     for (seq.tracks) |t| {
         const track = try b.addTrack();
         for (t.events) |e| {
-            if (e.kind == .tempura_residue) {
-                const r = e.payload.residue;
-                const body = seq.bytesOf(r.body);
-                if (r.ver != records.version) {
-                    try diags.add(
-                        .residue_version,
-                        .warning,
-                        .{ .start = 0, .end = 0 },
-                        "a residue payload of envelope version {d} (this build writes {d}); it stays in the file, unparsed",
-                        .{ r.ver, records.version },
-                    );
-                } else switch (@as(records.Kind, @enumFromInt(r.kind))) {
-                    .essence => {
-                        try parts.append(a, .{ .seq = r.seq, .total = r.total, .body = try a.dupe(u8, body) });
-                        continue;
-                    },
-                    .lane => {
-                        try lanes.append(a, try a.dupe(u8, body));
-                        continue;
-                    },
-                    .conductor => {
-                        if (conductor == null) conductor = try a.dupe(u8, body);
-                        continue;
-                    },
-                    // `04` is midivia's and anything else is nobody's
-                    // this build knows: both stay bytes in the file.
-                    .reserved, _ => {},
-                }
-            }
+            if (e.kind == .tempura_residue and try takeEvent(&taken, a, seq, e, &diags)) continue;
             try copyEvent(&b, seq, e, track);
         }
     }
@@ -283,19 +284,51 @@ pub fn detach(gpa: Allocator, seq: *const Sequence.Sequence) Error!Detached {
     // is kilobytes and needs a second buffer; the 21-byte one here did
     // not), and `it.zig`'s `parseChunk` has always hoisted it for the
     // same reason.
-    const essence_body = try records.reassemble(a, parts.items, &diags);
+    const essence_body = try records.reassemble(a, taken.parts.items, &diags);
     const sequence = try b.finish();
 
     return .{
         .arena = arena,
         .payloads = .{
             .essence = essence_body,
-            .conductor = conductor,
-            .lanes = lanes.items,
+            .conductor = taken.conductor,
+            .lanes = taken.lanes.items,
         },
         .sequence = sequence,
         .diags = diags,
     };
+}
+
+/// Whether the residue event `e` was taken out of the file into `taken`.
+/// A payload of another envelope version is not: it stays in the file,
+/// unparsed, and `residue_version` says so (rule 3). `04` is midivia's
+/// and anything else is nobody's this build knows: both stay bytes in
+/// the file too.
+fn takeEvent(
+    taken: *records.Gathered,
+    arena: Allocator,
+    seq: *const Sequence.Sequence,
+    e: Sequence.Event,
+    diags: *Diag.List,
+) Error!bool {
+    const r = e.payload.residue;
+    if (r.ver != records.version) {
+        try diags.add(
+            .residue_version,
+            .warning,
+            .{ .start = 0, .end = 0 },
+            "a residue payload of envelope version {d} (this build writes {d}); it stays in the file, unparsed",
+            .{ r.ver, records.version },
+        );
+        return false;
+    }
+    return taken.take(arena, .{
+        .ver = r.ver,
+        .kind = r.kind,
+        .seq = r.seq,
+        .total = r.total,
+        .body = seq.bytesOf(r.body),
+    });
 }
 
 /// One `FF 7F` event, its body copied into the builder's pool.
