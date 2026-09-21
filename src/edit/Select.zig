@@ -131,7 +131,6 @@ pub const Resolved = struct {
 pub fn resolve(gpa: std.mem.Allocator, d: *const doc.Doc, sel: Select) Error!Resolved {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
-    const a = arena.allocator();
 
     var list: std.ArrayList(Target) = .empty;
     var bound: ?Diag.Span = null;
@@ -145,78 +144,101 @@ pub fn resolve(gpa: std.mem.Allocator, d: *const doc.Doc, sel: Select) Error!Res
             if (sel.lanes != null and bound == null) bound = lane.span;
             continue;
         }
-        const idx: u32 = @intCast(li);
-        if (sel.kinds.note) for (lane.notes, 0..) |n, i| {
-            if (!sel.covers(n.at)) continue;
-            if (!keyWanted(sel.keys, n.key)) continue;
-            try list.append(a, .{
-                .kind = .note,
-                .lane = idx,
-                .item = @intCast(i),
-                .at = n.at,
-                .dur = n.dur,
-                .key = n.key,
-                .span = n.span,
-            });
-        };
-        if (sel.kinds.keyframe) for (lane.keyframes, 0..) |k, i| {
-            if (!sel.covers(k.at)) continue;
-            try list.append(a, .{
-                .kind = .keyframe,
-                .lane = idx,
-                .item = @intCast(i),
-                .at = k.at,
-                .dur = 0,
-                .key = null,
-                .span = k.span,
-            });
-        };
-        if (sel.kinds.clip) for (lane.clips, 0..) |c, i| {
-            if (!sel.covers(c.at)) continue;
-            try list.append(a, .{
-                .kind = .clip,
-                .lane = idx,
-                .item = @intCast(i),
-                .at = c.at,
-                .dur = clipWindow(d, c),
-                .key = null,
-                .span = c.span,
-            });
-        };
+        try laneTargets(arena.allocator(), &list, d, lane, @intCast(li), sel);
     }
+    if (sel.lanes == null) try rootTargets(arena.allocator(), &list, d, sel);
 
-    if (sel.lanes == null) {
-        if (sel.kinds.section) for (d.sections, 0..) |s, i| {
-            if (!sel.covers(s.at)) continue;
-            try list.append(a, .{
-                .kind = .section,
-                .lane = null,
-                .item = @intCast(i),
-                .at = s.at,
-                .dur = s.dur,
-                .key = null,
-                .span = s.span,
-            });
-        };
-        if (sel.kinds.cue) for (d.cues, 0..) |c, i| {
-            if (!sel.covers(c.at)) continue;
-            try list.append(a, .{
-                .kind = .cue,
-                .lane = null,
-                .item = @intCast(i),
-                .at = c.at,
-                .dur = 0,
-                .key = null,
-                .span = c.span,
-            });
-        };
-    }
-
-    const targets = try list.toOwnedSlice(a);
+    const targets = try list.toOwnedSlice(arena.allocator());
     // Stable, so two targets the key cannot separate keep the order they
     // were read in — which is document order.
     std.sort.insertion(Target, targets, @as(usize, d.lanes.len), lessThan);
     return .{ .targets = targets, .bound = bound, .arena = arena };
+}
+
+/// The notes, keyframes and clips of one native lane that the range,
+/// the kinds and the keys keep, appended to `list` in the order the
+/// lane holds them. `idx` is the lane's index in `d.lanes`.
+fn laneTargets(
+    arena: std.mem.Allocator,
+    list: *std.ArrayList(Target),
+    d: *const doc.Doc,
+    lane: doc.Lane,
+    idx: u32,
+    sel: Select,
+) Error!void {
+    if (sel.kinds.note) for (lane.notes, 0..) |n, i| {
+        if (!sel.covers(n.at)) continue;
+        if (!keyWanted(sel.keys, n.key)) continue;
+        try list.append(arena, .{
+            .kind = .note,
+            .lane = idx,
+            .item = @intCast(i),
+            .at = n.at,
+            .dur = n.dur,
+            .key = n.key,
+            .span = n.span,
+        });
+    };
+    if (sel.kinds.keyframe) for (lane.keyframes, 0..) |k, i| {
+        if (!sel.covers(k.at)) continue;
+        try list.append(arena, .{
+            .kind = .keyframe,
+            .lane = idx,
+            .item = @intCast(i),
+            .at = k.at,
+            .dur = 0,
+            .key = null,
+            .span = k.span,
+        });
+    };
+    if (sel.kinds.clip) for (lane.clips, 0..) |c, i| {
+        if (!sel.covers(c.at)) continue;
+        try list.append(arena, .{
+            .kind = .clip,
+            .lane = idx,
+            .item = @intCast(i),
+            .at = c.at,
+            .dur = clipWindow(d, c),
+            .key = null,
+            .span = c.span,
+        });
+    };
+}
+
+/// The sections and cues the range and the kinds keep, appended to
+/// `list` in document order. Only reached by a selection that names no
+/// lane: a lane filter is a question about LANE CONTENT, and the two
+/// root kinds answer only when there is none.
+fn rootTargets(
+    arena: std.mem.Allocator,
+    list: *std.ArrayList(Target),
+    d: *const doc.Doc,
+    sel: Select,
+) Error!void {
+    if (sel.kinds.section) for (d.sections, 0..) |s, i| {
+        if (!sel.covers(s.at)) continue;
+        try list.append(arena, .{
+            .kind = .section,
+            .lane = null,
+            .item = @intCast(i),
+            .at = s.at,
+            .dur = s.dur,
+            .key = null,
+            .span = s.span,
+        });
+    };
+    if (sel.kinds.cue) for (d.cues, 0..) |c, i| {
+        if (!sel.covers(c.at)) continue;
+        try list.append(arena, .{
+            .kind = .cue,
+            .lane = null,
+            .item = @intCast(i),
+            .at = c.at,
+            .dur = 0,
+            .key = null,
+            .span = c.span,
+        });
+    };
 }
 
 /// The plan's determinism rule: lanes in document order (the roots after
