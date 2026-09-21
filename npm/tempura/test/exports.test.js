@@ -465,5 +465,27 @@ test('a bad call changes nothing, and an unloaded instance answers empty', async
   assert.equal(bare.snap(17n, 'bar'), 17n, 'a snap with no map leaves the tick alone');
   assert.equal(bare.build('mid'), null);
   assert.equal(bare.exportScore(), null);
-  assert.deepEqual(bare.diagnostics, []);
+  // …and an empty answer says why. Every zero-length answer publishes its
+  // reason, nothing loaded included, so the blob is always the CALL's.
+  assert.deepEqual(
+    bare.diagnostics.map((d) => [d.stage, d.severity, d.code]),
+    [['operation', 'error', diagCode('sjon_diagnostic')]],
+  );
+  assert.match(bare.diagnostics[0].message, /no document is loaded/);
+});
+
+test('a zero-length answer says its own reason, never the previous report', async () => {
+  const t = await Tempura.load(wasmBytes, DOC);
+  // A refusal first, so the blob holds something a stale zero would leave.
+  assert.equal(t.plan(ops.unbind('nope')).diagnostics[0].code, diagCode('edit_range_empty'));
+
+  // An ask past the op zone answers nothing — and says so, replacing the
+  // refusal above rather than leaving it to be read as this call's.
+  const big = t.plan('x'.repeat(t.caps.op + 1));
+  assert.equal(big.actions, '');
+  assert.deepEqual(
+    big.diagnostics.map((d) => [d.stage, d.severity, d.code]),
+    [['operation', 'error', diagCode('sjon_diagnostic')]],
+  );
+  assert.match(big.diagnostics[0].message, /zone holds/);
 });

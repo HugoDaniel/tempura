@@ -40,7 +40,11 @@
 //! A `tpr_*` call that returns a LENGTH writes into exactly one zone and
 //! the length is that zone's fill. Zero means "nothing to read" — not
 //! loaded, refused, or over the zone's cap — and the `'TPDG'` blob says
-//! which.
+//! which. EVERY zero says so: nothing loaded, an argument out of range,
+//! the heap exhausted, a zone too small, or the verb's own report — each
+//! `return 0` publishes its reason (`say`), so a host never reads the
+//! previous call's report as this one's. A reason's storage is static,
+//! so the heap running out is itself a thing that can be said.
 //!
 //! ## Lifecycle
 //!
@@ -368,28 +372,70 @@ fn fill(zone: []u8, bytes: []const u8) u32 {
     return @intCast(bytes.len);
 }
 
-/// `fill`, with the refusal SAID: a zone that cannot hold the answer
-/// publishes why before returning 0, because the header's promise is
-/// that a zero length is explained by the `'TPDG'` blob and not left to
-/// a host to guess at.
+/// `fill`, with every outcome SAID. `also` is the verb's own report, or
+/// null for a verb that has none (`tpr_text`): it is published when the
+/// answer fits, and published together with the refusal when it does
+/// not — a build the out zone could not hold still says what the build
+/// found.
+fn fillOrSay(zone: []u8, bytes: []const u8, what: []const u8, also: ?*const Diag.List) u32 {
+    if (bytes.len > zone.len) return tooBig(what, bytes.len, zone.len, also);
+    if (also) |list| publishDiags(.operation, list);
+    return fill(zone, bytes);
+}
+
+/// The reason a zone could not hold an answer, said; answers 0.
+fn tooBig(what: []const u8, len: usize, cap: usize, also: ?*const Diag.List) u32 {
+    return say(also, "the {s} is {d} bytes and its zone holds {d}; nothing was written", .{
+        what,
+        len,
+        cap,
+    });
+}
+
+/// The reason for a verb that needs a document and has none; answers 0.
+fn notLoaded() u32 {
+    return say(null, "no document is loaded (tpr_load or tpr_loadFile first)", .{});
+}
+
+/// The reason for a verb the heap gave out under; answers 0.
+fn outOfMemory(doing: []const u8) u32 {
+    return say(null, "out of memory while {s}; nothing was written", .{doing});
+}
+
+/// Static scratch for `say`'s one diagnostic — its list, its entry and
+/// its message — so saying why a call answered nothing never needs the
+/// heap, and "the heap ran out" is a reason that can be said.
+var reason_scratch: [4096]u8 = undefined;
+
+/// Publish why a length-returning verb answered 0, and answer 0 — the
+/// header's promise that a zero is explained by the `'TPDG'` blob, kept
+/// at every `return 0` rather than at most of them.
 ///
-/// `sjon_diagnostic` is the code for the reason `Op.fromJson` and
-/// `apply` use it: "this zone is too small" belongs to the HOST's
-/// vocabulary, which has no tempura code of its own, and the span is
-/// `0..0` because it is not a fact about any text.
-fn fillOrSay(zone: []u8, bytes: []const u8, what: []const u8) u32 {
-    const written = fill(zone, bytes);
-    if (written != 0 or bytes.len == 0) return written;
-    var report: Diag.List = .init(gpa);
-    defer report.deinit();
-    report.add(
-        .sjon_diagnostic,
-        .err,
-        .{ .start = 0, .end = 0 },
-        "the {s} is {d} bytes and its zone holds {d}; nothing was written",
-        .{ what, bytes.len, zone.len },
-    ) catch return 0;
-    publishDiags(.operation, &report);
+/// The reason is `sjon_diagnostic`, stage `.operation`, span `0..0`:
+/// "this zone is too small", "nothing is loaded" and "the heap ran out"
+/// belong to the HOST's vocabulary, which has no tempura code of its own
+/// (the code `Op.fromJson` and `apply` use for the same reason), and none
+/// is a fact about any text. `also` rides AFTER the reason, so a report
+/// long enough to fill the zone loses its own tail and never the reason
+/// (`encodeDiags` drops what does not fit, in order).
+fn say(also: ?*const Diag.List, comptime fmt: []const u8, args: anytype) u32 {
+    var fba: std.heap.FixedBufferAllocator = .init(&reason_scratch);
+    var reason: Diag.List = .init(fba.allocator());
+    defer reason.deinit();
+    // Every message is a sentence and some numbers — a few hundred bytes
+    // of a 4 KiB scratch — so this does not fail; were it to, the blob
+    // still holds `also` (or nothing), never the previous call's report.
+    reason.add(.sjon_diagnostic, .err, .{ .start = 0, .end = 0 }, fmt, args) catch {};
+
+    var sources: [2]TprAbi.DiagSource = undefined;
+    sources[0] = .{ .stage = .operation, .list = &reason };
+    var n: usize = 1;
+    if (also) |list| {
+        sources[1] = .{ .stage = .operation, .list = list };
+        n = 2;
+    }
+    diags_len = @intCast(TprAbi.encodeDiags(sources[0..n], &diags_buffer).len);
+    std.debug.assert(diags_len <= DIAGS_CAP);
     return 0;
 }
 
@@ -582,14 +628,19 @@ export fn tpr_attachAnchor(len: u32) u32 {
 /// (`residue/essence.zig`), and canonicalising here would throw away
 /// every comment the carrier went to the trouble of keeping.
 export fn tpr_text() u32 {
-    const s = live() orelse return 0;
-    return fillOrSay(&text_buffer, s.source, "document");
+    const s = live() orelse return notLoaded();
+    return fillOrSay(&text_buffer, s.source, "document", null);
 }
 
-/// `'TPTL'` at `tpr_timelinePtr`: the derivation as a packed blob.
+/// `'TPTL'` at `tpr_timelinePtr`: the derivation as a packed blob. 0
+/// when nothing is loaded or the blob is past `TIMELINE_CAP`, and the
+/// `'TPDG'` blob says which.
 export fn tpr_timeline() u32 {
-    const s = live() orelse return 0;
-    const blob = TprAbi.encodeTimeline(&s.derived, &timeline_buffer) catch return 0;
+    const s = live() orelse return notLoaded();
+    const blob = TprAbi.encodeTimeline(&s.derived, &timeline_buffer) catch {
+        const len = TprAbi.timelineEncodedLen(&s.derived);
+        return tooBig("timeline", len, TIMELINE_CAP, null);
+    };
     // Never partial, never past the zone: the encoder refused instead.
     std.debug.assert(blob.len <= TIMELINE_CAP);
     return @intCast(blob.len);
@@ -598,31 +649,40 @@ export fn tpr_timeline() u32 {
 /// `'TPPH'` at `tpr_playheadPtr`: where `seconds` lands, after the end
 /// behaviour. A clock no map can answer for — a NaN, an infinity, a
 /// value past the tick ceiling — comes back as a REFUSAL record rather
-/// than as a position nobody asked for.
+/// than as a position nobody asked for. 0 when nothing is loaded, the
+/// heap ran out, or the record is past `PLAYHEAD_CAP` (more overlapping
+/// sections than its tail holds), and the `'TPDG'` blob says which.
 export fn tpr_at(seconds: f64) u32 {
-    const s = live() orelse return 0;
+    const s = live() orelse return notLoaded();
     var pos = Playhead.at(gpa, &s.derived, seconds) catch |err| switch (err) {
-        error.OutOfMemory => return 0,
+        error.OutOfMemory => return outOfMemory("placing the playhead"),
         error.TickOverflow, error.NonFiniteTime => |guard| {
-            const blob = TprAbi.encodeRefusal(.of(guard), &playhead_buffer) catch return 0;
+            const blob = TprAbi.encodeRefusal(.of(guard), &playhead_buffer) catch
+                return tooBig("refusal", TprAbi.PLAYHEAD_LEN, PLAYHEAD_CAP, null);
             return @intCast(blob.len);
         },
     };
     defer pos.deinit(gpa);
-    const blob = TprAbi.encodePlayhead(pos, &playhead_buffer) catch return 0;
-    std.debug.assert(blob.len <= PLAYHEAD_CAP);
-    return @intCast(blob.len);
+    return playheadRecord(pos);
 }
 
 /// The same answer, asked by TICK — the query an editor makes when the
 /// playhead was dragged on the grid rather than on the clock. A tick is
 /// already on the grid, so neither host guard can fire and the record is
-/// never a refusal.
+/// never a refusal. 0 as for `tpr_at`, said the same way.
 export fn tpr_atTick(tick: i64) u32 {
-    const s = live() orelse return 0;
-    var pos = Playhead.atTick(gpa, &s.derived, tick) catch return 0;
+    const s = live() orelse return notLoaded();
+    var pos = Playhead.atTick(gpa, &s.derived, tick) catch
+        return outOfMemory("placing the playhead");
     defer pos.deinit(gpa);
-    const blob = TprAbi.encodePlayhead(pos, &playhead_buffer) catch return 0;
+    return playheadRecord(pos);
+}
+
+/// `pos` as a `'TPPH'` record in the playhead zone, answering its length,
+/// or 0 with the reason said when the zone cannot hold its section tail.
+fn playheadRecord(pos: Playhead.Position) u32 {
+    const blob = TprAbi.encodePlayhead(pos, &playhead_buffer) catch
+        return tooBig("position", TprAbi.playheadEncodedLen(pos), PLAYHEAD_CAP, null);
     std.debug.assert(blob.len <= PLAYHEAD_CAP);
     return @intCast(blob.len);
 }
@@ -661,34 +721,36 @@ export fn tpr_snap(tick: i64, grid: u32, swing: f64) i64 {
 /// — there is nothing a host could have looked at — so the `tpr_apply(0)`
 /// that follows either is a bad call rather than a silent commit.
 export fn tpr_plan(len: u32) u32 {
-    if (len > OP_CAP) return 0;
-    const s = live() orelse return 0;
+    if (len > OP_CAP) return say(null, "the operation is {d} bytes and its zone holds {d}; " ++
+        "nothing was planned", .{ len, OP_CAP });
+    const s = live() orelse return notLoaded();
     dropPending();
 
-    var p = planOp(s, op_buffer[0..len]) catch return 0;
-    if (p == null) return 0;
-    const text = p.?.text(gpa) catch {
-        p.?.deinit();
+    // Null: the ask was not an operation, and `planOp` said so already.
+    var p = (planOp(s, op_buffer[0..len]) catch return outOfMemory("planning")) orelse
         return 0;
+    const text = p.text(gpa) catch {
+        p.deinit();
+        return outOfMemory("spelling the plan");
     };
     defer gpa.free(text);
 
     // The zone first: a plan the host cannot read is a plan it must not
-    // be able to commit either, and `fillOrSay` is what puts the reason
-    // in the blob instead of the plan's own diagnostics.
-    const written = fillOrSay(&out_buffer, text, "plan");
+    // be able to commit either. `fillOrSay` publishes the plan's own
+    // diagnostics either way — behind the zone's refusal when there is
+    // one, which is then the first thing the blob says.
+    const written = fillOrSay(&out_buffer, text, "plan", &p.diags);
     if (written == 0) {
-        p.?.deinit();
+        p.deinit();
         return 0;
     }
-    publishDiags(.operation, &p.?.diags);
     // Held only if there is something to commit. A refusal's actions are
     // `[]` and the diagnostics above say why.
-    if (refusal(&p.?)) {
-        p.?.deinit();
+    if (refusal(&p)) {
+        p.deinit();
         return written;
     }
-    pending = p.?;
+    pending = p;
     return written;
 }
 
@@ -837,17 +899,16 @@ export fn tpr_apply(len: u32) u32 {
 /// nothing downstream could tell it from a piece that really is at 120.
 /// `tpr_attachAnchor` is the way out in the browser.
 export fn tpr_exportScore(flags: u32) u32 {
-    const s = live() orelse return 0;
+    const s = live() orelse return notLoaded();
     if (doc.conductedPlaceholder(&s.result.doc)) return refuseScore(s);
     var result = exporter.exportScore(gpa, &s.result.doc, &s.derived, &.{}, .{
         .velocity = flags & 1 != 0,
         .ease_linear = flags & 2 != 0,
         .no_hints = flags & 4 != 0,
         .section_markers = flags & 8 != 0,
-    }) catch return 0;
+    }) catch return outOfMemory("exporting the score");
     defer result.deinit();
-    publishDiags(.operation, &result.diags);
-    return fillOrSay(&out_buffer, result.text, "score");
+    return fillOrSay(&out_buffer, result.text, "score", &result.diags);
 }
 
 /// `tpr_exportScore`'s refusal, said: one `anchor_unavailable` at the
@@ -880,7 +941,7 @@ fn refuseScore(s: *const State) u32 {
             "header naming the conductor; nothing was written — attach the file " ++
             "(`tpr_attachAnchor`) or inline the tier (`tempura inline`)",
         .{ id, file },
-    ) catch return 0;
+    ) catch return outOfMemory("refusing the score");
     publishDiags(.operation, &report);
     return 0;
 }
@@ -900,9 +961,10 @@ fn refuseScore(s: *const State) u32 {
 /// a claim about the conductor's time; a fresh file of the document's
 /// own lanes claims nothing about a file it does not contain.
 export fn tpr_build(kind: u32) u32 {
-    const s = live() orelse return 0;
-    const anchor_kind = kindOf(kind) orelse return 0;
-    const live_schema = liveSchema() orelse return 0;
+    const s = live() orelse return notLoaded();
+    const anchor_kind = kindOf(kind) orelse
+        return say(null, "kind {d} is neither 0 (.mid) nor 1 (.it); nothing was built", .{kind});
+    const live_schema = liveSchema() orelse return outOfMemory("loading the schema");
 
     var built = doc.pipeline.build(
         gpa,
@@ -912,8 +974,9 @@ export fn tpr_build(kind: u32) u32 {
         &s.derived,
         anchor_kind,
         .{ .anchor_bytes = s.anchor_bytes },
-    ) catch return 0;
+    ) catch return outOfMemory("building");
     defer built.deinit();
-    publishDiags(.operation, &built.diags);
-    return fill(&out_buffer, built.bytes);
+    // A refused build is no bytes and a report that says why; a build
+    // the out zone cannot hold says so AND what the build found.
+    return fillOrSay(&out_buffer, built.bytes, "file", &built.diags);
 }
