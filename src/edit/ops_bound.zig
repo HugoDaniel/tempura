@@ -124,6 +124,8 @@ pub fn planWith(
     map: *const TimeMap.TimeMap,
     op: Op.Op,
 ) Error!Plan.Plan {
+    d.invariants();
+    map.invariants();
     if (!routesHere(d, op)) return ops_native.planWith(gpa, d, tree, map, op);
 
     var b: Plan.Builder = .init(gpa);

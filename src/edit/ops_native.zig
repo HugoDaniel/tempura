@@ -88,6 +88,8 @@ pub fn planWith(
     map: *const TimeMap.TimeMap,
     op: Op.Op,
 ) Error!Plan.Plan {
+    d.invariants();
+    map.invariants();
     var b: Plan.Builder = .init(gpa);
     errdefer b.deinit();
     if (try refuseOffGrid(&b, op)) return b.finish();
