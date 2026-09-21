@@ -425,6 +425,11 @@ const ActionReader = struct {
         if (i < self.src.len and self.src[i] == ']') {
             i += 1;
         } else while (true) {
+            // Bounded by the source's length: an iteration either
+            // returns (a refusal, or the closing `]`) or moves `i` past
+            // one NON-EMPTY element and its `,` — an empty one is not
+            // JSON and `readAction` refuses it — so there are at most
+            // `src.len` of them.
             const end = self.elementEnd(i) orelse
                 return self.fail(self.spanFrom(i), "the action list ends in the middle of an action", .{});
             try self.readAction(std.mem.trimEnd(u8, self.src[i..end], &std.ascii.whitespace), @intCast(i));

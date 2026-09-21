@@ -37,9 +37,10 @@ pub const Buf = std.ArrayList(u8);
 pub fn position(gpa: std.mem.Allocator, out: *Buf, map: *const TimeMap.TimeMap, tick: i64) Error!void {
     var text: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&text);
-    // `spell` writes at most a sign, nineteen digits and a unit; the only
-    // failure a fixed writer has is a full buffer, which this one cannot
-    // reach (the canonical printer sizes its own the same way).
+    // `spell`'s widest text is `Pos.spell`'s decimal: a sign, nineteen
+    // integer digits, a point, ten fraction digits and `q` — 32 bytes;
+    // `Nbar` and `Nt` are shorter. A fixed writer's one failure is a full
+    // buffer, which 64 bytes cannot reach.
     map.spell(&w, tick) catch unreachable;
     try literal(gpa, out, w.buffered());
 }
@@ -49,6 +50,9 @@ pub fn position(gpa: std.mem.Allocator, out: *Buf, map: *const TimeMap.TimeMap, 
 pub fn duration(gpa: std.mem.Allocator, out: *Buf, map: *const TimeMap.TimeMap, ticks: i64, at: i64) Error!void {
     var text: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&text);
+    // `spellDuration` writes a bar COUNT (an `i64` and `bar`, at most 23
+    // bytes) or `Pos.spell`'s text (at most 32, as in `position`): a
+    // fixed writer's one failure, a full buffer, is out of reach.
     map.spellDuration(&w, ticks, at) catch unreachable;
     try literal(gpa, out, w.buffered());
 }
@@ -123,6 +127,12 @@ pub const Override = struct { key: []const u8, json: ?[]const u8 };
 /// has no channel for is trivia — the comments on a moved node are lost,
 /// plan 07's own risk, which is why every operation that can prefers
 /// `set_keyword` to a remove and an insert.
+///
+/// Recursive (`node` → `form` → `node`), and bounded by the substrate:
+/// the tree is SJON's, whose parser refuses nesting deeper than
+/// `Parser.MAX_PARSE_DEPTH` (1024 frames, `SJON/src/parser.zig`'s
+/// header), so the walk is at most that many levels deep, two frames a
+/// level. Plan 12 accepts the tree walks on exactly that bound.
 pub fn node(gpa: std.mem.Allocator, out: *Buf, tree: *const sjon.Ast.Tree, idx: sjon.Ast.NodeIndex) Error!void {
     switch (tree.tagOf(idx)) {
         .nil => try out.appendSlice(gpa, "null"),
