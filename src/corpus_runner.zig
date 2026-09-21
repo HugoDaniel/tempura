@@ -2297,35 +2297,15 @@ fn renderBuild(
             if (d.midi.len == 0) return try renderRendered(gpa, w, ask, loaded, .smf, rep);
             var written = try smf.write(gpa, &d.midi[0].sequence, .{});
             defer written.deinit();
-            var back = try smf.read(gpa, written.bytes);
-            defer back.deinit();
-            var again = try smf.write(gpa, &back.sequence, .{});
-            defer again.deinit();
-            return try renderBuilt(
-                w,
-                ask.kind,
-                written.bytes,
-                std.mem.eql(u8, again.bytes, written.bytes),
-                &written.diags,
-                rep,
-            );
+            const rung1 = try rung1Of(gpa, .smf, written.bytes);
+            return try renderBuilt(w, ask.kind, written.bytes, rung1, &written.diags, rep);
         },
         .it => {
             if (d.it.len == 0) return try renderRendered(gpa, w, ask, loaded, .it, rep);
             var written = try itf.write.write(gpa, &d.it[0].module, loaded.it_source, .{});
             defer written.deinit();
-            var back = try itf.read.read(gpa, written.bytes);
-            defer back.deinit();
-            var again = try itf.write.write(gpa, &back.module, written.bytes, .{});
-            defer again.deinit();
-            return try renderBuilt(
-                w,
-                ask.kind,
-                written.bytes,
-                std.mem.eql(u8, again.bytes, written.bytes),
-                &written.diags,
-                rep,
-            );
+            const rung1 = try rung1Of(gpa, .it, written.bytes);
+            return try renderBuilt(w, ask.kind, written.bytes, rung1, &written.diags, rep);
         },
     }
 }
