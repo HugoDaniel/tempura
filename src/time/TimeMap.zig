@@ -654,57 +654,83 @@ fn tempoTable(
     }
 
     for (tempo) |p| {
-        const us = usOf(p) orelse {
-            try diags.add(
-                .tempo_map_invalid,
-                .err,
-                p.span,
-                "tempo point at tick {d} names no tempo",
-                .{p.tick},
-            );
-            continue;
-        };
-        if (segs.items.len > 0) {
-            const prev = segs.items[segs.items.len - 1].tick;
-            if (p.tick <= prev) {
-                try diags.add(
-                    .tempo_map_invalid,
-                    .err,
-                    p.span,
-                    "tempo point at tick {d} is not after the previous point at tick {d}",
-                    .{ p.tick, prev },
-                );
-                continue;
-            }
+        switch (tempoStep(segs.getLastOrNull(), segs.items.len, p)) {
+            .keep => |seg| try segs.append(arena, seg),
+            .refuse => |why| {
+                try refuseTempo(diags, p, why);
+                // The budget is spent: every later point goes with this
+                // one, and the diagnostic said so once.
+                if (why == .over_budget) break;
+            },
         }
-        // Every segment sits inside the grid, so a query's `tick_i +
-        // offset` stays inside i64. No reader places a point past the
-        // ceiling — a literal, an SMF pulse and an IT tick are each
-        // capped on the way in — but the map's contract is the value's.
-        if (p.tick > Grid.MAX_TICK) {
-            try diags.add(
-                .tick_overflow,
-                .err,
-                p.span,
-                "tempo point at tick {d} is past the grid ceiling {d}",
-                .{ p.tick, Grid.MAX_TICK },
-            );
-            continue;
-        }
-        if (segs.items.len == MAX_TEMPO_SEGMENTS) {
-            try diags.add(
-                .tempo_map_invalid,
-                .err,
-                p.span,
-                "more than {d} tempo segments; the points from tick {d} on are dropped",
-                .{ MAX_TEMPO_SEGMENTS, p.tick },
-            );
-            break;
-        }
-        try segs.append(arena, blank(p.tick, us));
     }
 
     return segs.toOwnedSlice(arena);
+}
+
+/// Why `tempoTable` drops a point, with what its diagnostic prints.
+const TempoRefusal = union(enum) {
+    no_tempo,
+    /// The tick of the segment it fails to follow.
+    not_after: i64,
+    past_ceiling,
+    over_budget,
+};
+
+/// What one authored tempo point comes to, after `prev` (the last kept
+/// segment, or null before the first) and `count` kept segments: the
+/// segment to keep, or the reason to drop it. Pure; the checks run in
+/// the order the diagnostics have always been raised.
+fn tempoStep(
+    prev: ?Segment,
+    count: usize,
+    p: TempoPoint,
+) union(enum) { keep: Segment, refuse: TempoRefusal } {
+    const us = usOf(p) orelse return .{ .refuse = .no_tempo };
+    if (prev) |before| {
+        if (p.tick <= before.tick) return .{ .refuse = .{ .not_after = before.tick } };
+    }
+    // Every segment sits inside the grid, so a query's `tick_i +
+    // offset` stays inside i64. No reader places a point past the
+    // ceiling — a literal, an SMF pulse and an IT tick are each
+    // capped on the way in — but the map's contract is the value's.
+    if (p.tick > Grid.MAX_TICK) return .{ .refuse = .past_ceiling };
+    if (count == MAX_TEMPO_SEGMENTS) return .{ .refuse = .over_budget };
+    return .{ .keep = blank(p.tick, us) };
+}
+
+/// The diagnostic a dropped tempo point earns, with its own span.
+fn refuseTempo(diags: *Diag.List, p: TempoPoint, why: TempoRefusal) error{OutOfMemory}!void {
+    switch (why) {
+        .no_tempo => try diags.add(
+            .tempo_map_invalid,
+            .err,
+            p.span,
+            "tempo point at tick {d} names no tempo",
+            .{p.tick},
+        ),
+        .not_after => |prev| try diags.add(
+            .tempo_map_invalid,
+            .err,
+            p.span,
+            "tempo point at tick {d} is not after the previous point at tick {d}",
+            .{ p.tick, prev },
+        ),
+        .past_ceiling => try diags.add(
+            .tick_overflow,
+            .err,
+            p.span,
+            "tempo point at tick {d} is past the grid ceiling {d}",
+            .{ p.tick, Grid.MAX_TICK },
+        ),
+        .over_budget => try diags.add(
+            .tempo_map_invalid,
+            .err,
+            p.span,
+            "more than {d} tempo segments; the points from tick {d} on are dropped",
+            .{ MAX_TEMPO_SEGMENTS, p.tick },
+        ),
+    }
 }
 
 /// The meter points, validated into segments that carry the bar number
@@ -728,76 +754,93 @@ fn meterTable(
     }
 
     for (meter) |p| {
-        if (!meterOk(p)) {
-            try diags.add(
-                .meter_map_invalid,
-                .err,
-                p.span,
-                "meter [{d} {d}] at tick {d} is not a meter: n is 1..64 and d is one of 1, 2, 4, 8, 16, 32",
-                .{ p.n, p.d, p.tick },
-            );
-            continue;
+        switch (meterStep(mets.getLastOrNull(), p)) {
+            .keep => |seg| try mets.append(arena, seg),
+            .refuse => |why| try refuseMeter(diags, p, why),
         }
-        if (mets.items.len == 0) {
-            // Reachable only for a valid point at tick 0 — otherwise the
-            // default above already filled the slot.
-            try mets.append(arena, .{
-                .tick = p.tick,
-                .n = p.n,
-                .d = p.d,
-                .first_bar = 0,
-                .beats_before = 0,
-            });
-            continue;
-        }
-        const prev = mets.items[mets.items.len - 1];
-        if (p.tick <= prev.tick) {
-            try diags.add(
-                .meter_map_invalid,
-                .err,
-                p.span,
-                "meter point at tick {d} is not after the previous point at tick {d}",
-                .{ p.tick, prev.tick },
-            );
-            continue;
-        }
-        // Inside the grid, for the reason `tempoTable` gives.
-        if (p.tick > Grid.MAX_TICK) {
-            try diags.add(
-                .tick_overflow,
-                .err,
-                p.span,
-                "meter point at tick {d} is past the grid ceiling {d}",
-                .{ p.tick, Grid.MAX_TICK },
-            );
-            continue;
-        }
-        // A meter change mid-bar is not a thing in any source format
-        // (plan 03, "Meter"), so the point has to sit on a bar line of
-        // the meter before it.
-        const bar_len = Grid.barTicks(prev.n, prev.d);
-        const delta = p.tick - prev.tick;
-        if (@rem(delta, bar_len) != 0) {
-            try diags.add(
-                .meter_off_bar,
-                .err,
-                p.span,
-                "meter point at tick {d} is {d} ticks into a bar of [{d} {d}]",
-                .{ p.tick, @rem(delta, bar_len), prev.n, prev.d },
-            );
-            continue;
-        }
-        const nbars = @divExact(delta, bar_len);
-        try mets.append(arena, .{
-            .tick = p.tick,
-            .n = p.n,
-            .d = p.d,
-            .first_bar = prev.first_bar + nbars,
-            .beats_before = prev.beats_before + nbars * prev.n,
-        });
     }
 
     return mets.toOwnedSlice(arena);
+}
+
+/// Why `meterTable` drops a point, with what its diagnostic prints.
+const MeterRefusal = union(enum) {
+    not_a_meter,
+    /// The tick of the segment it fails to follow.
+    not_after: i64,
+    past_ceiling,
+    /// How far into a bar of the meter before it the point sits.
+    off_bar: struct { into: i64, n: u8, d: u8 },
+};
+
+/// What one authored meter point comes to after `prev`, the last kept
+/// segment (null before the first): the segment to keep, with its first
+/// bar and the beats before it, or the reason to drop it. Pure; the
+/// checks run in the order the diagnostics have always been raised.
+fn meterStep(prev: ?MeterSeg, p: MeterPoint) union(enum) { keep: MeterSeg, refuse: MeterRefusal } {
+    if (!meterOk(p)) return .{ .refuse = .not_a_meter };
+    // No segment yet: reachable only for a valid point at tick 0 —
+    // otherwise `meterTable`'s default already filled the slot.
+    const before = prev orelse return .{
+        .keep = .{ .tick = p.tick, .n = p.n, .d = p.d, .first_bar = 0, .beats_before = 0 },
+    };
+    if (p.tick <= before.tick) return .{ .refuse = .{ .not_after = before.tick } };
+    // Inside the grid, for the reason `tempoStep` gives.
+    if (p.tick > Grid.MAX_TICK) return .{ .refuse = .past_ceiling };
+    // A meter change mid-bar is not a thing in any source format
+    // (plan 03, "Meter"), so the point has to sit on a bar line of
+    // the meter before it.
+    const bar_len = Grid.barTicks(before.n, before.d);
+    const delta = p.tick - before.tick;
+    const into = @rem(delta, bar_len);
+    if (into != 0) return .{
+        .refuse = .{ .off_bar = .{ .into = into, .n = before.n, .d = before.d } },
+    };
+    const nbars = @divExact(delta, bar_len);
+    // Strictly after, on a bar line: at least one whole bar on.
+    std.debug.assert(nbars >= 1);
+    return .{ .keep = .{
+        .tick = p.tick,
+        .n = p.n,
+        .d = p.d,
+        .first_bar = before.first_bar + nbars,
+        .beats_before = before.beats_before + nbars * before.n,
+    } };
+}
+
+/// The diagnostic a dropped meter point earns, with its own span.
+fn refuseMeter(diags: *Diag.List, p: MeterPoint, why: MeterRefusal) error{OutOfMemory}!void {
+    switch (why) {
+        .not_a_meter => try diags.add(
+            .meter_map_invalid,
+            .err,
+            p.span,
+            "meter [{d} {d}] at tick {d} is not a meter: " ++
+                "n is 1..64 and d is one of 1, 2, 4, 8, 16, 32",
+            .{ p.n, p.d, p.tick },
+        ),
+        .not_after => |prev| try diags.add(
+            .meter_map_invalid,
+            .err,
+            p.span,
+            "meter point at tick {d} is not after the previous point at tick {d}",
+            .{ p.tick, prev },
+        ),
+        .past_ceiling => try diags.add(
+            .tick_overflow,
+            .err,
+            p.span,
+            "meter point at tick {d} is past the grid ceiling {d}",
+            .{ p.tick, Grid.MAX_TICK },
+        ),
+        .off_bar => |off| try diags.add(
+            .meter_off_bar,
+            .err,
+            p.span,
+            "meter point at tick {d} is {d} ticks into a bar of [{d} {d}]",
+            .{ p.tick, off.into, off.n, off.d },
+        ),
+    }
 }
 
 /// `n` is 1..64 and `d` is a power of two up to 32 (plan 03, "Meter":
@@ -824,7 +867,12 @@ fn barTable(
     const end_tick = @max(length, 0);
     var tick: i64 = 0;
     var mi: usize = 0;
-    while (true) {
+    // One entry per pass, so never more than `MAX_BARS` passes: on the
+    // last one the budget check below breaks if nothing else has, and
+    // the loop's `else` is never reached.
+    for (0..MAX_BARS) |_| {
+        // The meter in force at `tick`. `mi` only moves forward, so
+        // this is bounded by the meter count over the whole table.
         while (mi + 1 < meters.len and meters[mi + 1].tick <= tick) mi += 1;
         try bars.append(arena, tick);
         if (tick >= end_tick) break;
@@ -851,7 +899,7 @@ fn barTable(
             break;
         }
         tick = next;
-    }
+    } else unreachable;
     return bars.toOwnedSlice(arena);
 }
 

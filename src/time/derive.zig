@@ -194,9 +194,7 @@ pub fn derive(gpa: std.mem.Allocator, doc: *const Doc) Error!Derived {
     errdefer res.map.deinit();
     {
         defer res.diags.deinit();
-        for (res.diags.items()) |d| {
-            try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-        }
+        try relay(&diags, &res.diags);
     }
 
     return .{
@@ -246,25 +244,7 @@ fn conduct(
     rowmap: *?walk.RowMap,
 ) Error!Conducted {
     const id = doc.conductor orelse return .{ .tempo = doc.tempo, .meter = doc.meter };
-
-    // One owner of time per document (plan 03, "Three conductors"): with
-    // a `:conductor`, the document's own points are an error. The bridge
-    // says this too, over the SOURCE; a `Doc` reaching here from the edit
-    // engine never passed through it.
-    for (doc.tempo) |p| try diags.add(
-        .conductor_conflict,
-        .err,
-        p.span,
-        "this document names a :conductor, and a conducted document has one owner of time",
-        .{},
-    );
-    for (doc.meter) |p| try diags.add(
-        .conductor_conflict,
-        .err,
-        p.span,
-        "this document names a :conductor, and a conducted document has one owner of time",
-        .{},
-    );
+    try refuseOwnTime(diags, doc);
 
     const anchor = doc.anchorById(id) orelse return seeded();
     var built: fromSjon.Conductor = (try fromSjon.conductorOf(
@@ -273,26 +253,7 @@ fn conduct(
         id,
         doc.conductor_bytes,
     )) orelse {
-        // Neither an inline tier nor the anchor's own verified bytes, so
-        // the tables are plan 03's placeholder — and that is SAID, not
-        // assumed. This layer answers a `Doc` that may never have been
-        // through a load: a host that derived straight off a value it
-        // built itself would otherwise be timed at 120 quarter notes per
-        // minute with nothing to read about it.
-        //
-        // The document layer says its own half while it loads
-        // (`fromSjon.conductorTables`), so a CLI run that does both
-        // prints two lines. That is this function's existing convention
-        // rather than a new one — `conductor_conflict` above is raised
-        // by both layers too — and the two are worded for the layer that
-        // spoke, so a reader sees two facts and not a stutter.
-        try diags.add(
-            .anchor_unavailable,
-            .err,
-            anchor.span,
-            "the anchor '{s}' conducts this document and its file ({s}) is not here, so this derivation is the placeholder's 120 quarter notes per minute in [4 4] and not the file's time",
-            .{ id, anchor.file },
-        );
+        try sayPlaceholder(diags, anchor);
         return seeded();
     };
     defer built.deinit();
@@ -303,9 +264,7 @@ fn conduct(
     rowmap.* = built.rowmap;
     built.rowmap = null;
 
-    for (built.diags.items()) |d| {
-        try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-    }
+    try relay(diags, &built.diags);
     // Copied out: the conductor's arena dies with this call and the
     // tables outlive it.
     return .{
@@ -313,6 +272,48 @@ fn conduct(
         .meter = try arena.dupe(tm.MeterPoint, built.meter),
         .end = built.end,
     };
+}
+
+/// One owner of time per document (plan 03, "Three conductors"): with a
+/// `:conductor`, every tempo and meter point the document wrote itself is
+/// an error, each at its own span. The bridge says this too, over the
+/// SOURCE; a `Doc` reaching here from the edit engine never passed
+/// through it.
+fn refuseOwnTime(diags: *Diag.List, doc: *const Doc) Error!void {
+    const why = "this document names a :conductor, " ++
+        "and a conducted document has one owner of time";
+    for (doc.tempo) |p| try diags.add(.conductor_conflict, .err, p.span, why, .{});
+    for (doc.meter) |p| try diags.add(.conductor_conflict, .err, p.span, why, .{});
+}
+
+/// The placeholder, SAID: neither an inline tier nor the anchor's own
+/// verified bytes, so the tables are plan 03's placeholder, and a host
+/// that derived straight off a value it built itself would otherwise be
+/// timed at 120 quarter notes per minute with nothing to read about it.
+///
+/// The document layer says its own half while it loads
+/// (`fromSjon.conductorTables`), so a CLI run that does both prints two
+/// lines. That is this file's existing convention rather than a new one
+/// — `conductor_conflict` is raised by both layers too — and the two are
+/// worded for the layer that spoke, so a reader sees two facts and not a
+/// stutter.
+fn sayPlaceholder(diags: *Diag.List, anchor: *const value.Anchor) Error!void {
+    try diags.add(
+        .anchor_unavailable,
+        .err,
+        anchor.span,
+        "the anchor '{s}' conducts this document and its file ({s}) is not here, " ++
+            "so this derivation is the placeholder's 120 quarter notes per minute " ++
+            "in [4 4] and not the file's time",
+        .{ anchor.id, anchor.file },
+    );
+}
+
+/// Every diagnostic `from` holds, said again in `diags` word for word:
+/// the one way a report crosses from a part this file asks — the
+/// conductor, the tempo map, a bridge — into the derivation's own.
+fn relay(diags: *Diag.List, from: *const Diag.List) Error!void {
+    for (from.items()) |d| try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
 }
 
 fn seeded() Conducted {
@@ -406,40 +407,7 @@ fn bound(
     switch (binding.address) {
         .smf => |addr| {
             const tier = smfTier(doc, binding.anchor) orelse return;
-            const ppq = tier.sequence.division.pulsesPerQuarter();
-            switch (lane.kind) {
-                .notes => {
-                    var paired = try bridge_smf.pairNotes(gpa, &tier.sequence, addr.track, addr.ch, addr.key);
-                    defer paired.deinit();
-                    for (paired.diags.items()) |d| {
-                        try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-                    }
-                    for (paired.notes) |n| {
-                        const at = Grid.smfToTicks(n.at, ppq).tick;
-                        const end = Grid.smfToTicks(n.at + @max(n.dur, 0), ppq).tick;
-                        try onsets.append(arena, .{
-                            .tick = at,
-                            .dur = end - at,
-                            .key = n.key,
-                            .vel = n.vel,
-                            .ch = n.ch,
-                            .off_vel = n.off_vel,
-                        });
-                    }
-                },
-                .curve => {
-                    const address = addr.curve orelse return;
-                    const read = try bridge_smf.curveSteps(gpa, &tier.sequence, addr.track, addr.ch, address);
-                    defer gpa.free(read);
-                    for (read) |s| {
-                        const at = Grid.smfToTicks(s.at, ppq).tick;
-                        try steps.append(arena, normalised(at, s.value));
-                    }
-                },
-                // A `query` or a `formula` lane cannot bind
-                // (`bound_kind_invalid`, the document's own check).
-                .query, .formula => {},
-            }
+            try boundSmf(gpa, arena, &tier.sequence, lane.kind, addr, onsets, steps, diags);
         },
         .it => |addr| {
             const tier = itTier(doc, binding.anchor) orelse return;
@@ -448,43 +416,128 @@ fn bound(
             // skeleton — and a walk of its own otherwise.
             var local: ?walk.RowMap = null;
             defer if (local) |*l| l.deinit();
-            const map: *const walk.RowMap = map: {
-                if (doc.conductor) |id| {
-                    if (std.mem.eql(u8, id, binding.anchor)) {
-                        if (rowmap.*) |*r| break :map r;
-                    }
-                }
+            const map = conductorWalk(doc, binding.anchor, rowmap) orelse map: {
                 local = try walk.derive(gpa, &tier.module, .{});
                 break :map &local.?;
             };
-            switch (lane.kind) {
-                .notes => {
-                    const notes = try bridge_it.boundNotes(gpa, &tier.module, map, addr.channel);
-                    defer gpa.free(notes);
-                    for (notes) |n| {
-                        const at = itToTicks(n.at) orelse continue;
-                        const end = itToTicks(n.at + @max(n.dur, 0)) orelse Grid.MAX_TICK;
-                        try onsets.append(arena, .{
-                            .tick = at,
-                            .dur = end - at,
-                            .key = n.key,
-                            .vel = n.vel,
-                        });
-                    }
-                },
-                .curve => {
-                    const column = addr.column orelse return;
-                    const read = try bridge_it.curveSteps(gpa, &tier.module, map, addr.channel, column, addr.fx);
-                    defer gpa.free(read);
-                    for (read) |s| {
-                        const at = itToTicks(s.at) orelse continue;
-                        try steps.append(arena, normalised(at, s.value));
-                    }
-                },
-                .query, .formula => {},
-            }
+            try boundIt(gpa, arena, &tier.module, map, lane.kind, addr, onsets, steps);
         },
     }
+}
+
+/// A lane's SMF address and its IT one, as `value.Address` spells them.
+const SmfAddress = @FieldType(value.Address, "smf");
+const ItAddress = @FieldType(value.Address, "it");
+
+/// A lane bound to an SMF anchor: the notes its address pairs, or the
+/// curve its address reads, each converted from pulses onto the grid.
+fn boundSmf(
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    seq: *const Sequence.Sequence,
+    kind: value.LaneKind,
+    addr: SmfAddress,
+    onsets: *std.ArrayList(Onset),
+    steps: *std.ArrayList(Step),
+    diags: *Diag.List,
+) Error!void {
+    const ppq = seq.division.pulsesPerQuarter();
+    switch (kind) {
+        .notes => {
+            var paired = try bridge_smf.pairNotes(gpa, seq, addr.track, addr.ch, addr.key);
+            defer paired.deinit();
+            try relay(diags, &paired.diags);
+            for (paired.notes) |n| try onsets.append(arena, smfOnset(n, ppq));
+        },
+        .curve => {
+            const address = addr.curve orelse return;
+            const read = try bridge_smf.curveSteps(gpa, seq, addr.track, addr.ch, address);
+            defer gpa.free(read);
+            for (read) |s| {
+                const at = Grid.smfToTicks(s.at, ppq).tick;
+                try steps.append(arena, normalised(at, s.value));
+            }
+        },
+        // A `query` or a `formula` lane cannot bind
+        // (`bound_kind_invalid`, the document's own check).
+        .query, .formula => {},
+    }
+}
+
+/// A lane bound to an IT anchor: the notes of its channel, or the column
+/// it reads, through `map`, each converted from IT ticks onto the grid.
+/// Content that starts past the ceiling is not placed.
+fn boundIt(
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    module: *const Module.Module,
+    map: *const walk.RowMap,
+    kind: value.LaneKind,
+    addr: ItAddress,
+    onsets: *std.ArrayList(Onset),
+    steps: *std.ArrayList(Step),
+) Error!void {
+    switch (kind) {
+        .notes => {
+            const notes = try bridge_it.boundNotes(gpa, module, map, addr.channel);
+            defer gpa.free(notes);
+            for (notes) |n| {
+                const onset = itOnset(n) orelse continue;
+                try onsets.append(arena, onset);
+            }
+        },
+        .curve => {
+            const column = addr.column orelse return;
+            const read = try bridge_it.curveSteps(gpa, module, map, addr.channel, column, addr.fx);
+            defer gpa.free(read);
+            for (read) |s| {
+                const at = itToTicks(s.at) orelse continue;
+                try steps.append(arena, normalised(at, s.value));
+            }
+        },
+        .query, .formula => {},
+    }
+}
+
+/// The conductor's own walk, when `anchor` is the anchor that conducts
+/// this document and its walk came back with the conductor; null when a
+/// lane bound to `anchor` needs a walk of its own.
+fn conductorWalk(
+    doc: *const Doc,
+    anchor: value.AnchorId,
+    rowmap: *const ?walk.RowMap,
+) ?*const walk.RowMap {
+    const id = doc.conductor orelse return null;
+    if (!std.mem.eql(u8, id, anchor)) return null;
+    if (rowmap.*) |*r| return r;
+    return null;
+}
+
+/// One paired SMF note as an onset on the grid. BOTH ends are converted,
+/// so the duration is the distance between two grid ticks rather than a
+/// converted span, and a note carries its channel and release velocity.
+fn smfOnset(n: bridge_smf.PairedNote, ppq: u15) Onset {
+    const at = Grid.smfToTicks(n.at, ppq).tick;
+    const end = Grid.smfToTicks(n.at + @max(n.dur, 0), ppq).tick;
+    // The conversion is monotone, so a note never ends before it starts.
+    std.debug.assert(end >= at);
+    return .{
+        .tick = at,
+        .dur = end - at,
+        .key = n.key,
+        .vel = n.vel,
+        .ch = n.ch,
+        .off_vel = n.off_vel,
+    };
+}
+
+/// One IT note as an onset on the grid, or null when it starts past the
+/// ceiling; a note that ENDS past it is cut at the ceiling.
+fn itOnset(n: bridge_smf.PairedNote) ?Onset {
+    const at = itToTicks(n.at) orelse return null;
+    const end = itToTicks(n.at + @max(n.dur, 0)) orelse Grid.MAX_TICK;
+    std.debug.assert(end >= at);
+    return .{ .tick = at, .dur = end - at, .key = n.key, .vel = n.vel };
 }
 
 /// IT ticks to tempura ticks, or null past the grid ceiling. The product
