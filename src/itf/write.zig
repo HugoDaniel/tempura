@@ -470,7 +470,15 @@ const Writer = struct {
         // The mandatory end marker is one of the 256 entries, so the
         // orders themselves get at most 255 of them.
         if (n > max_orders - 1) {
-            try self.note(.it_count_exceeds_spec, .err, hdr.ord_num, hdr.ord_num + 2, "the module has {d} orders; IT's list is {d} entries including the end marker, so the rest are dropped", .{ n, max_orders });
+            try self.note(
+                .it_count_exceeds_spec,
+                .err,
+                hdr.ord_num,
+                hdr.ord_num + 2,
+                "the module has {d} orders; IT's list is {d} entries including the end marker, " ++
+                    "so the rest are dropped",
+                .{ n, max_orders },
+            );
             n = max_orders - 1;
         }
 
@@ -493,7 +501,14 @@ const Writer = struct {
         try out.appendSlice(self.arena, tail);
         // `MsgLgth` is a u16 (it 04's header table), terminator included.
         if (out.items.len > max_message) {
-            try self.note(.it_truncated, .warning, hdr.message_length, hdr.message_length + 2, "the song message is {d} bytes; MsgLgth is a u16, so it was cut to {d}", .{ out.items.len, max_message });
+            try self.note(
+                .it_truncated,
+                .warning,
+                hdr.message_length,
+                hdr.message_length + 2,
+                "the song message is {d} bytes; MsgLgth is a u16, so it was cut to {d}",
+                .{ out.items.len, max_message },
+            );
             out.shrinkRetainingCapacity(max_message);
         }
         try out.append(self.arena, 0);
@@ -506,7 +521,14 @@ const Writer = struct {
         var cells = p.cells;
 
         if (rows > self.limits.rows_max) {
-            try self.note(.it_pattern_rows_out_of_range, .err, at, at + 8, "pattern {d} has {d} rows, past IT's {d}; the extra rows are dropped", .{ index, rows, self.limits.rows_max });
+            try self.note(
+                .it_pattern_rows_out_of_range,
+                .err,
+                at,
+                at + 8,
+                "pattern {d} has {d} rows, past IT's {d}; the extra rows are dropped",
+                .{ index, rows, self.limits.rows_max },
+            );
             rows = self.limits.rows_max;
             cells = cells[0..@min(cells.len, @as(usize, rows) * model.channels)];
         } else if (rows < self.limits.rows_min) {
@@ -520,7 +542,14 @@ const Writer = struct {
             if (rows == 0) {
                 // A pattern with no rows has no last row to break on, so
                 // it is written as the shortest IT accepts, and empty.
-                try self.note(.it_pattern_rows_out_of_range, .warning, at, at + 8, "pattern {d} has no rows; written as {d} empty rows", .{ index, self.limits.rows_min });
+                try self.note(
+                    .it_pattern_rows_out_of_range,
+                    .warning,
+                    at,
+                    at + 8,
+                    "pattern {d} has no rows; written as {d} empty rows",
+                    .{ index, self.limits.rows_min },
+                );
             } else {
                 const last: usize = @as(usize, rows) - 1;
                 const free = breakChannel(padded, last);
@@ -530,9 +559,40 @@ const Writer = struct {
                     // Every channel on that row already carries a
                     // command: the break has to displace one, and which
                     // rows caused it is the diagnostic's whole point.
-                    try self.note(.it_pattern_rows_out_of_range, .err, at, at + 8, "pattern {d} has {d} rows, under IT's {d}; the C00 break on row {d} overwrote channel {d}'s command {c}{x:0>2}", .{ index, rows, self.limits.rows_min, last, channel + 1, '@' + slot.fx, slot.param });
+                    try self.note(
+                        .it_pattern_rows_out_of_range,
+                        .err,
+                        at,
+                        at + 8,
+                        "pattern {d} has {d} rows, under IT's {d}; the C00 break on row {d} " ++
+                            "overwrote channel {d}'s command {c}{x:0>2}",
+                        .{
+                            index,
+                            rows,
+                            self.limits.rows_min,
+                            last,
+                            channel + 1,
+                            '@' + slot.fx,
+                            slot.param,
+                        },
+                    );
                 } else {
-                    try self.note(.it_pattern_rows_out_of_range, .warning, at, at + 8, "pattern {d} has {d} rows, under IT's {d}; written {d} rows with a C00 break on row {d}, channel {d}", .{ index, rows, self.limits.rows_min, self.limits.rows_min, last, channel + 1 });
+                    try self.note(
+                        .it_pattern_rows_out_of_range,
+                        .warning,
+                        at,
+                        at + 8,
+                        "pattern {d} has {d} rows, under IT's {d}; written {d} rows with a C00 " ++
+                            "break on row {d}, channel {d}",
+                        .{
+                            index,
+                            rows,
+                            self.limits.rows_min,
+                            self.limits.rows_min,
+                            last,
+                            channel + 1,
+                        },
+                    );
                 }
                 slot.fx = cmd_break;
                 slot.param = 0;
@@ -567,12 +627,24 @@ const Writer = struct {
     /// Copies bytes the module owns, padded or truncated to `size` — the
     /// fixed-size records have to be their size whatever a producer
     /// handed over, and a short one says so.
-    fn copyBytes(self: *Writer, bytes: []const u8, size: u32, comptime what: []const u8) Error!void {
+    fn copyBytes(
+        self: *Writer,
+        bytes: []const u8,
+        size: u32,
+        comptime what: []const u8,
+    ) Error!void {
         const at = self.here();
         const take = @min(bytes.len, size);
         try self.blob(bytes[0..take]);
         if (take < size) {
-            try self.note(.it_truncated, .warning, at, at + size, what ++ " is {d} bytes of the {d} it must be; zero-padded to size", .{ take, size });
+            try self.note(
+                .it_truncated,
+                .warning,
+                at,
+                at + size,
+                what ++ " is {d} bytes of the {d} it must be; zero-padded to size",
+                .{ take, size },
+            );
             try self.zeros(size - take);
         }
     }
@@ -594,13 +666,27 @@ const Writer = struct {
             if (take < size) {
                 // A record the anchor holds only part of: the rest is
                 // zeroed, and the file says so.
-                try self.note(.it_truncated, .warning, at, at + size, what ++ " is {d} bytes of the {d} it must be; zero-padded to size", .{ take, size });
+                try self.note(
+                    .it_truncated,
+                    .warning,
+                    at,
+                    at + size,
+                    what ++ " is {d} bytes of the {d} it must be; zero-padded to size",
+                    .{ take, size },
+                );
                 try self.zeros(size - take);
             }
             return;
         }
         if (size > 0) {
-            try self.note(code, .warning, at, at + size, what ++ " is not inside the anchor's bytes; wrote {d} zero bytes", .{size});
+            try self.note(
+                code,
+                .warning,
+                at,
+                at + size,
+                what ++ " is not inside the anchor's bytes; wrote {d} zero bytes",
+                .{size},
+            );
             try self.zeros(size);
         }
     }
@@ -613,14 +699,28 @@ const Writer = struct {
         field: u32,
     ) Error!usize {
         if (have <= cap) return have;
-        try self.note(.it_count_exceeds_spec, .err, field, field + 2, "the module has {d} " ++ what ++ ", past IT's {d}; the rest are dropped", .{ have, cap });
+        try self.note(
+            .it_count_exceeds_spec,
+            .err,
+            field,
+            field + 2,
+            "the module has {d} " ++ what ++ ", past IT's {d}; the rest are dropped",
+            .{ have, cap },
+        );
         return cap;
     }
 
     fn clampTempo(self: *Writer) Error!u8 {
         const tempo = self.module.header.initial_tempo;
         if (tempo >= 32) return tempo;
-        try self.note(.it_count_exceeds_spec, .warning, hdr.initial_tempo, hdr.initial_tempo + 1, "an initial tempo of {d} is under IT's 32; written as 32", .{tempo});
+        try self.note(
+            .it_count_exceeds_spec,
+            .warning,
+            hdr.initial_tempo,
+            hdr.initial_tempo + 1,
+            "an initial tempo of {d} is under IT's 32; written as 32",
+            .{tempo},
+        );
         return 32;
     }
 
@@ -629,7 +729,14 @@ const Writer = struct {
         if (speed >= 1) return speed;
         // IT's own loader reads a zero speed as 6, so 6 is what keeps the
         // music (plan 06's header table), not the bare minimum 1.
-        try self.note(.it_count_exceeds_spec, .warning, hdr.initial_speed, hdr.initial_speed + 1, "an initial speed of 0 is outside IT's 1–255; written as IT's default 6", .{});
+        try self.note(
+            .it_count_exceeds_spec,
+            .warning,
+            hdr.initial_speed,
+            hdr.initial_speed + 1,
+            "an initial speed of 0 is outside IT's 1–255; written as IT's default 6",
+            .{},
+        );
         return 6;
     }
 };
@@ -980,8 +1087,16 @@ fn richFixture(gpa: std.mem.Allocator) ![]u8 {
     _ = try f.instrument("piano");
 
     var headers: [3]u32 = undefined;
-    headers[0] = try f.sampleHeader(.{ .name = "pcm", .flags = model.sample_flag.has_data | model.sample_flag.bits16, .length = 6 });
-    headers[1] = try f.sampleHeader(.{ .name = "adpcm", .convert = model.sample_convert.adpcm, .length = 16 });
+    headers[0] = try f.sampleHeader(
+        .{
+            .name = "pcm",
+            .flags = model.sample_flag.has_data | model.sample_flag.bits16,
+            .length = 6,
+        },
+    );
+    headers[1] = try f.sampleHeader(
+        .{ .name = "adpcm", .convert = model.sample_convert.adpcm, .length = 16 },
+    );
     headers[2] = try f.sampleHeader(.{
         .name = "packed",
         .flags = model.sample_flag.has_data | model.sample_flag.compressed,
@@ -1045,8 +1160,16 @@ test "write: the opaque regions come back byte-equal after read → write" {
         // fields before it AND the auto-vibrato bytes after it.
         const head = model.smp.sample_pointer;
         const tail = model.smp.sample_pointer + 4;
-        try testing.expectEqualSlices(u8, before.raw.slice(source).?[0..head], after.raw.slice(w.bytes).?[0..head]);
-        try testing.expectEqualSlices(u8, before.raw.slice(source).?[tail..model.sample_header_size], after.raw.slice(w.bytes).?[tail..model.sample_header_size]);
+        try testing.expectEqualSlices(
+            u8,
+            before.raw.slice(source).?[0..head],
+            after.raw.slice(w.bytes).?[0..head],
+        );
+        try testing.expectEqualSlices(
+            u8,
+            before.raw.slice(source).?[tail..model.sample_header_size],
+            after.raw.slice(w.bytes).?[tail..model.sample_header_size],
+        );
         try testing.expectEqualSlices(u8, before.data.slice(source).?, after.data.slice(w.bytes).?);
     }
     try testing.expectEqualSlices(
@@ -1206,7 +1329,10 @@ test "write: an owned MIDI configuration is written whole, and read back as byte
     // for rung 2 and the source map, the bytes for the bridge.
     var r = try read_it.read(gpa, w.bytes);
     defer r.deinit();
-    try testing.expectEqual(Region{ .off = 0xC2, .len = model.midi_config_size }, r.module.midi_config.?);
+    try testing.expectEqual(
+        Region{ .off = 0xC2, .len = model.midi_config_size },
+        r.module.midi_config.?,
+    );
     try testing.expectEqualSlices(u8, &block, r.module.midi_config_bytes.?);
 
     // …and written again WITHOUT its source, the bytes still carry it.
@@ -1234,7 +1360,12 @@ test "write: a module with no bytes behind its regions is written with diagnosti
     defer b.deinit();
     try b.addOrder(0);
     try b.addInstrument("ghost", .{ .off = 4000, .len = model.instrument_size });
-    try b.addSample(.{ .raw = .{ .off = 9000, .len = model.sample_header_size }, .data = .{ .off = 9100, .len = 64 } });
+    try b.addSample(
+        .{
+            .raw = .{ .off = 9000, .len = model.sample_header_size },
+            .data = .{ .off = 9100, .len = 64 },
+        },
+    );
     var m = b.finish();
     defer m.deinit();
 

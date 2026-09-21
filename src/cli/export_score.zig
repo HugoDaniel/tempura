@@ -244,7 +244,12 @@ test "export-score: the artifact goes where -o names, and stdout stays empty" {
 
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
-    const dest = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/s.score.sjon", .{tmp.sub_path}, 0);
+    const dest = try std.fmt.allocPrintSentinel(
+        a,
+        ".zig-cache/tmp/{s}/s.score.sjon",
+        .{tmp.sub_path},
+        0,
+    );
     defer a.free(dest);
 
     var c = try Cli.invoke(&.{ "tempura", "export-score", path, "-o", dest });

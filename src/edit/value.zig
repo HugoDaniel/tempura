@@ -34,7 +34,12 @@ pub const Buf = std.ArrayList(u8);
 
 /// A POSITION: `{"$num":[n,"unit"]}`, spelled by the map's rule — a bar
 /// line as `Nbar`, else `Nq`, else `Nt`.
-pub fn position(gpa: std.mem.Allocator, out: *Buf, map: *const TimeMap.TimeMap, tick: i64) Error!void {
+pub fn position(
+    gpa: std.mem.Allocator,
+    out: *Buf,
+    map: *const TimeMap.TimeMap,
+    tick: i64,
+) Error!void {
     var text: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&text);
     // `spell`'s widest text is `Pos.spell`'s decimal: a sign, nineteen
@@ -47,7 +52,13 @@ pub fn position(gpa: std.mem.Allocator, out: *Buf, map: *const TimeMap.TimeMap, 
 
 /// A DURATION measured from `at`: `Nbar` when both ends sit on bar
 /// lines, else the delta's own `Nq` / `Nt`.
-pub fn duration(gpa: std.mem.Allocator, out: *Buf, map: *const TimeMap.TimeMap, ticks: i64, at: i64) Error!void {
+pub fn duration(
+    gpa: std.mem.Allocator,
+    out: *Buf,
+    map: *const TimeMap.TimeMap,
+    ticks: i64,
+    at: i64,
+) Error!void {
     var text: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&text);
     // `spellDuration` writes a bar COUNT (an `i64` and `bar`, at most 23
@@ -133,7 +144,12 @@ pub const Override = struct { key: []const u8, json: ?[]const u8 };
 /// `Parser.MAX_PARSE_DEPTH` (1024 frames, `SJON/src/parser.zig`'s
 /// header), so the walk is at most that many levels deep, two frames a
 /// level. Plan 12 accepts the tree walks on exactly that bound.
-pub fn node(gpa: std.mem.Allocator, out: *Buf, tree: *const sjon.Ast.Tree, idx: sjon.Ast.NodeIndex) Error!void {
+pub fn node(
+    gpa: std.mem.Allocator,
+    out: *Buf,
+    tree: *const sjon.Ast.Tree,
+    idx: sjon.Ast.NodeIndex,
+) Error!void {
     switch (tree.tagOf(idx)) {
         .nil => try out.appendSlice(gpa, "null"),
         .boolean_true => try out.appendSlice(gpa, "true"),
@@ -285,12 +301,23 @@ pub const Form = struct {
         self.keys += 1;
     }
 
-    pub fn position(self: *Form, name: []const u8, map: *const TimeMap.TimeMap, tick: i64) Error!void {
+    pub fn position(
+        self: *Form,
+        name: []const u8,
+        map: *const TimeMap.TimeMap,
+        tick: i64,
+    ) Error!void {
         try self.key(name);
         try vals.position(self.gpa, &self.buf, map, tick);
     }
 
-    pub fn duration(self: *Form, name: []const u8, map: *const TimeMap.TimeMap, ticks: i64, at: i64) Error!void {
+    pub fn duration(
+        self: *Form,
+        name: []const u8,
+        map: *const TimeMap.TimeMap,
+        ticks: i64,
+        at: i64,
+    ) Error!void {
         try self.key(name);
         try vals.duration(self.gpa, &self.buf, map, ticks, at);
     }

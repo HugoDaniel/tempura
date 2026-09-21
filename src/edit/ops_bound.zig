@@ -457,7 +457,12 @@ const Ctx = struct {
     }
 
     /// The single events a bound `curve` lane reads off one address.
-    fn steps(self: *Ctx, evs: []const Ev, chs: doc.Channels, curve: doc.SmfCurve) Error![]const Step {
+    fn steps(
+        self: *Ctx,
+        evs: []const Ev,
+        chs: doc.Channels,
+        curve: doc.SmfCurve,
+    ) Error![]const Step {
         const arena = self.arena;
         var out: std.ArrayList(Step) = .empty;
         for (evs) |e| {
@@ -760,7 +765,11 @@ const Ctx = struct {
 
     fn numbered(self: *Ctx, parent: NodeIndex, head: []const u8, number: i64) Error!?Numbered {
         for (try self.children(parent)) |c| {
-            if (c.number == number and std.mem.eql(u8, self.tree.formHeader(c.node).head, head)) return c;
+            if (c.number == number and std.mem.eql(
+                u8,
+                self.tree.formHeader(c.node).head,
+                head,
+            )) return c;
         }
         return null;
     }
@@ -822,7 +831,10 @@ const Ctx = struct {
             }
             if (seen) continue;
 
-            const site = try (try (Site{ .root = root, .path = &.{} }).child(arena, pat.slot)).child(arena, row.slot);
+            const site = try (try (Site{ .root = root, .path = &.{} }).child(
+                arena,
+                pat.slot,
+            )).child(arena, row.slot);
             try out.append(arena, .{
                 .site = try site.child(arena, ev.slot),
                 .node = ev.node,
@@ -850,7 +862,12 @@ const Ctx = struct {
         const addr = binding.address.it;
         const tier = itTier(self.d, binding.anchor).?;
         const root = self.moduleRoot(binding.anchor) orelse {
-            try self.b.refuse(.edit_range_empty, lane.span, "the anchor \"{s}\" has no inline module", .{binding.anchor});
+            try self.b.refuse(
+                .edit_range_empty,
+                lane.span,
+                "the anchor \"{s}\" has no inline module",
+                .{binding.anchor},
+            );
             return;
         };
 
@@ -862,9 +879,19 @@ const Ctx = struct {
         defer rowmap.deinit();
 
         const sel = selectionOf(op).?;
-        const found: []const Cell = if (sel.kinds.note) try self.cells(root, &rowmap, addr.channel, sel) else &.{};
+        const found: []const Cell = if (sel.kinds.note) try self.cells(
+            root,
+            &rowmap,
+            addr.channel,
+            sel,
+        ) else &.{};
         if (found.len == 0) {
-            try self.b.refuse(.edit_range_empty, lane.span, "the selection reached no cell on this lane's channel", .{});
+            try self.b.refuse(
+                .edit_range_empty,
+                lane.span,
+                "the selection reached no cell on this lane's channel",
+                .{},
+            );
             return;
         }
         self.b.summary.targets = @intCast(found.len);
@@ -880,10 +907,15 @@ const Ctx = struct {
             .resize => try self.b.refuse(
                 .edit_inexact,
                 found[0].span,
-                "an Impulse Tracker note ends where the next cell on its channel starts; there is no :dur to write",
+                "an Impulse Tracker note ends where the next cell on its channel starts; there " ++
+                    "is no :dur to write",
                 .{},
             ),
-            .velocity => |x| for (found) |c| try self.b.setKeyword(c.site, "vol", try self.intJson(volumeOf(x.vel))),
+            .velocity => |x| for (found) |c| try self.b.setKeyword(
+                c.site,
+                "vol",
+                try self.intJson(volumeOf(x.vel)),
+            ),
             .remove => try self.removeCells(root, found),
             .retime => |x| try self.moveCells(root, &rowmap, found, x),
             else => unreachable,
@@ -901,7 +933,12 @@ const Ctx = struct {
     /// means and the plan proceeds.
     ///
     /// Answers whether it refused.
-    fn refuseShared(self: *Ctx, rowmap: *const walk.RowMap, cells_: []const Cell, allow: bool) Error!bool {
+    fn refuseShared(
+        self: *Ctx,
+        rowmap: *const walk.RowMap,
+        cells_: []const Cell,
+        allow: bool,
+    ) Error!bool {
         if (allow) return false;
         for (cells_) |c| {
             const plays = playCount(rowmap, c.pattern);
@@ -909,7 +946,8 @@ const Ctx = struct {
             try self.b.refuse(
                 .edit_pattern_shared,
                 c.span,
-                "this cell sits in a pattern {d} orders play; every occurrence would change, so the ask wants :allow-shared",
+                "this cell sits in a pattern {d} orders play; every occurrence would change, so " ++
+                    "the ask wants :allow-shared",
                 .{plays},
             );
             return true;
@@ -1131,7 +1169,10 @@ const Ctx = struct {
             const m = moves[i];
             const rows = try self.rowsOf(&patterns, m.pattern_slot, m.pattern_node, going.items);
             const json = try self.cellJson(m);
-            const pattern_site = try (Site{ .root = root, .path = &.{} }).child(arena, m.pattern_slot);
+            const pattern_site = try (Site{ .root = root, .path = &.{} }).child(
+                arena,
+                m.pattern_slot,
+            );
             if (rows.find(m.row)) |at| {
                 // The row is there and stays. Its slot is NOT the one the
                 // document gave it: every `remove_positional` of this plan
@@ -1389,7 +1430,12 @@ const Ctx = struct {
     /// cannot address, a track the dump does not have. Null after one.
     fn materializeSource(self: *Ctx, x: Op.Materialize) Error!?Source {
         const li = laneByName(self.d, x.lane) orelse {
-            try self.b.refuse(.edit_range_empty, .{ .start = 0, .end = 0 }, "no lane is named {s}", .{x.lane});
+            try self.b.refuse(
+                .edit_range_empty,
+                .{ .start = 0, .end = 0 },
+                "no lane is named {s}",
+                .{x.lane},
+            );
             return null;
         };
         const lane = self.d.lanes[li];
@@ -1677,7 +1723,9 @@ fn byFinal(finals: []const i64, x: usize, y: usize) bool {
 /// Two cell moves by the row they land on, so the inserts into one
 /// pattern go in low index first.
 fn byDestination(moves: []const Ctx.CellMove, x: usize, y: usize) bool {
-    if (moves[x].pattern_slot != moves[y].pattern_slot) return moves[x].pattern_slot < moves[y].pattern_slot;
+    if (moves[x].pattern_slot != moves[y].pattern_slot) {
+        return moves[x].pattern_slot < moves[y].pattern_slot;
+    }
     return moves[x].row < moves[y].row;
 }
 
@@ -1755,7 +1803,11 @@ fn edited(gpa: std.mem.Allocator, source: []const u8, regions: []const Region) !
     try out.appendSlice(gpa, source);
     for (regions) |r| {
         const at = std.mem.indexOf(u8, out.items, r.from) orelse return error.NoSuchRegion;
-        if (std.mem.indexOf(u8, out.items[at + r.from.len ..], r.from) != null) return error.AmbiguousRegion;
+        if (std.mem.indexOf(
+            u8,
+            out.items[at + r.from.len ..],
+            r.from,
+        ) != null) return error.AmbiguousRegion;
         try out.replaceRange(gpa, at, r.from.len, r.to);
     }
     return out.toOwnedSlice(gpa);
@@ -1763,7 +1815,12 @@ fn edited(gpa: std.mem.Allocator, source: []const u8, regions: []const Region) !
 
 /// Plan `op` over `source`, pin the actions as text, and pin the
 /// document the plan produces, byte for byte.
-fn expectPlan(source: [:0]const u8, op: Op.Op, want_actions: []const u8, want_text: []const u8) !void {
+fn expectPlan(
+    source: [:0]const u8,
+    op: Op.Op,
+    want_actions: []const u8,
+    want_text: []const u8,
+) !void {
     const gpa = testing.allocator;
     var fx = try test_support.Fixture.init(gpa, source);
     defer fx.deinit();
@@ -1816,7 +1873,12 @@ fn expectEditNoting(
     try testing.expectEqualStrings(want, applied.text);
 }
 
-fn expectEdit(source: [:0]const u8, op: Op.Op, want_actions: []const u8, regions: []const Region) !void {
+fn expectEdit(
+    source: [:0]const u8,
+    op: Op.Op,
+    want_actions: []const u8,
+    regions: []const Region,
+) !void {
     const gpa = testing.allocator;
     const want = try edited(gpa, source, regions);
     defer gpa.free(want);
@@ -1889,12 +1951,14 @@ test "bound SMF: a retime past a neighbour is a remove and an insert at the sort
             // The comment leaves with the note it led: the JSON bridge
             // carries no trivia (plan 07's risk note).
             .{
-                .from = "  ; the downbeat\n  (note-on        :at 0    :ch 1 :key 36 :vel 100)\n  (note-off       :at 240  :ch 1 :key 36 :vel 64)\n",
+                .from = "  ; the downbeat\n  (note-on        :at 0    :ch 1 :key 36 :vel 100)\n " ++
+                    " (note-off       :at 240  :ch 1 :key 36 :vel 64)\n",
                 .to = "",
             },
             .{
                 .from = "  (note-off       :at 1200 :ch 1 :key 41 :vel 64)\n",
-                .to = "  (note-on :at 960 :ch 1 :key 36 :vel 100)\n  (note-off       :at 1200 :ch 1 :key 41 :vel 64)\n  (note-off :at 1200 :ch 1 :key 36 :vel 64)\n",
+                .to = "  (note-on :at 960 :ch 1 :key 36 :vel 100)\n  (note-off       :at 1200 " ++
+                    ":ch 1 :key 41 :vel 64)\n  (note-off :at 1200 :ch 1 :key 36 :vel 64)\n",
             },
         },
     );
@@ -1949,7 +2013,8 @@ test "bound SMF: remove takes both events of the pair" {
         \\
     ,
         &.{.{
-            .from = "  ; the downbeat\n  (note-on        :at 0    :ch 1 :key 36 :vel 100)\n  (note-off       :at 240  :ch 1 :key 36 :vel 64)\n",
+            .from = "  ; the downbeat\n  (note-on        :at 0    :ch 1 :key 36 :vel 100)\n  " ++
+                "(note-off       :at 240  :ch 1 :key 36 :vel 64)\n",
             .to = "",
         }},
     );
@@ -1959,7 +2024,11 @@ test "bound SMF: a controller step is one event, and it moves like one" {
     try expectEdit(
         test_support.bound_smf,
         .{ .retime = .{
-            .sel = .{ .lanes = &.{"filter"}, .kinds = .keyframes, .range = .{ 2 * TPQ, 2 * TPQ + 1 } },
+            .sel = .{
+                .lanes = &.{"filter"},
+                .kinds = .keyframes,
+                .range = .{ 2 * TPQ, 2 * TPQ + 1 },
+            },
             .delta = -TPQ,
         } },
         \\[
@@ -1975,7 +2044,8 @@ test "bound SMF: a controller step is one event, and it moves like one" {
             },
             .{
                 .from = "  (note-off       :at 720  :ch 1 :key 38 :vel 64)\n",
-                .to = "  (control-change :at 480 :ch 1 :num 74 :val 100)\n  (note-off       :at 720  :ch 1 :key 38 :vel 64)\n",
+                .to = "  (control-change :at 480 :ch 1 :num 74 :val 100)\n  (note-off       :at " ++
+                    "720  :ch 1 :key 38 :vel 64)\n",
             },
         },
     );
@@ -2009,7 +2079,13 @@ test "bound SMF: the pairing here is the bridge's pairing" {
     const track = ctx.mtrkRoot("song", 1).?;
     const mine = try ctx.pairs(try ctx.events(track), .single(0), null);
 
-    var theirs = try doc.bridge_smf.pairNotes(gpa, &fx.doc_().midi[0].sequence, 1, .single(0), null);
+    var theirs = try doc.bridge_smf.pairNotes(
+        gpa,
+        &fx.doc_().midi[0].sequence,
+        1,
+        .single(0),
+        null,
+    );
     defer theirs.deinit();
 
     try testing.expectEqual(theirs.notes.len, mine.len);
@@ -2045,11 +2121,15 @@ test "bound SMF: materialize copies the notes in and takes the events out" {
     ,
         &.{
             .{
-                .from = "  ; the downbeat\n  (note-on        :at 0    :ch 1 :key 36 :vel 100)\n  (note-off       :at 240  :ch 1 :key 36 :vel 64)\n  (note-on        :at 480  :ch 1 :key 38 :vel 90)\n  (note-off       :at 720  :ch 1 :key 38 :vel 64)\n",
+                .from = "  ; the downbeat\n  (note-on        :at 0    :ch 1 :key 36 :vel 100)\n " ++
+                    " (note-off       :at 240  :ch 1 :key 36 :vel 64)\n  (note-on        :at " ++
+                    "480  :ch 1 :key 38 :vel 90)\n  (note-off       :at 720  :ch 1 :key 38 " ++
+                    ":vel 64)\n",
                 .to = "",
             },
             .{
-                .from = "  (note-on        :at 960  :ch 1 :key 41 :vel 80)\n  (note-off       :at 1200 :ch 1 :key 41 :vel 64)\n",
+                .from = "  (note-on        :at 960  :ch 1 :key 41 :vel 80)\n  (note-off       " ++
+                    ":at 1200 :ch 1 :key 41 :vel 64)\n",
                 .to = "",
             },
             .{
@@ -2057,7 +2137,9 @@ test "bound SMF: materialize copies the notes in and takes the events out" {
                 // The lane was one line and stays one line: SJON's
                 // `.preserve` splices into the layout the author chose
                 // rather than re-formatting the form around it.
-                .to = "(lane :name kick :kind notes (note :at 0bar :dur 0.5q :key 36 :vel 100 :off-vel 64) (note :at 1q :dur 0.5q :key 38 :vel 90 :off-vel 64) (note :at 2q :dur 0.5q :key 41 :vel 80 :off-vel 64))",
+                .to = "(lane :name kick :kind notes (note :at 0bar :dur 0.5q :key 36 :vel 100 " ++
+                    ":off-vel 64) (note :at 1q :dur 0.5q :key 38 :vel 90 :off-vel 64) (note :at " ++
+                    "2q :dur 0.5q :key 41 :vel 80 :off-vel 64))",
             },
         },
     );
@@ -2089,7 +2171,8 @@ test "bound SMF: materialize of a curve lane writes keyframes and keeps its :cc"
             .{ .from = "  (control-change :at 960  :ch 1 :num 74 :val 100)\n", .to = "" },
             .{
                 .from = "(lane :name filter :kind curve :from song :track 1 :ch 1 :cc 74)",
-                .to = "(lane :name filter :kind curve :cc 74 (keyframe :at 0bar :value 0.07874016) (keyframe :at 2q :value 0.78740156))",
+                .to = "(lane :name filter :kind curve :cc 74 (keyframe :at 0bar :value " ++
+                    "0.07874016) (keyframe :at 2q :value 0.78740156))",
             },
         },
     );
@@ -2353,12 +2436,14 @@ test "bound SMF: materialize off the grid counts the positions it rounded" {
     ,
         &.{
             .{
-                .from = "  (note-on      :at 1   :ch 1 :key 36 :vel 100)\n  (note-off     :at 251 :ch 1 :key 36 :vel 64)\n",
+                .from = "  (note-on      :at 1   :ch 1 :key 36 :vel 100)\n  (note-off     :at " ++
+                    "251 :ch 1 :key 36 :vel 64)\n",
                 .to = "",
             },
             .{
                 .from = "(lane :name kick :kind notes :from song :track 1 :ch 1)",
-                .to = "(lane :name kick :kind notes (note :at 92252t :dur 0.5q :key 36 :vel 100 :off-vel 64))",
+                .to = "(lane :name kick :kind notes (note :at 92252t :dur 0.5q :key 36 :vel 100 " ++
+                    ":off-vel 64))",
             },
         },
         .edit_inexact,
@@ -2451,7 +2536,8 @@ test "bound IT: two rows removed beneath the target shift it twice" {
             .{ .from = "\n    (row 1 (ev 1 \"E-5\" :ins 1))", .to = "" },
             .{
                 .from = "(row 4 (ev 2 \"C-6\" :ins 1))",
-                .to = "(row 4 (ev :ins 1 1 \"C-5\") (ev 2 \"C-6\" :ins 1))\n    (row 5 (ev :ins 1 1 \"E-5\"))",
+                .to = "(row 4 (ev :ins 1 1 \"C-5\") (ev 2 \"C-6\" :ins 1))\n    (row 5 (ev :ins " ++
+                    "1 1 \"E-5\"))",
             },
         },
     );

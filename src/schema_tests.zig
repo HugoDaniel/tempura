@@ -29,7 +29,10 @@ fn expectClean(schema: *const Schema, source: [:0]const u8) !void {
     var res = try Schema.validate(t_.allocator, schema, source);
     defer res.deinit();
     if (res.diagnostics.len != 0) {
-        std.debug.print("\nexpected a clean document, got {d} diagnostic(s):\n", .{res.diagnostics.len});
+        std.debug.print(
+            "\nexpected a clean document, got {d} diagnostic(s):\n",
+            .{res.diagnostics.len},
+        );
         for (res.diagnostics) |d| {
             std.debug.print("  {s}: {s}\n", .{ @tagName(d.code), d.message });
         }
@@ -44,7 +47,10 @@ fn expectCode(schema: *const Schema, source: [:0]const u8, want: Code) !void {
     defer res.deinit();
     for (res.diagnostics) |d| if (d.code == want) return;
 
-    std.debug.print("\nexpected {s}, got {d} diagnostic(s):\n", .{ @tagName(want), res.diagnostics.len });
+    std.debug.print(
+        "\nexpected {s}, got {d} diagnostic(s):\n",
+        .{ @tagName(want), res.diagnostics.len },
+    );
     for (res.diagnostics) |d| {
         std.debug.print("  {s}: {s}\n", .{ @tagName(d.code), d.message });
     }
@@ -69,7 +75,12 @@ fn readSiblingFile(gpa: std.mem.Allocator, rel: []const u8) !?[:0]u8 {
     const repo_root = @import("build_options").repo_root;
     const path = try std.fs.path.join(gpa, &.{ repo_root, "..", rel });
     defer gpa.free(path);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(t_.io, path, gpa, .limited(8 * 1024 * 1024)) catch return null;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(
+        t_.io,
+        path,
+        gpa,
+        .limited(8 * 1024 * 1024),
+    ) catch return null;
     defer gpa.free(bytes);
     return try gpa.dupeZ(u8, bytes);
 }
@@ -114,7 +125,11 @@ test "tempura: (tempo-point …) takes exactly one of :us | :qpm, never a second
     try expectClean(&schema, "(tempo-point :at 64bar :us 400000)");
 
     // The exclusive group, both ways.
-    try expectCode(&schema, "(tempo-point :at 0q :qpm 125 :us 400000)", .mutually_exclusive_keys_present);
+    try expectCode(
+        &schema,
+        "(tempo-point :at 0q :qpm 125 :us 400000)",
+        .mutually_exclusive_keys_present,
+    );
     try expectCode(&schema, "(tempo-point :at 0q)", .required_one_of_missing);
     // Seconds are circular on the map that defines them (plan 03).
     try expectCode(&schema, "(tempo-point :at 0s :qpm 125)", .unit_not_allowed);
@@ -170,7 +185,11 @@ test "tempura: (phrase …) holds lanes and nothing else" {
         \\    (note :at 0q :dur 0.25q :key 38 :vel 100)))
     );
 
-    try expectCode(&schema, "(phrase :length 1bar (lane :name flash :kind notes))", .missing_required_key);
+    try expectCode(
+        &schema,
+        "(phrase :length 1bar (lane :name flash :kind notes))",
+        .missing_required_key,
+    );
     // The positional head-set: a phrase's children are lanes.
     try expectCode(&schema,
         \\(phrase :name fill :length 1bar (cue :name "x" :at 0q))
@@ -257,7 +276,10 @@ test "tempura: the lane variants gate which keys exist" {
 
     // Each kind's own key, on its own kind.
     try expectClean(&schema, "(lane :name hats :kind query :target hats :query (euclid 3 8 1))");
-    try expectClean(&schema, "(lane :name pulse :kind formula :target pulse :expr (sin (* beat 6.2832)))");
+    try expectClean(
+        &schema,
+        "(lane :name pulse :kind formula :target pulse :expr (sin (* beat 6.2832)))",
+    );
     try expectClean(&schema,
         \\(anchor :id song :kind it :file "x.it")
         \\(lane :name bass-vol :kind curve :from song :channel 5 :column vol :range [0 1])
@@ -298,7 +320,10 @@ test "tempura: a bound curve lane addresses exactly one MIDI controller surface"
         \\(lane :name x :kind curve :from song :cc 74 :bend true)
     , .mutually_exclusive_keys_present);
     // …and an unbound curve lane needs none of them (at-most-one).
-    try expectClean(&schema, "(lane :name glow :kind curve :target glow (keyframe :at 0q :value 1))");
+    try expectClean(
+        &schema,
+        "(lane :name glow :kind curve :target glow (keyframe :at 0q :value 1))",
+    );
 }
 
 test "tempura: an IT curve lane's :fx is inert without the column that gives it meaning" {
@@ -504,10 +529,21 @@ test "midi: ease-hint is typed against pacer's own easing names" {
     defer schema.deinit();
 
     try expectClean(&schema, "(mtrk (ease-hint :at 0 :ch 1 :lane cc :num 74 :ease in-cubic))");
-    try expectClean(&schema, "(mtrk (ease-hint :at 0 :ch 1 :lane bend :ease (spring :damping 0.5 :periods 3)))");
+    try expectClean(
+        &schema,
+        "(mtrk (ease-hint :at 0 :ch 1 :lane bend :ease (spring :damping 0.5 :periods 3)))",
+    );
 
-    try expectCode(&schema, "(mtrk (ease-hint :at 0 :ch 1 :lane cc :num 74 :ease wobble))", .not_member);
-    try expectCode(&schema, "(mtrk (ease-hint :at 0 :ch 1 :lane pan :num 10 :ease linear))", .not_member);
+    try expectCode(
+        &schema,
+        "(mtrk (ease-hint :at 0 :ch 1 :lane cc :num 74 :ease wobble))",
+        .not_member,
+    );
+    try expectCode(
+        &schema,
+        "(mtrk (ease-hint :at 0 :ch 1 :lane pan :num 10 :ease linear))",
+        .not_member,
+    );
 }
 
 test "midi: the live tier is not hosted — note, midi-input, midi-output, midi-clock" {
@@ -636,9 +672,17 @@ test "it: the value kinds refuse what IT cannot hold" {
     // shape — so a number out of range reports the BOUND it broke rather
     // than collapsing into "no alternative matched" (the it set's
     // amendment 7 is exactly about this report).
-    try expectCode(&schema, "(pattern 0 :rows 64 (row 0 (ev 1 \"C-5\" :ins 2 :vol 100)))", .number_above_max);
+    try expectCode(
+        &schema,
+        "(pattern 0 :rows 64 (row 0 (ev 1 \"C-5\" :ins 2 :vol 100)))",
+        .number_above_max,
+    );
     // …and a shape neither arm reaches keeps the collapsed code.
-    try expectCode(&schema, "(pattern 0 :rows 64 (row 0 (ev 1 \"C-5\" :vol [0 1])))", .union_no_branch_matched);
+    try expectCode(
+        &schema,
+        "(pattern 0 :rows 64 (row 0 (ev 1 \"C-5\" :vol [0 1])))",
+        .union_no_branch_matched,
+    );
     try expectCode(&schema, "(instrument 1 :nna bounce)", .not_member);
     try expectCode(&schema, "(sample 2 :loop-mode pingpong)", .dependent_key_missing);
     // A bare count never carries a unit (amendment 6).
@@ -650,7 +694,11 @@ test "it: (bin …) takes an offset or a file, never both" {
     defer schema.deinit();
 
     try expectClean(&schema, "(pattern 3 :rows 64 (bin :file \"pat3.bin\"))");
-    try expectCode(&schema, "(pattern 3 :rows 64 (bin :at 0x10 :len 4 :file \"x\"))", .mutually_exclusive_keys_present);
+    try expectCode(
+        &schema,
+        "(pattern 3 :rows 64 (bin :at 0x10 :len 4 :file \"x\"))",
+        .mutually_exclusive_keys_present,
+    );
     try expectCode(&schema, "(pattern 3 :rows 64 (bin :len 4))", .dependent_key_missing);
 }
 
@@ -707,7 +755,8 @@ test "tempura: no head this set declares collides with a sibling vocabulary" {
     // once rather than staying quiet about a check that did not run.
     if (owned.items.len == 0) {
         std.debug.print(
-            "sibling-heads: none of the {d} sibling manifests is checked out beside this repo — nothing to cross-check\n",
+            "sibling-heads: none of the {d} sibling manifests is checked out beside this repo — " ++
+                "nothing to cross-check\n",
             .{absent},
         );
         return error.SkipZigTest;
@@ -729,11 +778,17 @@ test "tempura: no head this set declares collides with a sibling vocabulary" {
             switch (composed.preloaded.schema.lookupForm(form.name, null)) {
                 .found => {},
                 .not_found => {
-                    std.debug.print("{s}/{s} vanished from the composed schema\n", .{ plugin.name, form.name });
+                    std.debug.print(
+                        "{s}/{s} vanished from the composed schema\n",
+                        .{ plugin.name, form.name },
+                    );
                     return error.HeadNotFound;
                 },
                 .ambiguous => {
-                    std.debug.print("{s}/{s} is ambiguous against a sibling vocabulary\n", .{ plugin.name, form.name });
+                    std.debug.print(
+                        "{s}/{s} is ambiguous against a sibling vocabulary\n",
+                        .{ plugin.name, form.name },
+                    );
                     return error.SiblingHeadCollision;
                 },
             }
@@ -767,7 +822,10 @@ test "tempura: the four composed manifests share no head" {
                     return error.HeadNotFound;
                 },
                 .ambiguous => {
-                    std.debug.print("{s}/{s} is declared twice across the four manifests\n", .{ plugin.name, form.name });
+                    std.debug.print(
+                        "{s}/{s} is declared twice across the four manifests\n",
+                        .{ plugin.name, form.name },
+                    );
                     return error.HeadCollision;
                 },
             }
@@ -814,7 +872,10 @@ test "tempura: every form, key, kind and member carries the prose the docs page 
 fn expectPluginDescribed(plugin: sjon.Plugin.Plugin) DescribeError!void {
     for (plugin.value_kinds) |kind| {
         if (kind.description.len == 0) {
-            std.debug.print("value-kind `{s}` of `{s}` has no :description\n", .{ kind.name, plugin.name });
+            std.debug.print(
+                "value-kind `{s}` of `{s}` has no :description\n",
+                .{ kind.name, plugin.name },
+            );
             return error.MissingDescription;
         }
         // A member set is a closed vocabulary the page prints one line
@@ -888,9 +949,17 @@ test "it: a foreign head or a foreign shape in a positional slot is refused" {
     // arm's own not_head_member; a string reaches neither arm and keeps
     // the collapsed code.
     try expectCode(&schema, "(pattern 0 (timing :speed 6) \"junk\" 12345)", .not_head_member);
-    try expectCode(&schema, "(pattern 0 (timing :speed 6) \"junk\" 12345)", .union_no_branch_matched);
+    try expectCode(
+        &schema,
+        "(pattern 0 (timing :speed 6) \"junk\" 12345)",
+        .union_no_branch_matched,
+    );
     try expectCode(&schema, "(pattern 0 (timing :speed 6) \"junk\" 12345)", .number_above_max);
-    try expectCode(&schema, "(pattern 0 (row 0 (ev 1 \"C-5\") \"junk\"))", .union_no_branch_matched);
+    try expectCode(
+        &schema,
+        "(pattern 0 (row 0 (ev 1 \"C-5\") \"junk\"))",
+        .union_no_branch_matched,
+    );
     // A head outside the set that IS a form somewhere reports the
     // narrowing's code; one that is nowhere in scope at this slot reports
     // the descent's. Both refuse it, which is the point — `:positional

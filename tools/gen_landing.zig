@@ -92,18 +92,34 @@ const cases = [_]Case{
         .build = support.native,
         .opts = .{ .source_name = "native.sjon", .velocity = true },
     },
-    .{ .file = "smf-conducted.pacer", .build = support.smfConducted, .opts = .{ .source_name = "smf.sjon" } },
-    .{ .file = "it-conducted.pacer", .build = support.itConducted, .opts = .{ .source_name = "it.sjon" } },
+    .{
+        .file = "smf-conducted.pacer",
+        .build = support.smfConducted,
+        .opts = .{ .source_name = "smf.sjon" },
+    },
+    .{
+        .file = "it-conducted.pacer",
+        .build = support.itConducted,
+        .opts = .{ .source_name = "it.sjon" },
+    },
     // The one shape whose positions are SECONDS. It has to be here
     // rather than only in a Zig test: seconds ride pacer's degenerate
     // `ticks_per_second` path, and nothing on this side can prove the
     // two implementations of that expression agree.
-    .{ .file = "slide-seconds.pacer", .build = support.slideConducted, .opts = .{ .source_name = "slide.sjon" } },
+    .{
+        .file = "slide-seconds.pacer",
+        .build = support.slideConducted,
+        .opts = .{ .source_name = "slide.sjon" },
+    },
     // The SHIPPED example, `examples/native.sjon`, from its own bytes:
     // an example nobody compiles is an example nobody can trust, and
     // this is the one case whose input is a file in the repository
     // rather than a fixture built in Zig.
-    .{ .file = "example-native.pacer", .build = exampleNative, .opts = .{ .source_name = "native.sjon" } },
+    .{
+        .file = "example-native.pacer",
+        .build = exampleNative,
+        .opts = .{ .source_name = "native.sjon" },
+    },
 };
 
 /// `examples/native.sjon`, loaded and derived.
@@ -129,7 +145,10 @@ fn exampleNative(gpa: Allocator) !support.Fixture {
     defer loaded.map.deinit();
     defer loaded.diags.deinit();
     if (loaded.diags.hasErrors()) {
-        for (loaded.diags.items()) |d| std.debug.print("examples/native.sjon: {t}: {s}\n", .{ d.code, d.message });
+        for (loaded.diags.items()) |d| std.debug.print(
+            "examples/native.sjon: {t}: {s}\n",
+            .{ d.code, d.message },
+        );
         loaded.doc.deinit();
         return error.ExampleDoesNotLoad;
     }
@@ -184,7 +203,10 @@ pub fn main(init: std.process.Init) !u8 {
         var res = try exporter.exportScore(gpa, &fx.doc, &fx.derived, &.{}, c.opts);
         defer res.deinit();
         if (res.diags.hasErrors()) {
-            for (res.diags.items()) |d| try out.print("landing: {s}: {t}: {s}\n", .{ c.file, d.code, d.message });
+            for (res.diags.items()) |d| try out.print(
+                "landing: {s}: {t}: {s}\n",
+                .{ c.file, d.code, d.message },
+            );
             return error.GoldenScoreHasErrors;
         }
         try artifacts.append(gpa, .{
@@ -209,7 +231,12 @@ pub fn main(init: std.process.Init) !u8 {
     if (check) {
         var stale: usize = 0;
         for (artifacts.items) |art| {
-            const on_disk = Io.Dir.cwd().readFileAlloc(io, art.path, gpa, .limited(64 * 1024 * 1024)) catch {
+            const on_disk = Io.Dir.cwd().readFileAlloc(
+                io,
+                art.path,
+                gpa,
+                .limited(64 * 1024 * 1024),
+            ) catch {
                 try out.print("landing: {s} is missing\n", .{art.path});
                 stale += 1;
                 continue;
@@ -221,7 +248,10 @@ pub fn main(init: std.process.Init) !u8 {
             }
         }
         if (stale != 0) {
-            try out.print("landing: {d} fixture(s) do not match this tree — run `zig build landing`\n", .{stale});
+            try out.print(
+                "landing: {d} fixture(s) do not match this tree — run `zig build landing`\n",
+                .{stale},
+            );
             return 1;
         }
         try out.print("landing: {d} fixtures up to date\n", .{artifacts.items.len});
@@ -304,7 +334,10 @@ fn render(w: *Io.Writer, entries: []const Entry, scores: []const Score, full: bo
     for (scores, 0..) |sc, i| {
         try w.print("    {{ \"file\": \"{s}\", \"landings\": [", .{sc.file});
         for (sc.landings, 0..) |l, j| {
-            try w.print("{s}{{ \"target\": \"{s}\", \"ticks\": [", .{ if (j == 0) "" else ", ", l.target });
+            try w.print(
+                "{s}{{ \"target\": \"{s}\", \"ticks\": [",
+                .{ if (j == 0) "" else ", ", l.target },
+            );
             for (l.ticks, 0..) |t, k| try w.print("{s}{d}", .{ if (k == 0) "" else ", ", t });
             try w.writeAll("] }");
         }

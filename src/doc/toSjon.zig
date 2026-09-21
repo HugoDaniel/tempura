@@ -783,9 +783,15 @@ test "toSjon: a duration is spelled from its own :at, across a meter change" {
     var fx = try loaded(gpa, &schema, source);
     defer fx.deinit(gpa);
 
-    try testing.expect(std.mem.indexOf(u8, fx.text, "(section :name a :at 0bar :dur 1bar)") != null);
-    try testing.expect(std.mem.indexOf(u8, fx.text, "(section :name b :at 2bar :dur 1bar)") != null);
-    try testing.expect(std.mem.indexOf(u8, fx.text, "(section :name c :at 1bar :dur 2bar)") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, fx.text, "(section :name a :at 0bar :dur 1bar)") != null,
+    );
+    try testing.expect(
+        std.mem.indexOf(u8, fx.text, "(section :name b :at 2bar :dur 1bar)") != null,
+    );
+    try testing.expect(
+        std.mem.indexOf(u8, fx.text, "(section :name c :at 1bar :dur 2bar)") != null,
+    );
     // Four quarters from bar 2 IS a bar there, and the printer says so.
     try testing.expect(std.mem.indexOf(u8, fx.text, "(note :at 2bar :dur 1bar :key 36)") != null);
 
@@ -891,7 +897,10 @@ test "toSjon: a pass-through root is written back verbatim, comments and all" {
     );
     defer fx.deinit(gpa);
 
-    try testing.expect(std.mem.indexOf(u8, fx.text, "; pacer's form, pass-through\n(control :id glow-amt :type slider :min 0 :max 1 :value 0.5 :target glow-amt)") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, fx.text, "; pacer's form, pass-through\n(control :id glow-amt :type " ++
+            "slider :min 0 :max 1 :value 0.5 :target glow-amt)") != null,
+    );
 }
 
 test "toSjon: the golden — plan 02's own example, canonically spelled" {

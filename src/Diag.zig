@@ -476,8 +476,20 @@ test "Diag.List: add formats the message and preserves insertion order" {
 
     try testing.expectEqual(@as(usize, 0), list.items().len);
 
-    try list.add(.tick_overflow, .err, .{ .start = 4, .end = 9 }, "tick {d} is past the grid ceiling", .{@as(i64, 1) << 53});
-    try list.add(.note_overlap, .warning, .{ .start = 12, .end = 20 }, "lane {s} overlaps at {d}", .{ "kick", 3 });
+    try list.add(
+        .tick_overflow,
+        .err,
+        .{ .start = 4, .end = 9 },
+        "tick {d} is past the grid ceiling",
+        .{@as(i64, 1) << 53},
+    );
+    try list.add(
+        .note_overlap,
+        .warning,
+        .{ .start = 12, .end = 20 },
+        "lane {s} overlaps at {d}",
+        .{ "kick", 3 },
+    );
 
     const got = list.items();
     try testing.expectEqual(@as(usize, 2), got.len);
@@ -485,7 +497,10 @@ test "Diag.List: add formats the message and preserves insertion order" {
     try testing.expectEqual(Code.tick_overflow, got[0].code);
     try testing.expectEqual(Severity.err, got[0].severity);
     try testing.expectEqual(Span{ .start = 4, .end = 9 }, got[0].span);
-    try testing.expectEqualStrings("tick 9007199254740992 is past the grid ceiling", got[0].message);
+    try testing.expectEqualStrings(
+        "tick 9007199254740992 is past the grid ceiling",
+        got[0].message,
+    );
 
     try testing.expectEqual(Code.note_overlap, got[1].code);
     try testing.expectEqual(Severity.warning, got[1].severity);
@@ -501,7 +516,13 @@ test "Diag.List: the message belongs to the list's arena, not the caller's buffe
     defer list.deinit();
 
     var lane = [_]u8{ 'k', 'i', 'c', 'k' };
-    try list.add(.clip_lane_missing, .err, .{ .start = 0, .end = 1 }, "lane {s} is missing", .{lane[0..]});
+    try list.add(
+        .clip_lane_missing,
+        .err,
+        .{ .start = 0, .end = 1 },
+        "lane {s} is missing",
+        .{lane[0..]},
+    );
     @memset(&lane, 'x');
 
     try testing.expectEqualStrings("lane kick is missing", list.items()[0].message);
@@ -542,7 +563,13 @@ test "Diag.List: hasErrors reflects severity and count is per code" {
     try testing.expect(!list.hasErrors());
     try testing.expectEqual(@as(usize, 2), list.count(.render_inexact));
 
-    try list.add(.build_cross_kind, .err, .{ .start = 9, .end = 11 }, "a .mid document cannot build a .it file", .{});
+    try list.add(
+        .build_cross_kind,
+        .err,
+        .{ .start = 9, .end = 11 },
+        "a .mid document cannot build a .it file",
+        .{},
+    );
     try testing.expect(list.hasErrors());
     try testing.expectEqual(@as(usize, 1), list.count(.build_cross_kind));
     try testing.expectEqual(@as(usize, 2), list.count(.render_inexact));

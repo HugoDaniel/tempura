@@ -834,7 +834,8 @@ const Ctx = struct {
                 try self.emit(
                     .unit_required,
                     self.tree.spanOf(node),
-                    "a tempo or meter point is never placed in seconds: seconds are what this map defines",
+                    "a tempo or meter point is never placed in seconds: seconds are what this " ++
+                        "map defines",
                     .{},
                 );
                 return null;
@@ -920,7 +921,11 @@ const Ctx = struct {
         for (dumps) |dump| {
             if (dump.anchor >= anchor_forms.len) continue;
             const anchor_form = anchor_forms[dump.anchor];
-            const anchor_id = if (kvNode(self.tree, self.tree.formHeader(anchor_form).children, "id")) |n|
+            const anchor_id = if (kvNode(
+                self.tree,
+                self.tree.formHeader(anchor_form).children,
+                "id",
+            )) |n|
                 try self.symbol(n)
             else
                 continue;
@@ -938,10 +943,18 @@ const Ctx = struct {
                     for (read.diags.items()) |d| {
                         try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
                     }
-                    try midi.append(self.arena, .{ .anchor = anchor_id, .sequence = read.sequence });
+                    try midi.append(
+                        self.arena,
+                        .{ .anchor = anchor_id, .sequence = read.sequence },
+                    );
                 },
                 .it => {
-                    var read = try bridge_it.formsToModule(self.gpa, self.tree, roots, anchor_bytes);
+                    var read = try bridge_it.formsToModule(
+                        self.gpa,
+                        self.tree,
+                        roots,
+                        anchor_bytes,
+                    );
                     defer read.diags.deinit();
                     errdefer read.module.deinit();
                     for (read.diags.items()) |d| {
@@ -1007,7 +1020,8 @@ const Ctx = struct {
                 .anchor_mismatch,
                 .err,
                 anchor.span,
-                "\"{s}\" was read, and this anchor declares no readable :sha256 to check it against",
+                "\"{s}\" was read, and this anchor declares no readable :sha256 to check it " ++
+                    "against",
                 .{anchor.file},
             );
             return null;
@@ -1017,7 +1031,8 @@ const Ctx = struct {
                 .anchor_mismatch,
                 .err,
                 anchor.span,
-                "\"{s}\" is {d} bytes and does not match the declared :size {d} / :sha256; this dump's offsets name a file that has changed",
+                "\"{s}\" is {d} bytes and does not match the declared :size {d} / :sha256; this " ++
+                    "dump's offsets name a file that has changed",
                 .{ anchor.file, bytes.len, size },
             );
             return null;
@@ -1030,7 +1045,12 @@ const Ctx = struct {
     /// it agrees with the anchor and `anchor_conflict` when it does not"
     /// (plan 02, "(anchor …)"). Only the fields BOTH state are compared:
     /// a dump that omits one claims nothing about it.
-    fn sourceAgrees(self: *Ctx, doc: *const Doc.Doc, id: Doc.AnchorId, source: ?bridge_it.Source) Error!void {
+    fn sourceAgrees(
+        self: *Ctx,
+        doc: *const Doc.Doc,
+        id: Doc.AnchorId,
+        source: ?bridge_it.Source,
+    ) Error!void {
         const said = source orelse return;
         const anchor = doc.anchorById(id) orelse return;
 
@@ -1048,7 +1068,8 @@ const Ctx = struct {
             .anchor_conflict,
             .err,
             said.span,
-            "this module's own (source …) names a different :{s} than the (anchor :id {s} …) it is paired with",
+            "this module's own (source …) names a different :{s} than the (anchor :id {s} …) it " ++
+                "is paired with",
             .{ what, id },
         );
     }
@@ -1094,13 +1115,17 @@ const Ctx = struct {
                 .anchor_unavailable,
                 .err,
                 anchor.span,
-                "the anchor '{s}' conducts this document and its file ({s}) is not here, so every position is the placeholder's 120 quarter notes per minute in [4 4]: inline the tier (`tempura inline`) or hand the host the file",
+                "the anchor '{s}' conducts this document and its file ({s}) is not here, so " ++
+                    "every position is the placeholder's 120 quarter notes per minute in [4 4]: " ++
+                    "inline the tier (`tempura inline`) or hand the host the file",
                 .{ id, anchor.file },
             ) else try self.diags.add(
                 .anchor_unavailable,
                 .err,
                 anchor.span,
-                "the anchor '{s}' conducts this document and its file ({s}) verifies but is not a readable {t}, so every position is the placeholder's 120 quarter notes per minute in [4 4]: `tempura inspect` says what those bytes are",
+                "the anchor '{s}' conducts this document and its file ({s}) verifies but is not " ++
+                    "a readable {t}, so every position is the placeholder's 120 quarter notes " ++
+                    "per minute in [4 4]: `tempura inspect` says what those bytes are",
                 .{ id, anchor.file, anchor.kind },
             );
             return;
@@ -1524,7 +1549,8 @@ const Ctx = struct {
             try self.emit(
                 .address_invalid,
                 span,
-                "a lane bound to the SMF anchor \"{s}\" reads at least one channel, and :ch [] names none",
+                "a lane bound to the SMF anchor \"{s}\" reads at least one channel, and :ch [] " ++
+                    "names none",
                 .{id},
             );
             return null;
@@ -1563,9 +1589,21 @@ const Ctx = struct {
             .at = at,
             .dur = dur,
             .key = key,
-            .vel = if (kvNode(tree, children, "vel")) |n| castU7(readNumber(tree, n)) else default_vel,
-            .ch = if (kvNode(tree, children, "ch")) |n| wireChannel(u4, readNumber(tree, n)) else default_note_ch,
-            .off_vel = if (kvNode(tree, children, "off-vel")) |n| castU7(readNumber(tree, n)) else null,
+            .vel = if (kvNode(
+                tree,
+                children,
+                "vel",
+            )) |n| castU7(readNumber(tree, n)) else default_vel,
+            .ch = if (kvNode(
+                tree,
+                children,
+                "ch",
+            )) |n| wireChannel(u4, readNumber(tree, n)) else default_note_ch,
+            .off_vel = if (kvNode(
+                tree,
+                children,
+                "off-vel",
+            )) |n| castU7(readNumber(tree, n)) else null,
             .span = .{ .start = span.start, .end = span.end },
         };
     }
@@ -1626,10 +1664,18 @@ const Ctx = struct {
         return .{
             .at = at,
             .phrase = try self.symbol(phrase_node),
-            .repeat = if (kvNode(tree, children, "repeat")) |n| castU32(readNumber(tree, n)) else default_repeat,
+            .repeat = if (kvNode(
+                tree,
+                children,
+                "repeat",
+            )) |n| castU32(readNumber(tree, n)) else default_repeat,
             .offset = offset,
             .length = length,
-            .transpose = if (kvNode(tree, children, "transpose")) |n| castI8(readNumber(tree, n)) else default_transpose,
+            .transpose = if (kvNode(
+                tree,
+                children,
+                "transpose",
+            )) |n| castI8(readNumber(tree, n)) else default_transpose,
             .span = .{ .start = span.start, .end = span.end },
         };
     }
@@ -1689,14 +1735,18 @@ const Ctx = struct {
                 try self.emit(
                     .passthrough_conducts,
                     span,
-                    "tempura emits ({s} …) itself at export; a timeline document says tempo with (tempo-point …)",
+                    "tempura emits ({s} …) itself at export; a timeline document says tempo " ++
+                        "with (tempo-point …)",
                     .{hdr.head},
                 );
             }
 
             var comments: std.ArrayList([]const u8) = .empty;
             for (tree.commentSpans(tree.leading_comments_index[form.raw()])) |c| {
-                try comments.append(self.arena, try self.arena.dupe(u8, self.source[c.start..c.end]));
+                try comments.append(
+                    self.arena,
+                    try self.arena.dupe(u8, self.source[c.start..c.end]),
+                );
             }
 
             try out.append(self.arena, .{
@@ -1723,13 +1773,23 @@ const Ctx = struct {
             return null;
         };
         const answer = self.map.tickFromLiteral(lit) catch {
-            try self.emit(.tick_overflow, self.tree.spanOf(node), "this position is not a point on the grid", .{});
+            try self.emit(
+                .tick_overflow,
+                self.tree.spanOf(node),
+                "this position is not a point on the grid",
+                .{},
+            );
             return null;
         };
         switch (answer) {
             .tick => |t| return t,
             .err => |code| {
-                try self.emit(code, self.tree.spanOf(node), "this position is not a point on the grid", .{});
+                try self.emit(
+                    code,
+                    self.tree.spanOf(node),
+                    "this position is not a point on the grid",
+                    .{},
+                );
                 return null;
             },
         }
@@ -1759,13 +1819,23 @@ const Ctx = struct {
             return null;
         };
         const answer = self.map.durationTicks(lit, at) catch {
-            try self.emit(.tick_overflow, self.tree.spanOf(node), "this duration is not a span of the grid", .{});
+            try self.emit(
+                .tick_overflow,
+                self.tree.spanOf(node),
+                "this duration is not a span of the grid",
+                .{},
+            );
             return null;
         };
         switch (answer) {
             .tick => |t| return t,
             .err => |code| {
-                try self.emit(code, self.tree.spanOf(node), "this duration is not a span of the grid", .{});
+                try self.emit(
+                    code,
+                    self.tree.spanOf(node),
+                    "this duration is not a span of the grid",
+                    .{},
+                );
                 return null;
             },
         }
@@ -1797,7 +1867,9 @@ const Ctx = struct {
     fn effSymbol(self: *const Ctx, form: NodeIndex, key: []const u8) ?[]const u8 {
         const ev = self.view.getEffectiveValue(form, key) orelse return null;
         return switch (ev) {
-            .author => |node| if (self.tree.tagOf(node) == .symbol) self.tree.symbolText(node) else null,
+            .author => |node| if (self.tree.tagOf(
+                node,
+            ) == .symbol) self.tree.symbolText(node) else null,
             .default => |entry| switch (entry.value) {
                 .keyword => |k| k,
                 .string => |s| s,
@@ -2136,7 +2208,8 @@ pub fn itConductor(gpa: Allocator, module: *const itf.Module, span: Diag.Span) E
         .tick_overflow,
         .err,
         span,
-        "this module's walk reaches past the grid ceiling {d}; the tempo segments past it are dropped",
+        "this module's walk reaches past the grid ceiling {d}; the tempo segments past it are " ++
+            "dropped",
         .{Grid.MAX_TICK},
     );
 
@@ -2149,7 +2222,10 @@ pub fn itConductor(gpa: Allocator, module: *const itf.Module, span: Diag.Span) E
 
     return .{
         .tempo = try seedTempo(arena, try mergeByTick(arena, Doc.TempoPoint, tempo.items), span),
-        .meter = try arena.dupe(Doc.MeterPoint, &[_]Doc.MeterPoint{.{ .tick = 0, .n = n, .d = 4, .span = span }}),
+        .meter = try arena.dupe(
+            Doc.MeterPoint,
+            &[_]Doc.MeterPoint{.{ .tick = 0, .n = n, .d = 4, .span = span }},
+        ),
         .diags = diags,
         .arena = arena_state,
         .end = end: {
@@ -2414,7 +2490,10 @@ fn expectClean(source: [:0]const u8) !void {
     defer res.deinit();
     if (res.diags.items().len == 0) return;
 
-    std.debug.print("\nexpected a clean document, got {d} diagnostic(s):\n", .{res.diags.items().len});
+    std.debug.print(
+        "\nexpected a clean document, got {d} diagnostic(s):\n",
+        .{res.diags.items().len},
+    );
     for (res.diags.items()) |d| std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
     std.debug.print("source:\n{s}\n", .{source});
     return error.UnexpectedDiagnostics;
@@ -2563,9 +2642,13 @@ test "fromSjon: a bound SMF lane's :ch is one channel or a set of them" {
 
     // `[1 2]` is bits 0 and 1; `[3]` is exactly `:ch 3`; order in the
     // vector is nothing, the set is what is kept.
-    try testing.expect(res.doc.lanes[0].binding.?.address.smf.ch.eql(Doc.Channels.single(0).with(1)));
+    try testing.expect(
+        res.doc.lanes[0].binding.?.address.smf.ch.eql(Doc.Channels.single(0).with(1)),
+    );
     try testing.expect(res.doc.lanes[1].binding.?.address.smf.ch.eql(.single(2)));
-    try testing.expect(res.doc.lanes[2].binding.?.address.smf.ch.eql(Doc.Channels.single(9).with(15)));
+    try testing.expect(
+        res.doc.lanes[2].binding.?.address.smf.ch.eql(Doc.Channels.single(9).with(15)),
+    );
 
     // A set with nothing in it, or with a channel twice, is not an
     // address.
@@ -2681,7 +2764,10 @@ test "fromSjon: :from inside a phrase's lane is phrase_lane_bound" {
 }
 
 test "fromSjon: a pass-through (transport …) or (tempo …) is passthrough_conducts" {
-    try expectCode(preamble ++ "(transport :bpm 120 :meter [4 4] :dur 16bar)", .passthrough_conducts);
+    try expectCode(
+        preamble ++ "(transport :bpm 120 :meter [4 4] :dur 16bar)",
+        .passthrough_conducts,
+    );
     try expectCode(preamble ++ "(tempo :at 0b :bpm 140)", .passthrough_conducts);
 }
 
@@ -2951,7 +3037,11 @@ test "fromSjon: SJON's own complaints ride across as sjon_diagnostic" {
     try testing.expect(res.diags.count(.sjon_diagnostic) > 0);
     var found = false;
     for (res.diags.items()) |d| {
-        if (d.code == .sjon_diagnostic and std.mem.indexOf(u8, d.message, "nowhere") != null) found = true;
+        if (d.code == .sjon_diagnostic and std.mem.indexOf(
+            u8,
+            d.message,
+            "nowhere",
+        ) != null) found = true;
     }
     try testing.expect(found);
 }
@@ -3161,7 +3251,10 @@ test "fromSjon: a pass-through root is kept verbatim, with the comments above it
         res.doc.passthrough[0].text,
     );
     try testing.expectEqual(@as(usize, 1), res.doc.passthrough[0].comments.len);
-    try testing.expectEqualStrings("; pacer's form, pass-through", res.doc.passthrough[0].comments[0]);
+    try testing.expectEqualStrings(
+        "; pacer's form, pass-through",
+        res.doc.passthrough[0].comments[0],
+    );
 }
 
 test "fromSjon.parseNoteName: the midi set's convention, middle C is C4" {
@@ -3205,13 +3298,17 @@ test "fromSjon: the slot-local defaults restated here are the manifest's" {
             if (std.mem.eql(u8, form.name, "note") and std.mem.eql(u8, key.name, "vel")) {
                 try testing.expectEqual(@as(f64, default_vel), d.number);
                 seen += 1;
-            } else if (std.mem.eql(u8, form.name, "keyframe") and std.mem.eql(u8, key.name, "ease")) {
+            } else if (std.mem.eql(u8, form.name, "keyframe") and
+                std.mem.eql(u8, key.name, "ease"))
+            {
                 try testing.expectEqualStrings(default_ease, d.symbol);
                 seen += 1;
             } else if (std.mem.eql(u8, form.name, "clip") and std.mem.eql(u8, key.name, "repeat")) {
                 try testing.expectEqual(@as(f64, default_repeat), d.number);
                 seen += 1;
-            } else if (std.mem.eql(u8, form.name, "clip") and std.mem.eql(u8, key.name, "transpose")) {
+            } else if (std.mem.eql(u8, form.name, "clip") and
+                std.mem.eql(u8, key.name, "transpose"))
+            {
                 try testing.expectEqual(@as(f64, default_transpose), d.number);
                 seen += 1;
             }
@@ -3818,7 +3915,12 @@ test "fromSjon: a bound lane over an inline tier resolves its notes" {
     // …and the tier answers it, through the walk that conducts it.
     var rowmap = try itf.walk.derive(gpa, &res.doc.it[0].module, .{});
     defer rowmap.deinit();
-    const notes = try bridge_it.boundNotes(gpa, &res.doc.it[0].module, &rowmap, lane.binding.?.address.it.channel);
+    const notes = try bridge_it.boundNotes(
+        gpa,
+        &res.doc.it[0].module,
+        &rowmap,
+        lane.binding.?.address.it.channel,
+    );
     defer gpa.free(notes);
 
     try testing.expectEqual(@as(usize, 1), notes.len);

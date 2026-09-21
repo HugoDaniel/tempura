@@ -207,7 +207,12 @@ pub const Builder = struct {
         return self.arena.allocator();
     }
 
-    pub fn setKeyword(self: *Builder, site: Site, key: []const u8, value_json: []const u8) Error!void {
+    pub fn setKeyword(
+        self: *Builder,
+        site: Site,
+        key: []const u8,
+        value_json: []const u8,
+    ) Error!void {
         if (self.summary.refused) return;
         var out = try self.head(.set_keyword, site);
         defer out.deinit(self.gpa);
@@ -237,7 +242,12 @@ pub const Builder = struct {
     /// Insert a positional child into the form at `parent`, at the slot
     /// the child occupies in the document this plan produces (see
     /// `apply`'s sequencing).
-    pub fn insertPositional(self: *Builder, parent: Site, index: u32, value_json: []const u8) Error!void {
+    pub fn insertPositional(
+        self: *Builder,
+        parent: Site,
+        index: u32,
+        value_json: []const u8,
+    ) Error!void {
         if (self.summary.refused) return;
         var out = try self.head(.insert_positional, parent);
         defer out.deinit(self.gpa);
@@ -326,7 +336,11 @@ pub const Builder = struct {
     fn head(self: *Builder, kind: Kind, site: Site) Error!std.ArrayList(u8) {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(self.gpa);
-        try out.print(self.gpa, "{{\"op\":\"{s}\",\"root\":{d},\"path\":", .{ kind.text(), site.root });
+        try out.print(
+            self.gpa,
+            "{{\"op\":\"{s}\",\"root\":{d},\"path\":",
+            .{ kind.text(), site.root },
+        );
         try site.writePath(self.gpa, &out);
         return out;
     }
@@ -403,7 +417,10 @@ test "Plan: a refusal drops the actions and keeps the diagnostic" {
     try testing.expectEqual(@as(usize, 0), p.actions.len);
     try testing.expect(p.summary.refused);
     try testing.expect(p.diags.hasErrors());
-    try testing.expectEqual(Diag.Span{ .start = 4, .end = 9 }, p.findDiag(.edit_range_empty).?.span);
+    try testing.expectEqual(
+        Diag.Span{ .start = 4, .end = 9 },
+        p.findDiag(.edit_range_empty).?.span,
+    );
 
     const text = try p.text(gpa);
     defer gpa.free(text);
@@ -466,7 +483,11 @@ const ActionReader = struct {
     fn run(self: *ActionReader) ReadError!void {
         var i = self.skipWs(0);
         if (i >= self.src.len or self.src[i] != '[') {
-            return self.fail(.{ .start = 0, .end = @intCast(self.src.len) }, "an action list is a JSON array of actions (SJON §11.1)", .{});
+            return self.fail(
+                .{ .start = 0, .end = @intCast(self.src.len) },
+                "an action list is a JSON array of actions (SJON §11.1)",
+                .{},
+            );
         }
         i = self.skipWs(i + 1);
         if (i < self.src.len and self.src[i] == ']') {
@@ -478,12 +499,23 @@ const ActionReader = struct {
             // JSON and `readAction` refuses it — so there are at most
             // `src.len` of them.
             const end = self.elementEnd(i) orelse
-                return self.fail(self.spanFrom(i), "the action list ends in the middle of an action", .{});
-            try self.readAction(std.mem.trimEnd(u8, self.src[i..end], &std.ascii.whitespace), @intCast(i));
+                return self.fail(
+                    self.spanFrom(i),
+                    "the action list ends in the middle of an action",
+                    .{},
+                );
+            try self.readAction(
+                std.mem.trimEnd(u8, self.src[i..end], &std.ascii.whitespace),
+                @intCast(i),
+            );
             // `readAction` refused an empty element, so this one was not.
             std.debug.assert(end > i);
             i = end;
-            if (i >= self.src.len) return self.fail(self.spanFrom(i), "the action list is not closed", .{});
+            if (i >= self.src.len) return self.fail(
+                self.spanFrom(i),
+                "the action list is not closed",
+                .{},
+            );
             if (self.src[i] == ',') {
                 i = self.skipWs(i + 1);
                 continue;
@@ -492,7 +524,11 @@ const ActionReader = struct {
                 i += 1;
                 break;
             }
-            return self.fail(self.spanFrom(i), "an action is followed by `,` or `]`, not by `{c}`", .{self.src[i]});
+            return self.fail(
+                self.spanFrom(i),
+                "an action is followed by `,` or `]`, not by `{c}`",
+                .{self.src[i]},
+            );
         }
         if (self.skipWs(i) != self.src.len) {
             return self.fail(self.spanFrom(i), "there are bytes after the action list", .{});
@@ -504,7 +540,12 @@ const ActionReader = struct {
     /// spans the action a host can actually see.
     fn readAction(self: *ActionReader, text: []const u8, at: u32) ReadError!void {
         const span: Diag.Span = .{ .start = at, .end = at + @as(u32, @intCast(text.len)) };
-        var parsed = std.json.parseFromSlice(std.json.Value, self.gpa, text, .{}) catch |e| switch (e) {
+        var parsed = std.json.parseFromSlice(
+            std.json.Value,
+            self.gpa,
+            text,
+            .{},
+        ) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return self.fail(span, "this action is not JSON: {s}", .{@errorName(e)}),
         };
@@ -520,7 +561,11 @@ const ActionReader = struct {
             else => return self.fail(span, "an action's \"op\" is a string", .{}),
         };
         const kind = std.meta.stringToEnum(Kind, op_name) orelse
-            return self.fail(span, "\"{s}\" is not one of SJON's eight structural operations", .{op_name});
+            return self.fail(
+                span,
+                "\"{s}\" is not one of SJON's eight structural operations",
+                .{op_name},
+            );
 
         // The two FOREST operations name no node, so they carry the root
         // list's own empty address and say everything in their slot.
@@ -533,9 +578,15 @@ const ActionReader = struct {
         };
         const slot: ?u32 = switch (kind) {
             .set_keyword, .remove_keyword, .replace, .wrap => null,
-            .insert_positional, .remove_positional, .remove_root => try self.intOf(obj, "index", span),
+            .insert_positional, .remove_positional, .remove_root => try self.intOf(
+                obj,
+                "index",
+                span,
+            ),
             // §11.3: an omitted index is the append spelling.
-            .insert_root => if (obj.get("index") == null) null else try self.intOf(obj, "index", span),
+            .insert_root => if (obj.get(
+                "index",
+            ) == null) null else try self.intOf(obj, "index", span),
         };
 
         const arena = self.b.allocator();
@@ -555,19 +606,33 @@ const ActionReader = struct {
 
     /// A required whole-number key, in `u32`'s range — every `"root"`,
     /// `"path"` step and `"index"` the grammar has is one.
-    fn intOf(self: *ActionReader, obj: std.json.ObjectMap, key: []const u8, span: Diag.Span) ReadError!u32 {
+    fn intOf(
+        self: *ActionReader,
+        obj: std.json.ObjectMap,
+        key: []const u8,
+        span: Diag.Span,
+    ) ReadError!u32 {
         const value = obj.get(key) orelse
             return self.fail(span, "this action needs a \"{s}\"", .{key});
         return self.u32Of(value, key, span);
     }
 
-    fn u32Of(self: *ActionReader, value: std.json.Value, key: []const u8, span: Diag.Span) ReadError!u32 {
+    fn u32Of(
+        self: *ActionReader,
+        value: std.json.Value,
+        key: []const u8,
+        span: Diag.Span,
+    ) ReadError!u32 {
         const n = switch (value) {
             .integer => |x| x,
             else => return self.fail(span, "\"{s}\" is a whole number", .{key}),
         };
         if (n < 0 or n > std.math.maxInt(u32)) {
-            return self.fail(span, "\"{s}\" is {d}, which is not a slot in any document", .{ key, n });
+            return self.fail(
+                span,
+                "\"{s}\" is {d}, which is not a slot in any document",
+                .{ key, n },
+            );
         }
         return @intCast(n);
     }
@@ -587,7 +652,12 @@ const ActionReader = struct {
     /// Record the refusal and unwind. `sjon_diagnostic` for the reason
     /// `Op.fromJson` uses it: the complaint belongs to JSON's vocabulary
     /// and to §11.1's grammar, neither of which has a tempura code.
-    fn fail(self: *ActionReader, span: Diag.Span, comptime fmt: []const u8, args: anytype) ReadError {
+    fn fail(
+        self: *ActionReader,
+        span: Diag.Span,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) ReadError {
         try self.b.refuse(.sjon_diagnostic, span, fmt, args);
         return error.Refused;
     }

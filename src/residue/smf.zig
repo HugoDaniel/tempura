@@ -484,14 +484,20 @@ test "smf: the essence and the conductor lead track 0, a lane record leads its o
     const t0 = carried.sequence.tracks[0].events;
     try testing.expectEqual(Sequence.Kind.tempura_residue, t0[0].kind);
     try testing.expectEqual(@as(i64, 0), t0[0].at);
-    try testing.expectEqual(@as(u8, @intFromEnum(records.Kind.essence)), t0[0].payload.residue.kind);
+    try testing.expectEqual(
+        @as(u8, @intFromEnum(records.Kind.essence)),
+        t0[0].payload.residue.kind,
+    );
     try testing.expectEqual(@as(u8, 1), t0[0].payload.residue.ver);
     try testing.expectEqual(@as(u8, 0), t0[0].payload.residue.seq);
     try testing.expectEqual(@as(u8, 1), t0[0].payload.residue.total);
     try testing.expectEqualStrings("ESSENCE", carried.sequence.bytesOf(t0[0].payload.residue.body));
 
     try testing.expectEqual(Sequence.Kind.tempura_residue, t0[1].kind);
-    try testing.expectEqual(@as(u8, @intFromEnum(records.Kind.conductor)), t0[1].payload.residue.kind);
+    try testing.expectEqual(
+        @as(u8, @intFromEnum(records.Kind.conductor)),
+        t0[1].payload.residue.kind,
+    );
     // …and then the track's own first event, still at tick 0.
     try testing.expectEqual(Sequence.Kind.set_tempo, t0[2].kind);
 
@@ -570,7 +576,10 @@ test "smf: a split essence reassembles, and a missing part is residue_corrupt" {
         try testing.expectEqual(@as(u8, @intCast(i)), r.seq);
         try testing.expectEqual(@as(u8, 4), r.total);
     }
-    try testing.expectEqualStrings("0123456789", carried.sequence.bytesOf(t0[0].payload.residue.body));
+    try testing.expectEqualStrings(
+        "0123456789",
+        carried.sequence.bytesOf(t0[0].payload.residue.body),
+    );
     try testing.expectEqualStrings("uvwxyz", carried.sequence.bytesOf(t0[3].payload.residue.body));
 
     var back = try detach(gpa, &carried.sequence);
@@ -587,7 +596,9 @@ test "smf: a split essence reassembles, and a missing part is residue_corrupt" {
         const track = try holed.addTrack();
         for (t.events) |e| {
             if (ti == 0 and e.kind == .tempura_residue and e.payload.residue.seq == 2) continue;
-            const payload: Sequence.Payload = if (e.payload.poolBytes(e.kind)) |run| switch (e.kind.payloadField()) {
+            const payload: Sequence.Payload = if (e.payload.poolBytes(
+                e.kind,
+            )) |run| switch (e.kind.payloadField()) {
                 .residue => .{ .residue = .{
                     .ver = e.payload.residue.ver,
                     .kind = e.payload.residue.kind,

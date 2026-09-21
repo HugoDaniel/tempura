@@ -184,7 +184,10 @@ pub const Map = struct {
         std.mem.reverse(u32, steps.items);
 
         const path = try steps.toOwnedSlice(gpa);
-        const parent: ?Site = if (path.len == 0) null else .{ .root = root, .path = path[0 .. path.len - 1] };
+        const parent: ?Site = if (path.len == 0) null else .{
+            .root = root,
+            .path = path[0 .. path.len - 1],
+        };
         const slot: u32 = if (path.len == 0) root else path[path.len - 1];
         return .{ .site = .{ .root = root, .path = path }, .parent = parent, .slot = slot };
     }
@@ -248,7 +251,10 @@ test "locate: a lane's child is a positional slot under its root" {
     defer scratch.deinit();
     const arena = scratch.allocator();
 
-    const second = (try map.at(arena, spanOfText(probe_source, "(note :at 1q :dur 0.5q :key 60)"))).?;
+    const second = (try map.at(
+        arena,
+        spanOfText(probe_source, "(note :at 1q :dur 0.5q :key 60)"),
+    )).?;
     try testing.expectEqual(@as(u32, 1), second.site.root);
     try testing.expectEqualSlices(u32, &.{1}, second.site.path);
     try testing.expectEqual(@as(u32, 1), second.parent.?.root);

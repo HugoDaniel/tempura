@@ -132,7 +132,10 @@ test "ops_quantize: nudge by ticks and by counted steps" {
 
     // One sixteenth forward from a line, and two back from a quarter.
     const sixteenth: Snap.Grid = .{ .div = 16 };
-    try testing.expectEqual(@divExact(TPQ, 4), nudged(&res.map, 0, .{ .steps = .{ .grid = sixteenth, .count = 1 } }));
+    try testing.expectEqual(
+        @divExact(TPQ, 4),
+        nudged(&res.map, 0, .{ .steps = .{ .grid = sixteenth, .count = 1 } }),
+    );
     try testing.expectEqual(
         @divExact(TPQ, 2),
         nudged(&res.map, TPQ, .{ .steps = .{ .grid = sixteenth, .count = -2 } }),
@@ -143,7 +146,10 @@ test "ops_quantize: nudge by ticks and by counted steps" {
         nudged(&res.map, 1000, .{ .steps = .{ .grid = sixteenth, .count = 1 } }),
     );
     // Never before the start of the timeline.
-    try testing.expectEqual(@as(i64, 0), nudged(&res.map, 0, .{ .steps = .{ .grid = sixteenth, .count = -4 } }));
+    try testing.expectEqual(
+        @as(i64, 0),
+        nudged(&res.map, 0, .{ .steps = .{ .grid = sixteenth, .count = -4 } }),
+    );
 }
 
 test "ops_quantize: a bar step crosses a meter change by the bars themselves" {
@@ -161,6 +167,12 @@ test "ops_quantize: a bar step crosses a meter change by the bars themselves" {
     defer res.deinit();
 
     // Bar 2 starts at 8q and bar 3 at 11q under [3 4].
-    try testing.expectEqual(@as(i64, 8 * TPQ), nudged(&res.map, 4 * TPQ, .{ .steps = .{ .grid = .bar, .count = 1 } }));
-    try testing.expectEqual(@as(i64, 11 * TPQ), nudged(&res.map, 8 * TPQ, .{ .steps = .{ .grid = .bar, .count = 1 } }));
+    try testing.expectEqual(
+        @as(i64, 8 * TPQ),
+        nudged(&res.map, 4 * TPQ, .{ .steps = .{ .grid = .bar, .count = 1 } }),
+    );
+    try testing.expectEqual(
+        @as(i64, 11 * TPQ),
+        nudged(&res.map, 8 * TPQ, .{ .steps = .{ .grid = .bar, .count = 1 } }),
+    );
 }

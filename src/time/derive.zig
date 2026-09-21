@@ -809,7 +809,15 @@ test "derive: a native notes lane, its clip expanded by :repeat and :transpose" 
 
     var phrase_notes = [_]value.Note{
         .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 0, .off_vel = null, .span = span },
-        .{ .at = TPQ / 2, .dur = TPQ / 4, .key = 38, .vel = 80, .ch = 0, .off_vel = null, .span = span },
+        .{
+            .at = TPQ / 2,
+            .dur = TPQ / 4,
+            .key = 38,
+            .vel = 80,
+            .ch = 0,
+            .off_vel = null,
+            .span = span,
+        },
     };
     var phrase_lanes = [_]value.Lane{.{
         .name = "flash",
@@ -833,7 +841,15 @@ test "derive: a native notes lane, its clip expanded by :repeat and :transpose" 
 
     var notes = [_]value.Note{
         .{ .at = 0, .dur = TPQ / 2, .key = 36, .vel = 110, .ch = 0, .off_vel = null, .span = span },
-        .{ .at = TPQ, .dur = TPQ / 2, .key = 38, .vel = 90, .ch = 0, .off_vel = null, .span = span },
+        .{
+            .at = TPQ,
+            .dur = TPQ / 2,
+            .key = 38,
+            .vel = 90,
+            .ch = 0,
+            .off_vel = null,
+            .span = span,
+        },
     };
     var clips = [_]value.Clip{.{
         .at = bar44,
@@ -906,11 +922,24 @@ test "derive: an onset carries its note's :ch and :off-vel, through a clip too" 
         .expr_src = null,
         .span = span,
     }};
-    var phrases = [_]value.Phrase{.{ .name = "fill", .length = TPQ, .lanes = &phrase_lanes, .span = span }};
+    var phrases = [_]value.Phrase{.{
+        .name = "fill",
+        .length = TPQ,
+        .lanes = &phrase_lanes,
+        .span = span,
+    }};
 
     var notes = [_]value.Note{
         .{ .at = 0, .dur = TPQ / 2, .key = 36, .vel = 110, .ch = 3, .off_vel = 20, .span = span },
-        .{ .at = TPQ, .dur = TPQ / 2, .key = 60, .vel = 90, .ch = 0, .off_vel = null, .span = span },
+        .{
+            .at = TPQ,
+            .dur = TPQ / 2,
+            .key = 60,
+            .vel = 90,
+            .ch = 0,
+            .off_vel = null,
+            .span = span,
+        },
     };
     var clips = [_]value.Clip{.{
         .at = 2 * TPQ,
@@ -970,7 +999,15 @@ test "derive: a clip's :offset and :length window, content past it not placed" {
 
     var phrase_notes = [_]value.Note{
         .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 0, .off_vel = null, .span = span },
-        .{ .at = TPQ / 2, .dur = TPQ / 4, .key = 38, .vel = 80, .ch = 0, .off_vel = null, .span = span },
+        .{
+            .at = TPQ / 2,
+            .dur = TPQ / 4,
+            .key = 38,
+            .vel = 80,
+            .ch = 0,
+            .off_vel = null,
+            .span = span,
+        },
     };
     var phrase_lanes = [_]value.Lane{.{
         .name = "spark",
@@ -985,7 +1022,12 @@ test "derive: a clip's :offset and :length window, content past it not placed" {
         .expr_src = null,
         .span = span,
     }};
-    var phrases = [_]value.Phrase{.{ .name = "fill", .length = TPQ, .lanes = &phrase_lanes, .span = span }};
+    var phrases = [_]value.Phrase{.{
+        .name = "fill",
+        .length = TPQ,
+        .lanes = &phrase_lanes,
+        .span = span,
+    }};
 
     var clips = [_]value.Clip{.{
         .at = 0,
@@ -1037,7 +1079,13 @@ test "derive: a curve lane's keyframes become steps in tick order" {
 
     var keyframes = [_]value.Keyframe{
         .{ .at = 0, .value = .{ 0.2, 0, 0, 0 }, .ncomp = 1, .ease_src = "hold", .span = span },
-        .{ .at = 4 * TPQ, .value = .{ 0.9, 0, 0, 0 }, .ncomp = 1, .ease_src = "in-cubic", .span = span },
+        .{
+            .at = 4 * TPQ,
+            .value = .{ 0.9, 0, 0, 0 },
+            .ncomp = 1,
+            .ease_src = "in-cubic",
+            .span = span,
+        },
     };
     var lanes = [_]value.Lane{.{
         .name = "glow",
@@ -1082,7 +1130,15 @@ test "derive: the default :length is the last content rounded up to a bar" {
     var meter = [_]tm.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
     const span: Diag.Span = .{ .start = 0, .end = 1 };
     var notes = [_]value.Note{
-        .{ .at = TPQ, .dur = TPQ / 2, .key = 36, .vel = 100, .ch = 0, .off_vel = null, .span = span },
+        .{
+            .at = TPQ,
+            .dur = TPQ / 2,
+            .key = 36,
+            .vel = 100,
+            .ch = 0,
+            .off_vel = null,
+            .span = span,
+        },
     };
     var lanes = [_]value.Lane{.{
         .name = "kick",
@@ -1136,7 +1192,12 @@ test "derive: the default :length counts a clip's whole window" {
         .expr_src = null,
         .span = span,
     }};
-    var phrases = [_]value.Phrase{.{ .name = "fill", .length = 4 * bar44, .lanes = &phrase_lanes, .span = span }};
+    var phrases = [_]value.Phrase{.{
+        .name = "fill",
+        .length = 4 * bar44,
+        .lanes = &phrase_lanes,
+        .span = span,
+    }};
     var clips = [_]value.Clip{.{
         .at = bar44,
         .phrase = "fill",
@@ -1186,7 +1247,15 @@ test "derive.echo: the map, then the sections, the cues and the lanes" {
     };
     var notes = [_]value.Note{
         .{ .at = 0, .dur = TPQ / 2, .key = 36, .vel = 110, .ch = 0, .off_vel = null, .span = span },
-        .{ .at = TPQ, .dur = TPQ / 2, .key = 38, .vel = 90, .ch = 0, .off_vel = null, .span = span },
+        .{
+            .at = TPQ,
+            .dur = TPQ / 2,
+            .key = 38,
+            .vel = 90,
+            .ch = 0,
+            .off_vel = null,
+            .span = span,
+        },
     };
     var lanes = [_]value.Lane{.{
         .name = "flash",
@@ -1540,7 +1609,12 @@ test "derive: an SMF time-signature is the meter map" {
     b.division = .{ .ppq = 960 };
     _ = try b.addTrack();
     // `nn` 3 over `dd` 2, which is 2^2 = 4: three quarter notes to a bar.
-    try b.addEvent(0, 0, .time_signature, .{ .time_sig = .{ .nn = 3, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(
+        0,
+        0,
+        .time_signature,
+        .{ .time_sig = .{ .nn = 3, .dd = 2, .cc = 24, .bb = 8 } },
+    );
     try b.addEvent(0, 2880, .end_of_track, .empty);
     const seq = try b.finish();
 
@@ -1675,7 +1749,9 @@ test "derive: a bound SMF notes lane, paired and converted to the grid" {
         .range = null,
         .binding = .{
             .anchor = "song",
-            .address = .{ .smf = .{ .track = 1, .ch = .single(0), .key = null, .curve = .{ .cc = 74 } } },
+            .address = .{
+                .smf = .{ .track = 1, .ch = .single(0), .key = null, .curve = .{ .cc = 74 } },
+            },
         },
         .notes = &.{},
         .keyframes = &.{},
@@ -1781,7 +1857,15 @@ test "derive: a clip whose repeats overflow the grid places its window and stops
     meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
 
     const phrase_notes = try arena.alloc(value.Note, 1);
-    phrase_notes[0] = .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 0, .off_vel = null, .span = span };
+    phrase_notes[0] = .{
+        .at = 0,
+        .dur = TPQ / 4,
+        .key = 38,
+        .vel = 100,
+        .ch = 0,
+        .off_vel = null,
+        .span = span,
+    };
     const phrase_lanes = try arena.alloc(value.Lane, 1);
     phrase_lanes[0] = .{
         .name = "flash",
@@ -1856,7 +1940,15 @@ test "derive: a clip that would place content past the grid ceiling says so" {
     meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
 
     const phrase_notes = try arena.alloc(value.Note, 1);
-    phrase_notes[0] = .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 0, .off_vel = null, .span = span };
+    phrase_notes[0] = .{
+        .at = 0,
+        .dur = TPQ / 4,
+        .key = 38,
+        .vel = 100,
+        .ch = 0,
+        .off_vel = null,
+        .span = span,
+    };
     const phrase_lanes = try arena.alloc(value.Lane, 1);
     phrase_lanes[0] = .{
         .name = "flash",
@@ -1938,7 +2030,9 @@ test "derive.echo: a cue name's quotes and backslashes are escaped" {
     var buf: [512]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try d.echo(&w);
-    try testing.expect(std.mem.indexOf(u8, w.buffered(), "(cue :name \"say \\\"hi\\\" \\\\ bye\" :at 0)") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, w.buffered(), "(cue :name \"say \\\"hi\\\" \\\\ bye\" :at 0)") != null,
+    );
 }
 
 test "derive: one clip with :repeat, :offset, :length and :transpose at once" {
@@ -1968,8 +2062,24 @@ test "derive: one clip with :repeat, :offset, :length and :transpose at once" {
     meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
 
     const phrase_notes = try arena.alloc(value.Note, 2);
-    phrase_notes[0] = .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 0, .off_vel = null, .span = span };
-    phrase_notes[1] = .{ .at = TPQ / 2, .dur = TPQ / 4, .key = 38, .vel = 80, .ch = 0, .off_vel = null, .span = span };
+    phrase_notes[0] = .{
+        .at = 0,
+        .dur = TPQ / 4,
+        .key = 38,
+        .vel = 100,
+        .ch = 0,
+        .off_vel = null,
+        .span = span,
+    };
+    phrase_notes[1] = .{
+        .at = TPQ / 2,
+        .dur = TPQ / 4,
+        .key = 38,
+        .vel = 80,
+        .ch = 0,
+        .off_vel = null,
+        .span = span,
+    };
     const phrase_lanes = try arena.alloc(value.Lane, 1);
     phrase_lanes[0] = .{
         .name = "flash",
@@ -2180,7 +2290,12 @@ test "derive: an SMF-anchored document's map is the one fromSource built" {
     try b.addEvent(1, 0, .set_tempo, .{ .tempo = 480_000 });
     try b.addEvent(1, 960, .set_tempo, .{ .tempo = 400_000 });
     try b.addEvent(1, 1920, .set_tempo, .{ .tempo = 300_000 });
-    try b.addEvent(0, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(
+        0,
+        0,
+        .time_signature,
+        .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } },
+    );
     try b.addEvent(0, 3840, .end_of_track, .empty);
     try b.addEvent(1, 3840, .end_of_track, .empty);
     var seq = try b.finish();
@@ -2280,7 +2395,12 @@ test "derive: a BY-REFERENCE SMF conductor gives the map its inline twin gives" 
     _ = try b.addTrack();
     try b.addEvent(1, 0, .set_tempo, .{ .tempo = 480_000 });
     try b.addEvent(1, 960, .set_tempo, .{ .tempo = 400_000 });
-    try b.addEvent(0, 0, .time_signature, .{ .time_sig = .{ .nn = 3, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(
+        0,
+        0,
+        .time_signature,
+        .{ .time_sig = .{ .nn = 3, .dd = 2, .cc = 24, .bb = 8 } },
+    );
     try b.addEvent(0, 2880, .end_of_track, .empty);
     try b.addEvent(1, 2880, .end_of_track, .empty);
     var seq = try b.finish();

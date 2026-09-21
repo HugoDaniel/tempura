@@ -579,15 +579,42 @@ fn deriveDoc(gpa: std.mem.Allocator, source: [:0]const u8) !struct {
 test "TprAbi: the magics are four-character codes read little-endian" {
     // A hex dump of any of the three reads left to right, which is the
     // one property a host debugging a blob needs from a magic.
-    try testing.expectEqualStrings("TPDG", &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, DIAGS_MAGIC))));
-    try testing.expectEqualStrings("TPTL", &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, TIMELINE_MAGIC))));
-    try testing.expectEqualStrings("TPPH", &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, PLAYHEAD_MAGIC))));
-    try testing.expectEqualStrings("TSEG", &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, SEGMENTS_SECTION_ID))));
-    try testing.expectEqualStrings("TMET", &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, METERS_SECTION_ID))));
-    try testing.expectEqualStrings("TBAR", &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, BARS_SECTION_ID))));
-    try testing.expectEqualStrings("TSEC", &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, SECTIONS_SECTION_ID))));
-    try testing.expectEqualStrings("TCUE", &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, CUES_SECTION_ID))));
-    try testing.expectEqualStrings("TLAN", &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, LANES_SECTION_ID))));
+    try testing.expectEqualStrings(
+        "TPDG",
+        &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, DIAGS_MAGIC))),
+    );
+    try testing.expectEqualStrings(
+        "TPTL",
+        &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, TIMELINE_MAGIC))),
+    );
+    try testing.expectEqualStrings(
+        "TPPH",
+        &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, PLAYHEAD_MAGIC))),
+    );
+    try testing.expectEqualStrings(
+        "TSEG",
+        &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, SEGMENTS_SECTION_ID))),
+    );
+    try testing.expectEqualStrings(
+        "TMET",
+        &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, METERS_SECTION_ID))),
+    );
+    try testing.expectEqualStrings(
+        "TBAR",
+        &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, BARS_SECTION_ID))),
+    );
+    try testing.expectEqualStrings(
+        "TSEC",
+        &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, SECTIONS_SECTION_ID))),
+    );
+    try testing.expectEqualStrings(
+        "TCUE",
+        &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, CUES_SECTION_ID))),
+    );
+    try testing.expectEqualStrings(
+        "TLAN",
+        &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, LANES_SECTION_ID))),
+    );
 }
 
 test "TprAbi: 'TPTL' — the header, then the six sections in emission order" {
@@ -633,7 +660,10 @@ test "TprAbi: 'TPTL' — the header, then the six sections in emission order" {
 
     const bars = walked.find(BARS_SECTION_ID).?;
     try testing.expectEqual(BARS_PAYLOAD_LEN, bars.len);
-    try testing.expectEqual(@as(u32, @intCast(d.map.bars.len)), std.mem.readInt(u32, bars[0..4], .little));
+    try testing.expectEqual(
+        @as(u32, @intCast(d.map.bars.len)),
+        std.mem.readInt(u32, bars[0..4], .little),
+    );
     try testing.expectEqual(
         d.map.bars[d.map.bars.len - 1],
         std.mem.readInt(i64, bars[8..16], .little),
@@ -652,8 +682,14 @@ test "TprAbi: 'TPTL' — the header, then the six sections in emission order" {
     try testing.expectEqual(@intFromEnum(Doc.LaneKind.notes), lanes[4]);
     try testing.expectEqual(@as(u8, 0), lanes[5]); // not bound
     try testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, lanes[8..12], .little));
-    try testing.expectEqual(d.lanes[0].onsets[0].tick, std.mem.readInt(i64, lanes[16..24], .little));
-    try testing.expectEqual(d.lanes[0].onsets[1].tick, std.mem.readInt(i64, lanes[24..32], .little));
+    try testing.expectEqual(
+        d.lanes[0].onsets[0].tick,
+        std.mem.readInt(i64, lanes[16..24], .little),
+    );
+    try testing.expectEqual(
+        d.lanes[0].onsets[1].tick,
+        std.mem.readInt(i64, lanes[24..32], .little),
+    );
     try testing.expectEqualStrings("flash", lanes[4 + LANE_REC_LEN ..][0..5]);
 }
 
@@ -736,7 +772,10 @@ test "TprAbi: 'TPPH' — a refused clock carries the guard and nothing else" {
     try testing.expectEqual(@as(u8, 0), blob[48]);
     try testing.expectEqual(Refusal.tick_overflow, Refusal.of(error.TickOverflow));
     try testing.expectEqual(Refusal.non_finite_time, Refusal.of(error.NonFiniteTime));
-    try testing.expectError(error.BufferTooSmall, encodeRefusal(.tick_overflow, buf[0 .. PLAYHEAD_LEN - 1]));
+    try testing.expectError(
+        error.BufferTooSmall,
+        encodeRefusal(.tick_overflow, buf[0 .. PLAYHEAD_LEN - 1]),
+    );
 }
 
 test "TprAbi: 'TPDG' — pacer's layout, tempura's codes, three severities" {
@@ -746,7 +785,13 @@ test "TprAbi: 'TPDG' — pacer's layout, tempura's codes, three severities" {
     try load_diags.add(.anchor_unavailable, .err, .{ .start = 7, .end = 19 }, "no resolver", .{});
     var derive_diags: Diag.List = .init(gpa);
     defer derive_diags.deinit();
-    try derive_diags.add(.tick_overflow, .warning, .{ .start = 0, .end = 0 }, "past the ceiling", .{});
+    try derive_diags.add(
+        .tick_overflow,
+        .warning,
+        .{ .start = 0, .end = 0 },
+        "past the ceiling",
+        .{},
+    );
     try derive_diags.add(.smpte_tempo_ignored, .info, .{ .start = 1, .end = 2 }, "smpte", .{});
 
     const sources = [_]DiagSource{

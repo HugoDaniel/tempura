@@ -227,11 +227,15 @@ fn place(
         // destinations should be told that, not told something about its
         // anchors.
         if (ctx.cmd.out != null) {
-            try ctx.err.writeAll("tempura: --in-place and -o name two different destinations; pick one\n");
+            try ctx.err.writeAll(
+                "tempura: --in-place and -o name two different destinations; pick one\n",
+            );
             return Cli.Exit.usage;
         }
         const dest = anchor_path orelse {
-            try ctx.err.writeAll("tempura: --in-place needs a document with an anchor to write back onto\n");
+            try ctx.err.writeAll(
+                "tempura: --in-place needs a document with an anchor to write back onto\n",
+            );
             return Cli.Exit.usage;
         };
         return if (try writeThroughTemp(ctx, dest, bytes)) Cli.Exit.ok else Cli.Exit.usage;
@@ -248,7 +252,8 @@ fn place(
             if (!samePath(ctx.arena, out, path)) continue;
             if (tier_anchor != null and std.mem.eql(u8, a.id, tier_anchor.?)) {
                 try ctx.err.print(
-                    "tempura: {s} is this document's anchor; building onto it is --in-place only (plan 06)\n",
+                    "tempura: {s} is this document's anchor; building onto it is --in-place " ++
+                        "only (plan 06)\n",
                     .{out},
                 );
             } else {
@@ -428,7 +433,9 @@ test "build --ppq: an inexact rescale is refused, and --round accepts it" {
     defer s.deinit();
 
     // 96 → 7 pulses per quarter cannot land tick 127 exactly.
-    var strict = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "mid", "--ppq", "7", "--no-residue" });
+    var strict = try Cli.invoke(
+        &.{ "tempura", "build", s.doc, "--kind", "mid", "--ppq", "7", "--no-residue" },
+    );
     defer strict.deinit();
     try t.expectEqual(Cli.Exit.errors, strict.code);
     try t.expectEqualStrings("", strict.out.written());
@@ -442,7 +449,9 @@ test "build --format 0: the tracks merge into one" {
     var s = try Scratch.init("corpus/skeleton-smf/song.mid", "song.mid");
     defer s.deinit();
 
-    var one = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "mid", "--format", "0", "--no-residue" });
+    var one = try Cli.invoke(
+        &.{ "tempura", "build", s.doc, "--kind", "mid", "--format", "0", "--no-residue" },
+    );
     defer one.deinit();
     try t.expectEqual(Cli.Exit.ok, one.code);
     // The header's `format` word is bytes 8..10 and `ntrks` 10..12.
@@ -532,7 +541,10 @@ test "build: --in-place replaces the anchor through a temp that never survives" 
     defer a.free(after);
     try t.expect(std.mem.startsWith(u8, after, "IMPM"));
     // The temporary is gone, whatever happened.
-    try t.expectError(error.FileNotFound, s.tmp.dir.access(std.testing.io, "song.it.tempura-tmp", .{}));
+    try t.expectError(
+        error.FileNotFound,
+        s.tmp.dir.access(std.testing.io, "song.it.tempura-tmp", .{}),
+    );
 }
 
 test "build: --in-place and -o together name two destinations and are refused" {
@@ -542,7 +554,9 @@ test "build: --in-place and -o together name two destinations and are refused" {
     const out = try std.fmt.allocPrintSentinel(a, "{s}/out.it", .{s.dir}, 0);
     defer a.free(out);
 
-    var c = try Cli.invoke(&.{ "tempura", "build", s.doc, "--in-place", "-o", out, "--no-residue" });
+    var c = try Cli.invoke(
+        &.{ "tempura", "build", s.doc, "--in-place", "-o", out, "--no-residue" },
+    );
     defer c.deinit();
     try t.expectEqual(Cli.Exit.usage, c.code);
 }
@@ -669,7 +683,9 @@ test "build --in-place: the destination is the WRITTEN tier's anchor, not anchor
     const mid_before = try s.read("song.mid");
     defer a.free(mid_before);
 
-    var c = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "it", "--in-place", "--no-residue" });
+    var c = try Cli.invoke(
+        &.{ "tempura", "build", s.doc, "--kind", "it", "--in-place", "--no-residue" },
+    );
     defer c.deinit();
     try t.expectEqual(Cli.Exit.ok, c.code);
     try t.expectEqualStrings("", c.out.written());
@@ -691,14 +707,18 @@ test "build: -o naming either anchor is refused, and each refusal says which" {
     defer s.deinit();
 
     // The written tier's own anchor: the `--in-place` sentence.
-    var own = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "it", "-o", s.it, "--no-residue" });
+    var own = try Cli.invoke(
+        &.{ "tempura", "build", s.doc, "--kind", "it", "-o", s.it, "--no-residue" },
+    );
     defer own.deinit();
     try t.expectEqual(Cli.Exit.usage, own.code);
     try t.expect(std.mem.indexOf(u8, own.err.written(), "--in-place") != null);
 
     // The OTHER anchor's file, which this build is not writing: still
     // refused, because the toolchain never mutates an anchor.
-    var other = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "it", "-o", s.mid, "--no-residue" });
+    var other = try Cli.invoke(
+        &.{ "tempura", "build", s.doc, "--kind", "it", "-o", s.mid, "--no-residue" },
+    );
     defer other.deinit();
     try t.expectEqual(Cli.Exit.usage, other.code);
     try t.expect(std.mem.indexOf(u8, other.err.written(), "song") != null);
@@ -722,7 +742,9 @@ test "build: a flag that shapes the other format is refused, never ignored" {
     defer s.deinit();
 
     inline for (.{ "--ppq", "--format", "--cc" }) |flag| {
-        var c = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "it", flag, "0", "--no-residue" });
+        var c = try Cli.invoke(
+            &.{ "tempura", "build", s.doc, "--kind", "it", flag, "0", "--no-residue" },
+        );
         defer c.deinit();
         try t.expectEqual(Cli.Exit.usage, c.code);
         try t.expectEqualStrings("", c.out.written());
@@ -730,7 +752,9 @@ test "build: a flag that shapes the other format is refused, never ignored" {
         try t.expect(std.mem.indexOf(u8, c.err.written(), ".mid") != null);
     }
     inline for (.{ "--round", "--no-running-status" }) |flag| {
-        var c = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "it", flag, "--no-residue" });
+        var c = try Cli.invoke(
+            &.{ "tempura", "build", s.doc, "--kind", "it", flag, "--no-residue" },
+        );
         defer c.deinit();
         try t.expectEqual(Cli.Exit.usage, c.code);
         try t.expect(std.mem.indexOf(u8, c.err.written(), flag) != null);
@@ -738,7 +762,9 @@ test "build: a flag that shapes the other format is refused, never ignored" {
 
     var mid = try Scratch.init("corpus/skeleton-smf/song.mid", "song.mid");
     defer mid.deinit();
-    var c = try Cli.invoke(&.{ "tempura", "build", mid.doc, "--kind", "mid", "--loose", "--no-residue" });
+    var c = try Cli.invoke(
+        &.{ "tempura", "build", mid.doc, "--kind", "mid", "--loose", "--no-residue" },
+    );
     defer c.deinit();
     try t.expectEqual(Cli.Exit.usage, c.code);
     try t.expect(std.mem.indexOf(u8, c.err.written(), "--loose") != null);

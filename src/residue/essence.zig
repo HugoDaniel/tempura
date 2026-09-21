@@ -195,7 +195,9 @@ pub fn packFor(
                 .residue_unencodable,
                 .err,
                 .{ .start = 0, .end = 0 },
-                "the timeline tier is past SJON's Binary IR limits ({t}; see LANGUAGE.md §10.6), so no essence was packed and this file would carry nothing the format cannot say itself",
+                "the timeline tier is past SJON's Binary IR limits ({t}; see LANGUAGE.md " ++
+                    "§10.6), so no essence was packed and this file would carry nothing the " ++
+                    "format cannot say itself",
                 .{err},
             );
             return .{ .bytes = try gpa.alloc(u8, 0), .diags = diags };
@@ -492,7 +494,9 @@ test "essence: the file tiers are not in it, and the anchor's dump goes with the
     // The marker: `:id` and `:kind` as authored, `:file` the file itself,
     // and neither the path nor the size nor the digest of a file that is
     // about to change under both.
-    try testing.expect(std.mem.indexOf(u8, got.ok.text, "(anchor :id song :kind it :file \"self\")") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, got.ok.text, "(anchor :id song :kind it :file \"self\")") != null,
+    );
     try testing.expect(std.mem.indexOf(u8, got.ok.text, "impulse-04.it") == null);
     try testing.expect(std.mem.indexOf(u8, got.ok.text, ":size") == null);
 }
@@ -508,8 +512,28 @@ test "essence: a document with no carrying anchor keeps every anchor as written"
     var doc: Doc.Doc = .empty(gpa);
     defer doc.deinit();
     var anchors = [_]Doc.Anchor{
-        .{ .id = "a", .kind = .smf, .file = "one.mid", .size = null, .sha256 = null, .sha256_src = null, .inline_dump = false, .resolved = false, .span = .{ .start = 0, .end = 1 } },
-        .{ .id = "b", .kind = .smf, .file = "two.mid", .size = null, .sha256 = null, .sha256_src = null, .inline_dump = false, .resolved = false, .span = .{ .start = 0, .end = 1 } },
+        .{
+            .id = "a",
+            .kind = .smf,
+            .file = "one.mid",
+            .size = null,
+            .sha256 = null,
+            .sha256_src = null,
+            .inline_dump = false,
+            .resolved = false,
+            .span = .{ .start = 0, .end = 1 },
+        },
+        .{
+            .id = "b",
+            .kind = .smf,
+            .file = "two.mid",
+            .size = null,
+            .sha256 = null,
+            .sha256_src = null,
+            .inline_dump = false,
+            .resolved = false,
+            .span = .{ .start = 0, .end = 1 },
+        },
     };
     doc.anchors = &anchors;
 
@@ -531,7 +555,9 @@ test "essence: a document with no carrying anchor keeps every anchor as written"
     defer got_b.deinit(gpa);
     try testing.expect(std.mem.indexOf(u8, got_b.ok.text, "one.mid") != null);
     try testing.expect(std.mem.indexOf(u8, got_b.ok.text, "two.mid") == null);
-    try testing.expect(std.mem.indexOf(u8, got_b.ok.text, "(anchor :id b :kind smf :file \"self\")") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, got_b.ok.text, "(anchor :id b :kind smf :file \"self\")") != null,
+    );
 }
 
 test "essence: a newer wire version is kept opaque, and rubbish is residue_corrupt" {

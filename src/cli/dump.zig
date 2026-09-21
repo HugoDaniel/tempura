@@ -111,7 +111,10 @@ fn spansBlock(ctx: *const Cli.Ctx, kind: Args.Kind, bytes: []const u8) Cli.Error
             for (res.source_map.tracks, res.sequence.tracks, 0..) |tm, tr, ti| {
                 for (tm.events, tr.events, 0..) |site, ev, ei| {
                     try w.print(";   track {d} event {d}  at 0x{X:0>8}  tick {d}  {s}{s}\n", .{
-                        ti + 1,                                              ei, site.offset, ev.at, @tagName(ev.kind),
+                        ti + 1,                                              ei, site.offset, ev.at,
+                        @tagName(
+                            ev.kind,
+                        ),
                         if (site.running_status) "  running-status" else "",
                     });
                 }
@@ -185,7 +188,8 @@ const t = std.testing;
 // ---------------------------------------------------------------------------
 
 test "spliceAt: the block goes in at the byte it was given, and a cut past the end appends" {
-    const text = "(timeline :conductor song)\n\n(anchor :id song :kind it :file \"x.it\")\n(it/module)\n";
+    const text = "(timeline :conductor song)\n\n(anchor :id song :kind it :file \"x.it\")\n" ++
+        "(it/module)\n";
     var out: Writer.Allocating = .init(t.allocator);
     defer out.deinit();
     try spliceAt(&out.writer, text, std.mem.indexOf(u8, text, "(it/module").?, "; spans\n");
@@ -263,7 +267,9 @@ test "dump: an SMF with no residue derives its tier and says so on the first lin
     const text = c.out.written();
     try t.expect(std.mem.startsWith(u8, text, "; skeleton: derived, no residue found\n"));
     try t.expect(std.mem.indexOf(u8, text, ":conductor song") != null);
-    try t.expect(std.mem.indexOf(u8, text, "(anchor :id song :kind smf :file \"song.mid\" :size ") != null);
+    try t.expect(
+        std.mem.indexOf(u8, text, "(anchor :id song :kind smf :file \"song.mid\" :size ") != null,
+    );
     try t.expect(std.mem.indexOf(u8, text, "(midi/smf ") != null);
     // Rule 1's derived tier: a bound lane per address the file uses.
     try t.expect(std.mem.indexOf(u8, text, ":from song") != null);
@@ -294,7 +300,9 @@ test "dump: a file that carries a residue comes back as the document that was wr
     try t.expectEqual(Cli.Exit.ok, d.code);
     try t.expect(std.mem.indexOf(u8, d.out.written(), "; skeleton:") == null);
     // The document's own first line, restored verbatim.
-    try t.expect(std.mem.indexOf(u8, d.out.written(), "; The three-segment map of plan 03") != null);
+    try t.expect(
+        std.mem.indexOf(u8, d.out.written(), "; The three-segment map of plan 03") != null,
+    );
 }
 
 test "dump: an IT becomes a document, and --patterns=bin swaps rows for a ref" {
@@ -328,8 +336,13 @@ test "dump --spans: the reader's offsets ride as comments, and nothing else move
     defer spans.deinit();
 
     try t.expect(std.mem.indexOf(u8, plain.out.written(), "; spans:") == null);
-    try t.expect(std.mem.indexOf(u8, spans.out.written(), "; spans: the reader's byte offsets into \"song.mid\"") != null);
-    try t.expect(std.mem.indexOf(u8, spans.out.written(), ";   chunk 0  MThd  at 0x00000000") != null);
+    try t.expect(
+        std.mem.indexOf(u8, spans.out.written(), "; spans: the reader's byte offsets into " ++
+            "\"song.mid\"") != null,
+    );
+    try t.expect(
+        std.mem.indexOf(u8, spans.out.written(), ";   chunk 0  MThd  at 0x00000000") != null,
+    );
     try t.expect(std.mem.indexOf(u8, spans.out.written(), "running-status") != null);
     // Every line of the plain dump is still in the annotated one.
     try t.expect(spans.out.written().len > plain.out.written().len);
@@ -363,7 +376,12 @@ test "dump: the document it produces validates, which is the round trip" {
     defer a.free(bytes);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "song.it", .data = bytes });
 
-    const dest = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/doc.sjon", .{tmp.sub_path}, 0);
+    const dest = try std.fmt.allocPrintSentinel(
+        a,
+        ".zig-cache/tmp/{s}/doc.sjon",
+        .{tmp.sub_path},
+        0,
+    );
     defer a.free(dest);
 
     var d = try Cli.invoke(&.{ "tempura", "dump", src, "-o", dest });

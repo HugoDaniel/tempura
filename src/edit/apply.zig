@@ -104,7 +104,12 @@ pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Er
         values.appendAssumeCapacity(one.value);
     }
 
-    const edited = sjon.Edit.applyEdits(gpa, text, values.items, .{ .layout = .preserve }) catch |e| switch (e) {
+    const edited = sjon.Edit.applyEdits(
+        gpa,
+        text,
+        values.items,
+        .{ .layout = .preserve },
+    ) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             try diags.add(
@@ -114,12 +119,20 @@ pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Er
                 "SJON refused the edit: {s}",
                 .{@errorName(e)},
             );
-            return .{ .text = try arena.allocator().dupeZ(u8, text), .diags = diags, .arena = arena };
+            return .{
+                .text = try arena.allocator().dupeZ(u8, text),
+                .diags = diags,
+                .arena = arena,
+            };
         },
     };
     defer edited.deinit();
 
-    return .{ .text = try arena.allocator().dupeZ(u8, edited.data), .diags = diags, .arena = arena };
+    return .{
+        .text = try arena.allocator().dupeZ(u8, edited.data),
+        .diags = diags,
+        .arena = arena,
+    };
 }
 
 /// Which pass an action belongs to. The order is the contract above.
@@ -220,7 +233,12 @@ test "apply: removals run right to left and inserts land after them" {
     // Planned in document order, applied in the order that keeps each
     // address valid: the insert first in the list, the two removals
     // right to left before it.
-    try b.insertPositional(lane, 1, "{\"$form\":\"note\",\"at\":{\"$num\":[4,\"q\"]},\"dur\":{\"$num\":[0.5,\"q\"]},\"key\":64}");
+    try b.insertPositional(
+        lane,
+        1,
+        "{\"$form\":\"note\",\"at\":{\"$num\":[4,\"q\"]}," ++
+            "\"dur\":{\"$num\":[0.5,\"q\"]},\"key\":64}",
+    );
     try b.removePositional(lane, 0);
     try b.removePositional(lane, 1);
 

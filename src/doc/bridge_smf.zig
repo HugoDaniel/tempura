@@ -535,13 +535,18 @@ const Reader = struct {
         for (children) |child| {
             if (self.tree.tagOf(child) != .form) continue;
             const kind = kindOfHead(self.tree.formHeader(child).head) orelse continue;
-            const at = castInt(i64, kvNumber(self.tree, self.tree.formHeader(child).children, "at"), 0);
+            const at = castInt(
+                i64,
+                kvNumber(self.tree, self.tree.formHeader(child).children, "at"),
+                0,
+            );
 
             if (count > 0 and at < last_at) try self.diags.add(
                 .at_not_monotone,
                 .err,
                 spanOf(self.tree, child),
-                "this event sits at tick {d}, behind the {d} before it; a track's ticks never step back",
+                "this event sits at tick {d}, behind the {d} before it; a track's ticks never " ++
+                    "step back",
                 .{ at, last_at },
             );
             // An end-of-track that is not the last event: the one the
@@ -622,7 +627,9 @@ const Reader = struct {
     /// carries.
     fn textBytes(self: *Reader, children: []const NodeIndex) Error!smf.Bytes {
         if (kvNode(self.tree, children, "text")) |node| {
-            if (self.tree.tagOf(node) == .string) return self.b.addBytes(self.tree.stringText(node));
+            if (self.tree.tagOf(
+                node,
+            ) == .string) return self.b.addBytes(self.tree.stringText(node));
         }
         return self.hexBytes(children, "bytes");
     }
@@ -727,7 +734,11 @@ fn sniffSequencerSpecific(raw: []const u8, run: smf.Bytes) struct { smf.Payload,
         .total = raw[7],
         .body = .{ .off = run.off + 8, .len = run.len - 8 },
     } }, .tempura_residue };
-    if (raw.len >= 4 and std.mem.eql(u8, raw[0..4], "\x7Dpau")) return .{ .{ .bytes = run }, .ease_hint };
+    if (raw.len >= 4 and std.mem.eql(
+        u8,
+        raw[0..4],
+        "\x7Dpau",
+    )) return .{ .{ .bytes = run }, .ease_hint };
     return .{ .{ .bytes = run }, .sequencer_specific };
 }
 
@@ -1240,7 +1251,12 @@ test "bridge_smf: formsToSequence ∘ sequenceToForms is event-identical" {
         try b.addEvent(t0, 0, .device_name, .{ .bytes = try b.addBytes("port A") });
         try b.addEvent(t0, 0, .midi_channel_prefix, .{ .byte = 3 });
         try b.addEvent(t0, 0, .midi_port, .{ .byte = 200 });
-        try b.addEvent(t0, 0, .smpte_offset, .{ .smpte = .{ .hr = 1, .mn = 2, .se = 3, .fr = 4, .ff = 5 } });
+        try b.addEvent(
+            t0,
+            0,
+            .smpte_offset,
+            .{ .smpte = .{ .hr = 1, .mn = 2, .se = 3, .fr = 4, .ff = 5 } },
+        );
         try b.addEvent(t0, 0, .key_signature, .{ .key_sig = .{ .sf = -3, .mi = 1 } });
         try b.addEvent(t0, 0, .meta_unknown, .{ .meta = .{
             .bytes = try b.addBytes(&[_]u8{ 0xDE, 0xAD }),
@@ -1252,7 +1268,12 @@ test "bridge_smf: formsToSequence ∘ sequenceToForms is event-identical" {
         try b.addEvent(t0, 4, .poly_pressure, .{ .poly = .{ .ch = 0, .key = 60, .val = 40 } });
         try b.addEvent(t0, 4, .channel_pressure, .{ .pressure = .{ .ch = 15, .val = 90 } });
         try b.addEvent(t0, 8, .escape, .{ .bytes = try b.addBytes(&[_]u8{ 0xF7, 0x01 }) });
-        try b.addEvent(t0, 8, .sequencer_specific, .{ .bytes = try b.addBytes(&[_]u8{ 0x43, 0x01 }) });
+        try b.addEvent(
+            t0,
+            8,
+            .sequencer_specific,
+            .{ .bytes = try b.addBytes(&[_]u8{ 0x43, 0x01 }) },
+        );
         try b.addEvent(t0, 96, .end_of_track, .empty);
         break :built try b.finish();
     };
@@ -1752,7 +1773,12 @@ test "bridge_smf: every spelling the printer writes validates against schema/mid
         try b.addEvent(t, 0, .device_name, .{ .bytes = try b.addBytes("port") });
         try b.addEvent(t, 0, .midi_channel_prefix, .{ .byte = 3 });
         try b.addEvent(t, 0, .midi_port, .{ .byte = 200 });
-        try b.addEvent(t, 0, .smpte_offset, .{ .smpte = .{ .hr = 1, .mn = 2, .se = 3, .fr = 4, .ff = 5 } });
+        try b.addEvent(
+            t,
+            0,
+            .smpte_offset,
+            .{ .smpte = .{ .hr = 1, .mn = 2, .se = 3, .fr = 4, .ff = 5 } },
+        );
         try b.addEvent(t, 0, .key_signature, .{ .key_sig = .{ .sf = -3, .mi = 1 } });
         try b.addEvent(t, 0, .meta_unknown, .{ .meta = .{
             .bytes = try b.addBytes(&[_]u8{ 0xDE, 0xAD }),
@@ -1762,8 +1788,18 @@ test "bridge_smf: every spelling the printer writes validates against schema/mid
         try b.addEvent(t, 1, .poly_pressure, .{ .poly = .{ .ch = 0, .key = 60, .val = 40 } });
         try b.addEvent(t, 1, .channel_pressure, .{ .pressure = .{ .ch = 15, .val = 90 } });
         try b.addEvent(t, 1, .escape, .{ .bytes = try b.addBytes(&[_]u8{ 0xF7, 0x01 }) });
-        try b.addEvent(t, 1, .sequencer_specific, .{ .bytes = try b.addBytes(&[_]u8{ 0x43, 0x01 }) });
-        try b.addEvent(t, 2, .time_signature, .{ .time_sig = .{ .nn = 7, .dd = 3, .cc = 24, .bb = 8 } });
+        try b.addEvent(
+            t,
+            1,
+            .sequencer_specific,
+            .{ .bytes = try b.addBytes(&[_]u8{ 0x43, 0x01 }) },
+        );
+        try b.addEvent(
+            t,
+            2,
+            .time_signature,
+            .{ .time_sig = .{ .nn = 7, .dd = 3, .cc = 24, .bb = 8 } },
+        );
         try b.addEvent(t, 96, .end_of_track, .empty);
         break :seq try b.finish();
     };

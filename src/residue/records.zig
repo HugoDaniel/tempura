@@ -58,11 +58,16 @@
 //! | --- | --- | --- | --- |
 //! | 0 | 1 | `0` | `1` |
 //! | 1 | 2 | `track` u16, 1-based file order | `channel` u8 at +1, then a 0 |
-//! | 3 | 1 | `ch`, 0-based — ONE channel; a lane rendered on several writes one record each | `column` (`FF` none, else `vol` 0 / `pan` 1 / `fx` 2) |
+//! | 3 | 1 | `ch`, 0-based, ONE channel (¹) | `column` (²) |
 //! | 4 | 1 | `key` (`FF` none) | `fx` letter, ASCII, 0 none |
-//! | 5 | 1 | `curve` (`FF` none, else `cc` 0 / `cc14` 1 / `bend` 2 / `pressure` 3 / `velocity` 4) | 0 |
+//! | 5 | 1 | `curve` (³) | 0 |
 //! | 6 | 1 | the `cc` number, or the MSB of a `cc14` pair | 0 |
 //! | 7 | 1 | the LSB of a `cc14` pair | 0 |
+//!
+//! (¹) a lane rendered on several channels writes one record each.
+//! (²) `FF` none, else `vol` 0 / `pan` 1 / `fx` 2.
+//! (³) `FF` none, else `cc` 0 / `cc14` 1 / `bend` 2 / `pressure` 3 /
+//! `velocity` 4.
 //!
 //! # The hashes
 //!
@@ -328,7 +333,8 @@ pub fn reassemble(gpa: Allocator, parts: []const Part, diags: *Diag.List) Error!
             .residue_corrupt,
             .warning,
             .{ .start = 0, .end = 0 },
-            "the essence rides in {d} of {d} parts; a split body is all or none, so none of it was used",
+            "the essence rides in {d} of {d} parts; a split body is all or none, so none of it " ++
+                "was used",
             .{ parts.len, total },
         );
         return null;
@@ -524,7 +530,9 @@ fn decodeAddress(b: [8]u8) ?Doc.Address {
     switch (b[0]) {
         0 => {
             if (b[3] > 15) return null;
-            const key: ?u7 = if (b[4] == 0xFF) null else if (b[4] <= 127) @intCast(b[4]) else return null;
+            const key: ?u7 = if (b[4] == 0xFF) null else if (b[4] <= 127) @intCast(
+                b[4],
+            ) else return null;
             const curve: ?Doc.SmfCurve = switch (b[5]) {
                 0xFF => null,
                 0 => if (b[6] <= 127) .{ .cc = @intCast(b[6]) } else return null,
@@ -858,7 +866,12 @@ fn smfFixture(gpa: Allocator, f: Fix) !Sequence.Sequence {
 
     const t0 = try b.addTrack();
     try b.addEvent(t0, 0, .set_tempo, .{ .tempo = f.tempo });
-    try b.addEvent(t0, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(
+        t0,
+        0,
+        .time_signature,
+        .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } },
+    );
     try b.addEvent(t0, 96 * f.scale, .marker, .{ .bytes = try b.addBytes(f.marker) });
     try b.addEvent(t0, 192 * f.scale, .cue_point, .{ .bytes = try b.addBytes("bar 2") });
     try b.addEvent(t0, 384 * f.scale, .end_of_track, .empty);
@@ -1069,7 +1082,14 @@ test "records: a lane record round-trips through its body, and rubbish is residu
     };
     const rec: LaneRecord = .{
         .lane = "bass-vol",
-        .address = .{ .smf = .{ .track = 3, .ch = .single(5), .key = null, .curve = .{ .cc14 = .{ 74, 106 } } } },
+        .address = .{
+            .smf = .{
+                .track = 3,
+                .ch = .single(5),
+                .key = null,
+                .curve = .{ .cc14 = .{ 74, 106 } },
+            },
+        },
         .hash = @splat(0xAB),
         .steps_only = &segments,
     };
@@ -1113,7 +1133,14 @@ test "records: a lane record round-trips through its body, and rubbish is residu
     // "the lowest of them", said the same way every time.
     const set_rec: LaneRecord = .{
         .lane = "kit",
-        .address = .{ .smf = .{ .track = 2, .ch = Doc.Channels.single(9).with(3), .key = null, .curve = null } },
+        .address = .{
+            .smf = .{
+                .track = 2,
+                .ch = Doc.Channels.single(9).with(3),
+                .key = null,
+                .curve = null,
+            },
+        },
         .hash = @splat(1),
     };
     const set_body = try encodeLane(gpa, set_rec);
@@ -1193,7 +1220,11 @@ test "records: the envelope is 7D 74 65 6D ver kind seq total" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    try writeHead(&out, gpa, .{ .kind = @intFromEnum(Kind.essence), .seq = 2, .total = 5, .body = &.{} });
+    try writeHead(
+        &out,
+        gpa,
+        .{ .kind = @intFromEnum(Kind.essence), .seq = 2, .total = 5, .body = &.{} },
+    );
     try testing.expectEqualSlices(u8, &[_]u8{ 0x7D, 0x74, 0x65, 0x6D, 1, 1, 2, 5 }, out.items);
 
     const back = readHead(out.items).?;

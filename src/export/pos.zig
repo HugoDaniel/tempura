@@ -143,7 +143,9 @@ pub const Counter = struct {
     /// cost. The beats-mode position path; `Mapper` owns the other.
     pub fn convert(self: *Counter, tick: i64, n: u8, d: u8) i64 {
         const res = pacerTick(tick, n, d);
-        if (!res.exact) self.notePosition(errorInBeats(tick - res.tick * Grid.pacerDivisor(n, d).?, d));
+        if (!res.exact) self.notePosition(
+            errorInBeats(tick - res.tick * Grid.pacerDivisor(n, d).?, d),
+        );
         return res.tick;
     }
 
@@ -414,7 +416,10 @@ fn firstAtOrAbove(target: i64, rate: f64) i128 {
     else
         0;
     var steps: usize = 0;
-    while (m > 0 and pacerFloor(@floatFromInt(m - 1), rate) >= target and steps < 64) : (steps += 1) m -= 1;
+    while (m > 0 and pacerFloor(
+        @floatFromInt(m - 1),
+        rate,
+    ) >= target and steps < 64) : (steps += 1) m -= 1;
     steps = 0;
     while (pacerFloor(@floatFromInt(m), rate) < target and steps < 64) : (steps += 1) m += 1;
     return m;

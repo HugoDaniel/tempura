@@ -159,7 +159,9 @@ const Deriver = struct {
                     const c = e.payload.control;
                     if (c.ch < 16 and c.num < 128) cc[@as(usize, c.ch) * 128 + c.num].saw(c.val);
                 },
-                .pitch_bend => if (e.payload.bend.ch < 16) bend[e.payload.bend.ch].saw(e.payload.bend.value),
+                .pitch_bend => if (e.payload.bend.ch < 16) bend[e.payload.bend.ch].saw(
+                    e.payload.bend.value,
+                ),
                 .channel_pressure => if (e.payload.pressure.ch < 16) {
                     pressure[e.payload.pressure.ch].saw(e.payload.pressure.val);
                 },

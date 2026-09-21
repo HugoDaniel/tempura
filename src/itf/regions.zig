@@ -192,10 +192,18 @@ test "regions.sampleExtent: plain PCM is frames × bytes-per-frame × channels" 
     try testing.expect(!mono8.truncated);
 
     // Split stereo (left block then right) is the same total.
-    const stereo16 = sampleExtent(&bytes, 0, .{ .frames = 10, .bits = 16, .channels = 2, .enc = .pcm });
+    const stereo16 = sampleExtent(
+        &bytes,
+        0,
+        .{ .frames = 10, .bits = 16, .channels = 2, .enc = .pcm },
+    );
     try testing.expectEqual(Region{ .off = 0, .len = 40 }, stereo16.region);
 
-    const nothing = sampleExtent(&bytes, 4, .{ .frames = 0, .bits = 8, .channels = 1, .enc = .pcm });
+    const nothing = sampleExtent(
+        &bytes,
+        4,
+        .{ .frames = 0, .bits = 8, .channels = 1, .enc = .pcm },
+    );
     try testing.expectEqual(Region{ .off = 4, .len = 0 }, nothing.region);
 }
 
@@ -217,7 +225,11 @@ test "regions.sampleExtent: a compressed sample is its walked block stream" {
     std.mem.writeInt(u16, bytes[4..6], 5, .little);
     std.mem.writeInt(u16, bytes[11..13], 3, .little);
 
-    const e = sampleExtent(&bytes, 4, .{ .frames = 40000, .bits = 8, .channels = 1, .enc = .it214 });
+    const e = sampleExtent(
+        &bytes,
+        4,
+        .{ .frames = 40000, .bits = 8, .channels = 1, .enc = .it214 },
+    );
     try testing.expectEqual(Region{ .off = 4, .len = 12 }, e.region);
     try testing.expect(!e.truncated);
 
@@ -294,8 +306,14 @@ test "regions.midiConfig: embedded on Special b3 or Flags b7, omitted when defau
     // block is there, the module records nothing, and the bytes are
     // still spoken for.
     const whole: Region = .{ .off = 40, .len = 4896 };
-    try testing.expectEqual(MidiConfig{ .default_table = whole }, midiConfig(&bytes, 40, 0, model.special.midi_config));
-    try testing.expectEqual(MidiConfig{ .default_table = whole }, midiConfig(&bytes, 40, model.flag.embed_midi, 0));
+    try testing.expectEqual(
+        MidiConfig{ .default_table = whole },
+        midiConfig(&bytes, 40, 0, model.special.midi_config),
+    );
+    try testing.expectEqual(
+        MidiConfig{ .default_table = whole },
+        midiConfig(&bytes, 40, model.flag.embed_midi, 0),
+    );
     try testing.expectEqual(MidiConfig.absent, midiConfig(&bytes, 40, 0, 0));
 
     bytes[40 + 17] = 'F';
@@ -305,5 +323,8 @@ test "regions.midiConfig: embedded on Special b3 or Flags b7, omitted when defau
     );
 
     // Flagged but not there: truncated, never a read past the end.
-    try testing.expectEqual(MidiConfig.truncated, midiConfig(&bytes, 200, 0, model.special.midi_config));
+    try testing.expectEqual(
+        MidiConfig.truncated,
+        midiConfig(&bytes, 200, 0, model.special.midi_config),
+    );
 }

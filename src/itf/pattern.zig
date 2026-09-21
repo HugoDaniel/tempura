@@ -398,9 +398,15 @@ test "pattern.unpack: ITTECH's mask algorithm over hand-packed rows" {
     defer u.deinit();
 
     try testing.expectEqual(@as(usize, 3 * 64), u.cells.len);
-    try testing.expectEqual(Cell{ .note = 60, .ins = 1, .vol = 64, .fx = 1, .param = 6 }, u.cells[0]);
+    try testing.expectEqual(
+        Cell{ .note = 60, .ins = 1, .vol = 64, .fx = 1, .param = 6 },
+        u.cells[0],
+    );
     try testing.expectEqual(Cell{ .note = 62 }, u.cells[3]);
-    try testing.expectEqual(Cell{ .note = 62, .ins = 1, .vol = 32, .fx = 4, .param = 0x10 }, u.cells[64]);
+    try testing.expectEqual(
+        Cell{ .note = 62, .ins = 1, .vol = 32, .fx = 4, .param = 0x10 },
+        u.cells[64],
+    );
     // Every repeat bit read its channel's cache.
     try testing.expectEqual(u.cells[64], u.cells[128]);
     try testing.expectEqual(Cell.empty, u.cells[1]);
@@ -531,7 +537,13 @@ test "pattern.pack: round trips — unpack∘pack is identity, pack is a fixed p
         }
     }
     // A whole row of one repeated cell, then the same row again.
-    for (0..64) |ch| cells[6 * 64 + ch] = .{ .note = 48, .ins = 2, .vol = 40, .fx = 20, .param = 1 };
+    for (0..64) |ch| cells[6 * 64 + ch] = .{
+        .note = 48,
+        .ins = 2,
+        .vol = 40,
+        .fx = 20,
+        .param = 1,
+    };
     @memcpy(cells[7 * 64 ..][0..64], cells[6 * 64 ..][0..64]);
 
     var once = try pack(gpa, &cells, 8);

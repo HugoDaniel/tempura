@@ -165,7 +165,8 @@ pub fn sceneNames(diags: *Diag.List, doc: *const Doc.Doc) Error!void {
                 .scene_duplicate,
                 .err,
                 other.span,
-                "a section named {s} is already declared, and each exports to a pacer scene of that name",
+                "a section named {s} is already declared, and each exports to a pacer scene of " ++
+                    "that name",
                 .{other.name},
             );
         }
@@ -200,7 +201,8 @@ pub fn laneNames(diags: *Diag.List, doc: *const Doc.Doc) Error!void {
                 .lane_duplicate,
                 .err,
                 other.span,
-                "a lane named {s} is already declared; a lane's name is unique across the timeline's lanes",
+                "a lane named {s} is already declared; a lane's name is unique across the " ++
+                    "timeline's lanes",
                 .{other.name},
             );
         }

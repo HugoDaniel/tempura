@@ -282,7 +282,8 @@ fn verifiedSpans(
                 .ease_hint_mismatch,
                 .warning,
                 lane.span,
-                "lane {s}: the steps between ticks {d} and {d} are not {s} within {d} — the hint is dropped and the steps win",
+                "lane {s}: the steps between ticks {d} and {d} are not {s} within {d} — the " ++
+                    "hint is dropped and the steps win",
                 .{ index.name, h.from, h.to, h.ease, eps },
             );
             continue;
@@ -428,7 +429,12 @@ fn boundLane(name: []const u8, range: ?[2]f32) doc.Lane {
         .kind = .curve,
         .target = name,
         .range = range,
-        .binding = .{ .anchor = "song", .address = .{ .smf = .{ .track = 1, .ch = .single(0), .key = null, .curve = .{ .cc = 74 } } } },
+        .binding = .{
+            .anchor = "song",
+            .address = .{
+                .smf = .{ .track = 1, .ch = .single(0), .key = null, .curve = .{ .cc = 74 } },
+            },
+        },
         .notes = &.{},
         .keyframes = &.{},
         .clips = &.{},
@@ -536,7 +542,12 @@ test "lanes.curve: native keyframes are untouched, each with its :ease verbatim"
     const steps = [_]derive.Step{
         .{ .tick = 0, .value = .{ 0.2, 0, 0, 0 }, .ncomp = 1, .ease_src = "hold" },
         .{ .tick = q, .value = .{ 0.2, 0, 0, 0 }, .ncomp = 1, .ease_src = "in-cubic" },
-        .{ .tick = 2 * q, .value = .{ 0.2001, 0, 0, 0 }, .ncomp = 1, .ease_src = "(spring :damping 0.5)" },
+        .{
+            .tick = 2 * q,
+            .value = .{ 0.2001, 0, 0, 0 },
+            .ncomp = 1,
+            .ease_src = "(spring :damping 0.5)",
+        },
         .{ .tick = 3 * q, .value = .{ 0.9, 0, 0, 0 }, .ncomp = 1, .ease_src = "linear" },
     };
     const index: derive.LaneIndex = .{

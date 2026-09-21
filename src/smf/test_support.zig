@@ -115,7 +115,9 @@ pub const residue_payload = [_]u8{ 0x7D, 0x74, 0x65, 0x6D, 0x01, 0x01, 0x00, 0x0
 
 /// midivia's 25-byte `7D 70 61 75` easing hint (midi 03): version 1,
 /// channel 0, lane `cc`, controller 0x4A, op 2, four zero f32 parameters.
-pub const ease_hint_payload = [_]u8{ 0x7D, 0x70, 0x61, 0x75, 0x01, 0x00, 0x00, 0x4A, 0x02 } ++ [_]u8{0} ** 16;
+pub const ease_hint_payload = [_]u8{
+    0x7D, 0x70, 0x61, 0x75, 0x01, 0x00, 0x00, 0x4A, 0x02,
+} ++ [_]u8{0} ** 16;
 
 /// A Yamaha sequencer-specific payload: manufacturer `43`, somebody
 /// else's bytes, kept verbatim.

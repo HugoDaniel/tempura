@@ -66,7 +66,10 @@ pub fn ticksPerSmfTick(ppq: u15) ?i64 {
 /// after that check, because the input is a file's: SMF deltas are 28-bit
 /// and a few hundred maximal ones at `division = 1` run past `i64` itself,
 /// which a byte-eating entry point must answer rather than trap on.
-pub fn smfToTicks(smf_tick: i64, ppq: u15) struct { tick: i64, exact: bool, overflow: bool = false } {
+pub fn smfToTicks(
+    smf_tick: i64,
+    ppq: u15,
+) struct { tick: i64, exact: bool, overflow: bool = false } {
     if (ppq == 0) return .{ .tick = 0, .exact = false };
     const den: i128 = ppq;
     const num: i128 = @as(i128, smf_tick) * TPQ;

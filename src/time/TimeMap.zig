@@ -391,7 +391,10 @@ pub const TimeMap = struct {
                 const start = self.barStartOf(bar) catch return .{ .err = .tick_overflow };
                 // A bar of `[n d]` is 4n/d quarters — exact in f64 for
                 // every meter the map holds (`d` is a power of two).
-                const bar_quarters = 4.0 * @as(f64, @floatFromInt(seg.n)) / @as(f64, @floatFromInt(seg.d));
+                const bar_quarters = 4.0 * @as(
+                    f64,
+                    @floatFromInt(seg.n),
+                ) / @as(f64, @floatFromInt(seg.d));
                 const into = Pos.tickFromQuarters((lit.value - whole) * bar_quarters) catch
                     return .{ .err = .tick_overflow };
                 return .{
@@ -410,12 +413,17 @@ pub const TimeMap = struct {
                 const n: i64 = seg.n;
                 const start = self.barStartOf(seg.first_bar + @divFloor(delta, n)) catch
                     return .{ .err = .tick_overflow };
-                const beat_start = @as(i128, start) + @as(i128, @mod(delta, n)) * Grid.beatTicks(seg.d);
+                const beat_start = @as(
+                    i128,
+                    start,
+                ) + @as(i128, @mod(delta, n)) * Grid.beatTicks(seg.d);
                 // A beat of `[n d]` is 4/d quarters.
                 const beat_quarters = 4.0 / @as(f64, @floatFromInt(seg.d));
                 const into = Pos.tickFromQuarters((lit.value - whole) * beat_quarters) catch
                     return .{ .err = .tick_overflow };
-                return .{ .tick = capped(beat_start + into) catch return .{ .err = .tick_overflow } };
+                return .{
+                    .tick = capped(beat_start + into) catch return .{ .err = .tick_overflow },
+                };
             },
         }
     }
@@ -477,7 +485,9 @@ pub const TimeMap = struct {
                 .err => |c| .{ .err = c },
             },
             .s => {
-                const abs = self.tickFromSeconds(self.secondsFromTick(anchor) + lit.value) catch |e| switch (e) {
+                const abs = self.tickFromSeconds(
+                    self.secondsFromTick(anchor) + lit.value,
+                ) catch |e| switch (e) {
                     error.TickOverflow => return .{ .err = .tick_overflow },
                     error.NonFiniteTime => return e,
                 };
@@ -491,10 +501,17 @@ pub const TimeMap = struct {
                 const seg = self.meters[self.meterOfBar(landing)];
                 // A bar of `[n d]` is 4n/d quarters — exact in f64 for
                 // every meter the map holds (`d` is a power of two).
-                const bar_quarters = 4.0 * @as(f64, @floatFromInt(seg.n)) / @as(f64, @floatFromInt(seg.d));
+                const bar_quarters = 4.0 * @as(
+                    f64,
+                    @floatFromInt(seg.n),
+                ) / @as(f64, @floatFromInt(seg.d));
                 const into = Pos.tickFromQuarters((lit.value - whole) * bar_quarters) catch
                     return .{ .err = .tick_overflow };
-                return .{ .tick = capped(@max(0, start + into - anchor)) catch return .{ .err = .tick_overflow } };
+                return .{
+                    .tick = capped(
+                        @max(0, start + into - anchor),
+                    ) catch return .{ .err = .tick_overflow },
+                };
             },
             .b => {
                 const whole = @trunc(lit.value);
@@ -506,7 +523,11 @@ pub const TimeMap = struct {
                 const beat_quarters = 4.0 / @as(f64, @floatFromInt(seg.d));
                 const into = Pos.tickFromQuarters((lit.value - whole) * beat_quarters) catch
                     return .{ .err = .tick_overflow };
-                return .{ .tick = capped(@max(0, start + into - anchor)) catch return .{ .err = .tick_overflow } };
+                return .{
+                    .tick = capped(
+                        @max(0, start + into - anchor),
+                    ) catch return .{ .err = .tick_overflow },
+                };
             },
         }
     }
@@ -1640,7 +1661,12 @@ test "TimeMap.derive: a tempo or meter point past the grid ceiling is tick_overf
         .{ .tick = Grid.MAX_TICK + 1, .tempo = .{ .qpm = 60 }, .span = .{ .start = 3, .end = 9 } },
     }, &.{
         .{ .tick = 0, .n = 4, .d = 4 },
-        .{ .tick = 48_818_366 * (4 * Grid.TPQ), .n = 3, .d = 4, .span = .{ .start = 12, .end = 20 } },
+        .{
+            .tick = 48_818_366 * (4 * Grid.TPQ),
+            .n = 3,
+            .d = 4,
+            .span = .{ .start = 12, .end = 20 },
+        },
     }, 4 * Grid.TPQ, .hold);
     defer r.deinit();
 
@@ -1687,30 +1713,66 @@ test "TimeMap.tickFromLiteral: a bar, a beat and a seconds literal each resolve"
     // by THAT bar's length and rounded half to even by the one shared
     // seam. Bar 1 starts at 138 378 240 and is 3 quarters long, so
     // 1.5bar = 138 378 240 + round(1.5q) = 138 378 240 + 69 189 120.
-    try testing.expectEqual(@as(i64, 207_567_360), (try m.tickFromLiteral(.{ .value = 1.5, .unit = .bar })).tick);
-    try testing.expectEqual(@as(i64, 276_756_480), (try m.tickFromLiteral(.{ .value = 2, .unit = .bar })).tick);
+    try testing.expectEqual(
+        @as(i64, 207_567_360),
+        (try m.tickFromLiteral(.{ .value = 1.5, .unit = .bar })).tick,
+    );
+    try testing.expectEqual(
+        @as(i64, 276_756_480),
+        (try m.tickFromLiteral(.{ .value = 2, .unit = .bar })).tick,
+    );
     // Past the table's last bar (6, at :length) the last meter carries
     // on: bar 7 = 1 014 773 760 + 184 504 320.
-    try testing.expectEqual(@as(i64, 1_199_278_080), (try m.tickFromLiteral(.{ .value = 7, .unit = .bar })).tick);
+    try testing.expectEqual(
+        @as(i64, 1_199_278_080),
+        (try m.tickFromLiteral(.{ .value = 7, .unit = .bar })).tick,
+    );
 
     // `b`: beats counted from 0 ACROSS the map. Beat 3 is bar 1's first
     // beat (138 378 240); beat 6 is bar 2's (276 756 480); beat 7.5 is
     // 276 756 480 + 1 · 46 126 080 + round(0.5q) = 345 945 600.
-    try testing.expectEqual(@as(i64, 138_378_240), (try m.tickFromLiteral(.{ .value = 3, .unit = .b })).tick);
-    try testing.expectEqual(@as(i64, 276_756_480), (try m.tickFromLiteral(.{ .value = 6, .unit = .b })).tick);
-    try testing.expectEqual(@as(i64, 345_945_600), (try m.tickFromLiteral(.{ .value = 7.5, .unit = .b })).tick);
+    try testing.expectEqual(
+        @as(i64, 138_378_240),
+        (try m.tickFromLiteral(.{ .value = 3, .unit = .b })).tick,
+    );
+    try testing.expectEqual(
+        @as(i64, 276_756_480),
+        (try m.tickFromLiteral(.{ .value = 6, .unit = .b })).tick,
+    );
+    try testing.expectEqual(
+        @as(i64, 345_945_600),
+        (try m.tickFromLiteral(.{ .value = 7.5, .unit = .b })).tick,
+    );
 
     // `s`: through the tempo map, 2.5 · 92 252 160.
-    try testing.expectEqual(@as(i64, 230_630_400), (try m.tickFromLiteral(.{ .value = 2.5, .unit = .s })).tick);
+    try testing.expectEqual(
+        @as(i64, 230_630_400),
+        (try m.tickFromLiteral(.{ .value = 2.5, .unit = .s })).tick,
+    );
 
     // `q` and `t` still answer from the grid alone (`Pos`'s own seam).
-    try testing.expectEqual(@as(i64, 138_378_240), (try m.tickFromLiteral(.{ .value = 3, .unit = .q })).tick);
-    try testing.expectEqual(@as(i64, 12_345), (try m.tickFromLiteral(.{ .value = 12_345, .unit = .t })).tick);
+    try testing.expectEqual(
+        @as(i64, 138_378_240),
+        (try m.tickFromLiteral(.{ .value = 3, .unit = .q })).tick,
+    );
+    try testing.expectEqual(
+        @as(i64, 12_345),
+        (try m.tickFromLiteral(.{ .value = 12_345, .unit = .t })).tick,
+    );
 
     // A negative position is a diagnostic in every unit.
-    try testing.expectEqual(Diag.Code.position_negative, (try m.tickFromLiteral(.{ .value = -1, .unit = .bar })).err);
-    try testing.expectEqual(Diag.Code.position_negative, (try m.tickFromLiteral(.{ .value = -0.5, .unit = .b })).err);
-    try testing.expectEqual(Diag.Code.position_negative, (try m.tickFromLiteral(.{ .value = -2, .unit = .s })).err);
+    try testing.expectEqual(
+        Diag.Code.position_negative,
+        (try m.tickFromLiteral(.{ .value = -1, .unit = .bar })).err,
+    );
+    try testing.expectEqual(
+        Diag.Code.position_negative,
+        (try m.tickFromLiteral(.{ .value = -0.5, .unit = .b })).err,
+    );
+    try testing.expectEqual(
+        Diag.Code.position_negative,
+        (try m.tickFromLiteral(.{ .value = -2, .unit = .s })).err,
+    );
 }
 
 test "TimeMap.spell: the printer's rule, with this map's bar table" {
@@ -1878,7 +1940,10 @@ test "TimeMap.durationTicks: a bar is the bar it lands in, not the bar at the or
 
     // Bars 0 and 1 are `[3 4]` (three quarters); bar 2 on is `[4 4]`.
     // `:at 0bar :dur 1bar` is three quarters…
-    try testing.expectEqual(@as(i64, 3 * Grid.TPQ), (try map.durationTicks(.{ .value = 1, .unit = .bar }, 0)).tick);
+    try testing.expectEqual(
+        @as(i64, 3 * Grid.TPQ),
+        (try map.durationTicks(.{ .value = 1, .unit = .bar }, 0)).tick,
+    );
     // …and `:at 2bar :dur 1bar` is FOUR, which counting from the origin
     // would have got wrong (it would have answered the first bar's three).
     try testing.expectEqual(
@@ -1906,7 +1971,10 @@ test "TimeMap.durationTicks: the beat twin, over the cumulative beat count" {
     // Every beat here is a quarter, so a beat count is a quarter count —
     // what changes across the meter is which BAR a beat belongs to, and
     // `b` never asks.
-    try testing.expectEqual(@as(i64, Grid.TPQ), (try map.durationTicks(.{ .value = 1, .unit = .b }, 0)).tick);
+    try testing.expectEqual(
+        @as(i64, Grid.TPQ),
+        (try map.durationTicks(.{ .value = 1, .unit = .b }, 0)).tick,
+    );
     try testing.expectEqual(
         @as(i64, 4 * Grid.TPQ),
         (try map.durationTicks(.{ .value = 4, .unit = .b }, 6 * Grid.TPQ)).tick,
@@ -1930,7 +1998,10 @@ test "TimeMap.durationTicks: q and t carry no anchor, and s is wall-clock from i
             @as(i64, @divExact(5 * Grid.TPQ, 2)),
             (try map.durationTicks(.{ .value = 2.5, .unit = .q }, at)).tick,
         );
-        try testing.expectEqual(@as(i64, 9009), (try map.durationTicks(.{ .value = 9009, .unit = .t }, at)).tick);
+        try testing.expectEqual(
+            @as(i64, 9009),
+            (try map.durationTicks(.{ .value = 9009, .unit = .t }, at)).tick,
+        );
     }
     // 120 quarter notes per minute: one second is two quarters, from
     // anywhere on this one-segment tempo map.
@@ -1947,12 +2018,27 @@ test "TimeMap.durationTicks: a duration is never negative, and the document's ru
 
     // `0bar` from inside a bar names the line BEHIND the anchor; a
     // duration does not run backwards, so the answer is no time at all.
-    try testing.expectEqual(@as(i64, 0), (try map.durationTicks(.{ .value = 0, .unit = .bar }, Grid.TPQ)).tick);
-    try testing.expectEqual(@as(i64, 0), (try map.durationTicks(.{ .value = 0, .unit = .b }, 9009)).tick);
+    try testing.expectEqual(
+        @as(i64, 0),
+        (try map.durationTicks(.{ .value = 0, .unit = .bar }, Grid.TPQ)).tick,
+    );
+    try testing.expectEqual(
+        @as(i64, 0),
+        (try map.durationTicks(.{ .value = 0, .unit = .b }, 9009)).tick,
+    );
 
-    try testing.expectEqual(Diag.Code.position_negative, (try map.durationTicks(.{ .value = -1, .unit = .bar }, 0)).err);
-    try testing.expectEqual(Diag.Code.position_not_integer, (try map.durationTicks(.{ .value = 1.5, .unit = .t }, 0)).err);
-    try testing.expectEqual(Diag.Code.tick_overflow, (try map.durationTicks(.{ .value = 1e30, .unit = .bar }, 0)).err);
+    try testing.expectEqual(
+        Diag.Code.position_negative,
+        (try map.durationTicks(.{ .value = -1, .unit = .bar }, 0)).err,
+    );
+    try testing.expectEqual(
+        Diag.Code.position_not_integer,
+        (try map.durationTicks(.{ .value = 1.5, .unit = .t }, 0)).err,
+    );
+    try testing.expectEqual(
+        Diag.Code.tick_overflow,
+        (try map.durationTicks(.{ .value = 1e30, .unit = .bar }, 0)).err,
+    );
 }
 
 test "TimeMap.durationTicks: a seconds duration from an interior anchor is never negative" {
@@ -1992,7 +2078,10 @@ test "TimeMap.durationTicks: under ONE meter the anchor changes nothing, bit for
     for ([_]f64{ 0, 1, 2, 16, 0.5, 2.25 }) |v| {
         const unanchored = (try map.tickFromLiteral(.{ .value = v, .unit = .bar })).tick;
         for ([_]i64{ 0, 4 * Grid.TPQ, 16 * Grid.TPQ }) |at| {
-            try testing.expectEqual(unanchored, (try map.durationTicks(.{ .value = v, .unit = .bar }, at)).tick);
+            try testing.expectEqual(
+                unanchored,
+                (try map.durationTicks(.{ .value = v, .unit = .bar }, at)).tick,
+            );
         }
     }
 }
@@ -2065,17 +2154,26 @@ test "TimeMap: durationTicks(spellDuration(d, at), at) is d, across a meter chan
         const lit = switch (Pos.parse(text)) {
             .ok => |l| l,
             .err => |code| {
-                std.debug.print("duration {d} at {d} spelled {s}, which does not parse: {t}\n", .{ dur, at, text, code });
+                std.debug.print(
+                    "duration {d} at {d} spelled {s}, which does not parse: {t}\n",
+                    .{ dur, at, text, code },
+                );
                 return error.TestSpellingDoesNotParse;
             },
         };
         switch (try map.durationTicks(lit, at)) {
             .tick => |got| if (got != dur) {
-                std.debug.print("duration {d} at {d} spelled {s}, which reads back as {d}\n", .{ dur, at, text, got });
+                std.debug.print(
+                    "duration {d} at {d} spelled {s}, which reads back as {d}\n",
+                    .{ dur, at, text, got },
+                );
                 return error.TestDurationRoundTripDrifted;
             },
             .err => |code| {
-                std.debug.print("duration {d} at {d} spelled {s}, which will not resolve: {t}\n", .{ dur, at, text, code });
+                std.debug.print(
+                    "duration {d} at {d} spelled {s}, which will not resolve: {t}\n",
+                    .{ dur, at, text, code },
+                );
                 return error.TestDurationWillNotResolve;
             },
         }

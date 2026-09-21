@@ -366,7 +366,10 @@ fn runCase(
     const expected_path = try std.fs.path.join(arena, &.{ root, name, "expected.sjon" });
     if (update) {
         Io.Dir.cwd().writeFile(io, .{ .sub_path = expected_path, .data = actual }) catch |err| {
-            try out.print("corpus: {s}: cannot write expected.sjon: {s}\n", .{ name, @errorName(err) });
+            try out.print(
+                "corpus: {s}: cannot write expected.sjon: {s}\n",
+                .{ name, @errorName(err) },
+            );
             return .failed;
         };
         try out.print("corpus: {s}: regenerated\n", .{name});
@@ -395,7 +398,10 @@ fn readCaseFile(
     file: []const u8,
 ) ?[:0]u8 {
     const path = std.fs.path.join(arena, &.{ root, name, file }) catch |err| {
-        out.print("corpus: {s}: cannot join path for {s}: {s}\n", .{ name, file, @errorName(err) }) catch {};
+        out.print(
+            "corpus: {s}: cannot join path for {s}: {s}\n",
+            .{ name, file, @errorName(err) },
+        ) catch {};
         return null;
     };
     return Io.Dir.cwd().readFileAllocOptions(
@@ -851,7 +857,10 @@ fn opJson(
     try p(&buf.writer, "{{\"op\":\"{s}\"", .{head});
     if (args) |node| {
         if (tree.tagOf(node) != .form) {
-            out.print("corpus: {s}: times.sjon: (plan …)'s :args is a form of keys\n", .{name}) catch {};
+            out.print(
+                "corpus: {s}: times.sjon: (plan …)'s :args is a form of keys\n",
+                .{name},
+            ) catch {};
             return null;
         }
         for (tree.formHeader(node).children) |child| {
@@ -1079,7 +1088,10 @@ fn renderDocCase(
             continue;
         }
         switch (d) {
-            .unrun => |head| rep.say("UNRUN {s} — the directive lands with a later part\n", .{head}),
+            .unrun => |head| rep.say(
+                "UNRUN {s} — the directive lands with a later part\n",
+                .{head},
+            ),
             // Every remaining head asks about BYTES, and a document case
             // has none to read: `doc.sjon` is source, not a file either
             // core would recognise.
@@ -1262,11 +1274,11 @@ fn smfDifference(
         "format {d} became {d}",
         .{ x.format, y.format },
     );
-    if (x.division.pulsesPerQuarter() != y.division.pulsesPerQuarter()) return try std.fmt.allocPrint(
-        arena,
-        "the grid {d} became {d}",
-        .{ x.division.pulsesPerQuarter(), y.division.pulsesPerQuarter() },
-    );
+    const x_ppq = x.division.pulsesPerQuarter();
+    const y_ppq = y.division.pulsesPerQuarter();
+    if (x_ppq != y_ppq) {
+        return try std.fmt.allocPrint(arena, "the grid {d} became {d}", .{ x_ppq, y_ppq });
+    }
     if (x.tracks.len != y.tracks.len) return try std.fmt.allocPrint(
         arena,
         "{d} tracks became {d}",
@@ -1488,15 +1500,27 @@ fn renderWalk(
             row.order, row.pattern, row.row, row.start_tick, row.ticks,
         });
     }
-    if (map.rows.len > MAX_ROWS_ECHOED) try p(w, "\n  (rows-elided {d})", .{map.rows.len - MAX_ROWS_ECHOED});
+    if (map.rows.len > MAX_ROWS_ECHOED) try p(
+        w,
+        "\n  (rows-elided {d})",
+        .{map.rows.len - MAX_ROWS_ECHOED},
+    );
 
     for (map.segments) |seg| {
         try p(w, "\n  (segment :tick {d} :tempo {d})", .{ seg.start_tick, seg.tempo });
     }
     for (map.onsets[0..@min(map.onsets.len, MAX_ONSETS_ECHOED)]) |onset| {
-        try p(w, "\n  (onset :ch {d} :tick {d} :note {d})", .{ onset.channel, onset.tick, onset.cell.note });
+        try p(
+            w,
+            "\n  (onset :ch {d} :tick {d} :note {d})",
+            .{ onset.channel, onset.tick, onset.cell.note },
+        );
     }
-    if (map.onsets.len > MAX_ONSETS_ECHOED) try p(w, "\n  (onsets-elided {d})", .{map.onsets.len - MAX_ONSETS_ECHOED});
+    if (map.onsets.len > MAX_ONSETS_ECHOED) try p(
+        w,
+        "\n  (onsets-elided {d})",
+        .{map.onsets.len - MAX_ONSETS_ECHOED},
+    );
 
     try p(w, "\n  (total :ticks {d} :loop-row ", .{map.total_ticks});
     if (map.loop_row) |loop| {
@@ -1910,8 +1934,16 @@ fn renderReconciled(w: *Io.Writer, loaded: *const Loaded) Error!bool {
         c.file_conducts,
     }) else try pw(w, " :conductor none");
     for (d.verdicts) |v| {
-        try p(w, "\n  (verdict :lane {s} :hash-ok {} :action {t})", .{ v.lane, v.hash_ok, v.action });
-        for (v.hints) |h| try p(w, "\n    (hint :from {d} :to {d} :ease {s})", .{ h.from, h.to, h.ease });
+        try p(
+            w,
+            "\n  (verdict :lane {s} :hash-ok {} :action {t})",
+            .{ v.lane, v.hash_ok, v.action },
+        );
+        for (v.hints) |h| try p(
+            w,
+            "\n    (hint :from {d} :to {d} :ease {s})",
+            .{ h.from, h.to, h.ease },
+        );
     }
     // Rule 2's consumption, when it took anything: the restored lanes'
     // view and the conductor's, out of the file tier (plan 04, "One
@@ -2126,8 +2158,17 @@ fn renderPlan(
     const sum = plan.summary;
     try p(
         w,
-        "(planned :targets {d} :set {d} :inserted {d} :removed {d} :replaced {d} :inexact {d} :refused {}",
-        .{ sum.targets, sum.set, sum.inserted, sum.removed, sum.replaced, sum.inexact, sum.refused },
+        "(planned :targets {d} :set {d} :inserted {d} :removed {d} :replaced {d} :inexact {d} " ++
+            ":refused {}",
+        .{
+            sum.targets,
+            sum.set,
+            sum.inserted,
+            sum.removed,
+            sum.replaced,
+            sum.inexact,
+            sum.refused,
+        },
     );
     if (!try renderDiags(w, "  ", &plan.diags, rep)) return false;
     try pw(w, ")\n");
@@ -2252,7 +2293,14 @@ fn renderBuild(
             defer back.deinit();
             var again = try smf.write(gpa, &back.sequence, .{});
             defer again.deinit();
-            return try renderBuilt(w, ask.kind, written.bytes, std.mem.eql(u8, again.bytes, written.bytes), &written.diags, rep);
+            return try renderBuilt(
+                w,
+                ask.kind,
+                written.bytes,
+                std.mem.eql(u8, again.bytes, written.bytes),
+                &written.diags,
+                rep,
+            );
         },
         .it => {
             if (d.it.len == 0) return try renderRendered(gpa, w, ask, loaded, .it, rep);
@@ -2262,7 +2310,14 @@ fn renderBuild(
             defer back.deinit();
             var again = try itf.write.write(gpa, &back.module, written.bytes, .{});
             defer again.deinit();
-            return try renderBuilt(w, ask.kind, written.bytes, std.mem.eql(u8, again.bytes, written.bytes), &written.diags, rep);
+            return try renderBuilt(
+                w,
+                ask.kind,
+                written.bytes,
+                std.mem.eql(u8, again.bytes, written.bytes),
+                &written.diags,
+                rep,
+            );
         },
     }
 }
@@ -2307,7 +2362,8 @@ fn renderRendered(
 
     try p(w, "(built :kind {s} :len {d} :sha256 \"", .{ @tagName(ask.kind), built.bytes.len });
     try writeDigest(w, built.bytes);
-    try p(w, "\"\n  (rung1 :ok {})\n  (residue :essence {d} :lanes {d} :conductor {})\n  (rung3 :ok {})", .{
+    try p(w, "\"\n  (rung1 :ok {})\n  (residue :essence {d} :lanes {d} :conductor {})\n  (rung3 " ++
+        ":ok {})", .{
         try rung1Of(gpa, kind, built.bytes),
         built.essence_bytes,
         built.lanes.len,
@@ -2427,7 +2483,10 @@ fn reportMismatch(out: *Io.Writer, name: []const u8, diff: Mismatch) !void {
         diff.expected orelse "<end of file>",
         diff.actual orelse "<end of file>",
     });
-    try out.print("corpus: {s}: `zig build corpus -- --update` regenerates (review the diff)\n", .{name});
+    try out.print(
+        "corpus: {s}: `zig build corpus -- --update` regenerates (review the diff)\n",
+        .{name},
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2778,8 +2837,20 @@ test "corpus render: diagnostics carry the ordinal, the span and an escaped mess
     var diags: Diag.List = .init(t_.allocator);
     defer diags.deinit();
     try diags.add(.walk_runaway, .err, .{ .start = 1, .end = 2 }, "gave up", .{});
-    try diags.add(.it_command_unknown, .warning, .{ .start = 3, .end = 5 }, "a \"quoted\" \\ word", .{});
-    try diags.add(.smpte_tempo_ignored, .info, .{ .start = 0, .end = 0 }, "kept, not believed", .{});
+    try diags.add(
+        .it_command_unknown,
+        .warning,
+        .{ .start = 3, .end = 5 },
+        "a \"quoted\" \\ word",
+        .{},
+    );
+    try diags.add(
+        .smpte_tempo_ignored,
+        .info,
+        .{ .start = 0, .end = 0 },
+        "kept, not believed",
+        .{},
+    );
 
     var aw: Io.Writer.Allocating = .init(arena);
     try t_.expect(try renderDiags(&aw.writer, "  ", &diags, .{ .out = null, .name = "test" }));
@@ -2821,7 +2892,9 @@ test "corpus render: a walk longer than the echo cap says how much it left out" 
     try t_.expect(try renderWalk(gpa, &aw.writer, &m, 1 << 20, .{ .out = null, .name = "test" }));
     const text = aw.written();
 
-    try t_.expect(std.mem.indexOf(u8, text, "(row :order 0 :pattern 0 :row 0 :start 0 :ticks 6)") != null);
+    try t_.expect(
+        std.mem.indexOf(u8, text, "(row :order 0 :pattern 0 :row 0 :start 0 :ticks 6)") != null,
+    );
     try t_.expect(std.mem.indexOf(u8, text, "(rows-elided 304)") != null);
     try t_.expect(std.mem.indexOf(u8, text, "(onsets-elided 304)") != null);
     try t_.expect(std.mem.indexOf(u8, text, "(total :ticks 26400 :loop-row 0)") != null);
@@ -3122,8 +3195,20 @@ test "corpus render: a seconds query that no clock can answer is refused by NAME
     const text = try testRender(arena, .{ .file = "doc.sjon", .bytes = source, .kind = .doc }, &.{
         .{ .times = &.{ std.math.nan(f64), std.math.inf(f64) } },
     });
-    try t_.expect(std.mem.indexOf(u8, text, "(at :seconds \"7FF8000000000000\" :refused non-finite-time)") != null);
-    try t_.expect(std.mem.indexOf(u8, text, "(at :seconds \"7FF0000000000000\" :refused non-finite-time)") != null);
+    try t_.expect(
+        std.mem.indexOf(
+            u8,
+            text,
+            "(at :seconds \"7FF8000000000000\" :refused non-finite-time)",
+        ) != null,
+    );
+    try t_.expect(
+        std.mem.indexOf(
+            u8,
+            text,
+            "(at :seconds \"7FF0000000000000\" :refused non-finite-time)",
+        ) != null,
+    );
 }
 
 /// Load one of the corpus's own `doc.sjon` files and derive it — the
@@ -3164,7 +3249,12 @@ const LoadedCase = struct {
 /// same document with and without a line.
 const SourceEdit = struct { from: []const u8, to: []const u8 };
 
-fn loadCaseDoc(gpa: Allocator, schema: *const Schema, case: []const u8, edit: ?SourceEdit) !LoadedCase {
+fn loadCaseDoc(
+    gpa: Allocator,
+    schema: *const Schema,
+    case: []const u8,
+    edit: ?SourceEdit,
+) !LoadedCase {
     const raw = try readCorpusFile(gpa, case, "doc.sjon");
     defer gpa.free(raw);
 
@@ -3246,8 +3336,14 @@ test "corpus: the two position queries agree wherever the seconds seam is exact"
             // past the bar table's end where the last meter carries on.
             .interior = &.{ 70_000_000, 207_567_360, 322_882_560, 900_000_000 },
         },
-        .{ .name = "playhead-sections-cues", .interior = &.{ 1, 100_000_000, 300_000_000, 500_000_000 } },
-        .{ .name = "tempo-three-conductors-it", .interior = &.{ 10_000_000, 70_000_000, 120_000_000 } },
+        .{
+            .name = "playhead-sections-cues",
+            .interior = &.{ 1, 100_000_000, 300_000_000, 500_000_000 },
+        },
+        .{
+            .name = "tempo-three-conductors-it",
+            .interior = &.{ 10_000_000, 70_000_000, 120_000_000 },
+        },
     };
 
     for (cases) |c| {
@@ -3263,10 +3359,17 @@ test "corpus: the two position queries agree wherever the seconds seam is exact"
         for (loaded.derived.map.segments) |seg| {
             var by_tick = try Playhead.atTick(gpa, &loaded.derived, seg.tick);
             defer by_tick.deinit(gpa);
-            var by_seconds = try Playhead.at(gpa, &loaded.derived, Playhead.secondsOf(&loaded.derived, seg.tick));
+            var by_seconds = try Playhead.at(
+                gpa,
+                &loaded.derived,
+                Playhead.secondsOf(&loaded.derived, seg.tick),
+            );
             defer by_seconds.deinit(gpa);
             expectSamePosition(by_seconds, by_tick) catch |err| {
-                std.debug.print("{s}: the two queries disagree at segment start {d}\n", .{ c.name, seg.tick });
+                std.debug.print(
+                    "{s}: the two queries disagree at segment start {d}\n",
+                    .{ c.name, seg.tick },
+                );
                 return err;
             };
         }
@@ -3275,7 +3378,11 @@ test "corpus: the two position queries agree wherever the seconds seam is exact"
         // the clock landed on. The two are the same answer or the copy
         // has drifted.
         for (c.interior) |tick| {
-            var by_seconds = try Playhead.at(gpa, &loaded.derived, Playhead.secondsOf(&loaded.derived, tick));
+            var by_seconds = try Playhead.at(
+                gpa,
+                &loaded.derived,
+                Playhead.secondsOf(&loaded.derived, tick),
+            );
             defer by_seconds.deinit(gpa);
             var by_tick = try Playhead.atTick(gpa, &loaded.derived, by_seconds.tick);
             defer by_tick.deinit(gpa);
@@ -3324,7 +3431,11 @@ test "corpus render: the snap grids the manifest offers are exactly the ones the
         const needle = "(member :name " ++ f.name ++ " ";
         try t_.expect(std.mem.indexOf(u8, Schema.corpus_manifest_src, needle) != null);
     }
-    const kinds = Schema.corpus_manifest_src[std.mem.indexOf(u8, Schema.corpus_manifest_src, "(value-kind :name snap-grid").?..];
+    const kinds = Schema.corpus_manifest_src[std.mem.indexOf(
+        u8,
+        Schema.corpus_manifest_src,
+        "(value-kind :name snap-grid",
+    ).?..];
     const set = kinds[0..std.mem.indexOf(u8, kinds, "(value-kind :name row-cap").?];
     try t_.expectEqual(
         @typeInfo(Playhead.SnapGrid).@"enum".fields.len,
@@ -3389,7 +3500,9 @@ test "corpus render: a byte directive on a document case names what it needed" {
 
     // `doc.sjon` is source, not a file either core would recognise, so
     // `(read)` and `(walk …)` have nothing to read.
-    for ([_]Directive{ .read, .roundtrip, .{ .walk = 16 }, .{ .write = .{ .format0 = false } } }) |d| {
+    for ([_]Directive{ .read, .roundtrip, .{
+        .walk = 16,
+    }, .{ .write = .{ .format0 = false } } }) |d| {
         const said = try testRenderRefused(arena, testDocFixture(), &.{ .dump, d });
         try t_.expect(std.mem.indexOf(u8, said, "needs a song.mid or song.it fixture") != null);
     }

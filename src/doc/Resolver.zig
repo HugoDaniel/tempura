@@ -200,13 +200,17 @@ test "Resolver.parseDigest: 64 hex digits, either case, and nothing else" {
     try testing.expectEqual(@as(u8, 0x9f), got[0]);
     try testing.expectEqual(@as(u8, 0x2a), got[1]);
     try testing.expectEqual(@as(u8, 0xcd), got[31]);
-    try testing.expect(parseDigest("9F2A00000000000000000000000000000000000000000000000000000000ABCD") != null);
+    try testing.expect(
+        parseDigest("9F2A00000000000000000000000000000000000000000000000000000000ABCD") != null,
+    );
 
     // The plan's own elision is not a digest, and says so rather than
     // guessing at bytes.
     try testing.expect(parseDigest("9f2a…") == null);
     try testing.expect(parseDigest("") == null);
-    try testing.expect(parseDigest("zz2a00000000000000000000000000000000000000000000000000000000abcd") == null);
+    try testing.expect(
+        parseDigest("zz2a00000000000000000000000000000000000000000000000000000000abcd") == null,
+    );
 }
 
 test "Resolver.memory: a table answers what it holds and null for the rest" {

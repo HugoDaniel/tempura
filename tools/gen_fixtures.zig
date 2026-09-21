@@ -127,7 +127,10 @@ pub fn main(init: std.process.Init) !u8 {
 
     for (cases) |c| {
         const bytes = c.build(gpa) catch |err| {
-            try out.print("fixtures: {s}: cannot build {s}: {s}\n", .{ c.name, c.file, @errorName(err) });
+            try out.print(
+                "fixtures: {s}: cannot build {s}: {s}\n",
+                .{ c.name, c.file, @errorName(err) },
+            );
             return 1;
         };
         defer gpa.free(bytes);
@@ -136,7 +139,10 @@ pub fn main(init: std.process.Init) !u8 {
         try Io.Dir.cwd().createDirPath(io, dir);
         const path = try std.fs.path.join(arena, &.{ dir, c.file });
         Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes }) catch |err| {
-            try out.print("fixtures: {s}: cannot write {s}: {s}\n", .{ c.name, c.file, @errorName(err) });
+            try out.print(
+                "fixtures: {s}: cannot write {s}: {s}\n",
+                .{ c.name, c.file, @errorName(err) },
+            );
             return 1;
         };
         try out.print("fixtures: {s}/{s}: {d} bytes\n", .{ c.name, c.file, bytes.len });
@@ -276,7 +282,12 @@ fn smfFormat0(gpa: Allocator) ![]u8 {
     const conductor = try b.addTrack();
     const name = try b.addBytes("format0");
     try b.addEvent(conductor, 0, .sequence_name, .{ .bytes = name });
-    try b.addEvent(conductor, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(
+        conductor,
+        0,
+        .time_signature,
+        .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } },
+    );
     try b.addEvent(conductor, 0, .set_tempo, .{ .tempo = 500_000 });
     const marker = try b.addBytes("bar 2");
     try b.addEvent(conductor, 96, .marker, .{ .bytes = marker });
@@ -344,7 +355,12 @@ fn skeletonSmf(gpa: Allocator) ![]u8 {
     const conductor = try b.addTrack();
     const name = try b.addBytes("skeleton");
     try b.addEvent(conductor, 0, .sequence_name, .{ .bytes = name });
-    try b.addEvent(conductor, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(
+        conductor,
+        0,
+        .time_signature,
+        .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } },
+    );
     try b.addEvent(conductor, 0, .set_tempo, .{ .tempo = 500_000 });
     const marker = try b.addBytes("bar 2");
     try b.addEvent(conductor, 3840, .marker, .{ .bytes = marker });

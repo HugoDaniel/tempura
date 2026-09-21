@@ -458,7 +458,12 @@ test "timeline -o: the artifact goes to the file and stdout stays empty" {
     // `tmpDir` creates under the cwd's `.zig-cache/tmp`, and a build
     // Run step's cwd is the build root — the same cwd `Ctx.emit` writes
     // through, which is the whole point of naming it relatively here.
-    const dest = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/map.sjon", .{tmp.sub_path}, 0);
+    const dest = try std.fmt.allocPrintSentinel(
+        a,
+        ".zig-cache/tmp/{s}/map.sjon",
+        .{tmp.sub_path},
+        0,
+    );
     defer a.free(dest);
 
     var c = try Cli.invoke(&.{ "tempura", "timeline", path, "-o", dest });

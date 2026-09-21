@@ -41,7 +41,13 @@ pub const Kinds = struct {
     cue: bool = false,
 
     /// Everything a lane or a root can hold.
-    pub const all: Kinds = .{ .note = true, .keyframe = true, .clip = true, .section = true, .cue = true };
+    pub const all: Kinds = .{
+        .note = true,
+        .keyframe = true,
+        .clip = true,
+        .section = true,
+        .cue = true,
+    };
     /// The lane children alone — what a quantize or a nudge means.
     pub const children: Kinds = .{ .note = true, .keyframe = true, .clip = true };
     pub const notes: Kinds = .{ .note = true };

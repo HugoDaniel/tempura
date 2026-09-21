@@ -551,7 +551,11 @@ test "write: a SMPTE sequence's set-tempo is written as 500 000 µs, the tempo i
 
     // The tempo bytes are `07 A1 20`, never `0F 42 40`; the ticks are
     // untouched.
-    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20 }, out.bytes[22..29]);
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20 },
+        out.bytes[22..29],
+    );
     try testing.expect(std.mem.indexOf(u8, out.bytes, &[_]u8{ 0x0F, 0x42, 0x40 }) == null);
 
     var back = try reader.read(gpa, out.bytes);
@@ -636,7 +640,11 @@ test "write: running status runs, and a meta or a sysex resets it" {
     try track.vlq(96);
     try track.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
 
-    const expected = try support.buildFile(gpa, .{ .format = 0, .division = 96 }, &.{track.buf.items});
+    const expected = try support.buildFile(
+        gpa,
+        .{ .format = 0, .division = 96 },
+        &.{track.buf.items},
+    );
     defer gpa.free(expected);
     try testing.expectEqualSlices(u8, expected, out.bytes);
 }
@@ -662,7 +670,11 @@ test "write: running_status off spells every status byte" {
     try track.vlq(0);
     try track.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
 
-    const expected = try support.buildFile(gpa, .{ .format = 0, .division = 96 }, &.{track.buf.items});
+    const expected = try support.buildFile(
+        gpa,
+        .{ .format = 0, .division = 96 },
+        &.{track.buf.items},
+    );
     defer gpa.free(expected);
     try testing.expectEqualSlices(u8, expected, out.bytes);
     // Two different statuses, so running status changes nothing here.
@@ -701,7 +713,11 @@ test "write: a note off is 8n, and a note_on with velocity 0 stays 9n 00" {
     try track.vlq(0);
     try track.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
 
-    const expected = try support.buildFile(gpa, .{ .format = 0, .division = 96 }, &.{track.buf.items});
+    const expected = try support.buildFile(
+        gpa,
+        .{ .format = 0, .division = 96 },
+        &.{track.buf.items},
+    );
     defer gpa.free(expected);
     try testing.expectEqualSlices(u8, expected, out.bytes);
 }

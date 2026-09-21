@@ -543,7 +543,8 @@ export fn tpr_attachAnchor(len: u32) u32 {
             .anchor_mismatch,
             .err,
             .{ .start = 0, .end = 0 },
-            "these {d} bytes match no (anchor …) of the loaded document; the document was left as it was",
+            "these {d} bytes match no (anchor …) of the loaded document; the document was left " ++
+                "as it was",
             .{len},
         ) catch return @intFromEnum(Status.oom);
         publishDiags(.document, &report);
@@ -874,7 +875,10 @@ fn refuseScore(s: *const State) u32 {
         .anchor_unavailable,
         .err,
         span,
-        "the anchor '{s}' conducts this document and its file ({s}) is not here, so the score's transport would be the placeholder's 120 quarter notes per minute in [4 4] under a header naming the conductor; nothing was written — attach the file (`tpr_attachAnchor`) or inline the tier (`tempura inline`)",
+        "the anchor '{s}' conducts this document and its file ({s}) is not here, so the score's " ++
+            "transport would be the placeholder's 120 quarter notes per minute in [4 4] under a " ++
+            "header naming the conductor; nothing was written — attach the file " ++
+            "(`tpr_attachAnchor`) or inline the tier (`tempura inline`)",
         .{ id, file },
     ) catch return 0;
     publishDiags(.operation, &report);

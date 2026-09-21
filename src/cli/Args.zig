@@ -929,7 +929,14 @@ test "parse: at takes exactly one question, and edit needs its operation" {
     }), "two questions") != null);
 
     const e = try parseOk(arena, &.{
-        "tempura", "edit", "d.sjon", "--op", "{\"op\":\"remove\"}", "--select", "{\"lanes\":[\"a\"]}", "--dry-run",
+        "tempura",
+        "edit",
+        "d.sjon",
+        "--op",
+        "{\"op\":\"remove\"}",
+        "--select",
+        "{\"lanes\":[\"a\"]}",
+        "--dry-run",
     });
     try t.expectEqualStrings("{\"op\":\"remove\"}", e.edit.op.?);
     try t.expectEqualStrings("{\"lanes\":[\"a\"]}", e.edit.select.?);
@@ -1070,7 +1077,10 @@ test "parse: --compress is refused with a message naming the pass-through rule" 
     // must fail loudly rather than be ignored into a silently wrong file.
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
-    const msg = try usageMessage(arena.allocator(), &.{ "tempura", "build", "d.sjon", "--compress" });
+    const msg = try usageMessage(
+        arena.allocator(),
+        &.{ "tempura", "build", "d.sjon", "--compress" },
+    );
     try t.expect(std.mem.indexOf(u8, msg, "--compress") != null);
     try t.expect(std.mem.indexOf(u8, msg, "pass-through") != null);
 }
@@ -1163,7 +1173,9 @@ test "parse: an unknown flag and a second positional are usage errors" {
 test "parse: timeline --json" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
-    try t.expect((try parseOk(arena.allocator(), &.{ "tempura", "timeline", "d.sjon", "--json" })).json);
+    try t.expect(
+        (try parseOk(arena.allocator(), &.{ "tempura", "timeline", "d.sjon", "--json" })).json,
+    );
 }
 
 test "kindFromPath: the extension names the format, case and .midi included" {

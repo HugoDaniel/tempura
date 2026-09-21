@@ -629,8 +629,17 @@ pub fn checkResidue(gpa: Allocator, bytes: []const u8, kind: Doc.AnchorKind) Err
 /// `check-residue`'s one line for a residue this build leaves alone.
 fn newerLine(gpa: Allocator, out: *std.ArrayList(u8), n: Newer) Error!void {
     switch (n) {
-        .envelope => |v| try out.print(gpa, "residue: envelope version {d}, which this build does not read\n", .{v}),
-        .wire => |v| try out.print(gpa, "residue: essence of Binary IR wire version {d}, which this substrate does not decode\n", .{v}),
+        .envelope => |v| try out.print(
+            gpa,
+            "residue: envelope version {d}, which this build does not read\n",
+            .{v},
+        ),
+        .wire => |v| try out.print(
+            gpa,
+            "residue: essence of Binary IR wire version {d}, which this substrate does not " ++
+                "decode\n",
+            .{v},
+        ),
     }
 }
 
@@ -650,7 +659,11 @@ fn table(
             try out.appendSlice(gpa, "essence: none\n");
         }
     } else {
-        try out.print(gpa, "essence: {d} bytes, envelope version {d}\n", .{ essence.len, records.version });
+        try out.print(
+            gpa,
+            "essence: {d} bytes, envelope version {d}\n",
+            .{ essence.len, records.version },
+        );
     }
 
     var hasher: reconcile.Hasher = .init(gpa, tier);
@@ -851,7 +864,8 @@ fn missingTier(
             .anchor_unavailable,
             .warning,
             anchor.span,
-            "the anchor '{s}' ({s}) carries no inline dump, so this build renders the document's own lanes into a FRESH file and the anchor's own content is not in it",
+            "the anchor '{s}' ({s}) carries no inline dump, so this build renders the " ++
+                "document's own lanes into a FRESH file and the anchor's own content is not in it",
             .{ anchor.id, anchor.file },
         );
         return;
@@ -869,7 +883,8 @@ fn refuseCrossKind(diags: *Diag.List, doc: *const Doc.Doc, kind: Doc.AnchorKind)
         .build_cross_kind,
         .err,
         doc.anchors[0].span,
-        "this document is arranged around a {t} anchor and a {t} file was asked for; v1 builds a document into its own anchor's kind, or a native document into either (plan 08)",
+        "this document is arranged around a {t} anchor and a {t} file was asked for; v1 builds " ++
+            "a document into its own anchor's kind, or a native document into either (plan 08)",
         .{ doc.anchors[0].kind, kind },
     );
     return true;
@@ -887,14 +902,18 @@ fn wantsResidue(diags: *Diag.List, opts: BuildOptions, newer: ?Newer) Error!bool
             .residue_newer_kept,
             .warning,
             .{ .start = 0, .end = 0 },
-            "this anchor carries a residue of envelope version {d}, which this build does not read; it was kept and no residue of this build's own was written (--force-residue overrides)",
+            "this anchor carries a residue of envelope version {d}, which this build does not " ++
+                "read; it was kept and no residue of this build's own was written " ++
+                "(--force-residue overrides)",
             .{v},
         ),
         .wire => |v| try diags.add(
             .residue_newer_kept,
             .warning,
             .{ .start = 0, .end = 0 },
-            "this anchor carries an essence of SJON Binary IR wire version {d}, which this substrate does not decode; it was kept and no residue of this build's own was written (--force-residue overrides)",
+            "this anchor carries an essence of SJON Binary IR wire version {d}, which this " ++
+                "substrate does not decode; it was kept and no residue of this build's own was " ++
+                "written (--force-residue overrides)",
             .{v},
         ),
     }
@@ -1323,7 +1342,12 @@ fn smfSequence(gpa: Allocator, vel: u7) !smf.Sequence {
 
     const t0 = try b.addTrack();
     try b.addEvent(t0, 0, .set_tempo, .{ .tempo = 500_000 });
-    try b.addEvent(t0, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(
+        t0,
+        0,
+        .time_signature,
+        .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } },
+    );
     try b.addEvent(t0, 192, .end_of_track, .empty);
 
     const t1 = try b.addTrack();
@@ -1519,7 +1543,9 @@ test "pipeline: a newer envelope keeps its payloads in the tier and says residue
     try testing.expectEqual(reconcile.Rule.version, got.rule);
     try testing.expect(got.diags.count(.residue_version) > 0);
     try testing.expect(!got.diags.hasErrors());
-    try testing.expect(std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue is a newer version"));
+    try testing.expect(
+        std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue is a newer version"),
+    );
     // The payloads are still in the document, as the plain events
     // RP-001 told every reader to skip — so a later build can put them
     // back untouched.
@@ -1663,7 +1689,10 @@ fn ready(gpa: Allocator, schema: *const Schema, source: [:0]const u8) !Ready {
     var res = try fromSjon.fromSource(gpa, schema, source, null);
     errdefer res.deinit();
     if (res.diags.hasErrors()) {
-        for (res.diags.items()) |d| std.debug.print("build fixture: {t}: {s}\n", .{ d.code, d.message });
+        for (res.diags.items()) |d| std.debug.print(
+            "build fixture: {t}: {s}\n",
+            .{ d.code, d.message },
+        );
         return error.FixtureDoesNotLoad;
     }
     const derived = try time_derive.derive(gpa, &res.doc);
@@ -1999,7 +2028,9 @@ test "pipeline: an SMF essence with a part missing is rule 4, not rule 1" {
     try testing.expect(got.diags.count(.residue_corrupt) > 0);
     // The two surfaces agree: the header does not say "no residue found"
     // over a file whose diagnostics say the residue would not decode.
-    try testing.expect(std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue would not decode"));
+    try testing.expect(
+        std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue would not decode"),
+    );
     try testing.expect(std.mem.indexOf(u8, got.text, "no residue found") == null);
     try testing.expect(!got.diags.hasErrors());
 }
@@ -2016,7 +2047,9 @@ test "pipeline: an IT chunk whose framing does not hold is rule 4 when nothing e
 
     try testing.expectEqual(reconcile.Rule.corrupt, got.rule);
     try testing.expect(got.diags.count(.residue_corrupt) > 0);
-    try testing.expect(std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue would not decode"));
+    try testing.expect(
+        std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue would not decode"),
+    );
     try testing.expect(std.mem.indexOf(u8, got.text, "no residue found") == null);
     try testing.expect(!got.diags.hasErrors());
     // The skeleton is total all the same: the module is a document
@@ -2071,7 +2104,9 @@ test "pipeline: an IT chunk of a newer envelope leaves it in the file and derive
     try testing.expectEqual(reconcile.Rule.version, got.rule);
     try testing.expect(got.diags.count(.residue_version) > 0);
     try testing.expectEqual(@as(usize, 0), got.diags.count(.residue_corrupt));
-    try testing.expect(std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue is a newer version"));
+    try testing.expect(
+        std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue is a newer version"),
+    );
     try testing.expect(!got.diags.hasErrors());
 
     // The file was not touched: the chunk is still under its 4CC, and
@@ -2263,8 +2298,14 @@ test "pipeline.build: the same round is a fixed point for a .it" {
     try testing.expectEqualStrings(t1, t2);
     // The message's tail is the one thing that moved: the second
     // document has an anchor, and the tail says so.
-    try testing.expectEqual(@as(usize, 0), countIn(tierText(d1.text, .it), "(anchor :id song :kind it :file"));
-    try testing.expectEqual(@as(usize, 1), countIn(tierText(d2.text, .it), "(anchor :id song :kind it :file"));
+    try testing.expectEqual(
+        @as(usize, 0),
+        countIn(tierText(d1.text, .it), "(anchor :id song :kind it :file"),
+    );
+    try testing.expectEqual(
+        @as(usize, 1),
+        countIn(tierText(d2.text, .it), "(anchor :id song :kind it :file"),
+    );
     // The lanes land on the channels the dump emptied, not above them.
     try testing.expectEqual(b1.lanes.len, b2.lanes.len);
     for (b1.lanes, b2.lanes) |x, y| {
@@ -2409,7 +2450,9 @@ test "pipeline: a newer Binary IR wire version keeps its payloads in the tier, a
     try testing.expectEqual(reconcile.Rule.version, got.rule);
     try testing.expect(got.diags.count(.residue_version) > 0);
     try testing.expect(!got.diags.hasErrors());
-    try testing.expect(std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue is a newer version"));
+    try testing.expect(
+        std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue is a newer version"),
+    );
     // The carrier events are in the tier — all three of them.
     try testing.expectEqual(@as(usize, 3), countIn(got.text, "sequencer-specific"));
     try testing.expect(!got.consumed.any());
@@ -2428,7 +2471,15 @@ test "pipeline: a newer Binary IR wire version keeps its payloads in the tier, a
     try testing.expectEqual(Newer{ .wire = 0xFE }, newerSmf(&back.sequence).?);
 
     // …unless told to.
-    var forced = try build(gpa, &schema, got.text, &got.doc, &derived, .smf, .{ .force_residue = true });
+    var forced = try build(
+        gpa,
+        &schema,
+        got.text,
+        &got.doc,
+        &derived,
+        .smf,
+        .{ .force_residue = true },
+    );
     defer forced.deinit();
     try testing.expect(forced.essence_bytes > 0);
     var again = try smf.read(gpa, forced.bytes);
@@ -2465,7 +2516,15 @@ test "pipeline: an IT chunk whose essence is a newer wire version is rule 5, or 
         // A build over the anchor's bytes keeps the chunk.
         var derived = try time_derive.derive(gpa, &got.doc);
         defer derived.deinit();
-        var kept = try build(gpa, &schema, got.text, &got.doc, &derived, .it, .{ .anchor_bytes = bytes });
+        var kept = try build(
+            gpa,
+            &schema,
+            got.text,
+            &got.doc,
+            &derived,
+            .it,
+            .{ .anchor_bytes = bytes },
+        );
         defer kept.deinit();
         try testing.expectEqual(@as(usize, 1), kept.diags.count(.residue_newer_kept));
         try testing.expectEqual(@as(usize, 0), kept.essence_bytes);
@@ -2482,7 +2541,9 @@ test "pipeline: an IT chunk whose essence is a newer wire version is rule 5, or 
         var got = try dump(gpa, &schema, bytes, .it, .{});
         defer got.deinit();
         try testing.expectEqual(reconcile.Rule.version, got.rule);
-        try testing.expect(std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue is a newer version"));
+        try testing.expect(
+            std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue is a newer version"),
+        );
         try testing.expect(!got.diags.hasErrors());
     }
 }

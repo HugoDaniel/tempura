@@ -234,13 +234,19 @@ const Render = struct {
                     .render_channels_exhausted,
                     .warning,
                     lane.span,
-                    "the lane '{s}' needs {d} channel(s) and this module has none left of its {d}; its content rides in the residue alone",
+                    "the lane '{s}' needs {d} channel(s) and this module has none left of its " ++
+                        "{d}; its content rides in the residue alone",
                     .{ lane.name, want, model.channels },
                 );
                 continue;
             }
             switch (lane.kind) {
-                .notes => try self.notesLane(lane, &self.derived.lanes[i], @intCast(channel), @intCast(want)),
+                .notes => try self.notesLane(
+                    lane,
+                    &self.derived.lanes[i],
+                    @intCast(channel),
+                    @intCast(want),
+                ),
                 .curve => try self.curveLane(lane, &self.derived.lanes[i], @intCast(channel)),
                 .query, .formula => unreachable,
             }
@@ -251,14 +257,16 @@ const Render = struct {
             .render_inexact,
             .warning,
             .{ .start = 0, .end = 0 },
-            "{d} position(s) do not land on this module's row grid ({d} ticks to the row) and were written to the nearest row",
+            "{d} position(s) do not land on this module's row grid ({d} ticks to the row) and " ++
+                "were written to the nearest row",
             .{ self.inexact, self.speed },
         );
         if (self.collisions > 0) try self.diags.add(
             .render_inexact,
             .warning,
             .{ .start = 0, .end = 0 },
-            "{d} note(s) rounded onto a cell one of their own lane's notes already held; a cell holds one note, so the later one was not written and rides in the residue alone",
+            "{d} note(s) rounded onto a cell one of their own lane's notes already held; a cell " ++
+                "holds one note, so the later one was not written and rides in the residue alone",
             .{self.collisions},
         );
 
@@ -300,7 +308,8 @@ const Render = struct {
                 .it_count_exceeds_spec,
                 .warning,
                 .{ .start = 0, .end = 0 },
-                "this timeline needs {d} patterns of {d} rows and a module holds {d}; the tail is not rendered and rides in the residue alone",
+                "this timeline needs {d} patterns of {d} rows and a module holds {d}; the tail " ++
+                    "is not rendered and rides in the residue alone",
                 .{ wanted, self.rows_per_pattern, max_patterns },
             );
             wanted = max_patterns;
@@ -373,7 +382,9 @@ const Render = struct {
             .tempo_inexact,
             .warning,
             point.span,
-            "an Impulse Tracker tempo is a whole number 32..255 and this point is {d} quarter notes per minute; it was written as {d} and the residue keeps the tempo the document states",
+            "an Impulse Tracker tempo is a whole number 32..255 and this point is {d} quarter " ++
+                "notes per minute; it was written as {d} and the residue keeps the tempo the " ++
+                "document states",
             .{ qpm, clamped },
         );
         return @intFromFloat(clamped);
@@ -395,7 +406,8 @@ const Render = struct {
                 .render_inexact,
                 .warning,
                 point.span,
-                "every effect column of row {d} of pattern {d} is taken, so this tempo point could not be written there",
+                "every effect column of row {d} of pattern {d} is taken, so this tempo point " ++
+                    "could not be written there",
                 .{ slot.row, slot.pattern },
             );
         }
@@ -412,7 +424,8 @@ const Render = struct {
                     .residue_only,
                     .warning,
                     lane.span,
-                    "the {t} lane '{s}' is computed, and a .it holds no query or formula: it rides in the residue alone",
+                    "the {t} lane '{s}' is computed, and a .it holds no query or formula: it " ++
+                        "rides in the residue alone",
                     .{ lane.kind, lane.name },
                 );
                 return false;
@@ -457,7 +470,8 @@ const Render = struct {
                     .render_polyphony_exceeded,
                     .warning,
                     lane.span,
-                    "the lane '{s}' sounds more than {d} note(s) at once from tick {d}; the ones past the cap ride in the residue alone",
+                    "the lane '{s}' sounds more than {d} note(s) at once from tick {d}; the " ++
+                        "ones past the cap ride in the residue alone",
                     .{ lane.name, voices, o.tick },
                 );
                 continue;
@@ -546,7 +560,8 @@ const Render = struct {
             .it_no_instrument,
             .warning,
             .{ .start = 0, .end = 0 },
-            "this module carries no instrument or sample, so every rendered cell names instrument 1: the file holds the timing and a tracker brings the sound",
+            "this module carries no instrument or sample, so every rendered cell names " ++
+                "instrument 1: the file holds the timing and a tracker brings the sound",
             .{},
         );
     }
@@ -571,8 +586,14 @@ const Render = struct {
                     var at = prev.tick + self.row_ticks;
                     while (at < step.tick) : (at += self.row_ticks) {
                         const span = step.tick - prev.tick;
-                        const u = @as(f64, @floatFromInt(at - prev.tick)) / @as(f64, @floatFromInt(span));
-                        const v = @as(f64, prev.value[0]) + (@as(f64, step.value[0]) - @as(f64, prev.value[0])) * u;
+                        const u = @as(
+                            f64,
+                            @floatFromInt(at - prev.tick),
+                        ) / @as(f64, @floatFromInt(span));
+                        const v = @as(
+                            f64,
+                            prev.value[0],
+                        ) + (@as(f64, step.value[0]) - @as(f64, prev.value[0])) * u;
                         self.placeCurve(at, channel, v, range);
                     }
                 } else if (!std.mem.eql(u8, step.ease_src, "hold")) {
@@ -733,7 +754,9 @@ fn volumeOf(vel: u7) u8 {
 fn scale(v: f64, range: [2]f32, top: u8) u8 {
     const lo: f64 = range[0];
     const hi: f64 = range[1];
-    if (hi == lo or !std.math.isFinite(lo) or !std.math.isFinite(hi) or !std.math.isFinite(v)) return 0;
+    if (hi == lo or !std.math.isFinite(
+        lo,
+    ) or !std.math.isFinite(hi) or !std.math.isFinite(v)) return 0;
     const scaled = @round((v - lo) / (hi - lo) * @as(f64, @floatFromInt(top)));
     if (!(scaled > 0)) return 0;
     if (scaled >= @as(f64, @floatFromInt(top))) return top;
@@ -749,7 +772,12 @@ fn highestUsed(module: *const itf.Module) u16 {
         while (row < p.rows) : (row += 1) {
             var c: u16 = 0;
             while (c < model.channels) : (c += 1) {
-                if (!p.cells[@as(usize, row) * model.channels + c].isEmpty()) highest = @max(highest, c + 1);
+                if (!p.cells[
+                    @as(
+                        usize,
+                        row,
+                    ) * model.channels + c
+                ].isEmpty()) highest = @max(highest, c + 1);
             }
         }
     }
@@ -786,7 +814,10 @@ fn load(gpa: Allocator, source: [:0]const u8) !Fixture {
         loaded.diags.deinit();
     }
     if (loaded.diags.hasErrors()) {
-        for (loaded.diags.items()) |d| std.debug.print("fixture: {t}: {s}\n", .{ d.code, d.message });
+        for (loaded.diags.items()) |d| std.debug.print(
+            "fixture: {t}: {s}\n",
+            .{ d.code, d.message },
+        );
         return error.FixtureDoesNotLoad;
     }
     var d = loaded.doc;

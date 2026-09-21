@@ -332,7 +332,9 @@ const Render = struct {
                         .render_cc_missing,
                         .warning,
                         lane.span,
-                        "the curve lane '{s}' names {s} as its :cc, and this renderer writes one 7-bit controller; its keyframes ride in the residue alone and no DAW will hear them",
+                        "the curve lane '{s}' names {s} as its :cc, and this renderer writes " ++
+                            "one 7-bit controller; its keyframes ride in the residue alone and " ++
+                            "no DAW will hear them",
                         .{ lane.name, what },
                     );
                     return false;
@@ -341,7 +343,9 @@ const Render = struct {
                     .render_cc_missing,
                     .warning,
                     lane.span,
-                    "the curve lane '{s}' has no controller to render onto (:cc on the lane, or --cc), so its keyframes ride in the residue alone and no DAW will hear them",
+                    "the curve lane '{s}' has no controller to render onto (:cc on the lane, or " ++
+                        "--cc), so its keyframes ride in the residue alone and no DAW will hear " ++
+                        "them",
                     .{lane.name},
                 );
                 return false;
@@ -351,7 +355,8 @@ const Render = struct {
                     .residue_only,
                     .warning,
                     lane.span,
-                    "the {t} lane '{s}' is computed, and a .mid holds no query or formula: it rides in the residue alone",
+                    "the {t} lane '{s}' is computed, and a .mid holds no query or formula: it " ++
+                        "rides in the residue alone",
                     .{ lane.kind, lane.name },
                 );
                 return false;
@@ -367,7 +372,8 @@ const Render = struct {
             .render_format_promoted,
             .warning,
             .{ .start = 0, .end = 0 },
-            "this anchor is a format 0 file and a format 0 file has one track; the {d} lane track(s) rendered into it promote it to format 1",
+            "this anchor is a format 0 file and a format 0 file has one track; the {d} lane " ++
+                "track(s) rendered into it promote it to format 1",
             .{new_tracks},
         );
         return 1;
@@ -591,7 +597,8 @@ const Render = struct {
             .render_inexact,
             .warning,
             .{ .start = 0, .end = 0 },
-            "{d} position(s) of '{s}' do not land on division {d} and were written to the nearest pulse",
+            "{d} position(s) of '{s}' do not land on division {d} and were written to the " ++
+                "nearest pulse",
             .{ n, what, self.ppq },
         );
     }
@@ -722,7 +729,10 @@ fn load(gpa: Allocator, source: [:0]const u8) !Fixture {
         loaded.diags.deinit();
     }
     if (loaded.diags.hasErrors()) {
-        for (loaded.diags.items()) |d| std.debug.print("fixture: {t}: {s}\n", .{ d.code, d.message });
+        for (loaded.diags.items()) |d| std.debug.print(
+            "fixture: {t}: {s}\n",
+            .{ d.code, d.message },
+        );
         return error.FixtureDoesNotLoad;
     }
     var d = loaded.doc;
@@ -754,10 +764,19 @@ test "toPulse: exact when the division divides the tick, nearest otherwise" {
 }
 
 test "microseconds: :us verbatim, :qpm rounded" {
-    try testing.expectEqual(@as(u32, 400_000), microseconds(.{ .tick = 0, .tempo = .{ .us = 400_000 } }));
-    try testing.expectEqual(@as(u32, 480_000), microseconds(.{ .tick = 0, .tempo = .{ .qpm = 125 } }));
+    try testing.expectEqual(
+        @as(u32, 400_000),
+        microseconds(.{ .tick = 0, .tempo = .{ .us = 400_000 } }),
+    );
+    try testing.expectEqual(
+        @as(u32, 480_000),
+        microseconds(.{ .tick = 0, .tempo = .{ .qpm = 125 } }),
+    );
     // 60e6 / 130 = 461538.46…, which rounds up.
-    try testing.expectEqual(@as(u32, 461_538), microseconds(.{ .tick = 0, .tempo = .{ .qpm = 130 } }));
+    try testing.expectEqual(
+        @as(u32, 461_538),
+        microseconds(.{ .tick = 0, .tempo = .{ .qpm = 130 } }),
+    );
 }
 
 test "renderSmf: the conductor track carries the tempo, the meter and a marker per cue" {
@@ -786,7 +805,13 @@ test "renderSmf: the conductor track carries the tempo, the meter and a marker p
     try testing.expectEqual(@as(u32, 480_000), out.seq.tracks[0].events[1].payload.tempo);
     try testing.expect(out.conductor != null);
 
-    var with_sections = try renderSmf(gpa, &fx.doc, &fx.derived, null, .{ .section_markers = true });
+    var with_sections = try renderSmf(
+        gpa,
+        &fx.doc,
+        &fx.derived,
+        null,
+        .{ .section_markers = true },
+    );
     defer with_sections.deinit();
     try testing.expectEqual(@as(usize, 2), countKind(&with_sections.seq, 0, .marker));
 }

@@ -365,7 +365,9 @@ const Printer = struct {
             const p = raw_pan & 0x7F;
             const surround = p == 100;
             const pan: u8 = if (p <= 64) p else defaults.pan;
-            if (pan == defaults.pan and vol == defaults.channel_vol and !muted and !surround) continue;
+            if (pan == defaults.pan and vol == defaults.channel_vol and !muted and !surround) {
+                continue;
+            }
 
             try inner.raw("\n    (ch ");
             try inner.int(i + 1);
@@ -460,7 +462,8 @@ const Printer = struct {
                     .it_midi_macro_invalid,
                     .warning,
                     .{ .start = 0, .end = 0 },
-                    "MIDI macro {s} holds a byte outside printable ASCII; the slot is not spelled and rebuilds empty",
+                    "MIDI macro {s} holds a byte outside printable ASCII; the slot is not " ++
+                        "spelled and rebuilds empty",
                     .{slot_name},
                 );
                 continue;
@@ -529,7 +532,11 @@ const Printer = struct {
         // only the reader's map knows where to find — unless a dump
         // changed this pattern's cells, in which case the file's bytes
         // are not this pattern any more.
-        const forced = std.mem.indexOfScalar(u16, self.opts.rows_for, @intCast(@min(index, std.math.maxInt(u16)))) != null;
+        const forced = std.mem.indexOfScalar(
+            u16,
+            self.opts.rows_for,
+            @intCast(@min(index, std.math.maxInt(u16))),
+        ) != null;
         if (self.opts.patterns_bin and !forced) {
             if (self.opts.source_map) |map| {
                 if (map.find(.pattern, @intCast(index))) |region| {
@@ -610,7 +617,10 @@ const Printer = struct {
             try self.unspellable(byte, "no tracker gives it a meaning");
             return;
         };
-        if (!family.it) try self.unspellable(byte, "OpenMPT's volume-column sample-offset extension, not IT's own column");
+        if (!family.it) try self.unspellable(
+            byte,
+            "OpenMPT's volume-column sample-offset extension, not IT's own column",
+        );
         try self.raw(" :vol \"");
         try self.raw(&[_]u8{family.letter});
         try self.int(byte - family.base);
@@ -885,8 +895,16 @@ const Reader = struct {
         }
         h.global_volume = castInt(u8, kvNumber(tree, children, "global-vol"), defaults.global_vol);
         h.mix_volume = castInt(u8, kvNumber(tree, children, "mix-vol"), defaults.mix_vol);
-        h.pan_separation = castInt(u8, kvNumber(tree, children, "pan-separation"), defaults.pan_separation);
-        h.pitch_wheel_depth = castInt(u8, kvNumber(tree, children, "pitch-wheel-depth"), defaults.pitch_wheel_depth);
+        h.pan_separation = castInt(
+            u8,
+            kvNumber(tree, children, "pan-separation"),
+            defaults.pan_separation,
+        );
+        h.pitch_wheel_depth = castInt(
+            u8,
+            kvNumber(tree, children, "pitch-wheel-depth"),
+            defaults.pitch_wheel_depth,
+        );
         h.cwtv = castInt(u16, kvNumber(tree, children, "cwtv"), model.cwtv_tempura);
         h.cmwt = castInt(u16, kvNumber(tree, children, "cmwt"), model.cmwt_tempura);
     }
@@ -905,7 +923,10 @@ const Reader = struct {
             const surround = boolAt(tree, children, "surround") orelse false;
             const muted = boolAt(tree, children, "muted") orelse false;
             const pan = castInt(u8, kvNumber(tree, children, "pan"), defaults.pan);
-            h.channel_pan[i] = (if (surround) @as(u8, 100) else pan) | (if (muted) @as(u8, 0x80) else 0);
+            h.channel_pan[i] = (if (surround) @as(
+                u8,
+                100,
+            ) else pan) | (if (muted) @as(u8, 0x80) else 0);
             h.channel_vol[i] = castInt(u8, kvNumber(tree, children, "vol"), defaults.channel_vol);
         }
     }
@@ -1001,7 +1022,8 @@ const Reader = struct {
                 .it_midi_macro_invalid,
                 .err,
                 spanOf(tree, name_node.?),
-                "no MIDI macro slot is called {s}: the globals are start, stop, tick, note-on, note-off, volume, pan, bank and program, then sf0..sff and z80..zff",
+                "no MIDI macro slot is called {s}: the globals are start, stop, tick, note-on, " ++
+                    "note-off, volume, pan, bank and program, then sf0..sff and z80..zff",
                 .{name},
             );
             return;
@@ -1024,7 +1046,8 @@ const Reader = struct {
                 .it_midi_macro_invalid,
                 .err,
                 spanOf(tree, body_idx),
-                "MIDI macro {s}'s body holds a byte outside printable ASCII; the slot is left empty",
+                "MIDI macro {s}'s body holds a byte outside printable ASCII; the slot is left " ++
+                    "empty",
                 .{name},
             );
             return;
@@ -1078,7 +1101,12 @@ const Reader = struct {
     }
 
     /// Every key and child the record spells that tempura keeps opaque.
-    fn unmaterialised(self: *Reader, form: NodeIndex, names: []const []const u8, what: []const u8) Error!void {
+    fn unmaterialised(
+        self: *Reader,
+        form: NodeIndex,
+        names: []const []const u8,
+        what: []const u8,
+    ) Error!void {
         const tree = self.tree;
         for (tree.formHeader(form).children) |child| {
             const spelled: []const u8 = switch (tree.tagOf(child)) {
@@ -1092,7 +1120,8 @@ const Reader = struct {
                     .it_field_not_materialized,
                     .err,
                     spanOf(tree, child),
-                    "tempura keeps {s} bodies opaque: :{s} is written back from the :raw region, not from this",
+                    "tempura keeps {s} bodies opaque: :{s} is written back from the :raw " ++
+                        "region, not from this",
                     .{ what, n },
                 );
             }
@@ -1114,7 +1143,10 @@ const Reader = struct {
         if (self.b.patterns.items[index].rows != rows) {
             self.b.patterns.items[index] = .{
                 .rows = rows,
-                .cells = try self.b.module.allocator().alloc(model.Cell, @as(usize, rows) * model.channels),
+                .cells = try self.b.module.allocator().alloc(
+                    model.Cell,
+                    @as(usize, rows) * model.channels,
+                ),
             };
             @memset(self.b.patterns.items[index].cells, .empty);
         }
@@ -1214,7 +1246,8 @@ const Reader = struct {
                 .it_command_unknown,
                 .warning,
                 spanOf(tree, node),
-                "volume-column code \"{s}\" is OpenMPT's volume-column sample-offset extension, not IT's own column",
+                "volume-column code \"{s}\" is OpenMPT's volume-column sample-offset extension, " ++
+                    "not IT's own column",
                 .{text},
             );
             return f.base + @as(u8, @intCast(value));
@@ -1264,7 +1297,8 @@ const Reader = struct {
                 .it_parapointer_out_of_range,
                 .err,
                 spanOf(tree, form),
-                "this region ends at {d} and the anchor is {d} bytes; an offset is meaningful only against that exact file",
+                "this region ends at {d} and the anchor is {d} bytes; an offset is meaningful " ++
+                    "only against that exact file",
                 .{ region.end(), bytes.len },
             );
         }
@@ -1553,7 +1587,11 @@ pub fn orderCues(gpa: Allocator, rowmap: *const walk.RowMap) Error!Cues {
         try items.append(a, .{
             // The em dash is it 09's own idiom, and the name is what a
             // reader sees in a timeline beside the tracker's order list.
-            .name = try std.fmt.allocPrint(a, "order {d} — pattern {d}", .{ played.order, played.pattern }),
+            .name = try std.fmt.allocPrint(
+                a,
+                "order {d} — pattern {d}",
+                .{ played.order, played.pattern },
+            ),
             .at = played.start_tick,
         });
     }
@@ -1919,7 +1957,10 @@ test "bridge_it: a (macro …) the block cannot hold is it_midi_macro_invalid at
     try testing.expectEqualStrings("nope", source[items[0].span.start..items[0].span.end]);
     try testing.expectEqual(Diag.Severity.err, items[0].severity);
     try testing.expectEqual(Diag.Severity.warning, items[1].severity); // SF0 again
-    try testing.expectEqualStrings("\"0123456789ABCDEF0123456789ABCDEF0\"", source[items[2].span.start..items[2].span.end]);
+    try testing.expectEqualStrings(
+        "\"0123456789ABCDEF0123456789ABCDEF0\"",
+        source[items[2].span.start..items[2].span.end],
+    );
     try testing.expectEqualStrings("\"a\\tb\"", source[items[3].span.start..items[3].span.end]);
     try testing.expectEqualStrings("Z7F", source[items[4].span.start..items[4].span.end]);
 
@@ -2006,8 +2047,12 @@ test "bridge_it: --patterns=bin, --preserve-foreign and --preserve-history" {
         .preserve_history = true,
     });
     defer gpa.free(kept);
-    try testing.expect(std.mem.indexOf(u8, kept, "(it/foreign :tag \"STPM\" (bin :at 0x1000 :len 0x10))") != null);
-    try testing.expect(std.mem.indexOf(u8, kept, "(it/edit-history (bin :at 0x1010 :len 0x20))") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, kept, "(it/foreign :tag \"STPM\" (bin :at 0x1000 :len 0x10))") != null,
+    );
+    try testing.expect(
+        std.mem.indexOf(u8, kept, "(it/edit-history (bin :at 0x1010 :len 0x20))") != null,
+    );
 
     // `--patterns=bin` needs the reader's map to have somewhere to point;
     // without one the rows are dumped as usual.
@@ -2020,7 +2065,9 @@ test "bridge_it: --patterns=bin, --preserve-foreign and --preserve-history" {
     } };
     const refs = try moduleToForms(gpa, &module, .{ .patterns_bin = true, .source_map = &map });
     defer gpa.free(refs);
-    try testing.expect(std.mem.indexOf(u8, refs, "(it/pattern 0 :rows 64 (bin :at 0x2000 :len 0x40))") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, refs, "(it/pattern 0 :rows 64 (bin :at 0x2000 :len 0x40))") != null,
+    );
 
     // A pattern a dump changed (plan 04, rule 2's consumption) is rows
     // even under `--patterns=bin`: the file's bytes are not it any more.

@@ -721,7 +721,14 @@ const Walk = struct {
         const len: usize = switch (vlq.read(self.bytes[0..end], pos)) {
             .ok => |n| n,
             .err => |code| {
-                try self.diag(code, .err, pos.*, @min(pos.* + 1, end), "a payload length that is not one", .{});
+                try self.diag(
+                    code,
+                    .err,
+                    pos.*,
+                    @min(pos.* + 1, end),
+                    "a payload length that is not one",
+                    .{},
+                );
                 return null;
             },
         };
@@ -749,7 +756,14 @@ const Walk = struct {
     /// wrote.
     fn metaEvent(self: *Walk, pos: *usize, end: usize) Error!?Parsed {
         if (pos.* >= end) {
-            try self.diag(.smf_track_truncated, .err, pos.*, end, "a meta event with no type byte", .{});
+            try self.diag(
+                .smf_track_truncated,
+                .err,
+                pos.*,
+                end,
+                "a meta event with no type byte",
+                .{},
+            );
             return null;
         }
         const meta_type = self.bytes[pos.*];
@@ -783,7 +797,9 @@ const Walk = struct {
             0x2F => if (raw.len == 0) .{ .kind = .end_of_track, .payload = .empty } else null,
             0x51 => if (raw.len == 3) .{
                 .kind = .set_tempo,
-                .payload = .{ .tempo = (@as(u32, raw[0]) << 16) | (@as(u32, raw[1]) << 8) | raw[2] },
+                .payload = .{
+                    .tempo = (@as(u32, raw[0]) << 16) | (@as(u32, raw[1]) << 8) | raw[2],
+                },
             } else null,
             0x54 => if (raw.len == 5) .{ .kind = .smpte_offset, .payload = .{ .smpte = .{
                 .hr = raw[0],
@@ -864,7 +880,10 @@ test "read: the hand-built two-track fixture parses to the expected Sequence" {
     try testing.expectEqualStrings("Tempura", seq.bytesOf(t0[1].payload.bytes));
 
     try testing.expectEqual(Kind.time_signature, t0[2].kind);
-    try testing.expectEqual(sequence.TimeSig{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 }, t0[2].payload.time_sig);
+    try testing.expectEqual(
+        sequence.TimeSig{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 },
+        t0[2].payload.time_sig,
+    );
 
     // `FF 51 03 07 A1 20` is 500 000 µs per quarter — 120 BPM — and its
     // `A1` has the high bit set, which is nothing at all inside a
@@ -929,9 +948,15 @@ test "read: the hand-built two-track fixture parses to the expected Sequence" {
     try testing.expectEqualSlices(u8, &support.escape_payload, seq.bytesOf(t1[5].payload.bytes));
 
     try testing.expectEqual(Kind.control_change, t1[6].kind);
-    try testing.expectEqual(sequence.NumVal{ .ch = 0, .num = 7, .val = 127 }, t1[6].payload.control);
+    try testing.expectEqual(
+        sequence.NumVal{ .ch = 0, .num = 7, .val = 127 },
+        t1[6].payload.control,
+    );
     try testing.expectEqual(Kind.control_change, t1[7].kind);
-    try testing.expectEqual(sequence.NumVal{ .ch = 0, .num = 10, .val = 64 }, t1[7].payload.control);
+    try testing.expectEqual(
+        sequence.NumVal{ .ch = 0, .num = 10, .val = 64 },
+        t1[7].payload.control,
+    );
 
     try testing.expectEqual(Kind.program_change, t1[8].kind);
     try testing.expectEqual(sequence.ChNum{ .ch = 0, .num = 5 }, t1[8].payload.program);
@@ -1042,7 +1067,10 @@ test "read: a SMPTE division converts OpenMPT's way and its tempo events are rec
         result.sequence.division,
     );
     try testing.expectEqual(@as(u15, 500), result.sequence.division.pulsesPerQuarter());
-    try testing.expectEqual(SmpteConversion{ .fps = 25, .tpf = 40, .ppq = 500 }, result.source_map.smpte.?);
+    try testing.expectEqual(
+        SmpteConversion{ .fps = 25, .tpf = 40, .ppq = 500 },
+        result.source_map.smpte.?,
+    );
 
     // The event is kept; the timing walk is told not to believe it.
     try testing.expectEqual(Kind.set_tempo, result.sequence.tracks[0].events[0].kind);
@@ -1127,7 +1155,10 @@ test "read: a RIFF/RMID wrapper is unwrapped, recorded, and its spans stay file 
 
     // The unwrap is recorded, and every offset in the map is an offset
     // into the bytes the caller handed in — not into the unwrapped region.
-    try testing.expectEqual(Region{ .offset = 20, .len = @intCast(inner.len) }, result.source_map.riff.?);
+    try testing.expectEqual(
+        Region{ .offset = 20, .len = @intCast(inner.len) },
+        result.source_map.riff.?,
+    );
     try testing.expectEqual(@as(u32, 20), result.source_map.chunks[0].offset);
 }
 
@@ -1139,7 +1170,11 @@ test "read: ntrks that disagrees with the MTrk count is a diagnostic and the wal
     try t.vlq(0);
     try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
 
-    const bytes = try support.buildFile(gpa, .{ .format = 1, .ntrks = 4 }, &.{ t.buf.items, t.buf.items });
+    const bytes = try support.buildFile(
+        gpa,
+        .{ .format = 1, .ntrks = 4 },
+        &.{ t.buf.items, t.buf.items },
+    );
     defer gpa.free(bytes);
 
     var result = try read(gpa, bytes);
@@ -1353,7 +1388,11 @@ test "read: a track with no end-of-track, and one with bytes after it" {
     try early.vlq(0);
     try early.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
 
-    const bytes = try support.buildFile(gpa, .{ .format = 1 }, &.{ missing.buf.items, early.buf.items });
+    const bytes = try support.buildFile(
+        gpa,
+        .{ .format = 1 },
+        &.{ missing.buf.items, early.buf.items },
+    );
     defer gpa.free(bytes);
 
     var result = try read(gpa, bytes);
@@ -1424,7 +1463,10 @@ test "read: a system message is skipped with its data bytes and the track goes o
     try testing.expectEqual(@as(usize, 3), result.diags.count(.smf_status_invalid));
     try testing.expect(!result.diags.hasErrors());
     for (result.diags.items()) |d| {
-        if (d.code == .smf_status_invalid) try testing.expectEqual(Diag.Severity.warning, d.severity);
+        if (d.code == .smf_status_invalid) try testing.expectEqual(
+            Diag.Severity.warning,
+            d.severity,
+        );
     }
     // A system byte does not cancel running status, so no warning about
     // reusing it either.

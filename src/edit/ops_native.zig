@@ -71,7 +71,8 @@ fn refuse(b: *Plan.Builder, tick: i64, verb: []const u8) Error!void {
     try b.refuse(
         .tick_overflow,
         .{ .start = 0, .end = 0 },
-        "this operation {s} tick {d}, which is off the grid (±{d}): plan 03 makes a position past the ceiling a diagnostic and never a wrap",
+        "this operation {s} tick {d}, which is off the grid (±{d}): plan 03 makes a position " ++
+            "past the ceiling a diagnostic and never a wrap",
         .{ verb, tick, Grid.MAX_TICK },
     );
 }
@@ -236,7 +237,12 @@ const Ctx = struct {
             return null;
         }
         if (r.targets.len == 0) {
-            try self.b.refuse(.edit_range_empty, self.selectionSpan(sel), "the selection resolved to nothing", .{});
+            try self.b.refuse(
+                .edit_range_empty,
+                self.selectionSpan(sel),
+                "the selection resolved to nothing",
+                .{},
+            );
             r.deinit();
             return null;
         }
@@ -271,15 +277,30 @@ const Ctx = struct {
         const arena = self.arena;
         for (lane.notes, 0..) |n, i| {
             const w = (try self.where(n.span)) orelse return null;
-            try list.append(arena, .{ .slot = w.slot, .at = n.at, .kind = .note, .item = @intCast(i), .span = n.span });
+            try list.append(
+                arena,
+                .{ .slot = w.slot, .at = n.at, .kind = .note, .item = @intCast(i), .span = n.span },
+            );
         }
         for (lane.keyframes, 0..) |k, i| {
             const w = (try self.where(k.span)) orelse return null;
-            try list.append(arena, .{ .slot = w.slot, .at = k.at, .kind = .keyframe, .item = @intCast(i), .span = k.span });
+            try list.append(
+                arena,
+                .{
+                    .slot = w.slot,
+                    .at = k.at,
+                    .kind = .keyframe,
+                    .item = @intCast(i),
+                    .span = k.span,
+                },
+            );
         }
         for (lane.clips, 0..) |c, i| {
             const w = (try self.where(c.span)) orelse return null;
-            try list.append(arena, .{ .slot = w.slot, .at = c.at, .kind = .clip, .item = @intCast(i), .span = c.span });
+            try list.append(
+                arena,
+                .{ .slot = w.slot, .at = c.at, .kind = .clip, .item = @intCast(i), .span = c.span },
+            );
         }
         const out = try list.toOwnedSlice(arena);
         std.sort.insertion(Child, out, {}, bySlot);
@@ -370,16 +391,31 @@ const Ctx = struct {
     /// not write), which for a sorted lane is the sorted index.
     fn insertChild(self: *Ctx, x: Op.Insert) Error!void {
         const name = x.lane orelse {
-            try self.b.refuse(.edit_range_empty, .{ .start = 0, .end = 0 }, "a {s} goes into a lane, and none was named", .{x.what.head()});
+            try self.b.refuse(
+                .edit_range_empty,
+                .{ .start = 0, .end = 0 },
+                "a {s} goes into a lane, and none was named",
+                .{x.what.head()},
+            );
             return;
         };
         const li = self.laneByName(name) orelse {
-            try self.b.refuse(.edit_range_empty, .{ .start = 0, .end = 0 }, "no lane is named {s}", .{name});
+            try self.b.refuse(
+                .edit_range_empty,
+                .{ .start = 0, .end = 0 },
+                "no lane is named {s}",
+                .{name},
+            );
             return;
         };
         const lane = self.d.lanes[li];
         if (lane.binding != null) {
-            try self.b.refuse(.edit_target_bound, lane.span, "this lane's content lives in its anchor's file; inline it first", .{});
+            try self.b.refuse(
+                .edit_target_bound,
+                lane.span,
+                "this lane's content lives in its anchor's file; inline it first",
+                .{},
+            );
             return;
         }
         const lane_where = (try self.where(lane.span)) orelse return;
@@ -453,7 +489,13 @@ const Ctx = struct {
     /// can load, which is the contract's other half. A point at a tick
     /// one already occupies is the caller's to refuse before it gets
     /// here.
-    fn insertRootInOrder(self: *Ctx, head: []const u8, tick: i64, points: anytype, json: []const u8) Error!void {
+    fn insertRootInOrder(
+        self: *Ctx,
+        head: []const u8,
+        tick: i64,
+        points: anytype,
+        json: []const u8,
+    ) Error!void {
         var after: ?u32 = null;
         var before: ?u32 = null;
         for (points) |p| {
@@ -745,7 +787,10 @@ const Ctx = struct {
         for (duration_keys) |key| {
             if (m.dur) |d| {
                 if (asked != null and std.mem.eql(u8, asked.?, key) and d != m.t.dur) {
-                    try out.append(arena, .{ .key = key, .json = try self.durationJson(@max(0, d), m.to) });
+                    try out.append(
+                        arena,
+                        .{ .key = key, .json = try self.durationJson(@max(0, d), m.to) },
+                    );
                     continue;
                 }
             }
@@ -919,11 +964,19 @@ const Ctx = struct {
                     try self.b.setKeyword(w.site, "dur", try self.durationJson(@max(0, dur), t.at));
                 },
                 .clip => {
-                    if (x.repeat) |rep| try self.b.setKeyword(w.site, "repeat", try self.intJson(rep));
+                    if (x.repeat) |rep| try self.b.setKeyword(
+                        w.site,
+                        "repeat",
+                        try self.intJson(rep),
+                    );
                     // A clip's own length is its playback window, which
                     // is what `:dur` means for the one form that spells
                     // it with another key.
-                    if (x.dur) |dur| try self.b.setKeyword(w.site, "length", try self.durationJson(@max(0, dur), t.at));
+                    if (x.dur) |dur| try self.b.setKeyword(
+                        w.site,
+                        "length",
+                        try self.durationJson(@max(0, dur), t.at),
+                    );
                 },
                 // A keyframe and a cue are points: there is no end to
                 // move.
@@ -994,7 +1047,13 @@ const Ctx = struct {
             const to = ops_quantize.quantized(self.map, t.at, x.grid, x.strength, x.swing);
             var dur: ?i64 = null;
             if (x.dur_too and t.dur > 0) {
-                const end = ops_quantize.quantized(self.map, t.at +| t.dur, x.grid, x.strength, x.swing);
+                const end = ops_quantize.quantized(
+                    self.map,
+                    t.at +| t.dur,
+                    x.grid,
+                    x.strength,
+                    x.swing,
+                );
                 dur = @max(0, end - to);
             }
             try moves.append(self.gpa, .{ .t = t, .to = to, .dur = dur });
@@ -1099,11 +1158,21 @@ const Ctx = struct {
             }
         }
         const a_t = left orelse {
-            try self.b.refuse(.edit_range_empty, r.targets[0].span, "merge wants two clips and the selection named none", .{});
+            try self.b.refuse(
+                .edit_range_empty,
+                r.targets[0].span,
+                "merge wants two clips and the selection named none",
+                .{},
+            );
             return;
         };
         const b_t = right orelse {
-            try self.b.refuse(.edit_range_empty, a_t.span, "merge wants two clips and the selection named one", .{});
+            try self.b.refuse(
+                .edit_range_empty,
+                a_t.span,
+                "merge wants two clips and the selection named one",
+                .{},
+            );
             return;
         };
 
@@ -1131,7 +1200,11 @@ const Ctx = struct {
             try self.refuseUnaddressable(b_t.span);
             return;
         };
-        try self.b.setKeyword(aw.site, "length", try self.durationJson(b_t.at +| b_t.dur - a_t.at, a_t.at));
+        try self.b.setKeyword(
+            aw.site,
+            "length",
+            try self.durationJson(b_t.at +| b_t.dur - a_t.at, a_t.at),
+        );
         try self.b.removePositional(parent, bw.slot);
     }
 
@@ -1368,7 +1441,9 @@ const Ctx = struct {
         try self.b.refuse(
             .conductor_conflict,
             if (self.d.anchorById(id)) |anchor| anchor.span else .{ .start = 0, .end = 0 },
-            "this document names the :conductor '{s}', which owns its time: a {s} point of its own would not load (one owner of time per document). Take the :conductor off the (timeline …) first",
+            "this document names the :conductor '{s}', which owns its time: a {s} point of its " ++
+                "own would not load (one owner of time per document). Take the :conductor off " ++
+                "the (timeline …) first",
             .{ id, what },
         );
         return true;
@@ -1378,13 +1453,20 @@ const Ctx = struct {
     /// would say `tempo_map_invalid` / `meter_map_invalid` ("not after
     /// the previous point"), so the planner says it first, with that
     /// code, at the point that is there. True = refused.
-    fn refuseIfOccupied(self: *Ctx, code: Diag.Code, what: []const u8, points: anytype, tick: i64) Error!bool {
+    fn refuseIfOccupied(
+        self: *Ctx,
+        code: Diag.Code,
+        what: []const u8,
+        points: anytype,
+        tick: i64,
+    ) Error!bool {
         for (points) |p| {
             if (p.tick != tick) continue;
             try self.b.refuse(
                 code,
                 p.span,
-                "a {s} point already sits at tick {d}; a second one there would not load (one point per tick). Remove this one first, or insert at another tick",
+                "a {s} point already sits at tick {d}; a second one there would not load (one " ++
+                    "point per tick). Remove this one first, or insert at another tick",
                 .{ what, tick },
             );
             return true;
@@ -1396,7 +1478,12 @@ const Ctx = struct {
     /// every later event at the second it was already at.
     fn insertTempo(self: *Ctx, x: Op.InsertTempo) Error!void {
         if (try self.refuseIfConducted("tempo")) return;
-        if (try self.refuseIfOccupied(.tempo_map_invalid, "tempo", self.d.tempo, x.point.tick)) return;
+        if (try self.refuseIfOccupied(
+            .tempo_map_invalid,
+            "tempo",
+            self.d.tempo,
+            x.point.tick,
+        )) return;
         var points: std.ArrayList(doc.TempoPoint) = .empty;
         defer points.deinit(self.gpa);
         try points.appendSlice(self.gpa, self.d.tempo);
@@ -1410,10 +1497,20 @@ const Ctx = struct {
         try points.insert(self.gpa, at, x.point);
 
         if (x.mode == .wall_clock) {
-            var after = try TimeMap.derive(self.gpa, points.items, self.d.meter, self.map.length, self.d.end);
+            var after = try TimeMap.derive(
+                self.gpa,
+                points.items,
+                self.d.meter,
+                self.map.length,
+                self.d.end,
+            );
             defer after.deinit();
 
-            var moved = try Select.resolve(self.gpa, self.d, .{ .range = .{ x.point.tick + 1, Grid.MAX_TICK } });
+            var moved = try Select.resolve(
+                self.gpa,
+                self.d,
+                .{ .range = .{ x.point.tick + 1, Grid.MAX_TICK } },
+            );
             defer moved.deinit();
             self.b.summary.targets = @intCast(moved.targets.len);
 
@@ -1462,7 +1559,12 @@ const Ctx = struct {
     /// the grid and the clock, neither of which a meter touches.
     fn insertMeter(self: *Ctx, x: Op.InsertMeter) Error!void {
         if (try self.refuseIfConducted("meter")) return;
-        if (try self.refuseIfOccupied(.meter_map_invalid, "meter", self.d.meter, x.point.tick)) return;
+        if (try self.refuseIfOccupied(
+            .meter_map_invalid,
+            "meter",
+            self.d.meter,
+            x.point.tick,
+        )) return;
         if (self.map.isBarLine(x.point.tick) == null) {
             try self.b.refuse(
                 .edit_off_bar,
@@ -1485,7 +1587,13 @@ const Ctx = struct {
         }
         try points.insert(self.gpa, at, x.point);
 
-        var after = try TimeMap.derive(self.gpa, self.d.tempo, points.items, self.map.length, self.d.end);
+        var after = try TimeMap.derive(
+            self.gpa,
+            self.d.tempo,
+            points.items,
+            self.map.length,
+            self.d.end,
+        );
         defer after.deinit();
 
         for (self.tree.root) |root| {
@@ -1496,15 +1604,25 @@ const Ctx = struct {
         var f = try value.Form.init(self.gpa, "meter-point");
         defer f.deinit();
         try f.position("at", self.map, x.point.tick);
-        try f.raw("sig", try std.fmt.allocPrint(self.arena, "[{d},{d}]", .{ x.point.n, x.point.d }));
+        try f.raw(
+            "sig",
+            try std.fmt.allocPrint(self.arena, "[{d},{d}]", .{ x.point.n, x.point.d }),
+        );
         try self.insertRootInOrder("meter-point", x.point.tick, self.d.meter, try f.done());
     }
 
     /// Re-spell every position and duration of `node` (and of its
     /// children) that `after` would read as a different tick.
-    fn respellUnder(self: *Ctx, after: *const TimeMap.TimeMap, node: sjon.Ast.NodeIndex) Error!void {
+    fn respellUnder(
+        self: *Ctx,
+        after: *const TimeMap.TimeMap,
+        node: sjon.Ast.NodeIndex,
+    ) Error!void {
         const hdr = self.tree.formHeader(node);
-        const span: Diag.Span = .{ .start = self.tree.spanOf(node).start, .end = self.tree.spanOf(node).end };
+        const span: Diag.Span = .{
+            .start = self.tree.spanOf(node).start,
+            .end = self.tree.spanOf(node).end,
+        };
 
         // The anchor every duration on this form is measured from.
         var anchor: i64 = 0;
@@ -1573,8 +1691,14 @@ const Ctx = struct {
     /// point, or the start of the document.
     fn lastSpan(self: *Ctx, which: enum { tempo, meter }) Diag.Span {
         return switch (which) {
-            .tempo => if (self.d.tempo.len > 0) self.d.tempo[self.d.tempo.len - 1].span else .{ .start = 0, .end = 0 },
-            .meter => if (self.d.meter.len > 0) self.d.meter[self.d.meter.len - 1].span else .{ .start = 0, .end = 0 },
+            .tempo => if (self.d.tempo.len > 0) self.d.tempo[self.d.tempo.len - 1].span else .{
+                .start = 0,
+                .end = 0,
+            },
+            .meter => if (self.d.meter.len > 0) self.d.meter[self.d.meter.len - 1].span else .{
+                .start = 0,
+                .end = 0,
+            },
         };
     }
 
@@ -1774,7 +1898,12 @@ const Ctx = struct {
 
     fn bind(self: *Ctx, x: Op.Bind) Error!void {
         const li = self.laneByName(x.lane) orelse {
-            try self.b.refuse(.edit_range_empty, .{ .start = 0, .end = 0 }, "no lane is named {s}", .{x.lane});
+            try self.b.refuse(
+                .edit_range_empty,
+                .{ .start = 0, .end = 0 },
+                "no lane is named {s}",
+                .{x.lane},
+            );
             return;
         };
         const lane = self.d.lanes[li];
@@ -1809,8 +1938,16 @@ const Ctx = struct {
                 };
             },
             .it => |a_| {
-                try self.b.setKeyword(w.site, "channel", try self.intJson(@as(i64, a_.channel) + 1));
-                if (a_.column) |column| try self.b.setKeyword(w.site, "column", try self.symbolJson(@tagName(column)));
+                try self.b.setKeyword(
+                    w.site,
+                    "channel",
+                    try self.intJson(@as(i64, a_.channel) + 1),
+                );
+                if (a_.column) |column| try self.b.setKeyword(
+                    w.site,
+                    "column",
+                    try self.symbolJson(@tagName(column)),
+                );
                 if (a_.fx) |fx| {
                     var out: value.Buf = .empty;
                     defer out.deinit(self.gpa);
@@ -1826,18 +1963,26 @@ const Ctx = struct {
     /// plans NATIVE content, and a lane's native content is exactly what
     /// materialize does not have yet.
     fn materializeElsewhere(self: *Ctx, x: Op.Materialize) Error!void {
-        const span = if (self.laneByName(x.lane)) |li| self.d.lanes[li].span else Diag.Span{ .start = 0, .end = 0 };
+        const span = if (self.laneByName(
+            x.lane,
+        )) |li| self.d.lanes[li].span else Diag.Span{ .start = 0, .end = 0 };
         try self.b.refuse(
             .sjon_diagnostic,
             span,
-            "materialize reads an anchor's events; plan it through edit.plan, which routes it to ops_bound",
+            "materialize reads an anchor's events; plan it through edit.plan, which routes it " ++
+                "to ops_bound",
             .{},
         );
     }
 
     fn unbind(self: *Ctx, x: Op.Unbind) Error!void {
         const li = self.laneByName(x.lane) orelse {
-            try self.b.refuse(.edit_range_empty, .{ .start = 0, .end = 0 }, "no lane is named {s}", .{x.lane});
+            try self.b.refuse(
+                .edit_range_empty,
+                .{ .start = 0, .end = 0 },
+                "no lane is named {s}",
+                .{x.lane},
+            );
             return;
         };
         const lane = self.d.lanes[li];
@@ -1869,7 +2014,10 @@ const Ctx = struct {
 /// declares them — the set `unbind` takes off again, and the set
 /// `ops_bound.materialize` takes off with it. Shared so the two cannot
 /// drift apart into two answers about one lane.
-pub const address_keys = [_][]const u8{ "track", "ch", "key", "cc", "bend", "pressure", "velocity", "channel", "column", "fx" };
+pub const address_keys = [_][]const u8{
+    "track",    "ch",       "key",     "cc",     "bend",
+    "pressure", "velocity", "channel", "column", "fx",
+};
 
 /// Who keeps its slot, over a container's children in slot order:
 /// `finals[k]` is where child `k` lands and `moved[k]` whether a move put
@@ -1990,7 +2138,12 @@ fn expectPlan(op: Op.Op, want_actions: []const u8, want_text: []const u8) !void 
     return expectPlanOn(test_support.native, op, want_actions, want_text);
 }
 
-fn expectPlanOn(source: [:0]const u8, op: Op.Op, want_actions: []const u8, want_text: []const u8) !void {
+fn expectPlanOn(
+    source: [:0]const u8,
+    op: Op.Op,
+    want_actions: []const u8,
+    want_text: []const u8,
+) !void {
     const gpa = testing.allocator;
     var fx = try test_support.Fixture.init(gpa, source);
     defer fx.deinit();
@@ -2020,7 +2173,11 @@ fn edited(gpa: std.mem.Allocator, regions: []const Region) ![]u8 {
     try out.appendSlice(gpa, test_support.native);
     for (regions) |r| {
         const at = std.mem.indexOf(u8, out.items, r.from) orelse return error.NoSuchRegion;
-        if (std.mem.indexOf(u8, out.items[at + r.from.len ..], r.from) != null) return error.AmbiguousRegion;
+        if (std.mem.indexOf(
+            u8,
+            out.items[at + r.from.len ..],
+            r.from,
+        ) != null) return error.AmbiguousRegion;
         try out.replaceRange(gpa, at, r.from.len, r.to);
     }
     return out.toOwnedSlice(gpa);
@@ -2048,14 +2205,19 @@ test "ops: insert a note at the sorted index of its lane" {
     ,
         &.{.{
             .from = "  (clip :at 4q :phrase fill :repeat 2))",
-            .to = "  (note :at 3q :dur 0.5q :key 40 :vel 100)\n  (clip :at 4q :phrase fill :repeat 2))",
+            .to = "  (note :at 3q :dur 0.5q :key 40 :vel 100)\n  (clip :at 4q :phrase fill " ++
+                ":repeat 2))",
         }},
     );
 }
 
 test "ops: remove takes its targets right to left and leaves the lane" {
     try expectEdit(
-        .{ .remove = .{ .sel = .{ .lanes = &.{"flash"}, .kinds = .notes, .range = .{ 0, 2 * TPQ } } } },
+        .{
+            .remove = .{
+                .sel = .{ .lanes = &.{"flash"}, .kinds = .notes, .range = .{ 0, 2 * TPQ } },
+            },
+        },
         \\[
         \\{"op":"remove_positional","root":6,"path":[],"index":0},
         \\{"op":"remove_positional","root":6,"path":[],"index":1}
@@ -2063,7 +2225,8 @@ test "ops: remove takes its targets right to left and leaves the lane" {
         \\
     ,
         &.{.{
-            .from = "  ; the downbeat\n  (note :at 0q :dur 0.5q :key 36 :vel 110)\n  (note :at 1q :dur 0.5q :key 60 :vel 90)\n",
+            .from = "  ; the downbeat\n  (note :at 0q :dur 0.5q :key 36 :vel 110)\n  (note :at " ++
+                "1q :dur 0.5q :key 60 :vel 90)\n",
             .to = "",
         }},
     );
@@ -2197,8 +2360,10 @@ test "ops: velocity and transpose write :vel and :key" {
         \\
     ,
         &.{.{
-            .from = "  (note :at 0q :dur 0.5q :key 36 :vel 110)\n  (note :at 1q :dur 0.5q :key 60 :vel 90)\n  (note :at 2q :dur 0.5q :key 36 :vel 80)",
-            .to = "  (note :at 0q :dur 0.5q :key 36 :vel 64)\n  (note :at 1q :dur 0.5q :key 60 :vel 90)\n  (note :at 2q :dur 0.5q :key 36 :vel 64)",
+            .from = "  (note :at 0q :dur 0.5q :key 36 :vel 110)\n  (note :at 1q :dur 0.5q :key " ++
+                "60 :vel 90)\n  (note :at 2q :dur 0.5q :key 36 :vel 80)",
+            .to = "  (note :at 0q :dur 0.5q :key 36 :vel 64)\n  (note :at 1q :dur 0.5q :key 60 " ++
+                ":vel 90)\n  (note :at 2q :dur 0.5q :key 36 :vel 64)",
         }},
     );
 
@@ -2225,7 +2390,10 @@ test "ops: a selection that resolves to nothing is edit_range_empty" {
     defer fx.deinit();
 
     var p = try plan(gpa, fx.doc_(), &fx.tree, .{
-        .retime = .{ .sel = .{ .lanes = &.{"flash"}, .range = .{ 100 * TPQ, 200 * TPQ } }, .delta = 1 },
+        .retime = .{
+            .sel = .{ .lanes = &.{"flash"}, .range = .{ 100 * TPQ, 200 * TPQ } },
+            .delta = 1,
+        },
     });
     defer p.deinit();
 
@@ -2260,7 +2428,8 @@ test "ops: split a clip into two windows of one phrase" {
     ,
         &.{.{
             .from = "  (clip :at 4q :phrase fill :repeat 2))",
-            .to = "  (clip :at 4q :phrase fill :repeat 2 :length 2q)\n  (clip :at 6q :phrase fill :repeat 2 :offset 2q :length 6q))",
+            .to = "  (clip :at 4q :phrase fill :repeat 2 :length 2q)\n  (clip :at 6q :phrase " ++
+                "fill :repeat 2 :offset 2q :length 6q))",
         }},
     );
 }
@@ -2309,7 +2478,9 @@ test "ops: duplicate inserts retimed copies at their sorted indices" {
     ,
         &.{.{
             .from = "  (clip :at 4q :phrase fill :repeat 2))",
-            .to = "  (clip :at 4q :phrase fill :repeat 2)\n  (note :at 1bar :dur 0.5q :key 36 :vel 110)\n  (note :at 5q :dur 0.5q :key 60 :vel 90)\n  (note :at 6q :dur 0.5q :key 36 :vel 80))",
+            .to = "  (clip :at 4q :phrase fill :repeat 2)\n  (note :at 1bar :dur 0.5q :key 36 " ++
+                ":vel 110)\n  (note :at 5q :dur 0.5q :key 60 :vel 90)\n  (note :at 6q :dur 0.5q " ++
+                ":key 36 :vel 80))",
         }},
     );
 }
@@ -2334,16 +2505,37 @@ test "ops: stretch scales the range and shifts what follows, counting what round
         \\
     ,
         &.{
-            .{ .from = "(note :at 0q :dur 0.5q :key 36 :vel 110)", .to = "(note :at 0q :dur 0.75q :key 36 :vel 110)" },
-            .{ .from = "(note :at 1q :dur 0.5q :key 60 :vel 90)", .to = "(note :at 1.5q :dur 0.75q :key 60 :vel 90)" },
-            .{ .from = "(note :at 2q :dur 0.5q :key 36 :vel 80)", .to = "(note :at 3q :dur 0.5q :key 36 :vel 80)" },
-            .{ .from = "(clip :at 4q :phrase fill :repeat 2)", .to = "(clip :at 5q :phrase fill :repeat 2)" },
-            .{ .from = "(keyframe :at 4q :value 0.9 :ease in-cubic)", .to = "(keyframe :at 5q :value 0.9 :ease in-cubic)" },
+            .{
+                .from = "(note :at 0q :dur 0.5q :key 36 :vel 110)",
+                .to = "(note :at 0q :dur 0.75q :key 36 :vel 110)",
+            },
+            .{
+                .from = "(note :at 1q :dur 0.5q :key 60 :vel 90)",
+                .to = "(note :at 1.5q :dur 0.75q :key 60 :vel 90)",
+            },
+            .{
+                .from = "(note :at 2q :dur 0.5q :key 36 :vel 80)",
+                .to = "(note :at 3q :dur 0.5q :key 36 :vel 80)",
+            },
+            .{
+                .from = "(clip :at 4q :phrase fill :repeat 2)",
+                .to = "(clip :at 5q :phrase fill :repeat 2)",
+            },
+            .{
+                .from = "(keyframe :at 4q :value 0.9 :ease in-cubic)",
+                .to = "(keyframe :at 5q :value 0.9 :ease in-cubic)",
+            },
             // The section opens before the range and reaches past it, so
             // its onset stays and its window grows by what the stretch
             // put inside it.
-            .{ .from = "(section :name intro :at 0bar :dur 4bar)", .to = "(section :name intro :at 0bar :dur 17q)" },
-            .{ .from = "(cue :name \"the drop\" :at 4bar)", .to = "(cue :name \"the drop\" :at 17q)" },
+            .{
+                .from = "(section :name intro :at 0bar :dur 4bar)",
+                .to = "(section :name intro :at 0bar :dur 17q)",
+            },
+            .{
+                .from = "(cue :name \"the drop\" :at 4bar)",
+                .to = "(cue :name \"the drop\" :at 17q)",
+            },
         },
     );
 }
@@ -2384,7 +2576,10 @@ test "ops: insert-tempo, wall-clock — every event after it keeps its seconds" 
                 .from = "(tempo-point :at 0q :qpm 120)\n",
                 .to = "(tempo-point :at 0q :qpm 120)\n(tempo-point :at 1bar :qpm 240)\n",
             },
-            .{ .from = "(cue :name \"the drop\" :at 4bar)", .to = "(cue :name \"the drop\" :at 7bar)" },
+            .{
+                .from = "(cue :name \"the drop\" :at 4bar)",
+                .to = "(cue :name \"the drop\" :at 7bar)",
+            },
         },
     );
 }
@@ -2410,9 +2605,18 @@ test "ops: insert-meter respells every bar literal the change would move" {
             // takes the blank line that separated it, so it reads as its
             // own paragraph (§11.6: an inserted root copies the
             // whitespace run before its neighbour).
-            .{ .from = "\n(anchor :id song", .to = "\n(meter-point :at 1bar :sig [3 4])\n\n(anchor :id song" },
-            .{ .from = "(section :name intro :at 0bar :dur 4bar)", .to = "(section :name intro :at 0bar :dur 5bar)" },
-            .{ .from = "(cue :name \"the drop\" :at 4bar)", .to = "(cue :name \"the drop\" :at 5bar)" },
+            .{
+                .from = "\n(anchor :id song",
+                .to = "\n(meter-point :at 1bar :sig [3 4])\n\n(anchor :id song",
+            },
+            .{
+                .from = "(section :name intro :at 0bar :dur 4bar)",
+                .to = "(section :name intro :at 0bar :dur 5bar)",
+            },
+            .{
+                .from = "(cue :name \"the drop\" :at 4bar)",
+                .to = "(cue :name \"the drop\" :at 5bar)",
+            },
         },
     );
 }
@@ -2593,7 +2797,10 @@ test "ops: rename a phrase, and every clip that places it" {
         \\
     ,
         &.{
-            .{ .from = "(clip :at 4q :phrase fill :repeat 2)", .to = "(clip :at 4q :phrase roll :repeat 2)" },
+            .{
+                .from = "(clip :at 4q :phrase fill :repeat 2)",
+                .to = "(clip :at 4q :phrase roll :repeat 2)",
+            },
             .{ .from = "(phrase :name fill :length 1bar", .to = "(phrase :name roll :length 1bar" },
         },
     );
@@ -2609,7 +2816,10 @@ test "ops: rename a lane, and the phrase lane its clips place" {
         \\
     ,
         &.{
-            .{ .from = "(lane :name flash :target flash", .to = "(lane :name strobe :target flash" },
+            .{
+                .from = "(lane :name flash :target flash",
+                .to = "(lane :name strobe :target flash",
+            },
             .{ .from = "  (lane :name flash\n", .to = "  (lane :name strobe\n" },
         },
     );
@@ -2801,17 +3011,33 @@ test "ops: nudge by one step of a grid" {
         \\
     ,
         &.{
-            .{ .from = "(note :at 0q :dur 0.5q :key 36 :vel 110)", .to = "(note :at 0.25q :dur 0.5q :key 36 :vel 110)" },
-            .{ .from = "(note :at 1q :dur 0.5q :key 60 :vel 90)", .to = "(note :at 1.25q :dur 0.5q :key 60 :vel 90)" },
-            .{ .from = "(note :at 2q :dur 0.5q :key 36 :vel 80)", .to = "(note :at 2.25q :dur 0.5q :key 36 :vel 80)" },
-            .{ .from = "(clip :at 4q :phrase fill :repeat 2)", .to = "(clip :at 4.25q :phrase fill :repeat 2)" },
+            .{
+                .from = "(note :at 0q :dur 0.5q :key 36 :vel 110)",
+                .to = "(note :at 0.25q :dur 0.5q :key 36 :vel 110)",
+            },
+            .{
+                .from = "(note :at 1q :dur 0.5q :key 60 :vel 90)",
+                .to = "(note :at 1.25q :dur 0.5q :key 60 :vel 90)",
+            },
+            .{
+                .from = "(note :at 2q :dur 0.5q :key 36 :vel 80)",
+                .to = "(note :at 2.25q :dur 0.5q :key 36 :vel 80)",
+            },
+            .{
+                .from = "(clip :at 4q :phrase fill :repeat 2)",
+                .to = "(clip :at 4.25q :phrase fill :repeat 2)",
+            },
         },
     );
 }
 
 test "ops: insert a section root after the last one of its head" {
     try expectEdit(
-        .{ .insert = .{ .what = .{ .section = .{ .name = "outro", .at = 16 * TPQ, .dur = 16 * TPQ } } } },
+        .{
+            .insert = .{
+                .what = .{ .section = .{ .name = "outro", .at = 16 * TPQ, .dur = 16 * TPQ } },
+            },
+        },
         \\[
         \\{"op":"insert_root","index":5,"value":{"$form":"section","name":{"$sym":"outro"},"at":{"$num":[4,"bar"]},"dur":{"$num":[4,"bar"]}}}
         \\]
@@ -2860,12 +3086,17 @@ test "ops: insert the other children and the other roots" {
     ,
         &.{.{
             .from = "  (clip :at 4q :phrase fill :repeat 2))",
-            .to = "  (clip :at 4q :phrase fill :repeat 2)\n  (clip :at 2bar :phrase fill :repeat 2 :offset 0bar))",
+            .to = "  (clip :at 4q :phrase fill :repeat 2)\n  (clip :at 2bar :phrase fill " ++
+                ":repeat 2 :offset 0bar))",
         }},
     );
 
     try expectEdit(
-        .{ .insert = .{ .what = .{ .lane = .{ .name = "haze", .kind = .curve, .target = "haze" } } } },
+        .{
+            .insert = .{
+                .what = .{ .lane = .{ .name = "haze", .kind = .curve, .target = "haze" } },
+            },
+        },
         \\[
         \\{"op":"insert_root","index":9,"value":{"$form":"lane","name":{"$sym":"haze"},"kind":{"$sym":"curve"},"target":{"$sym":"haze"}}}
         \\]
@@ -2893,7 +3124,8 @@ test "ops: insert the other children and the other roots" {
             // A form built from an action's value is PRINTED, and the
             // printer keeps a short one on its line (§11.6's second
             // caveat: a splice does not refold).
-            .to = "\n(phrase :name roll :length 1bar (lane :name flash))\n\n(target :name glow :arity 1)",
+            .to = "\n(phrase :name roll :length 1bar (lane :name flash))\n\n(target :name glow " ++
+                ":arity 1)",
         }},
     );
 }
@@ -2945,10 +3177,22 @@ test "ops: a whole-lane retime moves every child and touches no structure" {
         \\
     ,
         &.{
-            .{ .from = "(note :at 0q :dur 0.5q :key 36 :vel 110)", .to = "(note :at 10q :dur 0.5q :key 36 :vel 110)" },
-            .{ .from = "(note :at 1q :dur 0.5q :key 60 :vel 90)", .to = "(note :at 11q :dur 0.5q :key 60 :vel 90)" },
-            .{ .from = "(note :at 2q :dur 0.5q :key 36 :vel 80)", .to = "(note :at 3bar :dur 0.5q :key 36 :vel 80)" },
-            .{ .from = "(clip :at 4q :phrase fill :repeat 2)", .to = "(clip :at 14q :phrase fill :repeat 2)" },
+            .{
+                .from = "(note :at 0q :dur 0.5q :key 36 :vel 110)",
+                .to = "(note :at 10q :dur 0.5q :key 36 :vel 110)",
+            },
+            .{
+                .from = "(note :at 1q :dur 0.5q :key 60 :vel 90)",
+                .to = "(note :at 11q :dur 0.5q :key 60 :vel 90)",
+            },
+            .{
+                .from = "(note :at 2q :dur 0.5q :key 36 :vel 80)",
+                .to = "(note :at 3bar :dur 0.5q :key 36 :vel 80)",
+            },
+            .{
+                .from = "(clip :at 4q :phrase fill :repeat 2)",
+                .to = "(clip :at 14q :phrase fill :repeat 2)",
+            },
         },
     );
 }
@@ -3222,7 +3466,10 @@ test "ops: insert-tempo lands at its tick's own place among the points, and the 
     // moves besides are the events after the point, which this document
     // has none of.
     var wall = try plan(gpa, fx.doc_(), &fx.tree, .{
-        .insert_tempo = .{ .point = .{ .tick = 4 * TPQ, .tempo = .{ .qpm = 110 } }, .mode = .wall_clock },
+        .insert_tempo = .{
+            .point = .{ .tick = 4 * TPQ, .tempo = .{ .qpm = 110 } },
+            .mode = .wall_clock,
+        },
     });
     defer wall.deinit();
     try testing.expectEqual(@as(?u32, 2), insertedRootIndex(&wall));

@@ -100,7 +100,10 @@ pub fn fromText(gpa: Allocator, source: [:0]const u8) !Fixture {
     var loaded = try doc.fromSource(gpa, &schema, source, null);
     errdefer loaded.deinit();
     if (loaded.diags.hasErrors()) {
-        for (loaded.diags.items()) |d| std.debug.print("fixture: {t}: {s}\n", .{ d.code, d.message });
+        for (loaded.diags.items()) |d| std.debug.print(
+            "fixture: {t}: {s}\n",
+            .{ d.code, d.message },
+        );
         return error.FixtureDoesNotLoad;
     }
     // The map `fromSource` returns is the bridge's; `derive` builds its
@@ -128,7 +131,12 @@ pub fn smfConducted(gpa: Allocator) !Fixture {
     _ = try b.addTrack();
     _ = try b.addTrack();
 
-    try b.addEvent(0, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(
+        0,
+        0,
+        .time_signature,
+        .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } },
+    );
     try b.addEvent(0, 0, .set_tempo, .{ .tempo = 480_000 });
     try b.addEvent(0, 960, .set_tempo, .{ .tempo = 400_000 });
     try b.addEvent(0, 3840, .end_of_track, .empty);
@@ -157,7 +165,12 @@ pub fn smfConducted(gpa: Allocator) !Fixture {
     d.length = 2 * bar;
 
     const lanes = try arena.alloc(doc.Lane, 2);
-    lanes[0] = bound("kick", .notes, .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = null } }, null);
+    lanes[0] = bound(
+        "kick",
+        .notes,
+        .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = null } },
+        null,
+    );
     lanes[1] = bound(
         "filter",
         .curve,
@@ -211,7 +224,12 @@ pub fn itConducted(gpa: Allocator) !Fixture {
     d.length = 2 * bar;
 
     const lanes = try arena.alloc(doc.Lane, 1);
-    lanes[0] = bound("bass", .notes, .{ .it = .{ .channel = 0, .column = null, .fx = null } }, null);
+    lanes[0] = bound(
+        "bass",
+        .notes,
+        .{ .it = .{ .channel = 0, .column = null, .fx = null } },
+        null,
+    );
     d.lanes = lanes;
     d.passthrough = try targets(arena, &.{ "bass 4", "bass-vel 1" });
 

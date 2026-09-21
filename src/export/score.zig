@@ -268,7 +268,9 @@ const Emitter = struct {
                 .export_meter_unsupported,
                 .warning,
                 self.meterSpan(0),
-                "pacer cannot carry [{d} {d}] (meter-component is 1..16 over an exact bar); the score gets [4 4] and positions in quarter notes, exact, with the bar and phase lanes wrong from the first bar",
+                "pacer cannot carry [{d} {d}] (meter-component is 1..16 over an exact bar); the " ++
+                    "score gets [4 4] and positions in quarter notes, exact, with the bar and " ++
+                    "phase lanes wrong from the first bar",
                 .{ first.n, first.d },
             );
         }
@@ -280,7 +282,8 @@ const Emitter = struct {
                 .export_meter_unsupported,
                 .warning,
                 self.meterSpan(1),
-                "meter changes to [{d} {d}] at bar {d}; pacer keeps [{d} {d}]; positions stay exact, bar/phase lanes drift from there",
+                "meter changes to [{d} {d}] at bar {d}; pacer keeps [{d} {d}]; positions stay " ++
+                    "exact, bar/phase lanes drift from there",
                 .{ next.n, next.d, next.first_bar, self.n, self.d },
             );
         }
@@ -321,7 +324,8 @@ const Emitter = struct {
                 .export_tempo_budget,
                 .warning,
                 self.tempoSpan(0),
-                "{d} tempo segments is past pacer's {d} even within {d} bpm; the score drops its tempo table and prints every position in seconds",
+                "{d} tempo segments is past pacer's {d} even within {d} bpm; the score drops " ++
+                    "its tempo table and prints every position in seconds",
                 .{ segments.len, MAX_TEMPO_SEGMENTS, self.opts.tempo_eps },
             );
             return;
@@ -355,7 +359,8 @@ const Emitter = struct {
             .export_bpm_out_of_range,
             .err,
             span,
-            "{d} beats per minute is outside pacer's bpm-value bound of 1..1000 — a pacer score has no spelling for this tempo under [{d} {d}]",
+            "{d} beats per minute is outside pacer's bpm-value bound of 1..1000 — a pacer score " ++
+                "has no spelling for this tempo under [{d} {d}]",
             .{ bpm, self.n, self.d },
         );
     }
@@ -369,7 +374,8 @@ const Emitter = struct {
             const anchor = self.doc.anchorById(id) orelse break :blk id;
             break :blk anchor.file;
         };
-        try pr(w, "; exported from {s} (conductor: {s}, {d} lanes, {d} sections) by tempura {s}\n", .{
+        try pr(w, "; exported from {s} (conductor: {s}, {d} lanes, {d} sections) " ++
+            "by tempura {s}\n", .{
             source,
             conductor,
             self.doc.lanes.len,
@@ -377,7 +383,8 @@ const Emitter = struct {
             self.opts.version,
         });
         const c = self.mapper.counter;
-        try pr(w, "; positions: {d} rounded (max {d}b), durations: {d} rounded (max {d}b); onsets: {d} aggregated\n", .{
+        try pr(w, "; positions: {d} rounded (max {d}b), durations: {d} rounded (max {d}b); " ++
+            "onsets: {d} aggregated\n", .{
             c.rounded,
             c.max_err_beats,
             c.durations_rounded,
@@ -458,7 +465,12 @@ const Emitter = struct {
         };
     }
 
-    fn triggerForm(self: *Emitter, w: *Io.Writer, lane: *const doc.Lane, index: *const derive.LaneIndex) Error!void {
+    fn triggerForm(
+        self: *Emitter,
+        w: *Io.Writer,
+        lane: *const doc.Lane,
+        index: *const derive.LaneIndex,
+    ) Error!void {
         var t = try lanes.triggers(self.arena, index.onsets, &self.mapper);
         defer t.deinit(self.arena);
         // pacer refuses an empty `:at` list (`trigger_invalid`), so a
@@ -476,7 +488,8 @@ const Emitter = struct {
             .export_onset_budget,
             .warning,
             lane.span,
-            "lane {s} carries {d} onsets, past pacer's parked :at-list cap of {d}; every one of them is emitted",
+            "lane {s} carries {d} onsets, past pacer's parked :at-list cap of {d}; every one of " ++
+                "them is emitted",
             .{ lane.name, t.ticks.len, MAX_ONSETS },
         );
 
@@ -497,7 +510,12 @@ const Emitter = struct {
         }
     }
 
-    fn trackForm(self: *Emitter, w: *Io.Writer, lane: *const doc.Lane, index: *const derive.LaneIndex) Error!void {
+    fn trackForm(
+        self: *Emitter,
+        w: *Io.Writer,
+        lane: *const doc.Lane,
+        index: *const derive.LaneIndex,
+    ) Error!void {
         var c = try lanes.curve(self.arena, lane, index, self.hints, &self.mapper, .{
             .eps = self.opts.eps,
             .ease_linear = self.opts.ease_linear,
@@ -515,7 +533,8 @@ const Emitter = struct {
             .export_key_budget,
             .warning,
             lane.span,
-            "lane {s} prints {d} keys, past --max-keys-per-track {d} (pacer holds {d} across the score)",
+            "lane {s} prints {d} keys, past --max-keys-per-track {d} (pacer holds {d} across " ++
+                "the score)",
             .{ lane.name, c.keys.len, self.opts.max_keys_per_track, 4096 },
         );
 
@@ -538,7 +557,8 @@ const Emitter = struct {
                     .passthrough_conducts,
                     .err,
                     p.span,
-                    "tempura emits ({s} …) itself at export; this pass-through root is dropped so the score still loads",
+                    "tempura emits ({s} …) itself at export; this pass-through root is dropped " ++
+                        "so the score still loads",
                     .{p.head},
                 );
                 continue;
@@ -550,7 +570,8 @@ const Emitter = struct {
                             .scene_duplicate,
                             .err,
                             p.span,
-                            "a (section :name {s} …) already exports to a scene of that name; this pass-through scene is dropped so the score still loads",
+                            "a (section :name {s} …) already exports to a scene of that name; " ++
+                                "this pass-through scene is dropped so the score still loads",
                             .{name},
                         );
                         continue;
@@ -737,7 +758,9 @@ test "score.exportScore: a lane bound at a channel SET reads every channel into 
     defer out.deinit();
     // Two onsets, one trigger — and channel 3's note, outside the set,
     // is nobody's.
-    try testing.expect(std.mem.indexOf(u8, out.text, "(trigger :target kit :at [0bar 1b])") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, out.text, "(trigger :target kit :at [0bar 1b])") != null,
+    );
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.text, "(trigger "));
 }
 
@@ -754,10 +777,14 @@ test "score.exportScore: --velocity writes a sibling -vel track with the loudest
 
     // The chord's loudest onset is 110; `110 / 127` is the first key.
     try testing.expect(std.mem.indexOf(u8, out.text, "(track :target kick-vel\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out.text, "(key :at 0bar :value 0.86614174 :ease hold)") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, out.text, "(key :at 0bar :value 0.86614174 :ease hold)") != null,
+    );
     // …and the quieter 96 of that same chord never appears.
     try testing.expect(std.mem.indexOf(u8, out.text, "0.7559055") == null);
-    try testing.expect(std.mem.indexOf(u8, out.text, "(key :at 1b :value 0.503937 :ease hold)") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, out.text, "(key :at 1b :value 0.503937 :ease hold)") != null,
+    );
 }
 
 test "score.exportScore: an SMF-conducted document names its conductor and takes its tempo" {
@@ -804,7 +831,9 @@ test "score.exportScore: an IT-conducted document's Txx rows become (tempo …) 
     try testing.expect(std.mem.indexOf(u8, out.text, "(tempo :at 2b :bpm 200)\n") != null);
     // …and the walk's own onsets are the bound lane's trigger: rows 0, 4,
     // 8 and 12 of a 16-row pattern at speed 6 are the four quarters.
-    try testing.expect(std.mem.indexOf(u8, out.text, "(trigger :target bass :at [0bar 1b 2b 3b])\n") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, out.text, "(trigger :target bass :at [0bar 1b 2b 3b])\n") != null,
+    );
 }
 
 test "score.exportScore: adjacent equal tempi coalesce into one segment" {
@@ -863,8 +892,8 @@ test "score.exportScore: past 512 segments, tempo_eps coalesces — and failing 
     }
     // …and they are strictly ascending, which is what keeps pacer from
     // refusing the list (`trigger_invalid`).
-    for (seconds.landings[0].ticks[1..], seconds.landings[0].ticks[0 .. seconds.landings[0].ticks.len - 1]) |next, prev|
-        try testing.expect(next > prev);
+    const ticks = seconds.landings[0].ticks;
+    for (ticks[1..], ticks[0 .. ticks.len - 1]) |next, prev| try testing.expect(next > prev);
 }
 
 test "score.exportScore: in seconds mode a scene's :dur is its OWN span, not the seconds from zero" {
@@ -912,7 +941,9 @@ test "score.exportScore: a meter pacer cannot carry falls back to [4 4] over qua
     try testing.expect(std.mem.indexOf(u8, out.text, "; warning: ") != null);
     // A quarter is one pacer beat under the fallback, so the positions
     // stay exact whatever the document's own meter was.
-    try testing.expect(std.mem.indexOf(u8, out.text, "(trigger :target hit :at [0bar 1b 2b 3b])") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, out.text, "(trigger :target hit :at [0bar 1b 2b 3b])") != null,
+    );
 }
 
 test "score.exportScore: a meter CHANGE keeps pacer's first meter and says so" {
@@ -927,7 +958,9 @@ test "score.exportScore: a meter CHANGE keeps pacer's first meter and says so" {
     defer out.deinit();
 
     try testing.expectEqual(@as(usize, 1), out.diags.count(.export_meter_unsupported));
-    try testing.expect(std.mem.indexOf(u8, out.text, "; warning: meter changes to [3 4] at bar 1") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, out.text, "; warning: meter changes to [3 4] at bar 1") != null,
+    );
     try testing.expect(std.mem.indexOf(u8, out.text, ":meter [4 4]") != null);
 }
 
@@ -969,7 +1002,12 @@ test "score.exportScore: qpm · d / 4 — a [6 8] document's eighth is pacer's b
 
 test "score.exportScore: scene_duplicate and passthrough_conducts are the door's own guard" {
     const gpa = testing.allocator;
-    var fx = try synthetic(gpa, &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }}, &.{.{ .tick = 0, .n = 4, .d = 4 }}, bar);
+    var fx = try synthetic(
+        gpa,
+        &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }},
+        &.{.{ .tick = 0, .n = 4, .d = 4 }},
+        bar,
+    );
     defer fx.deinit();
 
     const arena = fx.doc.arena.allocator();
@@ -978,9 +1016,24 @@ test "score.exportScore: scene_duplicate and passthrough_conducts are the door's
     fx.doc.sections = sections;
 
     const through = try arena.alloc(doc.Passthrough, 3);
-    through[0] = .{ .head = "scene", .text = "(scene :name intro :at 0b :dur 4b)", .comments = &.{}, .span = .{ .start = 0, .end = 1 } };
-    through[1] = .{ .head = "transport", .text = "(transport :bpm 90 :meter [4 4])", .comments = &.{}, .span = .{ .start = 0, .end = 1 } };
-    through[2] = .{ .head = "target", .text = "(target :name hit :arity 4)", .comments = &.{}, .span = .{ .start = 0, .end = 1 } };
+    through[0] = .{
+        .head = "scene",
+        .text = "(scene :name intro :at 0b :dur 4b)",
+        .comments = &.{},
+        .span = .{ .start = 0, .end = 1 },
+    };
+    through[1] = .{
+        .head = "transport",
+        .text = "(transport :bpm 90 :meter [4 4])",
+        .comments = &.{},
+        .span = .{ .start = 0, .end = 1 },
+    };
+    through[2] = .{
+        .head = "target",
+        .text = "(target :name hit :arity 4)",
+        .comments = &.{},
+        .span = .{ .start = 0, .end = 1 },
+    };
     fx.doc.passthrough = through;
     try reDerive(&fx);
 
@@ -999,7 +1052,12 @@ test "score.exportScore: scene_duplicate and passthrough_conducts are the door's
 
 test "score.exportScore: a pass-through root keeps its comments, above it, in order" {
     const gpa = testing.allocator;
-    var fx = try synthetic(gpa, &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }}, &.{.{ .tick = 0, .n = 4, .d = 4 }}, bar);
+    var fx = try synthetic(
+        gpa,
+        &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }},
+        &.{.{ .tick = 0, .n = 4, .d = 4 }},
+        bar,
+    );
     defer fx.deinit();
 
     const arena = fx.doc.arena.allocator();
@@ -1027,14 +1085,24 @@ test "score.exportScore: a pass-through root keeps its comments, above it, in or
 test "score.exportScore: the two budget warnings, past 1 000 onsets and past max-keys-per-track" {
     const gpa = testing.allocator;
 
-    var many = try synthetic(gpa, &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }}, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 1024 * q);
+    var many = try synthetic(
+        gpa,
+        &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }},
+        &.{.{ .tick = 0, .n = 4, .d = 4 }},
+        1024 * q,
+    );
     defer many.deinit();
     try addNotes(&many, 1001);
     var onsets = try exportScore(gpa, &many.doc, &many.derived, &.{}, .{});
     defer onsets.deinit();
     try testing.expectEqual(@as(usize, 1), onsets.diags.count(.export_onset_budget));
 
-    var keys = try synthetic(gpa, &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }}, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 1024 * q);
+    var keys = try synthetic(
+        gpa,
+        &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }},
+        &.{.{ .tick = 0, .n = 4, .d = 4 }},
+        1024 * q,
+    );
     defer keys.deinit();
     try addKeyframes(&keys, 600);
     var curve = try exportScore(gpa, &keys.doc, &keys.derived, &.{}, .{});

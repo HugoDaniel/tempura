@@ -1337,14 +1337,35 @@ test "walk.orderRowAt: the binary search finds every tick, and only those" {
     var map = try derive(testing.allocator, &m, .{});
     defer map.deinit();
 
-    try testing.expectEqual(Position{ .order = 0, .row = 0, .tick_in_row = 0 }, orderRowAt(&map, 0).?);
-    try testing.expectEqual(Position{ .order = 0, .row = 0, .tick_in_row = 5 }, orderRowAt(&map, 5).?);
-    try testing.expectEqual(Position{ .order = 2, .row = 0, .tick_in_row = 0 }, orderRowAt(&map, 6).?);
-    try testing.expectEqual(Position{ .order = 2, .row = 0, .tick_in_row = 5 }, orderRowAt(&map, 11).?);
-    try testing.expectEqual(Position{ .order = 1, .row = 0, .tick_in_row = 0 }, orderRowAt(&map, 12).?);
-    try testing.expectEqual(Position{ .order = 1, .row = 1, .tick_in_row = 0 }, orderRowAt(&map, 18).?);
+    try testing.expectEqual(
+        Position{ .order = 0, .row = 0, .tick_in_row = 0 },
+        orderRowAt(&map, 0).?,
+    );
+    try testing.expectEqual(
+        Position{ .order = 0, .row = 0, .tick_in_row = 5 },
+        orderRowAt(&map, 5).?,
+    );
+    try testing.expectEqual(
+        Position{ .order = 2, .row = 0, .tick_in_row = 0 },
+        orderRowAt(&map, 6).?,
+    );
+    try testing.expectEqual(
+        Position{ .order = 2, .row = 0, .tick_in_row = 5 },
+        orderRowAt(&map, 11).?,
+    );
+    try testing.expectEqual(
+        Position{ .order = 1, .row = 0, .tick_in_row = 0 },
+        orderRowAt(&map, 12).?,
+    );
+    try testing.expectEqual(
+        Position{ .order = 1, .row = 1, .tick_in_row = 0 },
+        orderRowAt(&map, 18).?,
+    );
     // The last row, to its last tick, and then past the end.
-    try testing.expectEqual(Position{ .order = 1, .row = 1, .tick_in_row = 5 }, orderRowAt(&map, 23).?);
+    try testing.expectEqual(
+        Position{ .order = 1, .row = 1, .tick_in_row = 5 },
+        orderRowAt(&map, 23).?,
+    );
     try testing.expectEqual(@as(?Position, null), orderRowAt(&map, 24));
     try testing.expectEqual(@as(?Position, null), orderRowAt(&map, 1000));
     try testing.expectEqual(@as(?Position, null), orderRowAt(&map, -1));

@@ -858,8 +858,18 @@ test "Doc.eql: ignores spans and notices every other field" {
     var b: Doc = .empty(gpa);
     defer b.deinit();
 
-    var one = [_]Section{.{ .name = "intro", .at = 0, .dur = 8, .span = .{ .start = 0, .end = 4 } }};
-    var two = [_]Section{.{ .name = "intro", .at = 0, .dur = 8, .span = .{ .start = 99, .end = 120 } }};
+    var one = [_]Section{.{
+        .name = "intro",
+        .at = 0,
+        .dur = 8,
+        .span = .{ .start = 0, .end = 4 },
+    }};
+    var two = [_]Section{.{
+        .name = "intro",
+        .at = 0,
+        .dur = 8,
+        .span = .{ .start = 99, .end = 120 },
+    }};
     a.sections = &one;
     b.sections = &two;
     try testing.expect(a.eql(&b));
@@ -1007,7 +1017,12 @@ test "Doc.anchorById / phraseByName: the two joins the bridge and the printer ne
         .resolved = false,
         .span = .{ .start = 0, .end = 1 },
     }};
-    var phrases = [_]Phrase{.{ .name = "fill", .length = 4, .lanes = &.{}, .span = .{ .start = 0, .end = 1 } }};
+    var phrases = [_]Phrase{.{
+        .name = "fill",
+        .length = 4,
+        .lanes = &.{},
+        .span = .{ .start = 0, .end = 1 },
+    }};
     d.anchors = &anchors;
     d.phrases = &phrases;
 

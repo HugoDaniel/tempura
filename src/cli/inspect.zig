@@ -70,7 +70,10 @@ fn smfMap(ctx: *const Cli.Ctx, w: *Writer, bytes: []const u8) Cli.Error!u8 {
         "smpte: {d} fps x {d} tpf converted to {d} ppq (tempo events are ignored for timing)\n",
         .{ c.fps, c.tpf, c.ppq },
     );
-    if (map.riff) |r| try w.print("riff: the SMF sits at 0x{X:0>8}, {d} bytes\n", .{ r.offset, r.len });
+    if (map.riff) |r| try w.print(
+        "riff: the SMF sits at 0x{X:0>8}, {d} bytes\n",
+        .{ r.offset, r.len },
+    );
 
     try w.writeAll("\n");
     // `SourceMap.tracks[i].chunk` indexes `chunks`, so the join goes the
@@ -155,7 +158,10 @@ fn itMap(ctx: *const Cli.Ctx, w: *Writer, bytes: []const u8) Cli.Error!u8 {
         // A kind with more than one record says WHICH: `sample_header 3`
         // is a different question from `sample_header 0`.
         switch (e.kind) {
-            .instrument, .sample_header, .sample_data, .pattern, .foreign => try w.print("  #{d}", .{e.index}),
+            .instrument, .sample_header, .sample_data, .pattern, .foreign => try w.print(
+                "  #{d}",
+                .{e.index},
+            ),
             else => {},
         }
         if (e.kind == .pattern and e.index < m.patterns.len)
@@ -202,7 +208,9 @@ test "inspect: an SMF's chunks, its events, and the running status they reused" 
 
     const text = c.out.written();
     try t.expect(std.mem.indexOf(u8, text, "kind: mid\n") != null);
-    try t.expect(std.mem.indexOf(u8, text, "chunk   0  MThd  at 0x00000000  header 8  body 6\n") != null);
+    try t.expect(
+        std.mem.indexOf(u8, text, "chunk   0  MThd  at 0x00000000  header 8  body 6\n") != null,
+    );
     try t.expect(std.mem.indexOf(u8, text, "chunk   1  MTrk  at 0x0000000E") != null);
     try t.expect(std.mem.indexOf(u8, text, "running-status") != null);
     try t.expect(std.mem.indexOf(u8, text, "residue: none\n") != null);
@@ -228,7 +236,9 @@ test "inspect: an IT module's regions, in reading order, with the pattern rows" 
 
     const text = c.out.written();
     try t.expect(std.mem.indexOf(u8, text, "kind: it\n") != null);
-    try t.expect(std.mem.indexOf(u8, text, "region   0  header          at 0x00000000  len 192\n") != null);
+    try t.expect(
+        std.mem.indexOf(u8, text, "region   0  header          at 0x00000000  len 192\n") != null,
+    );
     try t.expect(std.mem.indexOf(u8, text, "orders") != null);
     try t.expect(std.mem.indexOf(u8, text, "  rows ") != null);
     try t.expect(std.mem.indexOf(u8, text, "residue: none\n") != null);
@@ -256,7 +266,12 @@ test "inspect: a truncated file still maps what it has, and says what is wrong" 
         // `MThd` with a body length of 6 and only four bytes of it.
         .data = "MThd\x00\x00\x00\x06\x00\x01\x00\x01",
     });
-    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/broken.mid", .{tmp.sub_path}, 0);
+    const path = try std.fmt.allocPrintSentinel(
+        a,
+        ".zig-cache/tmp/{s}/broken.mid",
+        .{tmp.sub_path},
+        0,
+    );
     defer a.free(path);
 
     var c = try Cli.invoke(&.{ "tempura", "inspect", path });
@@ -276,7 +291,12 @@ test "inspect: a truncated file still maps what it has, and says what is wrong" 
 fn inspectBytes(tmp: *std.testing.TmpDir, name: []const u8, bytes: []const u8) !Cli.Captured {
     const a = t.allocator;
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
-    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name }, 0);
+    const path = try std.fmt.allocPrintSentinel(
+        a,
+        ".zig-cache/tmp/{s}/{s}",
+        .{ tmp.sub_path, name },
+        0,
+    );
     defer a.free(path);
     return Cli.invoke(&.{ "tempura", "inspect", path });
 }

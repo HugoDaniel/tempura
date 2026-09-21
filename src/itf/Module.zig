@@ -670,9 +670,21 @@ fn lossy(
     try out.append(arena, '?');
     const span: Diag.Span = .{ .start = @intCast(start), .end = @intCast(end) };
     if (cp) |c| {
-        try diags.add(.it_message_encoding_lossy, .warning, span, "U+{X:0>4} has no CP437 spelling; wrote '?'", .{c});
+        try diags.add(
+            .it_message_encoding_lossy,
+            .warning,
+            span,
+            "U+{X:0>4} has no CP437 spelling; wrote '?'",
+            .{c},
+        );
     } else {
-        try diags.add(.it_message_encoding_lossy, .warning, span, "invalid UTF-8 at byte {d}; wrote '?'", .{start});
+        try diags.add(
+            .it_message_encoding_lossy,
+            .warning,
+            span,
+            "invalid UTF-8 at byte {d}; wrote '?'",
+            .{start},
+        );
     }
 }
 
@@ -790,7 +802,10 @@ test "Module.Region: slicing is bounded and never wraps" {
     const source = "0123456789";
     try testing.expectEqualStrings("234", (Region{ .off = 2, .len = 3 }).slice(source).?);
     try testing.expectEqual(@as(?[]const u8, null), (Region{ .off = 8, .len = 4 }).slice(source));
-    try testing.expectEqual(@as(?[]const u8, null), (Region{ .off = 0xFFFF_FFFF, .len = 2 }).slice(source));
+    try testing.expectEqual(
+        @as(?[]const u8, null),
+        (Region{ .off = 0xFFFF_FFFF, .len = 2 }).slice(source),
+    );
     try testing.expect((Region.none).isEmpty());
 }
 

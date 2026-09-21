@@ -382,13 +382,55 @@ fn fixture(gpa: std.mem.Allocator, end: tm.End) !Doc {
     cues[1] = .{ .name = "b", .at = 507_386_880, .span = span };
 
     const notes = try arena.alloc(value.Note, 3);
-    notes[0] = .{ .at = 0, .dur = TPQ, .key = 36, .vel = 100, .ch = 0, .off_vel = null, .span = span };
-    notes[1] = .{ .at = TPQ, .dur = 2 * TPQ, .key = 38, .vel = 90, .ch = 0, .off_vel = null, .span = span };
-    notes[2] = .{ .at = 2 * TPQ, .dur = TPQ / 2, .key = 42, .vel = 80, .ch = 0, .off_vel = null, .span = span };
+    notes[0] = .{
+        .at = 0,
+        .dur = TPQ,
+        .key = 36,
+        .vel = 100,
+        .ch = 0,
+        .off_vel = null,
+        .span = span,
+    };
+    notes[1] = .{
+        .at = TPQ,
+        .dur = 2 * TPQ,
+        .key = 38,
+        .vel = 90,
+        .ch = 0,
+        .off_vel = null,
+        .span = span,
+    };
+    notes[2] = .{
+        .at = 2 * TPQ,
+        .dur = TPQ / 2,
+        .key = 42,
+        .vel = 80,
+        .ch = 0,
+        .off_vel = null,
+        .span = span,
+    };
     const keys = try arena.alloc(value.Keyframe, 3);
-    keys[0] = .{ .at = 0, .value = .{ 0.2, 0, 0, 0 }, .ncomp = 1, .ease_src = "hold", .span = span };
-    keys[1] = .{ .at = 184_504_320, .value = .{ 0.9, 0, 0, 0 }, .ncomp = 1, .ease_src = "in-cubic", .span = span };
-    keys[2] = .{ .at = 369_008_640, .value = .{ 0.1, 0, 0, 0 }, .ncomp = 1, .ease_src = "linear", .span = span };
+    keys[0] = .{
+        .at = 0,
+        .value = .{ 0.2, 0, 0, 0 },
+        .ncomp = 1,
+        .ease_src = "hold",
+        .span = span,
+    };
+    keys[1] = .{
+        .at = 184_504_320,
+        .value = .{ 0.9, 0, 0, 0 },
+        .ncomp = 1,
+        .ease_src = "in-cubic",
+        .span = span,
+    };
+    keys[2] = .{
+        .at = 369_008_640,
+        .value = .{ 0.1, 0, 0, 0 },
+        .ncomp = 1,
+        .ease_src = "linear",
+        .span = span,
+    };
 
     const lanes = try arena.alloc(value.Lane, 2);
     lanes[0] = .{
@@ -633,7 +675,10 @@ test "Playhead.onsets: the census of a window, half-open" {
 
     try testing.expectEqual(@as(usize, 3), onsets(&d, "kick", 0, 300_000_000).len);
     try testing.expectEqual(@as(usize, 1), onsets(&d, "kick", 46_126_080, 92_252_160).len);
-    try testing.expectEqual(@as(i64, 46_126_080), onsets(&d, "kick", 46_126_080, 92_252_160)[0].tick);
+    try testing.expectEqual(
+        @as(i64, 46_126_080),
+        onsets(&d, "kick", 46_126_080, 92_252_160)[0].tick,
+    );
     try testing.expectEqual(@as(usize, 0), onsets(&d, "kick", 1, 46_126_080).len);
     try testing.expectEqual(@as(usize, 0), onsets(&d, "glow", 0, 300_000_000).len);
 }

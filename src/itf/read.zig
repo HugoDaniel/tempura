@@ -261,11 +261,23 @@ const Reader = struct {
     fn readHeader(self: *Reader) Error!bool {
         const n = self.len();
         if (n < 4) {
-            try self.note(.it_truncated, .err, .{ .start = 0, .end = n }, "an IT file is 192 bytes of header; this one is {d}", .{n});
+            try self.note(
+                .it_truncated,
+                .err,
+                .{ .start = 0, .end = n },
+                "an IT file is 192 bytes of header; this one is {d}",
+                .{n},
+            );
             return false;
         }
         if (!std.mem.eql(u8, self.src[0..4], "IMPM")) {
-            try self.note(.it_bad_magic, .err, .{ .start = 0, .end = 4 }, "expected the magic 'IMPM', found '{f}'", .{std.ascii.hexEscape(self.src[0..4], .lower)});
+            try self.note(
+                .it_bad_magic,
+                .err,
+                .{ .start = 0, .end = 4 },
+                "expected the magic 'IMPM', found '{f}'",
+                .{std.ascii.hexEscape(self.src[0..4], .lower)},
+            );
             return false;
         }
 
@@ -275,7 +287,13 @@ const Reader = struct {
         const have: u32 = @min(n, model.header_size);
         @memcpy(raw[0..have], self.src[0..have]);
         if (n < model.header_size) {
-            try self.note(.it_truncated, .err, .{ .start = 0, .end = n }, "the header needs 192 bytes; the file ends after {d}", .{n});
+            try self.note(
+                .it_truncated,
+                .err,
+                .{ .start = 0, .end = n },
+                "the header needs 192 bytes; the file ends after {d}",
+                .{n},
+            );
         }
 
         var h: model.Header = .blank;
@@ -316,7 +334,13 @@ const Reader = struct {
         const available: u32 = if (self.len() > hdr.orders) self.len() - hdr.orders else 0;
         const take: u32 = @min(want, available);
         if (take < want) {
-            try self.note(.it_truncated, .err, self.toEnd(hdr.orders), "the order list wants {d} bytes; {d} are there", .{ want, available });
+            try self.note(
+                .it_truncated,
+                .err,
+                self.toEnd(hdr.orders),
+                "the order list wants {d} bytes; {d} are there",
+                .{ want, available },
+            );
         }
         if (take > 0) {
             self.module.orders = try self.arena.dupe(u8, self.src[hdr.orders..][0..take]);
@@ -352,7 +376,13 @@ const Reader = struct {
         const end: u32 = @intCast(@min(@as(u64, at) + declared, self.len()));
         if (declared > 0) {
             if (@as(u64, at) + declared > self.len()) {
-                try self.note(.it_truncated, .err, self.toEnd(at), "the parapointer arrays want {d} bytes; the file ends first", .{declared});
+                try self.note(
+                    .it_truncated,
+                    .err,
+                    self.toEnd(at),
+                    "the parapointer arrays want {d} bytes; the file ends first",
+                    .{declared},
+                );
             }
             try self.mark(.parapointers, 0, .{ .off = at, .len = end - at });
         }
@@ -385,7 +415,8 @@ const Reader = struct {
                     .it_history_flag_without_block,
                     .warning,
                     self.window(p.end, 2),
-                    "Special b1 claims an edit-history block that does not fit before offset {d}; read as absent",
+                    "Special b1 claims an edit-history block that does not fit before offset " ++
+                        "{d}; read as absent",
                     .{p.min_ptr},
                 );
                 return p.end;
@@ -416,7 +447,10 @@ const Reader = struct {
                 // slots and has no anchor to slice, so a read module
                 // carries what a built one would (`Module.midi_config_bytes`).
                 // `regions.midiConfig` already proved the region fits.
-                self.module.midi_config_bytes = try self.arena.dupe(u8, self.src[region.off..][0..region.len]);
+                self.module.midi_config_bytes = try self.arena.dupe(
+                    u8,
+                    self.src[region.off..][0..region.len],
+                );
                 try self.mark(.midi_config, 0, region);
             },
         }
@@ -431,7 +465,13 @@ const Reader = struct {
         const want = h.message_length;
         const declared: Region = .{ .off = h.message_offset, .len = want };
         if (declared.end() > self.len()) {
-            try self.note(.it_truncated, .warning, self.toEnd(h.message_offset), "the song message wants {d} bytes at offset {d}; the file ends first", .{ want, h.message_offset });
+            try self.note(
+                .it_truncated,
+                .warning,
+                self.toEnd(h.message_offset),
+                "the song message wants {d} bytes at offset {d}; the file ends first",
+                .{ want, h.message_offset },
+            );
         }
         if (h.message_offset >= self.len()) return;
 
@@ -554,7 +594,8 @@ const Reader = struct {
                     .it_pattern_rows_out_of_range,
                     .err,
                     .{ .start = at + 2, .end = at + 4 },
-                    "pattern {d} claims {d} rows, outside the 1–{d} a reader can honour; read as empty",
+                    "pattern {d} claims {d} rows, outside the 1–{d} a reader can honour; read " ++
+                        "as empty",
                     .{ i, rows, max_pattern_rows },
                 );
                 slot.* = try self.emptyPattern(empty_pattern_rows);
@@ -651,7 +692,13 @@ const Reader = struct {
         return .{ .rows = rows, .cells = cells };
     }
 
-    fn clampCount(self: *Reader, count: u16, cap: u16, field: u32, comptime what: []const u8) Error!u16 {
+    fn clampCount(
+        self: *Reader,
+        count: u16,
+        cap: u16,
+        field: u32,
+        comptime what: []const u8,
+    ) Error!u16 {
         if (count <= cap) return count;
         try self.note(
             .it_count_exceeds_spec,
@@ -663,7 +710,13 @@ const Reader = struct {
         return cap;
     }
 
-    fn outOfRange(self: *Reader, field: u32, at: u32, comptime what: []const u8, index: usize) Error!void {
+    fn outOfRange(
+        self: *Reader,
+        field: u32,
+        at: u32,
+        comptime what: []const u8,
+        index: usize,
+    ) Error!void {
         try self.note(
             .it_parapointer_out_of_range,
             .warning,
@@ -735,7 +788,10 @@ test "read: a hand-built minimal module parses" {
     try testing.expectEqual(Region{ .off = 0, .len = 192 }, r.source_map.find(.header, 0).?);
     try testing.expectEqual(Region{ .off = 0xC0, .len = 2 }, r.source_map.find(.orders, 0).?);
     try testing.expectEqual(Region{ .off = 0xC2, .len = 4 }, r.source_map.find(.parapointers, 0).?);
-    try testing.expectEqual(Region{ .off = 0xC6, .len = 8 + minimal_stream.len }, r.source_map.find(.pattern, 0).?);
+    try testing.expectEqual(
+        Region{ .off = 0xC6, .len = 8 + minimal_stream.len },
+        r.source_map.find(.pattern, 0).?,
+    );
 }
 
 test "read: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
@@ -953,7 +1009,10 @@ test "read: the message is read at MsgOffset, CR kept, NUL terminating" {
     var r = try read(gpa, bytes);
     defer r.deinit();
     try testing.expectEqualStrings("hello\rworld", r.module.message);
-    try testing.expectEqual(Region{ .off = message_at, .len = 20 }, r.source_map.find(.message, 0).?);
+    try testing.expectEqual(
+        Region{ .off = message_at, .len = 20 },
+        r.source_map.find(.message, 0).?,
+    );
 }
 
 test "read: a message declared past the end of the file is truncated, its span never inverted" {
@@ -1003,8 +1062,16 @@ test "read: sample extents dispatch on the encoding, truncation is recorded" {
     // 0: 16-bit PCM, 8 frames. 1: ADPCM, 16 frames. 2: IT215, 40000
     // frames in two blocks. 3: compressed and truncated.
     var headers: [4]u32 = undefined;
-    headers[0] = try f.sampleHeader(.{ .name = "pcm", .flags = model.sample_flag.has_data | model.sample_flag.bits16, .length = 8 });
-    headers[1] = try f.sampleHeader(.{ .name = "adpcm", .convert = model.sample_convert.adpcm, .length = 16 });
+    headers[0] = try f.sampleHeader(
+        .{
+            .name = "pcm",
+            .flags = model.sample_flag.has_data | model.sample_flag.bits16,
+            .length = 8,
+        },
+    );
+    headers[1] = try f.sampleHeader(
+        .{ .name = "adpcm", .convert = model.sample_convert.adpcm, .length = 16 },
+    );
     headers[2] = try f.sampleHeader(.{
         .name = "it215",
         .flags = model.sample_flag.has_data | model.sample_flag.compressed,

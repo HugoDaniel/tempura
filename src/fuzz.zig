@@ -957,7 +957,8 @@ test "fuzz residue.smf.detach: every track survives and a second detach is a no-
             "",
             minimal_smf,
             residue_smf,
-            "MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\xff\x7f\x04\x7dpau\x00\xff\x2f\x00",
+            "MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\xff\x7f\x04" ++
+                "\x7dpau\x00\xff\x2f\x00",
             "\xff\xfe\x00\x80",
         },
     });
@@ -1025,7 +1026,9 @@ fn fuzzItCarriers(_: void, smith: *Smith) anyerror!void {
 
 test "fuzz residue.it bites: a chunk record, a marker mid-line, and the escaping" {
     // One conductor record in chunk framing: envelope, length, 32 bytes.
-    const one = try checkItCarriers("\x7dtem\x01\x03\x00\x01" ++ "\x20\x00\x00\x00" ++ ("\x00" ** 32));
+    const one = try checkItCarriers(
+        "\x7dtem\x01\x03\x00\x01" ++ "\x20\x00\x00\x00" ++ ("\x00" ** 32),
+    );
     try testing.expectEqual(@as(usize, 1), one.hits);
     try testing.expect(!one.has(.residue_version));
 
@@ -1051,7 +1054,9 @@ test "fuzz residue.it bites: a chunk record, a marker mid-line, and the escaping
 
     // Only this build's version inside: the whole chunk is a newer
     // tempura's and is left alone.
-    const newer = try checkItCarriers("\x7dtem\x09\x03\x00\x01" ++ "\x20\x00\x00\x00" ++ ("\x00" ** 32));
+    const newer = try checkItCarriers(
+        "\x7dtem\x09\x03\x00\x01" ++ "\x20\x00\x00\x00" ++ ("\x00" ** 32),
+    );
     try testing.expect(newer.has(.residue_version));
 
     // The marker counts at a line start and nowhere else.
@@ -1166,7 +1171,8 @@ test "fuzz doc.pipeline.dump: arbitrary bytes dump as a document, .mid" {
             "",
             minimal_smf,
             residue_smf,
-            "MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x08\x00\x90\x3c\x40\x60\x80\x3c\x40",
+            "MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x08\x00\x90\x3c\x40" ++
+                "\x60\x80\x3c\x40",
             "\xff\xfe\x00\x80",
         },
     });

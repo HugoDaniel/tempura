@@ -94,13 +94,22 @@ test "version: src/root.zig and build.zig.zon spell the same version" {
 
     const path = try std.fs.path.join(gpa, &.{ repo_root, "build.zig.zon" });
     defer gpa.free(path);
-    const manifest = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, gpa, .limited(64 * 1024));
+    const manifest = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        path,
+        gpa,
+        .limited(64 * 1024),
+    );
     defer gpa.free(manifest);
 
     const key = ".version = \"";
     const at = std.mem.indexOf(u8, manifest, key) orelse return error.ManifestHasNoVersion;
     const rest = manifest[at + key.len ..];
-    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return error.ManifestVersionUnterminated;
+    const end = std.mem.indexOfScalar(
+        u8,
+        rest,
+        '"',
+    ) orelse return error.ManifestVersionUnterminated;
 
     try std.testing.expectEqualStrings(rest[0..end], version);
 }

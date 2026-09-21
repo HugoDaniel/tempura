@@ -96,8 +96,16 @@ fn ask(ctx: *const Cli.Ctx, derived: *const tempura.time.derive.Derived) Cli.Err
                 // Both guards are about the NUMBER the user typed, so both
                 // are usage errors: the document is fine and the question
                 // is not answerable.
-                error.TickOverflow => return try refuse(ctx, "--seconds {d} is past the grid's ceiling", .{secs}),
-                error.NonFiniteTime => return try refuse(ctx, "--seconds {d} is not a time", .{secs}),
+                error.TickOverflow => return try refuse(
+                    ctx,
+                    "--seconds {d} is past the grid's ceiling",
+                    .{secs},
+                ),
+                error.NonFiniteTime => return try refuse(
+                    ctx,
+                    "--seconds {d} is not a time",
+                    .{secs},
+                ),
             },
         };
     }
@@ -107,7 +115,8 @@ fn ask(ctx: *const Cli.Ctx, derived: *const tempura.time.derive.Derived) Cli.Err
         .ok => |l| l,
         .err => |code| return try refuse(
             ctx,
-            "`--pos {s}` is not a position ({t}); a position carries a unit — 17bar, 2.5q, 1t, 0.5b, 12.5s",
+            "`--pos {s}` is not a position ({t}); a position carries a unit — 17bar, 2.5q, 1t, " ++
+                "0.5b, 12.5s",
             .{ text, code },
         ),
     };
@@ -115,7 +124,11 @@ fn ask(ctx: *const Cli.Ctx, derived: *const tempura.time.derive.Derived) Cli.Err
         return try refuse(ctx, "`--pos {s}` is not a time", .{text});
     const tick = switch (resolved) {
         .tick => |x| x,
-        .err => |code| return try refuse(ctx, "`--pos {s}` does not resolve ({t})", .{ text, code }),
+        .err => |code| return try refuse(
+            ctx,
+            "`--pos {s}` does not resolve ({t})",
+            .{ text, code },
+        ),
     };
     return .{ .ok = try Playhead.atTick(ctx.gpa, derived, tick) };
 }
@@ -211,7 +224,9 @@ test "at --seconds: the tick, the bar and the beat of one clock reading" {
     defer c.deinit();
     try t.expectEqual(Cli.Exit.ok, c.code);
     try t.expectEqualStrings("", c.err.written());
-    try t.expect(std.mem.startsWith(u8, c.out.written(), "(at :tick 46126080 :bar 0 :beat 1 :sub 0"));
+    try t.expect(
+        std.mem.startsWith(u8, c.out.written(), "(at :tick 46126080 :bar 0 :beat 1 :sub 0"),
+    );
 }
 
 test "at --pos: a position literal is resolved by the document's own map" {
@@ -221,7 +236,9 @@ test "at --pos: a position literal is resolved by the document's own map" {
     var c = try Cli.invoke(&.{ "tempura", "at", path, "--pos", "1q" });
     defer c.deinit();
     try t.expectEqual(Cli.Exit.ok, c.code);
-    try t.expect(std.mem.startsWith(u8, c.out.written(), "(at :tick 46126080 :bar 0 :beat 1 :sub 0"));
+    try t.expect(
+        std.mem.startsWith(u8, c.out.written(), "(at :tick 46126080 :bar 0 :beat 1 :sub 0"),
+    );
 
     // …and the two spellings of one instant agree.
     var secs = try Cli.invoke(&.{ "tempura", "at", path, "--seconds", "0.48" });
@@ -254,7 +271,9 @@ test "at: an IT conductor adds the tracker position, and a native document does 
     try t.expectEqual(Cli.Exit.ok, it.code);
     // Speed 6 and 24 ticks to the quarter make a row a 16th, so 1q is
     // row 4 of order 0.
-    try t.expect(std.mem.indexOf(u8, it.out.written(), "(tracker :order 0 :row 4 :tick-in-row 0)") != null);
+    try t.expect(
+        std.mem.indexOf(u8, it.out.written(), "(tracker :order 0 :row 4 :tick-in-row 0)") != null,
+    );
 
     var native = try Cli.invoke(&.{ "tempura", "at", native_path, "--pos", "1q" });
     defer native.deinit();

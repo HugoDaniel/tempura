@@ -415,7 +415,8 @@ const Tailer = struct {
             .residue_tail_truncated,
             .warning,
             .{ .start = 0, .end = 0 },
-            "the message tail is {d} bytes of {d}; {d} forms did not fit ({d} sections, {d} cues, {d} lanes, {d} controls)",
+            "the message tail is {d} bytes of {d}; {d} forms did not fit ({d} sections, {d} " ++
+                "cues, {d} lanes, {d} controls)",
             .{
                 self.out.items.len, tail_budget,     lost,
                 self.dropped[0],    self.dropped[1], self.dropped[2],
@@ -672,7 +673,8 @@ const Tailer = struct {
             .it_message_encoding_lossy,
             .warning,
             .{ .start = 0, .end = 0 },
-            "\"{s}\" is not ASCII and the song message is transcoded by every tracker; the tail spells it with %XX escapes",
+            "\"{s}\" is not ASCII and the song message is transcoded by every tracker; the tail " ++
+                "spells it with %XX escapes",
             .{text},
         );
         self.lossy = was or self.lossy;
@@ -762,7 +764,9 @@ pub fn choose(
                     .residue_version,
                     .warning,
                     .{ .start = 0, .end = 0 },
-                    "the TMPU chunk's essence is SJON Binary IR of wire version {d}, which this substrate does not decode; it stays in the file and the message tail is read instead",
+                    "the TMPU chunk's essence is SJON Binary IR of wire version {d}, which this " ++
+                        "substrate does not decode; it stays in the file and the message tail " ++
+                        "is read instead",
                     .{v},
                 );
             },
@@ -770,7 +774,8 @@ pub fn choose(
                 .residue_version,
                 .warning,
                 .{ .start = 0, .end = 0 },
-                "the TMPU chunk is envelope version {d} (this build reads {d}); it stays in the file and the message tail is read instead",
+                "the TMPU chunk is envelope version {d} (this build reads {d}); it stays in the " ++
+                    "file and the message tail is read instead",
                 .{ v, records.version },
             ),
             .corrupt => |code| try diags.add(
@@ -789,7 +794,9 @@ pub fn choose(
             .residue_partial,
             .warning,
             .{ .start = 0, .end = 0 },
-            "only the message tail was readable: it carries the timeline's shape — sections, cues, lane declarations, pass-through controls — and no native content and no records, so every rendered lane stays bound",
+            "only the message tail was readable: it carries the timeline's shape — sections, " ++
+                "cues, lane declarations, pass-through controls — and no native content and no " ++
+                "records, so every rendered lane stays bound",
             .{},
         );
         return .{ .tail = text };
@@ -994,7 +1001,10 @@ test "it: the 4096 budget drops whole lines and says what fell off" {
     // Enough sections to run past the budget on their own.
     var src: std.ArrayList(u8) = .empty;
     defer src.deinit(gpa);
-    try src.appendSlice(gpa, "(timeline :title \"big\" :conductor song)\n(anchor :id song :kind it :file \"big.it\")\n");
+    try src.appendSlice(
+        gpa,
+        "(timeline :title \"big\" :conductor song)\n(anchor :id song :kind it :file \"big.it\")\n",
+    );
     for (0..200) |i| {
         var line: [64]u8 = undefined;
         const text = try std.fmt.bufPrint(

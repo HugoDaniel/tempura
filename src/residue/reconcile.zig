@@ -129,9 +129,11 @@ pub const Error = error{OutOfMemory};
 /// and not restored. Four reasons, four lines, so a reader knows at a
 /// glance which of plan 04's rules ran.
 pub const header_skeleton = skeleton.header_comment;
-pub const header_version = "; skeleton: derived, the residue is a newer version and was left in the file";
+pub const header_version = "; skeleton: derived, the residue is a newer version and was left in " ++
+    "the file";
 pub const header_corrupt = "; skeleton: derived, the residue would not decode";
-pub const header_partial = "; partial: the IT message tail alone — the shape of the piece, none of its content";
+pub const header_partial = "; partial: the IT message tail alone — the shape of the piece, none " ++
+    "of its content";
 
 /// How close a step has to sit to a hinted curve for the hint to be
 /// honoured. `export/lanes.zig`'s own default: one MIDI step, which is
@@ -410,7 +412,8 @@ const Run = struct {
                     .residue_corrupt,
                     .warning,
                     .{ .start = 0, .end = 0 },
-                    "{d} lane record(s) and {s} conductor record rode in this file with no essence to restore; the timeline tier is derived instead",
+                    "{d} lane record(s) and {s} conductor record rode in this file with no " ++
+                        "essence to restore; the timeline tier is derived instead",
                     .{ p.lanes.len, if (p.conductor != null) "a" else "no" },
                 );
                 return self.derive(.corrupt);
@@ -427,7 +430,9 @@ const Run = struct {
                     .residue_version,
                     .warning,
                     .{ .start = 0, .end = 0 },
-                    "the essence is SJON Binary IR of wire version {d}, which this substrate does not decode; the payload stays in the file and the timeline tier is derived instead",
+                    "the essence is SJON Binary IR of wire version {d}, which this substrate " ++
+                        "does not decode; the payload stays in the file and the timeline tier " ++
+                        "is derived instead",
                     .{v},
                 );
                 try self.derive(.version);
@@ -437,7 +442,8 @@ const Run = struct {
                     code,
                     .warning,
                     .{ .start = 0, .end = 0 },
-                    "the essence ({d} bytes) is not decodable Binary IR; the timeline tier is derived instead",
+                    "the essence ({d} bytes) is not decodable Binary IR; the timeline tier is " ++
+                        "derived instead",
                     .{body.len},
                 );
                 try self.derive(.corrupt);
@@ -663,7 +669,8 @@ const Run = struct {
             .residue_corrupt,
             .warning,
             .{ .start = 0, .end = 0 },
-            "the essence decoded but does not read back as SJON; the timeline tier is derived instead",
+            "the essence decoded but does not read back as SJON; the timeline tier is derived " ++
+                "instead",
             .{},
         );
         return self.derive(.corrupt);
@@ -701,7 +708,10 @@ const Run = struct {
         for (tree.root) |idx| {
             if (!isForm(&tree, idx, "lane")) continue;
             if (keyValue(&tree, idx, "from") == null) continue;
-            const name = atomText(&tree, keyValue(&tree, idx, "name") orelse continue) orelse continue;
+            const name = atomText(
+                &tree,
+                keyValue(&tree, idx, "name") orelse continue,
+            ) orelse continue;
             const address = addressOf(&tree, idx, self.file.tier.kind()) orelse continue;
             try self.verdicts.append(self.arena, .{
                 .lane = try self.arena.dupe(u8, name),
@@ -958,9 +968,11 @@ const Run = struct {
             .residue_stale,
             .warning,
             .{ .start = 0, .end = 0 },
-            "the file's tempo, meter or markers were edited after this residue was written, so the file conducts: dropped {s}",
+            "the file's tempo, meter or markers were edited after this residue was written, so " ++
+                "the file conducts: dropped {s}",
             .{if (dropped.len == 0)
-                "nothing — the document had no points or cues of its own, and now takes its time from the file"
+                "nothing — the document had no points or cues of its own, and now takes its " ++
+                    "time from the file"
             else
                 try std.mem.join(self.arena, ", ", dropped)},
         );
@@ -990,7 +1002,8 @@ const Run = struct {
                     .residue_stale,
                     .warning,
                     .{ .start = 0, .end = 0 },
-                    "a lane record names {s} at {s}, which the restored essence does not declare; the record is orphaned and was dropped",
+                    "a lane record names {s} at {s}, which the restored essence does not " ++
+                        "declare; the record is orphaned and was dropped",
                     .{ rec.lane, try self.addressText(rec.address) },
                 );
                 continue;
@@ -1008,7 +1021,12 @@ const Run = struct {
         }
     }
 
-    fn labelTempo(self: *Run, tree: *const Ast.Tree, source: []const u8, idx: NodeIndex) Error![]const u8 {
+    fn labelTempo(
+        self: *Run,
+        tree: *const Ast.Tree,
+        source: []const u8,
+        idx: NodeIndex,
+    ) Error![]const u8 {
         // The AUTHORED spelling is among the losses: `:qpm 120` and
         // `:us 500000` are the same tempo and not the same document.
         for ([_][]const u8{ "qpm", "us" }) |key| {
@@ -1191,7 +1209,8 @@ const Run = struct {
                     .ease_hint_mismatch,
                     .warning,
                     .{ .start = 0, .end = 0 },
-                    "lane {s}: the file's steps between ticks {d} and {d} are not {s} within {d} — the hint is dropped and the steps win",
+                    "lane {s}: the file's steps between ticks {d} and {d} are not {s} within " ++
+                        "{d} — the hint is dropped and the steps win",
                     .{ rec.lane, from, to, ease, self.opts.eps },
                 );
             }
@@ -1568,7 +1587,12 @@ pub const Hasher = struct {
                     .it => return @splat(0),
                 };
                 const track: u32 = if (s.track == 0) 0 else s.track - 1;
-                return records.hashSmfLane(seq, track, s.ch.first(), seq.division.pulsesPerQuarter());
+                return records.hashSmfLane(
+                    seq,
+                    track,
+                    s.ch.first(),
+                    seq.division.pulsesPerQuarter(),
+                );
             },
             .it => |m| {
                 const s = switch (address) {
@@ -1704,7 +1728,12 @@ fn atomText(tree: *const Ast.Tree, idx: NodeIndex) ?[]const u8 {
 
 /// A key's value exactly as the author spelled it — the source slice, so
 /// `:qpm 120.5` and `:us 400000` come back as themselves.
-fn keyLiteral(tree: *const Ast.Tree, source: []const u8, form: NodeIndex, key: []const u8) ?[]const u8 {
+fn keyLiteral(
+    tree: *const Ast.Tree,
+    source: []const u8,
+    form: NodeIndex,
+    key: []const u8,
+) ?[]const u8 {
     const v = keyValue(tree, form, key) orelse return null;
     const span = tree.spanOf(v);
     if (span.end > source.len or span.start > span.end) return null;
@@ -2051,7 +2080,12 @@ fn smfFile(gpa: Allocator, e: Edit) !Sequence.Sequence {
 
     const t0 = try b.addTrack();
     try b.addEvent(t0, 0, .set_tempo, .{ .tempo = e.tempo });
-    try b.addEvent(t0, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(
+        t0,
+        0,
+        .time_signature,
+        .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } },
+    );
     try b.addEvent(t0, 0, .marker, .{ .bytes = try b.addBytes(e.marker) });
     // Off the origin, and deliberately: tick 0 maps to tempura tick 0
     // under EVERY division, so a conductor whose events all sit there
@@ -2152,7 +2186,9 @@ fn smfCase(gpa: Allocator, carry: SmfCarry) !SmfCase {
     };
     const cutoff = try records.encodeLane(gpa, .{
         .lane = "cutoff",
-        .address = .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .{ .cc = 74 } } },
+        .address = .{
+            .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .{ .cc = 74 } },
+        },
         .hash = records.hashSmfLane(&written, 1, 1, carry.written.ppq),
         .steps_only = &segments,
     });
@@ -2260,14 +2296,20 @@ test "reconcile: rule 2 — both hashes match, the essence is the document again
     // The author's own text came back: the comment, the title, the
     // authored `:qpm` spelling, the cue and both lanes' native content.
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "; the author's own note") != null);
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "; the kick, as the author wrote it") != null);
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(tempo-point :at 0bar :qpm 120)") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, got.doc_text, "; the kick, as the author wrote it") != null,
+    );
+    try testing.expect(
+        std.mem.indexOf(u8, got.doc_text, "(tempo-point :at 0bar :qpm 120)") != null,
+    );
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "(cue :name \"intro\" :at 0bar)") != null);
     // The DOCUMENT conducts, as it did when it was built: no
     // `:conductor`, which is also what keeps its own points from being
     // `conductor_conflict` when the assembled text is read back.
     try testing.expect(std.mem.indexOf(u8, got.doc_text, ":conductor") == null);
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(note :at 0bar :dur 1q :key 36 :vel 100)") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, got.doc_text, "(note :at 0bar :dur 1q :key 36 :vel 100)") != null,
+    );
     try testing.expect(std.mem.indexOf(u8, got.doc_text, ":ease in-cubic") != null);
 
     // The marker is an anchor again, over the bytes being dumped.
@@ -2375,7 +2417,12 @@ fn kitCase(gpa: Allocator, edited: bool) !SmfCase {
     b.division = .{ .ppq = 96 };
     const t0 = try b.addTrack();
     try b.addEvent(t0, 0, .set_tempo, .{ .tempo = 500_000 });
-    try b.addEvent(t0, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(
+        t0,
+        0,
+        .time_signature,
+        .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } },
+    );
     try b.addEvent(t0, 384, .end_of_track, .empty);
     const t1 = try b.addTrack();
     try b.addEvent(t1, 0, .sequence_name, .{ .bytes = try b.addBytes("kit") });
@@ -2497,7 +2544,9 @@ test "reconcile: rule 2 — a lane rendered on two channels and edited on one bi
         "(lane :name kit :kind notes :target drums :from song :track 2 :ch [1 2])",
     ) != null);
     try testing.expect(std.mem.indexOf(u8, got.doc_text, ":key 36") == null);
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(note :at 2q :dur 1q :key 42 :vel 70)") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, got.doc_text, "(note :at 2q :dur 1q :key 42 :vel 70)") != null,
+    );
 
     // `residue_stale` names the SET, and the two notes it cost.
     try testing.expectEqual(@as(usize, 1), got.diags.count(.residue_stale));
@@ -3005,9 +3054,19 @@ test "reconcile: rule 2 and rule 5 — the chunk wins, and the essence is the do
 
     // The author's document, comments and native content and all — and
     // the bound lane exactly as it was written.
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "; impulsos, as the author wrote it") != null);
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(note :at 0bar :dur 1q :key 60)") != null);
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(lane :name hats :kind notes :from song :channel 4)") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, got.doc_text, "; impulsos, as the author wrote it") != null,
+    );
+    try testing.expect(
+        std.mem.indexOf(u8, got.doc_text, "(note :at 0bar :dur 1q :key 60)") != null,
+    );
+    try testing.expect(
+        std.mem.indexOf(
+            u8,
+            got.doc_text,
+            "(lane :name hats :kind notes :from song :channel 4)",
+        ) != null,
+    );
     // The marker became an anchor over the bytes being dumped.
     try testing.expect(std.mem.indexOf(u8, got.doc_text, ":file \"self\"") == null);
     try testing.expect(std.mem.indexOf(u8, got.doc_text, ":file \"song.it\" :size") != null);
@@ -3151,8 +3210,16 @@ test "reconcile: rule 5 — the tail alone is the shape of the piece and says wh
     try testing.expectEqual(@as(usize, 0), got.diags.count(.residue_stale));
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "(cue :name \"intro\" :at 0bar)") != null);
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "(cue :name \"intro\" :at 0bar)") != null);
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(lane :name kick :kind notes :target drums)") != null);
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(lane :name hats :kind notes :from song :channel 4)") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, got.doc_text, "(lane :name kick :kind notes :target drums)") != null,
+    );
+    try testing.expect(
+        std.mem.indexOf(
+            u8,
+            got.doc_text,
+            "(lane :name hats :kind notes :from song :channel 4)",
+        ) != null,
+    );
     // …and none of the content, which only the essence could have said.
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "(note ") == null);
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "(keyframe ") == null);
@@ -3241,7 +3308,9 @@ test "reconcile: a lane record naming a lane the essence has not got is named an
     // …and the loss is named rather than swallowed.
     try testing.expectEqual(@as(usize, 1), got.diags.count(.residue_stale));
     const d = findDiag(&got, .residue_stale).?;
-    try testing.expect(std.mem.indexOf(u8, d.message, "names ghost at track 2 ch 1 key 36") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, d.message, "names ghost at track 2 ch 1 key 36") != null,
+    );
     try testing.expect(std.mem.indexOf(u8, d.message, "orphaned") != null);
     // The real lanes came back untouched, content and all. (The
     // assertion is on the FORM's content rather than on its line: SJON's
@@ -3249,8 +3318,12 @@ test "reconcile: a lane record naming a lane the essence has not got is named an
     // the essence preserves is the comments, the spellings and the
     // content — not the author's exact whitespace.)
     try testing.expect(std.mem.indexOf(u8, got.doc_text, ":name kick") != null);
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "(note :at 0bar :dur 1q :key 36 :vel 100)") != null);
-    try testing.expect(std.mem.indexOf(u8, got.doc_text, "; the kick, as the author wrote it") != null);
+    try testing.expect(
+        std.mem.indexOf(u8, got.doc_text, "(note :at 0bar :dur 1q :key 36 :vel 100)") != null,
+    );
+    try testing.expect(
+        std.mem.indexOf(u8, got.doc_text, "; the kick, as the author wrote it") != null,
+    );
 }
 
 test "reconcile: the binding keys it writes are the ones the printer writes back" {
@@ -3264,13 +3337,47 @@ test "reconcile: the binding keys it writes are the ones the printer writes back
 
     const Case = struct { kind: []const u8, address: Doc.Address };
     const cases = [_]Case{
-        .{ .kind = "notes", .address = .{ .smf = .{ .track = 2, .ch = .single(0), .key = 36, .curve = null } } },
-        .{ .kind = "notes", .address = .{ .smf = .{ .track = 1, .ch = .single(15), .key = null, .curve = null } } },
-        .{ .kind = "curve", .address = .{ .smf = .{ .track = 3, .ch = .single(4), .key = null, .curve = .{ .cc = 74 } } } },
-        .{ .kind = "curve", .address = .{ .smf = .{ .track = 3, .ch = .single(4), .key = null, .curve = .{ .cc14 = .{ 74, 106 } } } } },
-        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .bend } } },
-        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .pressure } } },
-        .{ .kind = "curve", .address = .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .velocity } } },
+        .{
+            .kind = "notes",
+            .address = .{ .smf = .{ .track = 2, .ch = .single(0), .key = 36, .curve = null } },
+        },
+        .{
+            .kind = "notes",
+            .address = .{ .smf = .{ .track = 1, .ch = .single(15), .key = null, .curve = null } },
+        },
+        .{
+            .kind = "curve",
+            .address = .{
+                .smf = .{ .track = 3, .ch = .single(4), .key = null, .curve = .{ .cc = 74 } },
+            },
+        },
+        .{
+            .kind = "curve",
+            .address = .{
+                .smf = .{
+                    .track = 3,
+                    .ch = .single(4),
+                    .key = null,
+                    .curve = .{ .cc14 = .{ 74, 106 } },
+                },
+            },
+        },
+        .{
+            .kind = "curve",
+            .address = .{ .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .bend } },
+        },
+        .{
+            .kind = "curve",
+            .address = .{
+                .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .pressure },
+            },
+        },
+        .{
+            .kind = "curve",
+            .address = .{
+                .smf = .{ .track = 2, .ch = .single(1), .key = null, .curve = .velocity },
+            },
+        },
         .{ .kind = "notes", .address = .{ .it = .{ .channel = 3, .column = null, .fx = null } } },
         .{ .kind = "curve", .address = .{ .it = .{ .channel = 5, .column = .vol, .fx = null } } },
         .{ .kind = "curve", .address = .{ .it = .{ .channel = 5, .column = .fx, .fx = 'T' } } },

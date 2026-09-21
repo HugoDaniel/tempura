@@ -207,7 +207,10 @@ test "Schema: the corpus and timeline vocabularies are never composed" {
     // harness's to give up.
     try t_.expect(one.preloaded.schema.lookupForm("timing", null) == .found);
 
-    var both = try loadSourcesUnchecked(t_.allocator, &(timeline_manifest_srcs ++ [_][:0]const u8{corpus_manifest_src}));
+    var both = try loadSourcesUnchecked(
+        t_.allocator,
+        &(timeline_manifest_srcs ++ [_][:0]const u8{corpus_manifest_src}),
+    );
     defer both.deinit();
     for (verbs) |verb| {
         try t_.expect(both.preloaded.schema.lookupForm(verb, null) == .found);

@@ -179,13 +179,30 @@ fn tierText(
         .smf => {
             var res = try tempura.smf.read(ctx.gpa, bytes);
             defer res.deinit();
-            for (res.diags.items()) |d| try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-            return tempura.doc.bridge_smf.sequenceToForms(ctx.gpa, &res.sequence, null, .{ .qualify = true });
+            for (res.diags.items()) |d| try diags.add(
+                d.code,
+                d.severity,
+                d.span,
+                "{s}",
+                .{d.message},
+            );
+            return tempura.doc.bridge_smf.sequenceToForms(
+                ctx.gpa,
+                &res.sequence,
+                null,
+                .{ .qualify = true },
+            );
         },
         .it => {
             var res = try tempura.itf.read.read(ctx.gpa, bytes);
             defer res.deinit();
-            for (res.diags.items()) |d| try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
+            for (res.diags.items()) |d| try diags.add(
+                d.code,
+                d.severity,
+                d.span,
+                "{s}",
+                .{d.message},
+            );
             return tempura.doc.bridge_it.moduleToForms(ctx.gpa, &res.module, .{
                 .qualify = true,
                 .source_map = &res.source_map,
@@ -237,7 +254,10 @@ fn planInsert(ctx: *const Cli.Ctx, tier: []const u8, at: u32) Cli.Error!Planned 
     var encoded = sjon.toJsonRoots(ctx.gpa, tree, .{}) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
-            try ctx.err.print("tempura: the anchor's dump did not encode ({s})\n", .{@errorName(e)});
+            try ctx.err.print(
+                "tempura: the anchor's dump did not encode ({s})\n",
+                .{@errorName(e)},
+            );
             return .{ .failed = Cli.Exit.internal };
         },
     };
@@ -270,7 +290,10 @@ fn planInsert(ctx: *const Cli.Ctx, tier: []const u8, at: u32) Cli.Error!Planned 
         try w.writeAll("[\n");
         for (roots, 0..) |value, i| {
             if (i > 0) try w.writeAll(",\n");
-            try w.print("{{\"op\":\"insert_root\",\"index\":{d},\"value\":", .{at + @as(u32, @intCast(i))});
+            try w.print(
+                "{{\"op\":\"insert_root\",\"index\":{d},\"value\":",
+                .{at + @as(u32, @intCast(i))},
+            );
             std.json.Stringify.value(value, .{}, w) catch |e| switch (e) {
                 error.WriteFailed => return error.WriteFailed,
             };
@@ -283,7 +306,9 @@ fn planInsert(ctx: *const Cli.Ctx, tier: []const u8, at: u32) Cli.Error!Planned 
     errdefer plan.deinit();
     if (plan.summary.refused or plan.actions.len != roots.len) {
         try Diags.render(ctx.err, "<inline>", .bytes, plan.diags.items(), ctx.style);
-        try ctx.err.writeAll("tempura: the anchor's dump did not read back as an action list (a tempura defect)\n");
+        try ctx.err.writeAll(
+            "tempura: the anchor's dump did not read back as an action list (a tempura defect)\n",
+        );
         return .{ .failed = Cli.Exit.internal };
     }
     return .{ .ok = plan };
@@ -368,8 +393,16 @@ test "inline: an SMF anchor's tier lands after its anchor, with the layout kept"
     try t.expect(anchor_at < tier_at);
     try t.expect(tier_at < lane_at);
     // …and every authored byte survived, comment included.
-    try t.expect(std.mem.indexOf(u8, text, "; a document arranged around a file it does not carry") != null);
-    try t.expect(std.mem.indexOf(u8, text, "  ; the downbeat\n  (note :at 0q :dur 0.5q :key 36 :vel 110))") != null);
+    try t.expect(
+        std.mem.indexOf(u8, text, "; a document arranged around a file it does not carry") != null,
+    );
+    try t.expect(
+        std.mem.indexOf(
+            u8,
+            text,
+            "  ; the downbeat\n  (note :at 0q :dur 0.5q :key 36 :vel 110))",
+        ) != null,
+    );
 }
 
 test "inline: the document it produces is a document, and its content is editable" {
@@ -391,7 +424,12 @@ test "inline: the document it produces is a document, and its content is editabl
     defer v.deinit();
     try t.expectEqual(Cli.Exit.ok, v.code);
 
-    const written = try s.tmp.dir.readFileAlloc(std.testing.io, "inlined.sjon", a, .limited(1 << 20));
+    const written = try s.tmp.dir.readFileAlloc(
+        std.testing.io,
+        "inlined.sjon",
+        a,
+        .limited(1 << 20),
+    );
     defer a.free(written);
     try t.expect(std.mem.indexOf(u8, written, "(it/module") != null);
     try t.expect(std.mem.indexOf(u8, written, "(it/pattern") != null);

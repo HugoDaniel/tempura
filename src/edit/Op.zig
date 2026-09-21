@@ -404,7 +404,8 @@ pub fn fromJson(gpa: std.mem.Allocator, text: []const u8) Error!Parsed {
     // for a diagnostic; this is the one funnel every operation passes.
     if (reader.out_of_range) |x| {
         try reader.fail(
-            "{d} is outside the range the field it was written for can hold; this operation names no edit",
+            "{d} is outside the range the field it was written for can hold; this operation " ++
+                "names no edit",
             .{x},
         );
         return .{ .op = null, .diags = diags, .arena = arena };
@@ -417,7 +418,8 @@ pub fn fromJson(gpa: std.mem.Allocator, text: []const u8) Error!Parsed {
     // so one malformed text keeps giving one complaint.
     if (op != null) if (reader.mistyped) |what| {
         try reader.fail(
-            "a {s} was written where this operation wants a number (a position is an integer tick; 4q is 184504320); this operation names no edit",
+            "a {s} was written where this operation wants a number (a position is an integer " ++
+                "tick; 4q is 184504320); this operation names no edit",
             .{what},
         );
         return .{ .op = null, .diags = diags, .arena = arena };
@@ -885,7 +887,12 @@ const Reader = struct {
             var curve: ?doc.SmfCurve = null;
             if (o.get("cc")) |cc| {
                 if (self.pair(cc)) |two| {
-                    curve = .{ .cc14 = .{ @intCast(std.math.clamp(two[0], 0, 127)), @intCast(std.math.clamp(two[1], 0, 127)) } };
+                    curve = .{
+                        .cc14 = .{
+                            @intCast(std.math.clamp(two[0], 0, 127)),
+                            @intCast(std.math.clamp(two[1], 0, 127)),
+                        },
+                    };
                 } else if (self.int(cc)) |n| {
                     curve = .{ .cc = @intCast(std.math.clamp(n, 0, 127)) };
                 }
@@ -897,17 +904,26 @@ const Reader = struct {
                 curve = .velocity;
             }
             const chs = self.channels(o.get("ch")) orelse {
-                try self.fail("bind's \"ch\" is a channel 1..16, or an array of distinct ones", .{});
+                try self.fail(
+                    "bind's \"ch\" is a channel 1..16, or an array of distinct ones",
+                    .{},
+                );
                 return null;
             };
             return .{ .smf = .{
                 .track = @intCast(std.math.clamp(self.int(v) orelse 1, 1, 65535)),
                 .ch = chs,
-                .key = if (self.optInt(o.get("key"))) |k| @intCast(std.math.clamp(k, 0, 127)) else null,
+                .key = if (self.optInt(
+                    o.get("key"),
+                )) |k| @intCast(std.math.clamp(k, 0, 127)) else null,
                 .curve = curve,
             } };
         }
-        try self.fail("bind wants an address: \"track\" (and \"ch\") for a .mid anchor, \"channel\" for a .it one", .{});
+        try self.fail(
+            "bind wants an address: \"track\" (and \"ch\") for a .mid anchor, \"channel\" for a " ++
+                ".it one",
+            .{},
+        );
         return null;
     }
 
@@ -979,7 +995,10 @@ const Reader = struct {
 
     fn grid(self: *Reader, v: ?std.json.Value) Error!?Snap.Grid {
         const text = try self.str(v orelse .null) orelse {
-            try self.fail("this operation wants a \"grid\": 1/4, 1/8, 1/12, 1/16, 1/32, 1bar or 1b", .{});
+            try self.fail(
+                "this operation wants a \"grid\": 1/4, 1/8, 1/12, 1/16, 1/32, 1bar or 1b",
+                .{},
+            );
             return null;
         };
         return Snap.Grid.parse(text) orelse {
@@ -1309,14 +1328,20 @@ test "Op.fromJson: the payload of every operation the CLI can spell" {
         defer p.deinit();
         try testing.expectEqual(@as(i64, 184504320), p.op.?.insert_tempo.point.tick);
         try testing.expectEqual(@as(f64, 140), p.op.?.insert_tempo.point.tempo.qpm);
-        try testing.expectEqual(@as(@TypeOf(p.op.?.insert_tempo.mode), .wall_clock), p.op.?.insert_tempo.mode);
+        try testing.expectEqual(
+            @as(@TypeOf(p.op.?.insert_tempo.mode), .wall_clock),
+            p.op.?.insert_tempo.mode,
+        );
 
         var q = try parsed(
             \\{"op":"insert-tempo","at":0,"us":500000}
         );
         defer q.deinit();
         try testing.expectEqual(@as(u32, 500000), q.op.?.insert_tempo.point.tempo.us);
-        try testing.expectEqual(@as(@TypeOf(q.op.?.insert_tempo.mode), .musical), q.op.?.insert_tempo.mode);
+        try testing.expectEqual(
+            @as(@TypeOf(q.op.?.insert_tempo.mode), .musical),
+            q.op.?.insert_tempo.mode,
+        );
     }
     {
         var p = try parsed(
@@ -1490,7 +1515,10 @@ test "Op.fromJson: a number no field can hold is refused, never truncated" {
             return error.NumberNotRefused;
         }
         try testing.expect(p.diags.hasErrors());
-        try testing.expectEqual(Diag.Code.sjon_diagnostic, p.diags.items()[p.diags.items().len - 1].code);
+        try testing.expectEqual(
+            Diag.Code.sjon_diagnostic,
+            p.diags.items()[p.diags.items().len - 1].code,
+        );
     }
 }
 

@@ -328,8 +328,20 @@ test "render: the line is path:line:col: severity code: message, in producer ord
     const source = "(timeline)\n(anchor :id song)\n";
     var list: Diag.List = .init(t.allocator);
     defer list.deinit();
-    try list.add(.anchor_missing, .err, .{ .start = 11, .end = 27 }, "no anchor named {s}", .{"song"});
-    try list.add(.division_inexact, .warning, .{ .start = 0, .end = 10 }, "480 does not divide", .{});
+    try list.add(
+        .anchor_missing,
+        .err,
+        .{ .start = 11, .end = 27 },
+        "no anchor named {s}",
+        .{"song"},
+    );
+    try list.add(
+        .division_inexact,
+        .warning,
+        .{ .start = 0, .end = 10 },
+        "480 does not divide",
+        .{},
+    );
 
     const text = try rendered(source, list.items(), .{});
     defer t.allocator.free(text);
@@ -378,7 +390,13 @@ test "render: a file diagnostic shows its byte offset, not a line and a column" 
     // place with nothing to do with them.
     var list: Diag.List = .init(t.allocator);
     defer list.deinit();
-    try list.add(.smf_track_truncated, .err, .{ .start = 0x2b, .end = 0x2b }, "40 declared, 31 present", .{});
+    try list.add(
+        .smf_track_truncated,
+        .err,
+        .{ .start = 0x2b, .end = 0x2b },
+        "40 declared, 31 present",
+        .{},
+    );
 
     var out: Writer.Allocating = .init(t.allocator);
     defer out.deinit();

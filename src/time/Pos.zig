@@ -150,7 +150,10 @@ pub fn tickFromLiteral(lit: Literal) TickResult {
             // nothing, not even its own truncation), so this comparison
             // only has to hold back the ceiling.
             if (lit.value != @trunc(lit.value)) break :blk .{ .err = .position_not_integer };
-            if (lit.value > @as(f64, @floatFromInt(Grid.MAX_TICK))) break :blk .{ .err = .tick_overflow };
+            if (lit.value > @as(
+                f64,
+                @floatFromInt(Grid.MAX_TICK),
+            )) break :blk .{ .err = .tick_overflow };
             break :blk .{ .tick = @intFromFloat(lit.value) };
         },
         .bar, .b, .s => .{ .needs_map = lit.unit },
@@ -268,7 +271,10 @@ test "Pos.parse: each of the five units, in its plan-03 spelling" {
 
     // A big integer tick, and a long decimal, both read whole.
     try testing.expectEqual(Literal{ .value = 15_375_360, .unit = .t }, parse("15375360t").ok);
-    try testing.expectEqual(Literal{ .value = 0.0001953125, .unit = .q }, parse("0.0001953125q").ok);
+    try testing.expectEqual(
+        Literal{ .value = 0.0001953125, .unit = .q },
+        parse("0.0001953125q").ok,
+    );
 }
 
 test "Pos.parse: a plain number is unit_required" {
@@ -356,15 +362,29 @@ test "Pos.tickFromQuarters: past MAX_TICK is TickOverflow, never a wrap" {
     try testing.expectError(error.TickOverflow, tickFromQuarters(std.math.inf(f64)));
     try testing.expectError(error.TickOverflow, tickFromQuarters(std.math.nan(f64)));
     // The ceiling itself is reachable and is not an overflow.
-    try testing.expectEqual(Grid.MAX_TICK, try tickFromQuarters(@as(f64, @floatFromInt(Grid.MAX_TICK)) / @as(f64, @floatFromInt(Grid.TPQ))));
+    try testing.expectEqual(
+        Grid.MAX_TICK,
+        try tickFromQuarters(
+            @as(f64, @floatFromInt(Grid.MAX_TICK)) / @as(f64, @floatFromInt(Grid.TPQ)),
+        ),
+    );
 }
 
 test "Pos.tickFromLiteral: q and t resolve here, the map units do not" {
-    try testing.expectEqual(@as(i64, 115_315_200), tickFromLiteral(.{ .value = 2.5, .unit = .q }).tick);
+    try testing.expectEqual(
+        @as(i64, 115_315_200),
+        tickFromLiteral(.{ .value = 2.5, .unit = .q }).tick,
+    );
     try testing.expectEqual(@as(i64, 0), tickFromLiteral(.{ .value = 0, .unit = .q }).tick);
     try testing.expectEqual(@as(i64, 1), tickFromLiteral(.{ .value = 1, .unit = .t }).tick);
-    try testing.expectEqual(@as(i64, 15_375_360), tickFromLiteral(.{ .value = 15_375_360, .unit = .t }).tick);
-    try testing.expectEqual(Grid.MAX_TICK, tickFromLiteral(.{ .value = @floatFromInt(Grid.MAX_TICK), .unit = .t }).tick);
+    try testing.expectEqual(
+        @as(i64, 15_375_360),
+        tickFromLiteral(.{ .value = 15_375_360, .unit = .t }).tick,
+    );
+    try testing.expectEqual(
+        Grid.MAX_TICK,
+        tickFromLiteral(.{ .value = @floatFromInt(Grid.MAX_TICK), .unit = .t }).tick,
+    );
 
     // `bar`, `b` and `s` need a table this file does not own.
     try testing.expectEqual(Unit.bar, tickFromLiteral(.{ .value = 16, .unit = .bar }).needs_map);
@@ -375,11 +395,26 @@ test "Pos.tickFromLiteral: q and t resolve here, the map units do not" {
 test "Pos.tickFromLiteral: the diagnostics, on literals no parse built" {
     // A literal can arrive from a validated SJON number and a unit token
     // without passing through `parse`, so the rules are re-stated here.
-    try testing.expectEqual(Diag.Code.position_negative, tickFromLiteral(.{ .value = -1, .unit = .q }).err);
-    try testing.expectEqual(Diag.Code.position_negative, tickFromLiteral(.{ .value = -0.5, .unit = .bar }).err);
-    try testing.expectEqual(Diag.Code.position_not_integer, tickFromLiteral(.{ .value = 1.5, .unit = .t }).err);
-    try testing.expectEqual(Diag.Code.tick_overflow, tickFromLiteral(.{ .value = 195_273_461, .unit = .q }).err);
-    try testing.expectEqual(Diag.Code.tick_overflow, tickFromLiteral(.{ .value = 1e30, .unit = .t }).err);
+    try testing.expectEqual(
+        Diag.Code.position_negative,
+        tickFromLiteral(.{ .value = -1, .unit = .q }).err,
+    );
+    try testing.expectEqual(
+        Diag.Code.position_negative,
+        tickFromLiteral(.{ .value = -0.5, .unit = .bar }).err,
+    );
+    try testing.expectEqual(
+        Diag.Code.position_not_integer,
+        tickFromLiteral(.{ .value = 1.5, .unit = .t }).err,
+    );
+    try testing.expectEqual(
+        Diag.Code.tick_overflow,
+        tickFromLiteral(.{ .value = 195_273_461, .unit = .q }).err,
+    );
+    try testing.expectEqual(
+        Diag.Code.tick_overflow,
+        tickFromLiteral(.{ .value = 1e30, .unit = .t }).err,
+    );
 }
 
 /// Spell `tick` into `buf` for the tests below, and give back the slice.
@@ -485,17 +520,26 @@ test "Pos: spell → parse → tick is the identity on 10 000 random ticks" {
         const lit = switch (parse(text)) {
             .ok => |l| l,
             .err => |code| {
-                std.debug.print("tick {d} spelled {s}, which does not parse: {t}\n", .{ k, text, code });
+                std.debug.print(
+                    "tick {d} spelled {s}, which does not parse: {t}\n",
+                    .{ k, text, code },
+                );
                 return error.TestSpellingDoesNotParse;
             },
         };
         switch (tickFromLiteral(lit)) {
             .tick => |got| if (got != k) {
-                std.debug.print("tick {d} spelled {s}, which reads back as {d}\n", .{ k, text, got });
+                std.debug.print(
+                    "tick {d} spelled {s}, which reads back as {d}\n",
+                    .{ k, text, got },
+                );
                 return error.TestRoundTripDrifted;
             },
             else => {
-                std.debug.print("tick {d} spelled {s}, which does not resolve on the grid\n", .{ k, text });
+                std.debug.print(
+                    "tick {d} spelled {s}, which does not resolve on the grid\n",
+                    .{ k, text },
+                );
                 return error.TestSpellingNeedsAMap;
             },
         }

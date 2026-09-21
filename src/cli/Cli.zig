@@ -213,7 +213,11 @@ pub const Ctx = struct {
     /// `space` says which bytes the spans count, and every caller has to
     /// answer: a document's spans are text coordinates, a reader's and a
     /// writer's are file offsets (`Diags.Space`).
-    pub fn report(self: *const Ctx, space: Diags.Space, diags: []const tempura.Diag.Diagnostic) Error!void {
+    pub fn report(
+        self: *const Ctx,
+        space: Diags.Space,
+        diags: []const tempura.Diag.Diagnostic,
+    ) Error!void {
         try Diags.render(self.err, self.cmd.path, space, diags, self.style);
     }
 
@@ -224,7 +228,8 @@ pub const Ctx = struct {
     pub fn sniffKind(self: *const Ctx, bytes: []const u8) Error!?Args.Kind {
         return sniff(bytes, self.cmd.path) orelse {
             try self.err.print(
-                "tempura: {s}: not a .mid (MThd/RMID) or a .it (IMPM), and the name does not say which\n",
+                "tempura: {s}: not a .mid (MThd/RMID) or a .it (IMPM), and the name does not " ++
+                    "say which\n",
                 .{Diags.label(self.cmd.path)},
             );
             return null;

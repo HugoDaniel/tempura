@@ -653,14 +653,29 @@ test "Division: the grid PPQ is as read, OpenMPT's conversion for SMPTE, 96 for 
     try testing.expectEqual(@as(u15, 32767), (Division{ .ppq = 32767 }).pulsesPerQuarter());
 
     // OpenMPT's `frames · subframes / 2` (Load_mid.cpp:661-669).
-    try testing.expectEqual(@as(u15, 500), (Division{ .smpte = .{ .fps = 25, .tpf = 40 } }).pulsesPerQuarter());
-    try testing.expectEqual(@as(u15, 1200), (Division{ .smpte = .{ .fps = 30, .tpf = 80 } }).pulsesPerQuarter());
-    try testing.expectEqual(@as(u15, 48), (Division{ .smpte = .{ .fps = 24, .tpf = 4 } }).pulsesPerQuarter());
+    try testing.expectEqual(
+        @as(u15, 500),
+        (Division{ .smpte = .{ .fps = 25, .tpf = 40 } }).pulsesPerQuarter(),
+    );
+    try testing.expectEqual(
+        @as(u15, 1200),
+        (Division{ .smpte = .{ .fps = 30, .tpf = 80 } }).pulsesPerQuarter(),
+    );
+    try testing.expectEqual(
+        @as(u15, 48),
+        (Division{ .smpte = .{ .fps = 24, .tpf = 4 } }).pulsesPerQuarter(),
+    );
 
     // A zero division is OpenMPT's 96 in both arms, never a divide by nothing.
     try testing.expectEqual(@as(u15, 96), (Division{ .ppq = 0 }).pulsesPerQuarter());
-    try testing.expectEqual(@as(u15, 96), (Division{ .smpte = .{ .fps = 0, .tpf = 0 } }).pulsesPerQuarter());
-    try testing.expectEqual(@as(u15, 96), (Division{ .smpte = .{ .fps = 1, .tpf = 1 } }).pulsesPerQuarter());
+    try testing.expectEqual(
+        @as(u15, 96),
+        (Division{ .smpte = .{ .fps = 0, .tpf = 0 } }).pulsesPerQuarter(),
+    );
+    try testing.expectEqual(
+        @as(u15, 96),
+        (Division{ .smpte = .{ .fps = 1, .tpf = 1 } }).pulsesPerQuarter(),
+    );
 }
 
 test "Division: tempoOnGrid is the tempo as read on a PPQ grid, and 120 QPM on a converted one" {
@@ -676,7 +691,10 @@ test "Division: tempoOnGrid is the tempo as read on a PPQ grid, and 120 QPM on a
     try testing.expectEqual(@as(u32, 500_000), smpte.tempoOnGrid(500_000));
     try testing.expectEqual(@as(u32, 500_000), smpte.tempoOnGrid(0));
     // The 96 fallback is still a converted grid.
-    try testing.expectEqual(@as(u32, 500_000), (Division{ .smpte = .{ .fps = 0, .tpf = 0 } }).tempoOnGrid(250_000));
+    try testing.expectEqual(
+        @as(u32, 500_000),
+        (Division{ .smpte = .{ .fps = 0, .tpf = 0 } }).tempoOnGrid(250_000),
+    );
 }
 
 test "Kind: the ordinals are the wire, pinned by name and append-only" {
@@ -984,7 +1002,12 @@ test "Builder: document order decides among events at one tick" {
         .residue = .{ .ver = 1, .kind = 1, .seq = 0, .total = 1, .body = body },
     });
     try b.addEvent(t0, 0, .set_tempo, .{ .tempo = 500_000 });
-    try b.addEvent(t0, 0, .time_signature, .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(
+        t0,
+        0,
+        .time_signature,
+        .{ .time_sig = .{ .nn = 4, .dd = 2, .cc = 24, .bb = 8 } },
+    );
     try b.addEvent(t0, 96, .end_of_track, .empty);
     try testing.expectEqual(@as(usize, 4), b.eventCount(t0));
 

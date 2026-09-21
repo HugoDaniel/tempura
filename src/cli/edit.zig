@@ -188,7 +188,9 @@ fn merged(ctx: *const Cli.Ctx) Cli.Error!Merged {
         return .{ .failed = Cli.Exit.usage };
     }
     if (sel.value != .object) {
-        try ctx.err.writeAll("tempura: --select takes one JSON object of lanes, range, kinds and keys\n");
+        try ctx.err.writeAll(
+            "tempura: --select takes one JSON object of lanes, range, kinds and keys\n",
+        );
         return .{ .failed = Cli.Exit.usage };
     }
 
@@ -287,8 +289,12 @@ test "edit --dry-run: the actions are printed and the document is not touched" {
     defer d.deinit();
 
     var c = try Cli.invoke(&.{
-        "tempura", "edit",                                                                    d.path, "--dry-run",
-        "--op",    "{\"op\":\"transpose\",\"sel\":{\"lanes\":[\"flash\"]},\"semitones\":12}",
+        "tempura",
+        "edit",
+        d.path,
+        "--dry-run",
+        "--op",
+        "{\"op\":\"transpose\",\"sel\":{\"lanes\":[\"flash\"]},\"semitones\":12}",
     });
     defer c.deinit();
     try t.expectEqual(Cli.Exit.ok, c.code);
@@ -309,14 +315,23 @@ test "edit: the applied document keeps every byte the edit did not touch" {
     defer d.deinit();
 
     var c = try Cli.invoke(&.{
-        "tempura", "edit",                                                                           d.path,
-        "--op",    "{\"op\":\"velocity\",\"sel\":{\"lanes\":[\"flash\"],\"keys\":[36]},\"vel\":64}",
+        "tempura",
+        "edit",
+        d.path,
+        "--op",
+        "{\"op\":\"velocity\",\"sel\":{\"lanes\":[\"flash\"],\"keys\":[36]},\"vel\":64}",
     });
     defer c.deinit();
     try t.expectEqual(Cli.Exit.ok, c.code);
 
     const text = c.out.written();
-    try t.expect(std.mem.indexOf(u8, text, "  ; the downbeat\n  (note :at 0q :dur 0.5q :key 36 :vel 64)") != null);
+    try t.expect(
+        std.mem.indexOf(
+            u8,
+            text,
+            "  ; the downbeat\n  (note :at 0q :dur 0.5q :key 36 :vel 64)",
+        ) != null,
+    );
     // The key that was not selected is untouched.
     try t.expect(std.mem.indexOf(u8, text, "(note :at 1q :dur 0.5q :key 60 :vel 90)") != null);
     // …and so is the header comment.
@@ -330,8 +345,14 @@ test "edit --select: the flag supplies the operation's selection" {
     // The operation carries no `"sel"` at all; the flag is the whole of
     // it.
     var c = try Cli.invoke(&.{
-        "tempura", "edit",                                   d.path,     "--dry-run",
-        "--op",    "{\"op\":\"transpose\",\"semitones\":1}", "--select", "{\"lanes\":[\"flash\"],\"keys\":[60]}",
+        "tempura",
+        "edit",
+        d.path,
+        "--dry-run",
+        "--op",
+        "{\"op\":\"transpose\",\"semitones\":1}",
+        "--select",
+        "{\"lanes\":[\"flash\"],\"keys\":[60]}",
     });
     defer c.deinit();
     try t.expectEqual(Cli.Exit.ok, c.code);
@@ -438,8 +459,10 @@ test "edit: an unresolved anchor does not block an edit whose tier is inline" {
     defer a.free(path);
 
     var c = try Cli.invoke(&.{
-        "tempura", "edit",                                                                                  path, "--dry-run",
-        "--op",    "{\"op\":\"velocity\",\"sel\":{\"lanes\":[\"lead\"]},\"vel\":64,\"allow-shared\":true}",
+        "tempura", "edit", path, "--dry-run",
+        "--op",
+        "{\"op\":\"velocity\",\"sel\":{\"lanes\":[\"lead\"]},\"vel\":64," ++
+            "\"allow-shared\":true}",
     });
     defer c.deinit();
     try t.expectEqual(Cli.Exit.ok, c.code);
@@ -472,7 +495,8 @@ test "edit: the two bound corpus cases run through the verb, not only the engine
     const cases = [_]struct { case: []const u8, op: [:0]const u8, want: []const u8 }{
         .{
             .case = "corpus/edit-bound-smf-pair/doc.sjon",
-            .op = "{\"op\":\"retime\",\"sel\":{\"lanes\":[\"kick\"],\"kinds\":[\"note\"],\"range\":[0,1]},\"delta\":92252160}",
+            .op = "{\"op\":\"retime\",\"sel\":{\"lanes\":[\"kick\"],\"kinds\":[\"note\"]," ++
+                "\"range\":[0,1]},\"delta\":92252160}",
             // The pair moved a whole bar's half: the `note-on` is now at
             // SMF tick 960 and the `note-off` at 1200, after the events
             // it crossed.
@@ -480,7 +504,8 @@ test "edit: the two bound corpus cases run through the verb, not only the engine
         },
         .{
             .case = "corpus/edit-bound-it-cell/doc.sjon",
-            .op = "{\"op\":\"retime\",\"sel\":{\"lanes\":[\"lead\"],\"kinds\":[\"note\"],\"range\":[92252160,92252161]},\"delta\":5765760}",
+            .op = "{\"op\":\"retime\",\"sel\":{\"lanes\":[\"lead\"],\"kinds\":[\"note\"]," ++
+                "\"range\":[92252160,92252161]},\"delta\":5765760}",
             // Three of the twenty-four ticks a row holds at speed 24, so
             // the cell is delayed inside the row it already sits in.
             .want = "SD3",
@@ -496,7 +521,9 @@ test "edit: the two bound corpus cases run through the verb, not only the engine
         try t.expectEqualStrings("", got.err.written());
         try t.expect(std.mem.indexOf(u8, got.out.written(), c.want) != null);
         // Layout preserved: the document's own header comment survives.
-        try t.expect(std.mem.startsWith(u8, got.out.written(), "; A document whose one anchor is an INLINE"));
+        try t.expect(
+            std.mem.startsWith(u8, got.out.written(), "; A document whose one anchor is an INLINE"),
+        );
     }
 }
 
@@ -514,8 +541,10 @@ test "edit: -o writes the edited document, and the input is left alone" {
     defer a.free(dest);
 
     var c = try Cli.invoke(&.{
-        "tempura", "edit",                                                                                            d.path, "-o", dest,
-        "--op",    "{\"op\":\"remove\",\"sel\":{\"lanes\":[\"flash\"],\"kinds\":[\"note\"],\"range\":[0,46126080]}}",
+        "tempura", "edit", d.path, "-o", dest,
+        "--op",
+        "{\"op\":\"remove\",\"sel\":{\"lanes\":[\"flash\"],\"kinds\":[\"note\"]," ++
+            "\"range\":[0,46126080]}}",
     });
     defer c.deinit();
     try t.expectEqual(Cli.Exit.ok, c.code);
