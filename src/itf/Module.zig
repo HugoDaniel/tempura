@@ -563,6 +563,15 @@ const cp437_high = [128]u21{
     0x00B0, 0x2219, 0x00B7, 0x221A, 0x207F, 0x00B2, 0x25A0, 0x00A0,
 };
 
+comptime {
+    // The proof `cp437ToUtf8`'s `catch unreachable` rests on: `utf8Encode`
+    // fails only on a surrogate half (U+D800..U+DFFF) or a codepoint past
+    // U+10FFFF, and every entry of the table is below the first of those.
+    for (cp437_high) |cp| {
+        std.debug.assert(cp < 0xD800);
+    }
+}
+
 /// What a transcoder returns: the bytes and what was lost on the way.
 pub const Text = struct {
     arena: std.heap.ArenaAllocator,
@@ -590,6 +599,9 @@ pub fn cp437ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) Error!Text {
             try out.append(arena, b);
         } else {
             var buf: [4]u8 = undefined;
+            // Every codepoint in `cp437_high` is below U+D800 (pinned at
+            // comptime above), so neither of `utf8Encode`'s errors — a
+            // surrogate half, a codepoint past U+10FFFF — can happen.
             const n = std.unicode.utf8Encode(cp437_high[b - 0x80], &buf) catch unreachable;
             try out.appendSlice(arena, buf[0..n]);
         }
