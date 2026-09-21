@@ -93,7 +93,7 @@ One stream of content driving one pacer target. :kind is the discriminant and de
 | `:target` | `symbol` | no | — | The pacer name this lane drives at export. Defaults to :name. |
 | `:from` | `ref → (anchor :id …)` | no | — | The anchor this lane reads its content from. A lane with :from is BOUND: its content lives in the file, and children here are bound_lane_has_content. Only a notes or curve lane may bind — a query or formula lane that names one is bound_kind_invalid, which is a relation between :kind and :from and so cannot be a variant gate. |
 | `:track` | `number` | no | — | integer; min 1<br>Which track of a bound SMF anchor, 1-based in file order. |
-| `:ch` | `midi-channel \| midi-channel-set` | no | — | integer; min 1; max 16; min-len 1; max-len 16; integer; min 1; max 16<br>Which MIDI channel of a bound SMF anchor, 1..16 — or which channels, as a vector: `:ch [1 2]` reads both channels of the one :track. The vector is what a dump writes when a native lane whose notes named several channels comes back bound (residue rule 2: the lane binds at its track and at every channel its records name). On a native lane a single channel is the default its notes take, and a vector is address_invalid. |
+| `:ch` | `midi-channel \| midi-channel-set` | no | — | integer; min 1; max 16; min-len 1; max-len 16; integer; min 1; max 16<br>Which MIDI channel of a bound SMF anchor, 1..16 — or which channels, as a vector: `:ch [1 2]` reads both channels of the one :track. The vector is what a dump writes when a native lane whose notes named several channels comes back bound (residue rule 2: the lane binds at its track and at every channel its records name). A native lane's notes carry their own :ch and take none from the lane's (the lane's is a binding key); a vector on a native lane is address_invalid. |
 | `:channel` | `number` | no | — | integer; min 1; max 64<br>Which channel of a bound Impulse Tracker anchor, 1..64. |
 
 Positional children: `form: (note …, local) | (keyframe …, local) | (clip …, local)`.
@@ -138,7 +138,7 @@ A note event. Two notes on one key overlapping in one lane are note_overlap.
 | `:dur` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`<br>How long the note sounds, measured from :at. |
 | `:key` | `note-key-number \| note-key-name` | yes | — | integer; min 0; max 127<br>Which key: the MIDI number, or the note name. |
 | `:vel` | `number` | no | `100` | integer; min 1; max 127; repr f32<br>On-velocity. |
-| `:ch` | `number` | no | — | integer; min 1; max 16<br>MIDI channel for rendering. Defaults to the lane's :ch, or 1 — a default that copies another key, so it is not declared here. |
+| `:ch` | `number` | no | — | integer; min 1; max 16<br>MIDI channel for rendering. Defaults to 1. A lane's own :ch is a BINDING key — which channels of a bound anchor the lane reads — and says nothing about the notes a native lane carries, so it is not the default here (a ruling `doc/fromSjon.zig` records at `default_note_ch`). |
 | `:off-vel` | `number` | no | — | integer; min 0; max 127<br>Off-velocity. MIDI rendering only. |
 
 #### `(keyframe …)`

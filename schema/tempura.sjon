@@ -394,7 +394,7 @@
       (key :name vel :type velocity :optional true :default 100
         :description "On-velocity.")
       (key :name ch :type midi-channel :optional true
-        :description "MIDI channel for rendering. Defaults to the lane's :ch, or 1 — a default that copies another key, so it is not declared here.")
+        :description "MIDI channel for rendering. Defaults to 1. A lane's own :ch is a BINDING key — which channels of a bound anchor the lane reads — and says nothing about the notes a native lane carries, so it is not the default here (a ruling `doc/fromSjon.zig` records at `default_note_ch`).")
       (key :name off-vel :type release-velocity :optional true
         :description "Off-velocity. MIDI rendering only."))
 
@@ -440,7 +440,7 @@
     (key :name track :type track-index :optional true
       :description "Which track of a bound SMF anchor, 1-based in file order.")
     (key :name ch :type midi-channels :optional true
-      :description "Which MIDI channel of a bound SMF anchor, 1..16 — or which channels, as a vector: `:ch [1 2]` reads both channels of the one :track. The vector is what a dump writes when a native lane whose notes named several channels comes back bound (residue rule 2: the lane binds at its track and at every channel its records name). On a native lane a single channel is the default its notes take, and a vector is address_invalid.")
+      :description "Which MIDI channel of a bound SMF anchor, 1..16 — or which channels, as a vector: `:ch [1 2]` reads both channels of the one :track. The vector is what a dump writes when a native lane whose notes named several channels comes back bound (residue rule 2: the lane binds at its track and at every channel its records name). A native lane's notes carry their own :ch and take none from the lane's (the lane's is a binding key); a vector on a native lane is address_invalid.")
     (key :name channel :type it-channel :optional true
       :description "Which channel of a bound Impulse Tracker anchor, 1..64.")
 

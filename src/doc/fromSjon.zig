@@ -1936,10 +1936,15 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
         "{d} set-tempo event(s) of a SMPTE file are kept in the dump and not believed: SMPTE ticks are wall-clock",
         .{ignored},
     );
-    // 500 000 microseconds a quarter IS 120 quarter notes per minute,
-    // and an integer, so the one SMPTE segment keeps plan 03's integer
-    // path.
-    if (smpte) try tempo.append(a, .{ .tick = 0, .tempo = .{ .us = 500_000 }, .span = span });
+    // The tempo the converted grid was derived for — 120 quarter notes
+    // per minute, an integer, so the one SMPTE segment keeps plan 03's
+    // integer path — and the number the writer and the bridge put on
+    // every `set-tempo` of that grid (`Division.tempoOnGrid`): one owner.
+    if (smpte) try tempo.append(a, .{
+        .tick = 0,
+        .tempo = .{ .us = smf.Division.smpte_tempo_us },
+        .span = span,
+    });
 
     return .{
         .tempo = try seedTempo(a, try mergeByTick(a, Doc.TempoPoint, tempo.items), span),
