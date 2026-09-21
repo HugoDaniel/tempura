@@ -273,8 +273,12 @@ pub fn tail(gpa: Allocator, doc: *const Doc.Doc, map: *const TimeMap.TimeMap) Er
         t.diags.deinit();
     }
     try t.write();
+    // The last allocation BEFORE the line is freed: the `errdefer`
+    // above frees it too, and a failed `toOwnedSlice` after a `deinit`
+    // freed it twice.
+    const bytes = try t.out.toOwnedSlice(gpa);
     t.line.deinit(gpa);
-    return .{ .bytes = try t.out.toOwnedSlice(gpa), .diags = t.diags };
+    return .{ .bytes = bytes, .diags = t.diags };
 }
 
 /// Where the human message ends and the tail begins.
@@ -1195,5 +1199,31 @@ test "it: appendTail puts the marker at the start of a line, whatever the messag
         try testing.expectEqualStrings(text, split.tail.?);
         // The human half is the message, its own trailing newline gone.
         try testing.expect(std.mem.startsWith(u8, message, split.human));
+    }
+}
+
+test "it.tail: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var res = try loadExample(gpa, &schema, example_source);
+    defer res.deinit();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = tail(failing.allocator(), &res.doc, &res.map);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var value = try result;
+            value.deinit(failing.allocator());
+            break;
+        }
     }
 }
