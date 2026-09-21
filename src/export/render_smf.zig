@@ -262,11 +262,9 @@ const Render = struct {
 
         for (renderable.items, ghosts.items) |i, ghost| {
             const lane = &self.doc.lanes[i];
-            const track: u32 = if (self.opts.format0) track0 else ghost orelse blk: {
-                const t = try b.addTrack();
-                try b.addEvent(t, 0, .sequence_name, .{ .bytes = try b.addBytes(lane.name) });
-                break :blk t;
-            };
+            const at: u32 = if (self.opts.format0) track0 else ghost orelse
+                @intCast(b.tracks.items.len);
+            const track = try self.claimTrack(&b, lane, at, ghost != null) orelse continue;
             switch (lane.kind) {
                 .notes => try self.notesLane(&b, track, lane, &self.derived.lanes[i]),
                 .curve => try self.curveLane(&b, track, lane, &self.derived.lanes[i]),
@@ -275,6 +273,38 @@ const Render = struct {
         }
 
         return b.finish();
+    }
+
+    /// The track a lane renders onto: `at`, which is the one-track
+    /// file's only track, the base track a dump left empty for it
+    /// (`existing`), or the next new one — added here with the lane's
+    /// name. Null, diagnosed, when its 1-based number does not fit the
+    /// u16 a lane record's address holds: a base of 65 535 tracks leaves
+    /// none, and the lane rides in the residue alone, as an IT lane with
+    /// no channel left does.
+    fn claimTrack(
+        self: *Render,
+        b: *Sequence.Builder,
+        lane: *const Doc.Lane,
+        at: u32,
+        existing: bool,
+    ) Error!?Track {
+        const number = std.math.cast(u16, @as(u64, at) + 1) orelse {
+            try self.diags.add(
+                .render_channels_exhausted,
+                .warning,
+                lane.span,
+                "the lane '{s}' needs a track and a lane record numbers its track in 16 bits; " ++
+                    "this file has {d} already, so its content rides in the residue alone",
+                .{ lane.name, b.tracks.items.len },
+            );
+            return null;
+        };
+        if (!self.opts.format0 and !existing) {
+            const t = try b.addTrack();
+            try b.addEvent(t, 0, .sequence_name, .{ .bytes = try b.addBytes(lane.name) });
+        }
+        return .{ .index = at, .number = number };
     }
 
     /// The base track a dump left empty for `name` — one whose every
@@ -422,7 +452,7 @@ const Render = struct {
     fn notesLane(
         self: *Render,
         b: *Sequence.Builder,
-        track: u32,
+        track: Track,
         lane: *const Doc.Lane,
         index: *const derive.LaneIndex,
     ) Error!void {
@@ -460,7 +490,7 @@ const Render = struct {
         }
         std.mem.sort(NoteEvent, pairs.items, {}, noteBefore);
         for (pairs.items) |e| try b.addEvent(
-            track,
+            track.index,
             e.at,
             if (e.off) .note_off else .note_on,
             .{ .note = .{ .ch = e.ch, .key = e.key, .vel = e.vel } },
@@ -478,11 +508,11 @@ const Render = struct {
         if (!any) try self.noteRecord(lane, track, 0);
     }
 
-    fn noteRecord(self: *Render, lane: *const Doc.Lane, track: u32, ch: u4) Error!void {
+    fn noteRecord(self: *Render, lane: *const Doc.Lane, track: Track, ch: u4) Error!void {
         try self.lanes.append(self.arena, .{
             .lane = try self.arena.dupe(u8, lane.name),
             .address = .{ .smf = .{
-                .track = @intCast(track + 1),
+                .track = track.number,
                 .ch = .single(ch),
                 .key = null,
                 .curve = null,
@@ -506,7 +536,7 @@ const Render = struct {
     fn curveLane(
         self: *Render,
         b: *Sequence.Builder,
-        track: u32,
+        track: Track,
         lane: *const Doc.Lane,
         index: *const derive.LaneIndex,
     ) Error!void {
@@ -526,7 +556,7 @@ const Render = struct {
                 // other easing is the two endpoints and a note in the
                 // record — tempura does not evaluate a named curve.
                 if (std.mem.eql(u8, step.ease_src, "linear")) {
-                    try self.ramp(b, track, num, range, prev, step, rate, &off_grid);
+                    try self.ramp(b, track.index, num, range, prev, step, rate, &off_grid);
                 } else if (!std.mem.eql(u8, step.ease_src, "hold")) {
                     try steps_only.append(self.arena, .{
                         .at = step.tick,
@@ -534,7 +564,7 @@ const Render = struct {
                     });
                 }
             }
-            try b.addEvent(track, self.pulse(step.tick, &off_grid), .control_change, .{
+            try b.addEvent(track.index, self.pulse(step.tick, &off_grid), .control_change, .{
                 .control = .{ .ch = 0, .num = num, .val = value7(step.value[0], range) },
             });
         }
@@ -543,7 +573,7 @@ const Render = struct {
         try self.lanes.append(self.arena, .{
             .lane = try self.arena.dupe(u8, lane.name),
             .address = .{ .smf = .{
-                .track = @intCast(track + 1),
+                .track = track.number,
                 .ch = .single(0),
                 .key = null,
                 .curve = .{ .cc = num },
@@ -603,6 +633,11 @@ const Render = struct {
         );
     }
 };
+
+/// The track a lane renders onto: its index in the builder, and the
+/// 1-based number a lane record's address spells, which `claimTrack`
+/// has already checked fits.
+const Track = struct { index: u32, number: u16 };
 
 /// One end of a rendered note, before the pairs are ordered.
 const NoteEvent = struct { at: i64, off: bool, ch: u4, key: u7, vel: u7, seq: u32 };
@@ -1122,6 +1157,37 @@ test "renderSmf: a format 0 anchor is promoted, and --format 0 keeps the one tra
     try testing.expectEqual(@as(u8, 0), merged.seq.format);
     try testing.expectEqual(@as(usize, 1), merged.seq.tracks.len);
     try testing.expectEqual(@as(u16, 1), merged.lanes[0].address.smf.track);
+}
+
+test "renderSmf: a lane past the 65 535th track is diagnosed and skipped, never narrowed" {
+    // A lane record numbers its track in 16 bits, 1-based. A base with
+    // 65 535 tracks leaves no number for the next one: the lane is
+    // `render_channels_exhausted` and rides in the residue alone, the
+    // same answer an IT lane with no channel left gets.
+    const gpa = testing.allocator;
+    var fx = try load(gpa,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :us 500000)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name kick :kind notes
+        \\  (note :at 0q :dur 1q :key 36 :vel 100))
+        \\(lane :name glow :kind curve :cc 74
+        \\  (keyframe :at 0q :value 0.5 :ease hold))
+    );
+    defer fx.deinit();
+
+    var b: Sequence.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.division = .{ .ppq = 480 };
+    for (0..std.math.maxInt(u16)) |_| _ = try b.addTrack();
+    var base = try b.finish();
+    defer base.deinit();
+
+    var out = try renderSmf(gpa, &fx.doc, &fx.derived, &base, .{});
+    defer out.deinit();
+    try testing.expectEqual(@as(usize, 2), out.diags.count(.render_channels_exhausted));
+    try testing.expectEqual(@as(usize, 0), out.lanes.len);
+    try testing.expectEqual(@as(usize, std.math.maxInt(u16)), out.seq.tracks.len);
 }
 
 test "renderSmf: a bound lane is the anchor's own content and is not rendered again" {
