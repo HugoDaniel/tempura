@@ -1219,6 +1219,75 @@ test "it: appendTail puts the marker at the start of a line, whatever the messag
     }
 }
 
+test "it.chunk: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers.
+    const gpa = testing.allocator;
+    const lane = try records.encodeLane(gpa, .{
+        .lane = "kick",
+        .address = .{ .it = .{ .channel = 2, .column = null, .fx = null } },
+        .hash = @splat(0x33),
+    });
+    defer gpa.free(lane);
+    const conductor = records.encodeConductor(.{ .hash = @splat(0x44) });
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = chunk(failing.allocator(), .{
+            .essence = "ESSENCE",
+            .conductor = &conductor,
+            .lanes = &.{lane},
+        });
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            const bytes = try result;
+            failing.allocator().free(bytes);
+            break;
+        }
+    }
+}
+
+test "it.parseChunk: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers.
+    const gpa = testing.allocator;
+    const lane = try records.encodeLane(gpa, .{
+        .lane = "kick",
+        .address = .{ .it = .{ .channel = 2, .column = null, .fx = null } },
+        .hash = @splat(0x33),
+    });
+    defer gpa.free(lane);
+    const conductor = records.encodeConductor(.{ .hash = @splat(0x44) });
+    const bytes = try chunk(gpa, .{
+        .essence = "ESSENCE",
+        .conductor = &conductor,
+        .lanes = &.{lane},
+    });
+    defer gpa.free(bytes);
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = parseChunk(failing.allocator(), bytes);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var value = try result;
+            defer value.deinit();
+            try testing.expect(value == .ok);
+            break;
+        }
+    }
+}
+
 test "it.tail: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
     // Goal: prove the errdefer discipline behind "an owned struct with
     // arena-backed deinit": at EVERY allocation index the call fails with

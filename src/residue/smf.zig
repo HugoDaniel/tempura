@@ -807,3 +807,69 @@ test "smf: attach replaces the payloads of its own version and keeps a newer env
     try testing.expectEqualStrings("NEW ESSENCE", back.payloads.essence.?);
     try testing.expectEqual(@as(usize, 0), back.diags.count(.residue_corrupt));
 }
+
+test "smf.attach: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers.
+    const gpa = testing.allocator;
+    var seq = try fixture(gpa);
+    defer seq.deinit();
+    const lane = try laneBody(gpa, "kick", 2);
+    defer gpa.free(lane);
+    const conductor = records.encodeConductor(.{ .hash = @splat(0x22) });
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        // `max_event = 3` splits the seven-byte essence across three
+        // events, so the split path allocates too.
+        const result = attach(failing.allocator(), &seq, .{
+            .essence = "ESSENCE",
+            .conductor = &conductor,
+            .lanes = &.{lane},
+        }, .{ .max_event = 3 });
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var value = try result;
+            value.deinit();
+            break;
+        }
+    }
+}
+
+test "smf.detach: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers.
+    const gpa = testing.allocator;
+    var seq = try fixture(gpa);
+    defer seq.deinit();
+    const lane = try laneBody(gpa, "kick", 2);
+    defer gpa.free(lane);
+    const conductor = records.encodeConductor(.{ .hash = @splat(0x22) });
+    var carried = try attach(gpa, &seq, .{
+        .essence = "ESSENCE",
+        .conductor = &conductor,
+        .lanes = &.{lane},
+    }, .{ .max_event = 3 });
+    defer carried.deinit();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = detach(failing.allocator(), &carried.sequence);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var value = try result;
+            value.deinit();
+            break;
+        }
+    }
+}

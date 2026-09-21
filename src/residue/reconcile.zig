@@ -3422,3 +3422,40 @@ test "reconcile: consumption clears a restored lane's cells in the played patter
         last = pi;
     }
 }
+
+test "reconcile: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var case = try smfCase(gpa, .{});
+    defer case.deinit();
+
+    // Rule 2's own path: the records decoded, the hashes asked, the
+    // essence's text re-emitted and a stale curve's hints checked: the
+    // second file's edits to the kick's velocity and the cutoff's steps
+    // bind both lanes, so `bindLane` and `verifiedHints` run too. Rules
+    // 1, 3 and 4 derive the skeleton
+    // through `fromSjon.fromSource`, whose own sweep is `doc/`'s.
+    var stale = try smfCase(gpa, .{ .read_as = .{ .vel = 90, .cc48 = 20 } });
+    defer stale.deinit();
+    for ([_]*const SmfCase{ &case, &stale }) |c| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+            const result = reconcile(failing.allocator(), &schema, c.input(), c.found(), .{});
+            if (failing.has_induced_failure) {
+                try testing.expectError(error.OutOfMemory, result);
+            } else {
+                var value = try result;
+                defer value.deinit();
+                try testing.expectEqual(Rule.restored, value.rule);
+                break;
+            }
+        }
+    }
+}
