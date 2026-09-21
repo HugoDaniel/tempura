@@ -97,6 +97,7 @@ pub fn planWith(
 
     var ctx: Ctx = .{
         .gpa = gpa,
+        .arena = b.allocator(),
         .d = d,
         .tree = tree,
         .map = map,
@@ -123,6 +124,10 @@ const Child = struct {
 /// What every operation plans against.
 const Ctx = struct {
     gpa: std.mem.Allocator,
+    /// The plan's arena (`b.allocator()`): what every action carries
+    /// and every scratch table lives here until the plan's `deinit`,
+    /// and nothing allocated from it is ever freed on its own.
+    arena: std.mem.Allocator,
     d: *const doc.Doc,
     tree: *const sjon.Ast.Tree,
     map: *const TimeMap.TimeMap,
@@ -143,10 +148,6 @@ const Ctx = struct {
     /// "an accepted plan is applicable" — a `retime` whose delta is
     /// itself on the grid still moves a note at 4q past the ceiling.
     off_grid: ?i64 = null,
-
-    fn a(self: *Ctx) std.mem.Allocator {
-        return self.b.allocator();
-    }
 
     fn run(self: *Ctx, op: Op.Op) Error!void {
         switch (op) {
@@ -198,7 +199,7 @@ const Ctx = struct {
                 return null;
             }
         }
-        const w = try self.loc.at(self.a(), span);
+        const w = try self.loc.at(self.arena, span);
         if (w == null) try self.refuseUnaddressable(span);
         return w;
     }
@@ -265,20 +266,20 @@ const Ctx = struct {
     fn children(self: *Ctx, li: u32) Error!?[]Child {
         const lane = self.d.lanes[li];
         var list: std.ArrayList(Child) = .empty;
-        const alloc = self.a();
+        const arena = self.arena;
         for (lane.notes, 0..) |n, i| {
             const w = (try self.where(n.span)) orelse return null;
-            try list.append(alloc, .{ .slot = w.slot, .at = n.at, .kind = .note, .item = @intCast(i), .span = n.span });
+            try list.append(arena, .{ .slot = w.slot, .at = n.at, .kind = .note, .item = @intCast(i), .span = n.span });
         }
         for (lane.keyframes, 0..) |k, i| {
             const w = (try self.where(k.span)) orelse return null;
-            try list.append(alloc, .{ .slot = w.slot, .at = k.at, .kind = .keyframe, .item = @intCast(i), .span = k.span });
+            try list.append(arena, .{ .slot = w.slot, .at = k.at, .kind = .keyframe, .item = @intCast(i), .span = k.span });
         }
         for (lane.clips, 0..) |c, i| {
             const w = (try self.where(c.span)) orelse return null;
-            try list.append(alloc, .{ .slot = w.slot, .at = c.at, .kind = .clip, .item = @intCast(i), .span = c.span });
+            try list.append(arena, .{ .slot = w.slot, .at = c.at, .kind = .clip, .item = @intCast(i), .span = c.span });
         }
-        const out = try list.toOwnedSlice(alloc);
+        const out = try list.toOwnedSlice(arena);
         std.sort.insertion(Child, out, {}, bySlot);
         return out;
     }
@@ -341,18 +342,18 @@ const Ctx = struct {
         var out: value.Buf = .empty;
         defer out.deinit(self.gpa);
         try value.position(self.gpa, &out, self.map, at);
-        return self.a().dupe(u8, out.items);
+        return self.arena.dupe(u8, out.items);
     }
 
     fn durationJson(self: *Ctx, ticks: i64, at: i64) Error![]const u8 {
         var out: value.Buf = .empty;
         defer out.deinit(self.gpa);
         try value.duration(self.gpa, &out, self.map, ticks, at);
-        return self.a().dupe(u8, out.items);
+        return self.arena.dupe(u8, out.items);
     }
 
     fn intJson(self: *Ctx, v: i64) Error![]const u8 {
-        return std.fmt.allocPrint(self.a(), "{d}", .{v});
+        return std.fmt.allocPrint(self.arena, "{d}", .{v});
     }
 
     // ---- the operations ----
@@ -629,7 +630,7 @@ const Ctx = struct {
     fn moveInLane(self: *Ctx, li: u32, moves: []const Move) Error!void {
         const kids = (try self.children(li)) orelse return;
         if (kids.len == 0) return;
-        const arena = self.a();
+        const arena = self.arena;
 
         // Where each child ends up, and which move put it there.
         const finals = try arena.alloc(i64, kids.len);
@@ -743,7 +744,7 @@ const Ctx = struct {
     /// written out again only when it would come back a different tick.
     fn writesFor(self: *Ctx, m: Move) Error![]value.Override {
         var out: std.ArrayList(value.Override) = .empty;
-        const arena = self.a();
+        const arena = self.arena;
         if (m.to != m.t.at) {
             try out.append(arena, .{ .key = "at", .json = try self.positionJson(m.to) });
         }
@@ -806,7 +807,7 @@ const Ctx = struct {
     fn refuseLaneOverlaps(self: *Ctx, li: u32, moves: []const Move) Error!bool {
         const notes = self.d.lanes[li].notes;
         if (notes.len == 0) return false;
-        const arena = self.a();
+        const arena = self.arena;
         const at = try arena.alloc(i64, notes.len);
         const dur = try arena.alloc(i64, notes.len);
         const moving = try arena.alloc(bool, notes.len);
@@ -1481,7 +1482,7 @@ const Ctx = struct {
         var f = try value.Form.init(self.gpa, "meter-point");
         defer f.deinit();
         try f.position("at", self.map, x.point.tick);
-        try f.raw("sig", try std.fmt.allocPrint(self.a(), "[{d},{d}]", .{ x.point.n, x.point.d }));
+        try f.raw("sig", try std.fmt.allocPrint(self.arena, "[{d},{d}]", .{ x.point.n, x.point.d }));
         try self.insertRootInOrder("meter-point", x.point.tick, self.d.meter, try f.done());
     }
 
@@ -1703,7 +1704,7 @@ const Ctx = struct {
         var out: value.Buf = .empty;
         defer out.deinit(self.gpa);
         try value.symbol(self.gpa, &out, text);
-        return self.a().dupe(u8, out.items);
+        return self.arena.dupe(u8, out.items);
     }
 
     // ---- binding ----
@@ -1730,14 +1731,14 @@ const Ctx = struct {
         switch (x.address) {
             .smf => |a_| {
                 try self.b.setKeyword(w.site, "track", try self.intJson(a_.track));
-                try self.b.setKeyword(w.site, "ch", try Op.channelsJson(self.a(), a_.ch));
+                try self.b.setKeyword(w.site, "ch", try Op.channelsJson(self.arena, a_.ch));
                 if (a_.key) |key| try self.b.setKeyword(w.site, "key", try self.intJson(key));
                 if (a_.curve) |curve| switch (curve) {
                     .cc => |n| try self.b.setKeyword(w.site, "cc", try self.intJson(n)),
                     .cc14 => |pair| try self.b.setKeyword(
                         w.site,
                         "cc",
-                        try std.fmt.allocPrint(self.a(), "[{d},{d}]", .{ pair[0], pair[1] }),
+                        try std.fmt.allocPrint(self.arena, "[{d},{d}]", .{ pair[0], pair[1] }),
                     ),
                     .bend => try self.b.setKeyword(w.site, "bend", "true"),
                     .pressure => try self.b.setKeyword(w.site, "pressure", "true"),

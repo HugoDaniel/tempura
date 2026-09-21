@@ -137,7 +137,15 @@ pub fn planWith(
     var loc: locate.Map = try .init(gpa, tree);
     defer loc.deinit();
 
-    var ctx: Ctx = .{ .gpa = gpa, .d = d, .tree = tree, .map = map, .loc = &loc, .b = &b };
+    var ctx: Ctx = .{
+        .gpa = gpa,
+        .arena = b.allocator(),
+        .d = d,
+        .tree = tree,
+        .map = map,
+        .loc = &loc,
+        .b = &b,
+    };
     try ctx.run(op);
     return b.finish();
 }
@@ -225,15 +233,15 @@ fn reachable(d: *const doc.Doc, lane: doc.Lane, binding: doc.Binding) bool {
 /// What every bound operation plans against.
 const Ctx = struct {
     gpa: std.mem.Allocator,
+    /// The plan's arena (`b.allocator()`): what every action carries
+    /// and every scratch table lives here until the plan's `deinit`,
+    /// and nothing allocated from it is ever freed on its own.
+    arena: std.mem.Allocator,
     d: *const doc.Doc,
     tree: *const Ast.Tree,
     map: *const TimeMap.TimeMap,
     loc: *const locate.Map,
     b: *Plan.Builder,
-
-    fn a(self: *Ctx) std.mem.Allocator {
-        return self.b.allocator();
-    }
 
     fn run(self: *Ctx, op: Op.Op) Error!void {
         if (op == .materialize) return self.materialize(op.materialize);
@@ -251,26 +259,26 @@ const Ctx = struct {
     // ---- the small writers ----
 
     fn intJson(self: *Ctx, v: i64) Error![]const u8 {
-        return std.fmt.allocPrint(self.a(), "{d}", .{v});
+        return std.fmt.allocPrint(self.arena, "{d}", .{v});
     }
 
     fn stringJson(self: *Ctx, text: []const u8) Error![]const u8 {
         var out: value.Buf = .empty;
         defer out.deinit(self.gpa);
         try value.string(self.gpa, &out, text);
-        return self.a().dupe(u8, out.items);
+        return self.arena.dupe(u8, out.items);
     }
 
     /// The address of positional child `slot` of root `root`.
     fn slotSite(self: *Ctx, root: u32, slot: u32) Error!Site {
         const site: Site = .{ .root = root, .path = &.{} };
-        return site.child(self.a(), slot);
+        return site.child(self.arena, slot);
     }
 
     /// The root index of the form whose span is `span` — a lane's, which
     /// is the only `Doc` node this file addresses.
     fn rootOf(self: *Ctx, span: Diag.Span) Error!?u32 {
-        const w = (try self.loc.at(self.a(), span)) orelse return null;
+        const w = (try self.loc.at(self.arena, span)) orelse return null;
         if (w.site.path.len != 0) return null;
         return w.site.root;
     }
@@ -373,7 +381,7 @@ const Ctx = struct {
     const EvMove = struct { slot: u32, to: i64 };
 
     fn events(self: *Ctx, root: u32) Error![]const Ev {
-        const arena = self.a();
+        const arena = self.arena;
         const kids = try locate.positional(arena, self.tree, self.tree.root[root]);
         var out: std.ArrayList(Ev) = .empty;
         for (kids, 0..) |node, i| {
@@ -394,7 +402,7 @@ const Ctx = struct {
     /// alone. `bridge_smf.pairNotes` is the same walk over the same
     /// events, and a test here holds the two to the same answer.
     fn pairs(self: *Ctx, evs: []const Ev, chs: doc.Channels, key: ?u7) Error![]const Pair {
-        const arena = self.a();
+        const arena = self.arena;
         var out: std.ArrayList(Pair) = .empty;
         // A key is held per (channel, key), as the bridge holds it: an
         // address may name several channels, and the same key on two of
@@ -447,7 +455,7 @@ const Ctx = struct {
 
     /// The single events a bound `curve` lane reads off one address.
     fn steps(self: *Ctx, evs: []const Ev, chs: doc.Channels, curve: doc.SmfCurve) Error![]const Step {
-        const arena = self.a();
+        const arena = self.arena;
         var out: std.ArrayList(Step) = .empty;
         for (evs) |e| {
             _ = wireChannel(chs, kvInt(self.tree, e.node, "ch")) orelse continue;
@@ -610,7 +618,7 @@ const Ctx = struct {
     /// the sorted index, ties AFTER what is already there.
     fn moveEvents(self: *Ctx, root: u32, evs: []const Ev, moves: []const EvMove) Error!void {
         if (moves.len == 0) return;
-        const arena = self.a();
+        const arena = self.arena;
 
         const finals = try arena.alloc(i64, evs.len);
         const moved = try arena.alloc(bool, evs.len);
@@ -733,7 +741,7 @@ const Ctx = struct {
     /// Every positional child of `parent` that is a form, with its step
     /// and its leading number.
     fn children(self: *Ctx, parent: NodeIndex) Error![]const Numbered {
-        const arena = self.a();
+        const arena = self.arena;
         var out: std.ArrayList(Numbered) = .empty;
         for (try locate.positional(arena, self.tree, parent), 0..) |node, i| {
             if (self.tree.tagOf(node) != .form) continue;
@@ -747,7 +755,7 @@ const Ctx = struct {
     }
 
     fn leadingNumber(self: *Ctx, form: NodeIndex) Error!?i64 {
-        for (try locate.positional(self.a(), self.tree, form)) |k| {
+        for (try locate.positional(self.arena, self.tree, form)) |k| {
             if (intOf(self.tree, k)) |v| return v;
         }
         return null;
@@ -761,7 +769,7 @@ const Ctx = struct {
         channel: u6,
         sel: Select.Select,
     ) Error![]const Cell {
-        const arena = self.a();
+        const arena = self.arena;
         const module = self.tree.root[root];
         var out: std.ArrayList(Cell) = .empty;
 
@@ -885,11 +893,11 @@ const Ctx = struct {
     /// A cell's removal, and its row's when that was the last cell on it.
     fn removeCells(self: *Ctx, root: u32, cells_: []const Cell) Error!void {
         for (cells_, 0..) |c, i| {
-            const site = try (Site{ .root = root, .path = &.{} }).child(self.a(), c.pattern_slot);
+            const site = try (Site{ .root = root, .path = &.{} }).child(self.arena, c.pattern_slot);
             if (try self.lastOnRow(c, cells_, i)) {
                 try self.b.removePositional(site, c.row_slot);
             } else {
-                try self.b.removePositional(try site.child(self.a(), c.row_slot), c.ev_slot);
+                try self.b.removePositional(try site.child(self.arena, c.row_slot), c.ev_slot);
             }
         }
     }
@@ -926,7 +934,7 @@ const Ctx = struct {
     };
 
     fn moveCells(self: *Ctx, root: u32, rowmap: *const walk.RowMap, cells_: []const Cell, x: Op.Retime) Error!void {
-        const arena = self.a();
+        const arena = self.arena;
         const module = self.tree.root[root];
         var moves: std.ArrayList(CellMove) = .empty;
 
@@ -1028,7 +1036,7 @@ const Ctx = struct {
     /// The cells that change row: every removal, then every insert
     /// against the rows the removals leave behind.
     fn relocateCells(self: *Ctx, root: u32, moves: []const CellMove) Error!void {
-        const arena = self.a();
+        const arena = self.arena;
         var going: std.ArrayList(Cell) = .empty;
         var which: std.ArrayList(usize) = .empty;
         for (moves, 0..) |m, i| {
@@ -1157,7 +1165,7 @@ const Ctx = struct {
         for (patterns.items) |*p| {
             if (p.slot == slot) return p;
         }
-        const arena = self.a();
+        const arena = self.arena;
         var rows: std.ArrayList(PatternRows.Row) = .empty;
         for (try self.children(node)) |r| {
             if (!std.mem.eql(u8, self.tree.formHeader(r.node).head, "row")) continue;
@@ -1803,7 +1811,15 @@ test "bound SMF: the pairing here is the bridge's pairing" {
     var map = try doc.fromSjon.mapOf(gpa, fx.doc_());
     defer map.deinit();
 
-    var ctx: Ctx = .{ .gpa = gpa, .d = fx.doc_(), .tree = &fx.tree, .map = &map, .loc = &loc, .b = &b };
+    var ctx: Ctx = .{
+        .gpa = gpa,
+        .arena = b.allocator(),
+        .d = fx.doc_(),
+        .tree = &fx.tree,
+        .map = &map,
+        .loc = &loc,
+        .b = &b,
+    };
     const track = ctx.mtrkRoot("song", 1).?;
     const mine = try ctx.pairs(try ctx.events(track), .single(0), null);
 

@@ -283,11 +283,11 @@ pub const Builder = struct {
     /// the scratch buffer either way.
     fn push(self: *Builder, kind: Kind, site: Site, slot: ?u32, out: *std.ArrayList(u8)) Error!void {
         defer out.deinit(self.gpa);
-        const a = self.allocator();
-        try self.actions.append(a, .{
-            .json = try a.dupe(u8, out.items),
+        const arena = self.allocator();
+        try self.actions.append(arena, .{
+            .json = try arena.dupe(u8, out.items),
             .kind = kind,
-            .site = .{ .root = site.root, .path = try a.dupe(u32, site.path) },
+            .site = .{ .root = site.root, .path = try arena.dupe(u32, site.path) },
             .slot = slot,
         });
     }
@@ -478,9 +478,9 @@ const ActionReader = struct {
             .insert_root => if (obj.get("index") == null) null else try self.intOf(obj, "index", span),
         };
 
-        const a = self.b.allocator();
-        try self.b.actions.append(a, .{
-            .json = try a.dupe(u8, text),
+        const arena = self.b.allocator();
+        try self.b.actions.append(arena, .{
+            .json = try arena.dupe(u8, text),
             .kind = kind,
             .site = site,
             .slot = slot,

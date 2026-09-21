@@ -67,10 +67,9 @@ pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Er
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
-    const a = arena.allocator();
 
     if (p.actions.len == 0) {
-        return .{ .text = try a.dupeZ(u8, text), .diags = diags, .arena = arena };
+        return .{ .text = try arena.allocator().dupeZ(u8, text), .diags = diags, .arena = arena };
     }
 
     const ordered = try gpa.dupe(Plan.Action, p.actions);
@@ -107,12 +106,12 @@ pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Er
                 "SJON refused the edit: {s}",
                 .{@errorName(e)},
             );
-            return .{ .text = try a.dupeZ(u8, text), .diags = diags, .arena = arena };
+            return .{ .text = try arena.allocator().dupeZ(u8, text), .diags = diags, .arena = arena };
         },
     };
     defer edited.deinit();
 
-    return .{ .text = try a.dupeZ(u8, edited.data), .diags = diags, .arena = arena };
+    return .{ .text = try arena.allocator().dupeZ(u8, edited.data), .diags = diags, .arena = arena };
 }
 
 /// Which pass an action belongs to. The order is the contract above.

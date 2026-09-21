@@ -380,7 +380,7 @@ pub fn fromJson(gpa: std.mem.Allocator, text: []const u8) Error!Parsed {
     errdefer diags.deinit();
 
     var reader: Reader = .{
-        .a = arena.allocator(),
+        .arena = arena.allocator(),
         .diags = &diags,
         .span = .{ .start = 0, .end = @intCast(text.len) },
     };
@@ -429,7 +429,9 @@ pub fn fromJson(gpa: std.mem.Allocator, text: []const u8) Error!Parsed {
 /// about and answers null, so one malformed operation gives one
 /// complaint and no half-built value.
 const Reader = struct {
-    a: std.mem.Allocator,
+    /// The `Parsed` arena: every string the operation holds is copied
+    /// here and lives until the caller's `Parsed.deinit`.
+    arena: std.mem.Allocator,
     diags: *Diag.List,
     span: Diag.Span,
     /// The first user number that no field of the grammar could hold — a
@@ -808,7 +810,7 @@ const Reader = struct {
         }
         if (o.get("keys")) |keys| {
             if (keys == .array) {
-                const out = try self.a.alloc(u7, keys.array.items.len);
+                const out = try self.arena.alloc(u7, keys.array.items.len);
                 for (keys.array.items, out) |item, *slot| {
                     slot.* = @intCast(std.math.clamp(self.int(item) orelse 0, 0, 127));
                 }
@@ -853,7 +855,7 @@ const Reader = struct {
     /// name under memory pressure would edit the wrong lane.
     fn str(self: *Reader, v: std.json.Value) Error!?[]const u8 {
         return switch (v) {
-            .string => |text| try self.a.dupe(u8, text),
+            .string => |text| try self.arena.dupe(u8, text),
             else => null,
         };
     }
@@ -866,9 +868,9 @@ const Reader = struct {
         var out: std.ArrayList([]const u8) = .empty;
         for (arr) |item| {
             const one = try self.str(item) orelse continue;
-            try out.append(self.a, one);
+            try out.append(self.arena, one);
         }
-        return out.toOwnedSlice(self.a);
+        return out.toOwnedSlice(self.arena);
     }
 
     /// One JSON number as a tick. The ONE place a float becomes an i64
@@ -992,21 +994,21 @@ fn eql(a: []const u8, b: []const u8) bool {
 /// A bound SMF lane's channels as the JSON value a `:ch` edit action
 /// carries — `2` for one channel, `[1,2]` for a set — the inverse of
 /// `Reader.channels`, and the spelling `ops_native.zig`'s `bind` writes.
-/// The slice is `a`'s to free.
-pub fn channelsJson(a: std.mem.Allocator, chs: doc.Channels) Error![]const u8 {
-    if (chs.count() == 1) return std.fmt.allocPrint(a, "{d}", .{@as(u8, chs.first()) + 1});
+/// The slice is the caller's to free with `gpa`.
+pub fn channelsJson(gpa: std.mem.Allocator, chs: doc.Channels) Error![]const u8 {
+    if (chs.count() == 1) return std.fmt.allocPrint(gpa, "{d}", .{@as(u8, chs.first()) + 1});
     var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(a);
-    try out.append(a, '[');
+    errdefer out.deinit(gpa);
+    try out.append(gpa, '[');
     var it = chs.iterator();
     var sep = false;
     while (it.next()) |c| {
-        if (sep) try out.append(a, ',');
+        if (sep) try out.append(gpa, ',');
         sep = true;
-        try out.print(a, "{d}", .{@as(u8, c) + 1});
+        try out.print(gpa, "{d}", .{@as(u8, c) + 1});
     }
-    try out.append(a, ']');
-    return out.toOwnedSlice(a);
+    try out.append(gpa, ']');
+    return out.toOwnedSlice(gpa);
 }
 
 // ---------------------------------------------------------------------------

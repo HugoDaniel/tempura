@@ -46,7 +46,9 @@ pub const Site = struct {
         try out.append(gpa, ']');
     }
 
-    /// `self` with one more positional step, the path copied into `a`.
+    /// `self` with one more positional step. The new path is allocated
+    /// from `gpa` and is the caller's: every caller in this part hands in
+    /// a plan's arena and the path dies with the plan.
     ///
     /// The way an address is built where the `Doc` carries no span to
     /// match on: an inline dump's events and cells are not `Doc` nodes
@@ -54,8 +56,8 @@ pub const Site = struct {
     /// `ops_bound` walks the tree's own positional children and descends
     /// step by step — a `(midi/mtrk …)` root to its event, an
     /// `(it/module …)` root to a pattern, a row and an `(ev …)` cell.
-    pub fn child(self: Site, a: std.mem.Allocator, index: u32) Error!Site {
-        const path = try a.alloc(u32, self.path.len + 1);
+    pub fn child(self: Site, gpa: std.mem.Allocator, index: u32) Error!Site {
+        const path = try gpa.alloc(u32, self.path.len + 1);
         @memcpy(path[0..self.path.len], self.path);
         path[self.path.len] = index;
         return .{ .root = self.root, .path = path };
@@ -84,18 +86,18 @@ pub const Site = struct {
 /// 1, and an off-by-one there addresses the wrong node rather than
 /// failing.
 pub fn positional(
-    a: std.mem.Allocator,
+    gpa: std.mem.Allocator,
     tree: *const sjon.Ast.Tree,
     form: sjon.Ast.NodeIndex,
 ) Error![]const sjon.Ast.NodeIndex {
     if (tree.tagOf(form) != .form) return &.{};
     var out: std.ArrayList(sjon.Ast.NodeIndex) = .empty;
-    errdefer out.deinit(a);
+    errdefer out.deinit(gpa);
     for (tree.formHeader(form).children) |child| {
         if (tree.tagOf(child) == .kvpair) continue;
-        try out.append(a, child);
+        try out.append(gpa, child);
     }
-    return out.toOwnedSlice(a);
+    return out.toOwnedSlice(gpa);
 }
 
 /// A node, its address, and the slot it occupies in whatever holds it.
@@ -134,8 +136,9 @@ pub const Map = struct {
         self.table.deinit();
     }
 
-    /// The address of the node whose span is EXACTLY `span`, allocated in
-    /// `a`. Null when no node has that span (a stale span, or a span of
+    /// The address of the node whose span is EXACTLY `span`, its path
+    /// allocated from `gpa` and the caller's to free (a plan hands in its
+    /// arena). Null when no node has that span (a stale span, or a span of
     /// another document), or when the node is reached through a keyword
     /// step.
     ///
@@ -143,9 +146,9 @@ pub const Map = struct {
     /// parent links. Documents are a few hundred nodes and a plan asks a
     /// handful of times; a caller resolving thousands should index the
     /// table by span itself.
-    pub fn at(self: *const Map, a: std.mem.Allocator, span: Diag.Span) Error!?Where {
+    pub fn at(self: *const Map, gpa: std.mem.Allocator, span: Diag.Span) Error!?Where {
         const row = self.rowOfSpan(span) orelse return null;
-        return try self.whereOfRow(a, row);
+        return try self.whereOfRow(gpa, row);
     }
 
     /// The row whose span is exactly `span`. The first match in row
@@ -157,16 +160,20 @@ pub const Map = struct {
         return null;
     }
 
-    fn whereOfRow(self: *const Map, a: std.mem.Allocator, row_idx: u32) Error!?Where {
+    fn whereOfRow(self: *const Map, gpa: std.mem.Allocator, row_idx: u32) Error!?Where {
         var steps: std.ArrayList(u32) = .empty;
-        errdefer steps.deinit(a);
+        // A `defer` and not an `errdefer`: the keyword branch below answers
+        // null with steps still on the list, and `toOwnedSlice` leaves the
+        // list empty on the success path, so this frees exactly what is not
+        // returned.
+        defer steps.deinit(gpa);
 
         const root = self.table.rows[row_idx].root;
         var cur: ?u32 = row_idx;
         while (cur) |at_row| {
             const row = self.table.rows[at_row];
             if (row.seg) |seg| switch (seg) {
-                .index => |i| try steps.append(a, i),
+                .index => |i| try steps.append(gpa, i),
                 // A form under a keyword is not a site: no operation
                 // here addresses one, and answering half an address
                 // would be worse than answering none.
@@ -176,7 +183,7 @@ pub const Map = struct {
         }
         std.mem.reverse(u32, steps.items);
 
-        const path = try steps.toOwnedSlice(a);
+        const path = try steps.toOwnedSlice(gpa);
         const parent: ?Site = if (path.len == 0) null else .{ .root = root, .path = path[0 .. path.len - 1] };
         const slot: u32 = if (path.len == 0) root else path[path.len - 1];
         return .{ .site = .{ .root = root, .path = path }, .parent = parent, .slot = slot };
@@ -218,11 +225,11 @@ test "locate: a root's address is its index and an empty path" {
     var map: Map = try .init(gpa, &tree);
     defer map.deinit();
 
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
 
-    const cue = (try map.at(a, spanOfText(probe_source, "(cue :name \"bar 41\" :at 40bar)"))).?;
+    const cue = (try map.at(arena, spanOfText(probe_source, "(cue :name \"bar 41\" :at 40bar)"))).?;
     try testing.expectEqual(@as(u32, 2), cue.site.root);
     try testing.expectEqual(@as(usize, 0), cue.site.path.len);
     try testing.expect(cue.parent == null);
@@ -237,11 +244,11 @@ test "locate: a lane's child is a positional slot under its root" {
     var map: Map = try .init(gpa, &tree);
     defer map.deinit();
 
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
 
-    const second = (try map.at(a, spanOfText(probe_source, "(note :at 1q :dur 0.5q :key 60)"))).?;
+    const second = (try map.at(arena, spanOfText(probe_source, "(note :at 1q :dur 0.5q :key 60)"))).?;
     try testing.expectEqual(@as(u32, 1), second.site.root);
     try testing.expectEqualSlices(u32, &.{1}, second.site.path);
     try testing.expectEqual(@as(u32, 1), second.parent.?.root);
@@ -261,10 +268,10 @@ test "locate: a span no node carries is null, not an error" {
     var map: Map = try .init(gpa, &tree);
     defer map.deinit();
 
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
 
-    try testing.expect((try map.at(arena.allocator(), .{ .start = 3, .end = 7 })) == null);
+    try testing.expect((try map.at(scratch.allocator(), .{ .start = 3, .end = 7 })) == null);
 }
 
 test "locate: Site.order is document order, a prefix before what extends it" {
@@ -292,25 +299,25 @@ test "locate: a positional walk skips the keyword pairs, so a step is a step" {
     var tree = try sjon.parse(gpa, source);
     defer tree.deinit();
 
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
 
     const module = tree.root[0];
-    const kids = try positional(a, &tree, module);
+    const kids = try positional(arena, &tree, module);
     // `:title` is not a step: the timing form is step 0 and the pattern
     // is step 1.
     try testing.expectEqual(@as(usize, 2), kids.len);
 
     const pattern = kids[1];
-    const rows = try positional(a, &tree, pattern);
+    const rows = try positional(arena, &tree, pattern);
     // The pattern's NUMBER is step 0 and the row is step 1.
     try testing.expectEqual(@as(usize, 2), rows.len);
-    const cells = try positional(a, &tree, rows[1]);
+    const cells = try positional(arena, &tree, rows[1]);
     try testing.expectEqual(@as(usize, 2), cells.len);
     try testing.expectEqualStrings("ev", tree.formHeader(cells[1]).head);
 
-    const site = try (try (Site{ .root = 0, .path = &.{} }).child(a, 1)).child(a, 1);
-    const cell = try site.child(a, 1);
+    const site = try (try (Site{ .root = 0, .path = &.{} }).child(arena, 1)).child(arena, 1);
+    const cell = try site.child(arena, 1);
     try testing.expectEqualSlices(u32, &.{ 1, 1, 1 }, cell.path);
 }
