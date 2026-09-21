@@ -77,6 +77,24 @@ A renderer samples `hold` and `linear` and nothing else (plan 08), so the
 spring is written into the file as steps and is read back out of the
 essence, exactly. The query lane never reached the file at all.
 
+Look at the `midi/` tier of `one-file.mid.sjon` too: track 2 and track 3
+are there, each holding nothing but its `sequence-name`, and track 0
+holds no tempo, meter or marker. The dump CONSUMED them (plan 04, rule
+2): the snare's note pairs, the bloom's controller steps and the
+conductor's events were tempura's own rendering of lanes the essence
+restored native, so they leave the tier and live in the document once.
+`one-file.it.sjon` says the same with empty rows. That is what makes a
+rebuild a fixed point: `tempura build one-file.mid.sjon --kind mid --cc 11
+-o again.mid` renders each lane back onto the track that carries its
+name, and `again.mid` dumps to `one-file.mid.sjon` again, the anchor line
+aside (it names the file it was dumped from). Build that dump and the
+music is `again.mid`'s byte for byte — `tempura export … --kind mid` of
+the two documents, the residue left off, compares equal — and the only
+bytes that move are the essence's own record of the anchor line, whose
+file name, size and digest are inputs that change with every round.
+(Until 2026-09-21 the rendered tracks stayed in the tier and every
+rebuild rendered each lane beside its previous rendering.)
+
 The `.it`'s message tail is what a tracker shows under the song text:
 
 ```
@@ -155,8 +173,9 @@ music is intact, one velocity is the DAW's, and the arrangement is still
 the document's.
 
 `one-file.mid.sjon` against `one-file-edited.sjon` is the diff worth
-reading: one lane changed shape, one velocity changed value, nothing else
-moved.
+reading: one lane changed shape, one velocity changed value, and track 2's
+events — consumed in the clean dump — are back in the tier, because a
+bound lane reads them there. Nothing else moved.
 
 ## The step that is UNMEASURED
 
