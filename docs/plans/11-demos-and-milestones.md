@@ -395,6 +395,20 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
   is not spelled and rebuilds empty (`it_midi_macro_invalid` says so), and bytes after a
   slot's NUL survive the bytes path but not the text path.
 
+- 2026-09-21 — **The backlog pass over "Filed and routed at the E3 close".** Each open item
+  re-checked against the tree after the ten-defect wave; `it.choose` was already closed by
+  it (marked above), the phrases→patterns branch is unchanged and stays a design job (plan
+  08's rule, the meter-sizing gap folded in), and two are closed here.
+  - **A `nudge` with an absurd count hung rather than refused** — never in this ledger
+    before today. The count narrows to an `i32` and `ops_quantize.nudged` walks grid lines
+    one by one, about 4 µs a line per target: 1,000,000 sixteenths took 3.9 s, 20,000,000
+    took 76 s, and the 2,147,483,647 the field admits is hours. `Op.Delta.max_steps` (65536,
+    either way) is the walk's bound, refused by name where the count is read
+    (`sjon_diagnostic`, as every number no field can hold). The closed form — whole bars
+    jumped through the bar table, the meter past the map's end one repeating window — would
+    make any count legal and is the follow-up if a real edit ever wants more than 4096 bars
+    of sixteenths.
+
 ## Status board
 
 | Milestone | Item | Status |

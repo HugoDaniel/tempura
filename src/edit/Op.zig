@@ -194,6 +194,18 @@ pub const Quantize = struct {
 pub const Delta = union(enum) {
     ticks: i64,
     steps: struct { grid: Snap.Grid, count: i32 },
+
+    /// The most grid lines a nudge counts, either way.
+    ///
+    /// `ops_quantize.nudged` walks the lines one at a time — a step is
+    /// counted from the tick's own bar, so a meter change is honoured
+    /// line by line — and a count is therefore time: about 4 µs a line
+    /// per target. The `i32` above admits two billion, and a `count` of
+    /// 2000000000 ran for hours where it should have been refused. 65536
+    /// sixteenths is 4096 bars of `[4 4]`, 65536 bars at 120 qpm is a
+    /// day and a half; a nudge that wants more is not a nudge, and
+    /// `fromJson` refuses it by name.
+    pub const max_steps: i32 = 1 << 16;
 };
 
 pub const Nudge = struct { sel: Select, delta: Delta };
@@ -281,7 +293,8 @@ pub const Op = union(enum) {
     /// filters what is already in the document and lands nothing, so
     /// `[0 maxInt]` is "everything from the start" and not a position.
     /// A `count` of steps is not here either — it is a number of grid
-    /// LINES, and `ops_quantize.nudged` walks them with `+|`.
+    /// LINES, and `ops_quantize.nudged` walks them with `+|`; its own
+    /// bound is `Delta.max_steps`, checked where the count is read.
     ///
     /// Destinations the plan COMPUTES are bounded separately, where they
     /// become text (`ops_native.Ctx.positionJson`): the two halves
@@ -529,9 +542,20 @@ const Reader = struct {
                 return .{ .nudge = .{ .sel = sel, .delta = .{ .ticks = ticks } } };
             }
             const g = try self.grid(o.get("grid")) orelse return null;
+            const count = self.narrow(i32, self.optInt(o.get("count")) orelse 1, 1);
+            // The bound is the walk's, not the field's (`Delta.max_steps`);
+            // a number the field cannot hold went through `out_of_range`
+            // above and is refused by the funnel in `fromJson`.
+            if (count > Delta.max_steps or count < -Delta.max_steps) {
+                try self.fail(
+                    "a nudge of {d} steps is refused: the walk counts grid lines one by one and stops at {d} either way",
+                    .{ count, Delta.max_steps },
+                );
+                return null;
+            }
             return .{ .nudge = .{ .sel = sel, .delta = .{ .steps = .{
                 .grid = g,
-                .count = self.narrow(i32, self.optInt(o.get("count")) orelse 1, 1),
+                .count = count,
             } } } };
         }
         if (eql(name, "transpose")) return .{ .transpose = .{
@@ -1324,6 +1348,46 @@ test "Op.fromJson: a number no field can hold is refused, never truncated" {
         }
         try testing.expect(p.diags.hasErrors());
         try testing.expectEqual(Diag.Code.sjon_diagnostic, p.diags.items()[p.diags.items().len - 1].code);
+    }
+}
+
+test "Op.fromJson: a nudge counts at most 65536 grid lines, either way" {
+    // `nudged` walks the lines one by one, so a count is time: about
+    // 4 µs a line on this machine, and the `i32` the field narrows to
+    // admits two billion of them — a `count` of 2000000000 ran for
+    // hours rather than being refused. 65536 sixteenths is 4096 bars of
+    // `[4 4]`; a nudge that wants more is not a nudge.
+    const inside = [_][]const u8{
+        \\{"op":"nudge","sel":{},"grid":"1/16","count":65536}
+        ,
+        \\{"op":"nudge","sel":{},"grid":"1bar","count":-65536}
+        ,
+    };
+    for (inside) |text| {
+        var p = try fromJson(testing.allocator, text);
+        defer p.deinit();
+        try testing.expect(p.op != null);
+        try testing.expectEqual(@as(usize, 0), p.diags.items().len);
+    }
+
+    const beyond = [_][]const u8{
+        \\{"op":"nudge","sel":{},"grid":"1/16","count":65537}
+        ,
+        \\{"op":"nudge","sel":{},"grid":"1bar","count":-65537}
+        ,
+    };
+    for (beyond) |text| {
+        var p = try fromJson(testing.allocator, text);
+        defer p.deinit();
+        if (p.op != null) {
+            std.debug.print("not refused: {s}\n", .{text});
+            return error.CountNotRefused;
+        }
+        try testing.expect(p.diags.hasErrors());
+        const last = p.diags.items()[p.diags.items().len - 1];
+        try testing.expectEqual(Diag.Code.sjon_diagnostic, last.code);
+        // The refusal names the bound, so the user knows what would pass.
+        try testing.expect(std.mem.indexOf(u8, last.message, "65536") != null);
     }
 }
 
