@@ -67,7 +67,7 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     defer schema.deinit();
 
     var dumped = try pipeline.dump(ctx.gpa, &schema, bytes, Cli.anchorKind(kind), .{
-        .file = anchorFile(ctx, kind),
+        .file = ctx.anchorFile(kind),
         .cues = ctx.cmd.dump.cues,
         .patterns_bin = ctx.cmd.dump.patterns_bin,
         .preserve_foreign = ctx.cmd.dump.preserve_foreign,
@@ -97,7 +97,7 @@ fn spansBlock(ctx: *const Cli.Ctx, kind: Args.Kind, bytes: []const u8) Cli.Error
     var out: Writer.Allocating = .init(ctx.gpa);
     errdefer out.deinit();
     const w = &out.writer;
-    try w.print("; spans: the reader's byte offsets into \"{s}\"\n", .{anchorFile(ctx, kind)});
+    try w.print("; spans: the reader's byte offsets into \"{s}\"\n", .{ctx.anchorFile(kind)});
 
     switch (kind) {
         .mid => {
@@ -166,20 +166,6 @@ pub fn spliceAt(w: *Writer, text: []const u8, cut: usize, block: []const u8) Wri
     try w.writeAll(text[0..at]);
     try w.writeAll(block);
     try w.writeAll(text[at..]);
-}
-
-/// What the dumped anchor's `:file` says.
-///
-/// The BASENAME, because plan 02 resolves an `:file` "relative to the
-/// document" and a dump usually lands beside its file. Stdin has no name
-/// at all, so it gets one that says where it came from rather than a `-`
-/// no resolver could ever honour.
-fn anchorFile(ctx: *const Cli.Ctx, kind: Args.Kind) []const u8 {
-    if (Diags.isStdin(ctx.cmd.path)) return switch (kind) {
-        .mid => "stdin.mid",
-        .it => "stdin.it",
-    };
-    return std.fs.path.basename(ctx.cmd.path);
 }
 
 const t = std.testing;

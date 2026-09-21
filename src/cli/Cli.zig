@@ -294,6 +294,20 @@ pub const Ctx = struct {
         if (Diags.isStdin(self.cmd.path)) return ".";
         return std.fs.path.dirname(self.cmd.path) orelse ".";
     }
+
+    /// The `:file` the anchor of a document DUMPED from the input names:
+    /// the input's basename (a document is read beside its file), or
+    /// `stdin.mid` / `stdin.it` for `-`, which has no name and still has
+    /// to produce an anchor a later `build` can resolve. The one
+    /// spelling: `dump` and `export-score` both dump. Borrowed from the
+    /// invocation's path, or static.
+    pub fn anchorFile(self: *const Ctx, kind: Args.Kind) []const u8 {
+        if (Diags.isStdin(self.cmd.path)) return switch (kind) {
+            .mid => "stdin.mid",
+            .it => "stdin.it",
+        };
+        return std.fs.path.basename(self.cmd.path);
+    }
 };
 
 /// A document, loaded: the text, its line index, the preloaded
@@ -368,18 +382,26 @@ pub fn load(gpa: Allocator, io: Io, path: []const u8) LoadError![:0]u8 {
 
 /// Which native format these bytes are.
 ///
-/// The MAGIC first, the extension only as a tie-break: a `.mid` is
-/// `MThd` (or a `RIFF`/`RMID` wrapper around one) and a `.it` is `IMPM`,
-/// and those four bytes are a far better answer than a file name a user
+/// The MAGIC first (`sniffMagic`), the extension only as a tie-break: a
+/// file's own four bytes are a far better answer than a name a user
 /// typed. The extension still gets a turn, because an empty or truncated
 /// file has no magic and "I could not tell what this is" is a worse
 /// message than the reader's own diagnostics about the bytes.
 pub fn sniff(bytes: []const u8, path: []const u8) ?Args.Kind {
+    return sniffMagic(bytes) orelse Args.kindFromPath(path);
+}
+
+/// Which native format these bytes ANNOUNCE, by magic alone: `MThd` (or a
+/// `RIFF`/`RMID` wrapper around one) is a `.mid`, `IMPM` is a `.it`, and
+/// anything else is null. The one magic test — `sniff` adds the name's
+/// tie-break for the verbs that take a file, and `export-score`, which
+/// takes a document unless the bytes say otherwise, asks this alone.
+pub fn sniffMagic(bytes: []const u8) ?Args.Kind {
     if (std.mem.startsWith(u8, bytes, "MThd")) return .mid;
     if (std.mem.startsWith(u8, bytes, "IMPM")) return .it;
-    if (bytes.len >= 12 and std.mem.startsWith(u8, bytes, "RIFF") and
-        std.mem.eql(u8, bytes[8..12], "RMID")) return .mid;
-    return Args.kindFromPath(path);
+    const riff = bytes.len >= 12 and std.mem.startsWith(u8, bytes, "RIFF");
+    if (riff and std.mem.eql(u8, bytes[8..12], "RMID")) return .mid;
+    return null;
 }
 
 /// The `(anchor …)` kind a `--kind` names. Two vocabularies for one
@@ -552,6 +574,12 @@ test "sniff: the magic decides, and the extension only breaks a tie" {
     // No magic: the name gets its turn, and then there is no answer.
     try t.expectEqual(@as(?Args.Kind, .it), sniff("", "song.it"));
     try t.expectEqual(@as(?Args.Kind, null), sniff("", "-"));
+    // `sniffMagic` is the same test with no name at all: what
+    // `export-score` asks, since a document is its default.
+    try t.expectEqual(@as(?Args.Kind, .mid), sniffMagic("RIFF\x00\x00\x00\x00RMID"));
+    try t.expectEqual(@as(?Args.Kind, .it), sniffMagic("IMPM"));
+    try t.expectEqual(@as(?Args.Kind, null), sniffMagic("RIFF\x00\x00\x00\x00WAVE"));
+    try t.expectEqual(@as(?Args.Kind, null), sniffMagic("(timeline)"));
 }
 
 test "an unreadable input is a usage error, not an internal one, for every verb" {

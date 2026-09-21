@@ -57,6 +57,7 @@
 const std = @import("std");
 const tempura = @import("tempura");
 
+const Args = @import("Args.zig");
 const Cli = @import("Cli.zig");
 const Diags = @import("Diags.zig");
 
@@ -73,22 +74,12 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
         return Cli.reportLoadFailure(ctx, e);
 
     // A `.mid` or a `.it` is dumped first; anything else is a document.
-    // The MAGIC decides, never the extension alone: `Cli.sniff` would
-    // call an empty `.sjon` nothing at all, and a document is what a
-    // document verb should assume when the bytes say nothing.
-    if (nativeKind(bytes)) |kind| return fromFile(ctx, bytes, kind);
+    // The MAGIC decides, never the extension: `export-score` takes a
+    // document by default and a file only when the bytes announce
+    // themselves (`Cli.sniff` would give the name a turn, and an empty
+    // `.sjon` is a document a document verb should assume).
+    if (Cli.sniffMagic(bytes)) |kind| return fromFile(ctx, bytes, kind);
     return fromDocument(ctx, bytes);
-}
-
-/// The native format these bytes ARE, by magic alone. The extension gets
-/// no turn here: `export-score` takes a document by default and a file
-/// only when the bytes announce themselves.
-fn nativeKind(bytes: []const u8) ?tempura.doc.AnchorKind {
-    if (std.mem.startsWith(u8, bytes, "MThd")) return .smf;
-    if (std.mem.startsWith(u8, bytes, "IMPM")) return .it;
-    if (bytes.len >= 12 and std.mem.startsWith(u8, bytes, "RIFF") and
-        std.mem.eql(u8, bytes[8..12], "RMID")) return .smf;
-    return null;
 }
 
 fn fromDocument(ctx: *const Cli.Ctx, source: [:0]u8) Cli.Error!u8 {
@@ -106,12 +97,14 @@ fn fromDocument(ctx: *const Cli.Ctx, source: [:0]u8) Cli.Error!u8 {
     return emit(ctx, &loaded.result.doc, &derived, &.{}, all.items, loaded.space());
 }
 
-fn fromFile(ctx: *const Cli.Ctx, bytes: []const u8, kind: tempura.doc.AnchorKind) Cli.Error!u8 {
+fn fromFile(ctx: *const Cli.Ctx, bytes: []const u8, kind: Args.Kind) Cli.Error!u8 {
     var schema = try tempura.Schema.load(ctx.gpa);
     defer schema.deinit();
 
-    var dumped = try pipeline.dump(ctx.gpa, &schema, bytes, kind, .{
-        .file = std.fs.path.basename(Diags.label(ctx.cmd.path)),
+    // The anchor is named the way `dump` names it: one spelling, so a
+    // `.mid` on stdin is `stdin.mid` here as there.
+    var dumped = try pipeline.dump(ctx.gpa, &schema, bytes, Cli.anchorKind(kind), .{
+        .file = ctx.anchorFile(kind),
     });
     defer dumped.deinit();
 
