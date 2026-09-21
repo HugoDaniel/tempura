@@ -1120,3 +1120,31 @@ test "toSjon: the skeleton of an anchored document names the lanes rule 1 owes i
         skeleton.header_comment,
     );
 }
+
+test "toSjon.print: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails
+    // with error.OutOfMemory and testing.allocator sees no leak; past
+    // the last index it succeeds. Bounded by the number of allocations
+    // the call makes, which the loop discovers.
+    const gpa = testing.allocator;
+    const source = try readExample(gpa);
+    defer gpa.free(source);
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var res = try fromSjon.fromSource(gpa, &schema, source, null);
+    defer res.deinit();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = print(failing.allocator(), &res.doc, &res.map, .{});
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            const text = try result;
+            failing.allocator().free(text);
+            break;
+        }
+    }
+}

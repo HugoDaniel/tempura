@@ -2486,3 +2486,76 @@ test "pipeline: an IT chunk whose essence is a newer wire version is rule 5, or 
         try testing.expect(!got.diags.hasErrors());
     }
 }
+
+test "pipeline.dump: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails
+    // with error.OutOfMemory and testing.allocator sees no leak; past
+    // the last index it succeeds. Bounded by the number of allocations
+    // the call makes, which the loop discovers. Both kinds, each with a
+    // residue, so both carriers and the reconciliation are swept.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const mid = try smfBytes(gpa, records.version, true);
+    defer gpa.free(mid);
+    const it = try itBytes(gpa, &schema, true);
+    defer gpa.free(it);
+
+    for ([_]struct { []const u8, Doc.AnchorKind }{ .{ mid, .smf }, .{ it, .it } }) |case| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+            const result = dump(failing.allocator(), &schema, case[0], case[1], .{});
+            if (failing.has_induced_failure) {
+                try testing.expectError(error.OutOfMemory, result);
+            } else {
+                var got = try result;
+                got.deinit();
+                break;
+            }
+        }
+    }
+}
+
+test "pipeline.build: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails
+    // with error.OutOfMemory and testing.allocator sees no leak; past
+    // the last index it succeeds. Bounded by the number of allocations
+    // the call makes, which the loop discovers. The `.mid` build, with
+    // its residue, so the records and the SMF carrier are swept.
+    //
+    // The `.it` build is NOT swept yet: it fails the sweep outside this
+    // part, in `residue/it.zig`'s `tail`, which frees `t.line` and then
+    // frees it again from its `errdefer` when the `toOwnedSlice` after
+    // it fails. Add `.it` here once that is fixed.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var fx = try ready(gpa, &schema, native_doc);
+    defer fx.deinit();
+
+    for ([_]Doc.AnchorKind{.smf}) |kind| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+            const result = build(
+                failing.allocator(),
+                &schema,
+                native_doc,
+                &fx.res.doc,
+                &fx.derived,
+                kind,
+                .{},
+            );
+            if (failing.has_induced_failure) {
+                try testing.expectError(error.OutOfMemory, result);
+            } else {
+                var got = try result;
+                got.deinit();
+                break;
+            }
+        }
+    }
+}

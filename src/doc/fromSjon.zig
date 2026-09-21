@@ -3984,3 +3984,80 @@ test "fromSjon: a bound IT curve lane names one :column" {
         \\(lane :name kick :kind notes :from song :channel 3)
     );
 }
+
+/// Every root kind at once, so a sweep over the loader walks every
+/// reader: an inline tier of EACH kind — the `(midi/…)` one conducting —
+/// with a lane bound to each, native notes, a curve with its own `:cc`,
+/// a query, a clip over a phrase, a section, a cue and a pass-through
+/// root. The two tiers are what pin `releaseTiers`: each owns an arena
+/// of its own, which a load that fails after `readTiers` must free.
+const sweep_doc: [:0]const u8 =
+    \\; every root kind, so the sweep walks every reader
+    \\(timeline :title "sweep" :length 2bar :conductor song)
+    \\(anchor :id song :kind smf :file "x.mid")
+    \\(midi/smf :format 1 :division 480)
+    \\(midi/mtrk
+    \\  (set-tempo :at 0 :us 500000)
+    \\  (time-signature :at 0 :num 4 :denom 4 :clocks 24 :thirty-seconds 8)
+    \\  (marker :at 0 :text "top")
+    \\  (end-of-track :at 1920))
+    \\(midi/mtrk
+    \\  (note-on :at 0 :ch 1 :key 60 :vel 100)
+    \\  (note-off :at 480 :ch 1 :key 60 :vel 64)
+    \\  (end-of-track :at 1920))
+    \\(anchor :id mod :kind it :file "y.it")
+    \\(it/module
+    \\  (it/timing :speed 6 :tempo 125 :highlight [4 16])
+    \\  (it/orders 0 end)
+    \\  (it/pattern 0 :rows 4 (row 2 (ev 1 :fx "T96"))))
+    \\(section :name intro :at 0bar :dur 1bar)
+    \\(cue :name "drop" :at 1bar)
+    \\(lane :name kick :kind notes
+    \\  (note :at 0bar :dur 1q :key 36 :vel 100)
+    \\  (clip :at 1bar :phrase fill :repeat 2))
+    \\(lane :name glow :kind curve :range [0 1] :cc 74
+    \\  (keyframe :at 0bar :value 0)
+    \\  (keyframe :at 1bar :value 1 :ease in-cubic))
+    \\(lane :name piano :kind notes :from song :track 2 :ch 1)
+    \\(lane :name lead :kind notes :from mod :channel 1)
+    \\(lane :name hats :kind query :query (euclid 3 8 1))
+    \\(phrase :name fill :length 1q
+    \\  (lane :name kick :kind notes
+    \\    (note :at 0q :dur 1t :key 38)))
+    \\; a pacer root, passed through
+    \\(control :id glow-amt :type slider :min 0 :max 1 :value 0.5 :target glow-amt)
+;
+
+test "fromSjon.fromSource: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails
+    // with error.OutOfMemory and testing.allocator sees no leak; past
+    // the last index it succeeds. Bounded by the number of allocations
+    // the call makes, which the loop discovers.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = fromSource(failing.allocator(), &schema, sweep_doc, null);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var res = try result;
+            defer res.deinit();
+            // The fixture is worth the sweep only if it really walked
+            // every reader: it loads clean.
+            for (res.diags.items()) |d| {
+                std.debug.print("sweep fixture: {t}: {s}\n", .{ d.code, d.message });
+            }
+            try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+            // …and it carried a tier of each kind, which is what makes
+            // every index past `readTiers` a test of `releaseTiers`.
+            try testing.expectEqual(@as(usize, 1), res.doc.midi.len);
+            try testing.expectEqual(@as(usize, 1), res.doc.it.len);
+            break;
+        }
+    }
+}
