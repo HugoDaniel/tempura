@@ -99,9 +99,11 @@ On `dump`, after the format core has read the file and the bridge has built the 
    field of the wrong length): the skeleton is derived with `residue_corrupt` naming the
    payload; a fuzz harness holds the never-panic line ([09](09-conformance.md)).
 5. **Residue in both IT carriers** (the chunk and the message tail, below): the chunk wins
-   when present and readable; the message tail is used when the chunk is absent, corrupt or
-   truncated, with `residue_partial` naming what the tail lacks (it carries no native content
-   and no records, so no hash check runs and every rendered lane stays bound).
+   when present and readable; the message tail is used when the chunk is absent, corrupt,
+   truncated, empty or of a version the reader does not know (the envelope's `ver` or the
+   essence's own Binary IR wire version — `docs/residue.md`'s wording, decided 2026-09-21,
+   the progress log below), with `residue_partial` naming what the tail lacks (it carries no
+   native content and no records, so no hash check runs and every rendered lane stays bound).
 
 The rule in one line: **the file's native content is the truth for what the file can say;
 the residue is the truth for what it cannot; the hash says whether the two were written

@@ -298,6 +298,8 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
   - **`it.choose` prefers a readable message tail over a NEWER-version `TMPU` chunk.** Plan
     04's rule 5 lists only absent, corrupt and truncated. Pinned by
     `corpus/residue-newer-version/` and recorded in [04](04-residue.md)'s progress log.
+    **Closed** the same day by the ten-defect wave below (item 4): the rule gained the case,
+    in `docs/residue.md`'s words, and plan 04's rule 5 now says so.
   - **The phrases→patterns structured branch is not implemented.** A clip is always
     flattened into rows when a `.it` is rendered; the essence keeps the phrase and the clip,
     so a dump restores the structure. What is missing is the `.it` holding a phrase AS a
