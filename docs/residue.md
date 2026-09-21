@@ -107,8 +107,9 @@ is, unparsed, and reported as `residue_version`.
 
 ## The IT carriers
 
-Two, graded by survival: a tracker's re-save keeps the message and drops the
-trailing chunk.
+Two, graded by **expected** survival: a tracker's re-save is expected to keep the
+message and to drop the trailing chunk. Nothing here has measured that — see the end
+of this section.
 
 ### 1. The `TMPU` chunk
 
@@ -188,8 +189,12 @@ form — and `residue_tail_truncated` names how many sections, cues, lanes and
 controls fell off. The `(timeline …)` and `(anchor …)` lines are written first and
 are never dropped.
 
-A `.it` written by tempura carries both carriers. A `.it` re-saved by a tracker
-keeps the tail.
+A `.it` written by tempura carries both carriers. A `.it` re-saved by a foreign
+tracker is **expected** to keep the tail and to drop the chunk — the message is a
+first-class field and trailing bytes are not — but that is a design expectation and
+not a measurement: nothing in this repository has verified it. `conformance/CHECKLIST.md`
+holds the survival table it is recorded in, and every row of that table is
+UNMEASURED as of 2026-09-21.
 
 ## The record bodies
 
@@ -335,8 +340,8 @@ A pattern played twice contributes twice, at its two ticks: the hash is over wha
 pattern list, a row past the pattern's height, a pattern whose cell grid is short
 and a channel above 63 all contribute nothing.
 
-**The scope, stated precisely** (this is the open question plan 04 left for this
-document). A lane record's address names one IT channel. The hash is computed with
+**The scope, stated precisely** — the statement plan 04 deferred to this document.
+A lane record's address names one IT channel. The hash is computed with
 
 * `channels` = that one channel, and
 * `patterns` = **every pattern the timing walk played**, ascending and deduplicated
@@ -348,17 +353,40 @@ pattern number the first time it appears, then sorting ascending. Both the build
 that writes the record and the dump that checks it derive the list the same way from
 the same file, so a second implementation needs the walk and nothing else.
 
-Two things this scope is **not**, because plan 04's open question left both open:
-it is not the set of patterns the lane's clip structure touched — a lane whose
-clips cover one pattern still hashes every pattern the walk played — and it carries
-**no order entries**. The order list is in the *conductor* hash, where a change to
-it belongs: reordering a song is conducting, not editing a lane.
+**This scope is not plan 04's, deliberately.** Plan 04 names a different one — the
+cells at the lane's channel "in the patterns the clip structure touched and the
+order entries in that range" — and then delegates the precise statement to this
+document. The code's scope is the one above, for two reasons.
 
-The
-`note`/`ins`/`vol`/`fx`/`param` bytes are tempura's cell values, which are ITTECH's
-on-disk values with the note sentinels normalised (on-disk `254` cut, `255` off,
-`120 … 253` all fade) and a command byte above 26 read as no effect with a zero
-parameter.
+*The clip structure is not an input.* A hash is recomputed from the **module and the
+record's address**, and from nothing else: `tempura check-residue` answers the same
+question as a dump, over a file alone, with no schema loaded and the essence never
+restored (`src/doc/pipeline.zig`'s `table`, which calls `reconcile.Hasher.lane` with
+only the decoded address). A scope that depended on which clips a lane had could not
+be recomputed there, and a hash one of its two readers cannot compute is not a hash.
+
+*The order entries belong to the conductor.* They are in `tmpu/cond/it/1`, not in a
+lane's hash, because reordering a song is conducting and not editing a lane. Hashing
+them in both would make every lane stale on a reorder that moved none of its cells,
+and the point of per-lane records is that a foreign edit is detected per lane.
+
+Implement the scope stated above. Plan 04's sentence predates the code.
+
+**The five cell bytes are tempura's values, not ITTECH's on-disk bytes.** The
+unpacker remaps the note field, and the hash is fed what the unpacker produced, so a
+second implementation must remap before hashing or it will hash different bytes for
+every off, fade and empty cell:
+
+| byte | domain, as hashed |
+| --- | --- |
+| `note` | `0 … 119` a note (`C-0` at 0); `252` fade; `253` off; `254` cut; `255` no note. On disk those sentinels are `120 … 253` fade, `255` off, `254` cut, and "no note" has no byte at all — the stream simply leaves the field out |
+| `ins` | the instrument number as the stream carries it; `0` is none |
+| `vol` | IT's **raw** volume-column byte, unremapped (`0 … 64` volume, `65 … 124` the slide families, `128 … 192` pan, `193 … 202` tone porta, `203 … 212` vibrato), with `255` meaning no volume-column entry |
+| `fx` | ITTECH's command number, `letter - '@'`, so `A` is 1 and `T` is 20; `0` is no effect. A disk byte above 26 names no letter and is read as no effect |
+| `param` | the effect parameter; `0` whenever `fx` is `0`, including for a command byte the unpacker refused |
+
+A cell in which all five are at their "absent" values (`255`, `0`, `255`, `0`, `0`)
+is empty and contributes nothing.
 
 ### `tmpu/cond/it/1\n` — the IT conductor
 
@@ -485,6 +513,8 @@ Three limits, stated so nobody has to find them.
   rendered onto one IT channel share a hash for the same reason, and a change
   anywhere the walk goes moves it.
 
-Beyond the hashes: a carrier's **survival** through a foreign tool is measured, never
-promised. The `TMPU` chunk is not expected to survive a tracker's re-save; the
-message tail is. `conformance/CHECKLIST.md` holds the table this is recorded in.
+Beyond the hashes: a carrier's **survival** through a foreign tool is to be measured,
+never promised, and has not been measured yet. The design expects the `TMPU` chunk
+not to survive a tracker's re-save and the message tail to — but that is an
+expectation, not a result. `conformance/CHECKLIST.md` holds the table it is recorded
+in, and every row of that table reads UNMEASURED as of 2026-09-21.

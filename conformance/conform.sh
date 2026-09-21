@@ -28,10 +28,17 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 quiet=0
 status=0
 
+# The header above, as help. The range is derived rather than numbered —
+# `1d` drops the shebang and `/^[^#]/,$d` stops at the first line that is
+# not a comment — so it cannot drift when the header grows.
+usage() {
+    sed -e '1d' -e '/^[^#]/,$d' -e 's/^#\{1,\} \{0,1\}//' "$0"
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --quiet) quiet=1 ;;
-        -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
         *) echo "conform: unknown argument: $1" >&2; exit 2 ;;
     esac
     shift

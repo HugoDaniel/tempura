@@ -41,6 +41,7 @@ midi plan sets' 2026-08-27 verification and carry that date).
 | The reader's tolerance rules: the CRLF pair in a song message read as one newline; command bytes 27–31 read as no effect; the `Cwtv`/`Cmwt` reading at `Load_it.cpp:557` | `src/doc/bridge_it.zig`, `src/itf/pattern.zig`, `src/itf/Module.zig` | `Load_it.cpp:750-753`, `Load_it.cpp:557` |
 | The volume-column sample-offset extension (bytes 223–232), read with a diagnostic and dropped on write | `src/doc/bridge_it.zig` | OpenMPT's volume-column extension table |
 | The trailing extension-chunk tags a foreign `.it` may carry (`STPM`, `XTPM`), preserved opaque | `src/itf/Module.zig` (`Foreign`) | OpenMPT's IT extensions |
+| The ModPlug ADPCM sample layout: a sample whose `Cvt` byte is `0xFF` as a WHOLE byte (not a bit) is ADPCM, and its data spans `16 + ceil(frames / 2)` bytes per channel — a 16-byte nibble table then the packed nibbles | `src/itf/regions.zig` (`sampleExtent`'s `.adpcm` arm, and the extent test), `src/itf/Module.zig` (`sample_convert`) | ModPlug's extension as OpenMPT documents and loads it (it 04 §Samples; plan 06, "Sample data extents") |
 | Row-tick behaviour cited while implementing the walk: `GetNumTicksOnCurrentRow()`, the `SD0`-as-`SD1` rule, the pattern-loop start on row 0 | `src/itf/walk.zig` | OpenMPT's `Snd_fx.cpp` behaviour, per plan 06 |
 | `libopenmpt` as the `.it` oracle | test time only, from Homebrew, pinned in `conformance/PINS.md` | never vendored, never linked into tempura |
 

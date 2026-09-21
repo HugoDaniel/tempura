@@ -634,24 +634,39 @@ fn checkRecords(input: []const u8) !Seen {
     }
 
     // Reassembly: nothing at all, or exactly the parts' bytes in `seq`
-    // order. The input is cut into parts so a fuzzed split is reached.
+    // order. `partsOf` cuts the input into a contiguous split and tears
+    // it one of three ways depending on the last byte, so both branches
+    // are reached — a whole split must come back byte for byte, and a
+    // torn one must come back as nothing, with `residue_corrupt`.
     var diags: Diag.List = .init(gpa);
     defer diags.deinit();
     var parts: [4]records.Part = undefined;
     const n = partsOf(input, &parts);
     if (try records.reassemble(gpa, parts[0..n], &diags)) |body| {
         defer gpa.free(body);
-        var want: usize = 0;
-        for (parts[0..n]) |p| want += p.body.len;
-        try testing.expectEqual(want, body.len);
+        // The parts are the input, cut up in order, so the reassembly is
+        // the input again — nothing dropped, nothing reordered, nothing
+        // invented.
+        try testing.expectEqualSlices(u8, input, body);
+        try testing.expectEqual(@as(usize, 0), diags.count(.residue_corrupt));
+    } else if (n > 0) {
+        // Nothing came back, so the split was torn and said so.
+        try testing.expect(diags.count(.residue_corrupt) > 0);
     }
     try seen.note(&diags);
 
     return seen;
 }
 
-/// Cut `input` into up to four parts, numbered as a split essence is.
-/// A zero-length input is no parts at all.
+/// Cut `input` into up to four parts, numbered as a split essence is —
+/// and TEAR the split sometimes, so `reassemble`'s all-or-none branch is
+/// reached and not merely compiled.
+///
+/// The first byte picks how many parts; the LAST byte picks the tear:
+/// `0` whole, `1` a hole where the last part should be, `2` two parts
+/// claiming to be the first, `3` a part whose `total` disagrees with its
+/// siblings'. A zero-length input is no parts at all, which is "no
+/// residue" rather than a tear and raises nothing.
 fn partsOf(input: []const u8, out: *[4]records.Part) usize {
     if (input.len == 0) return 0;
     const total: u8 = @intCast(1 + (input[0] % 4));
@@ -662,7 +677,25 @@ fn partsOf(input: []const u8, out: *[4]records.Part) usize {
         const to = if (i + 1 == total) input.len else from + step;
         out[i] = .{ .seq = i, .total = total, .body = input[from..to] };
     }
-    return total;
+    return switch (input[input.len - 1] % 4) {
+        // A hole: the last part never arrived. Only when there is one to
+        // lose — dropping the only part leaves no parts at all, which is
+        // a different answer entirely.
+        1 => if (total > 1) total - 1 else total,
+        // A repeated `seq`: the last part claims to be the first, so one
+        // number is missing and one is there twice.
+        2 => blk: {
+            if (total > 1) out[total - 1].seq = 0;
+            break :blk total;
+        },
+        // A `total` the others do not agree with. This one tears a
+        // single-part split too, which is why it is the last arm.
+        3 => blk: {
+            out[total - 1].total = total +% 1;
+            break :blk total;
+        },
+        else => total,
+    };
 }
 
 fn expectSubslice(inner: []const u8, outer: []const u8) !void {
@@ -699,6 +732,15 @@ test "fuzz residue.records bites: a body that promises more than it holds" {
     // The envelope, read as a head and nothing more.
     const head = try checkRecords("\x7dtem\x01\x02\x00\x01");
     try testing.expectEqual(@as(usize, 0), head.hits);
+
+    // A split body is all or none. These four differ only in their LAST
+    // byte, which is what `partsOf` reads to tear the split: whole, a
+    // hole, a repeated `seq`, a disagreeing `total`. The first byte
+    // makes it a two-part split in every case.
+    try testing.expect(!(try checkRecords("\x01aaaaaaaa\x00")).has(.residue_corrupt));
+    try testing.expect((try checkRecords("\x01aaaaaaaa\x01")).has(.residue_corrupt));
+    try testing.expect((try checkRecords("\x01aaaaaaaa\x02")).has(.residue_corrupt));
+    try testing.expect((try checkRecords("\x01aaaaaaaa\x03")).has(.residue_corrupt));
 }
 
 test "fuzz residue.records: heads, bodies and a reassembly that invents nothing" {
@@ -713,6 +755,11 @@ test "fuzz residue.records: heads, bodies and a reassembly that invents nothing"
             // A lane body with one easing segment.
             ("\x11" ** 32) ++ "\x01\x03\x00\x00\x00\x00\x00\x00" ++ "\x03\x00\x01\x00" ++ "hat" ++
                 "\x00\x00\x00\x00\x00\x00\x00\x00" ++ "\x06\x00" ++ "linear",
+            // The four splits `partsOf` can cut, whole and torn three ways.
+            "\x01aaaaaaaa\x00",
+            "\x01aaaaaaaa\x01",
+            "\x01aaaaaaaa\x02",
+            "\x01aaaaaaaa\x03",
             "\xff" ** 48,
         },
     });
@@ -1063,10 +1110,20 @@ test "fuzz doc.pipeline.dump bites: no residue is rule 1, a torn one is rule 4" 
     try testing.expectEqual(residue.reconcile.Rule.corrupt, broken.rule);
     try testing.expect(broken.diags.count(.residue_corrupt) > 0);
 
-    // And the harness itself runs over both of them.
+    // The `.it` half: the seed carries no residue either, so it takes
+    // rule 1 as well — and its one note on channel 0 becomes exactly one
+    // bound lane, which is the verdict the harness counts.
+    var plain_it = try pipeline.dump(testing.allocator, &schema, minimal_it, .it, .{});
+    defer plain_it.deinit();
+    try testing.expectEqual(residue.reconcile.Rule.derived, plain_it.rule);
+    try testing.expectEqual(@as(usize, 0), plain_it.diags.count(.residue_corrupt));
+
+    // And the harness itself runs over all three, agreeing on the count.
     _ = try checkDump(&schema, minimal_smf, .smf);
     _ = try checkDump(&schema, torn, .smf);
-    _ = try checkDump(&schema, minimal_it, .it);
+    const it_seen = try checkDump(&schema, minimal_it, .it);
+    try testing.expectEqual(plain_it.verdicts.len, it_seen.hits);
+    try testing.expectEqual(@as(usize, 1), it_seen.hits);
 }
 
 test "fuzz doc.pipeline.dump: arbitrary bytes dump as a document, .mid" {
