@@ -246,12 +246,12 @@ const Emit = struct {
                 end_at = at;
                 continue;
             }
-            try self.delta(w, at - last, base + body.written().len);
+            try self.delta(w, last, at, base + body.written().len);
             last = at;
             try self.event(w, e, &running);
         }
 
-        try self.delta(w, @max(end_at orelse last, last) - last, base + body.written().len);
+        try self.delta(w, last, @max(end_at orelse last, last), base + body.written().len);
         try w.writeAll(&[_]u8{ 0xFF, 0x2F, 0x00 });
 
         const out = &self.out.writer;
@@ -303,10 +303,16 @@ const Emit = struct {
         ));
     }
 
-    /// A delta time. Negative cannot be written and is zero; too large
-    /// cannot be written either and is the ceiling, with `tick_overflow`
-    /// saying so.
-    fn delta(self: *Emit, w: *Writer, value: i64, offset: usize) Fail!void {
+    /// The delta time from tick `from` to tick `to`. Negative cannot be
+    /// written and is zero; too large cannot be written either and is the
+    /// ceiling, with `tick_overflow` saying so.
+    ///
+    /// The difference is taken in i128: a builder (or the document
+    /// bridge, which saturates an absurd `:at`) may seat a tick at the
+    /// bottom of i64, and the distance from there to any positive tick is
+    /// past i64 itself — the one delta this function exists to refuse.
+    fn delta(self: *Emit, w: *Writer, from: i64, to: i64, offset: usize) Fail!void {
+        const value = @as(i128, to) - @as(i128, from);
         if (value <= 0) return vlq.write(w, 0);
         if (value > vlq.MAX) {
             try self.diag(
@@ -981,6 +987,37 @@ test "write: a delta a VLQ cannot hold is tick_overflow, and the file stays read
 
     try testing.expectEqual(@as(usize, 1), out.diags.count(.tick_overflow));
     try testing.expect(out.diags.hasErrors());
+
+    var back = try reader.read(gpa, out.bytes);
+    defer back.deinit();
+    try testing.expect(!back.diags.hasErrors());
+    try testing.expectEqual(@as(i64, vlq.MAX), back.sequence.tracks[0].events[1].at);
+}
+
+test "write: a delta across a saturated negative tick is tick_overflow, never a wrap" {
+    // The document bridge saturates an `:at` of -1e19 to minInt(i64),
+    // and a builder may seat one directly: the delta from there to any
+    // positive tick is past i64, and the writer answers it as the VLQ
+    // ceiling it could not write rather than wrapping.
+    const gpa = testing.allocator;
+
+    var b: sequence.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.format = 0;
+    b.division = .{ .ppq = 96 };
+    const t = try b.addTrack();
+    const min = std.math.minInt(i64);
+    try b.addEvent(t, min, .note_on, .{ .note = .{ .ch = 0, .key = 60, .vel = 100 } });
+    try b.addEvent(t, 96, .note_off, .{ .note = .{ .ch = 0, .key = 60, .vel = 64 } });
+    try b.addEvent(t, std.math.maxInt(i64), .end_of_track, .empty);
+
+    var seq = try b.finish();
+    defer seq.deinit();
+
+    var out = try write(gpa, &seq, .{});
+    defer out.deinit();
+    // The note off's delta and the end of track's are both past the VLQ.
+    try testing.expectEqual(@as(usize, 2), out.diags.count(.tick_overflow));
 
     var back = try reader.read(gpa, out.bytes);
     defer back.deinit();
