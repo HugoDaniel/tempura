@@ -186,7 +186,7 @@ function parseValue(toks, at) {
   if (!tok) throw new Error('tempura: times.sjon ended mid-value');
   if (tok.kind === '(') {
     const head = toks[at + 1];
-    if (!head || head.kind !== 'sym') throw new Error('tempura: a form opens with its head');
+    if (head?.kind !== 'sym') throw new Error('tempura: a form opens with its head');
     /** @type {Node[]} */
     const children = [];
     let i = at + 2;
@@ -247,7 +247,9 @@ function parseHarness(src) {
     // every other form's values are keyed and were read above.
     form.positional =
       node.head === 'times'
-        ? node.children.filter((c) => c.t === 'str').map((c) => /** @type {{text: string}} */ (c).text)
+        ? node.children
+            .filter((c) => c.t === 'str')
+            .map((c) => /** @type {{text: string}} */ (c).text)
         : [];
     // …and a `(plan …)` carries an OPERATION, which is the one thing in
     // this file that has to be translated rather than read.
@@ -311,7 +313,10 @@ function jsonOfNode(node) {
     case 'form':
       return `{${node.children
         .filter((c) => c.t === 'kv')
-        .map((c) => `"${/** @type {{key: string}} */ (c).key}":${jsonOfNode(/** @type {{value: Node}} */ (c).value)}`)
+        .map(
+          (c) =>
+            `"${/** @type {{key: string}} */ (c).key}":${jsonOfNode(/** @type {{value: Node}} */ (c).value)}`,
+        )
         .join(',')}}`;
     default:
       return 'null';

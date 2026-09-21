@@ -23,10 +23,9 @@
 // and are regenerated, never hand-edited.
 
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { Pacer } from 'pacer';
 
 const require = createRequire(import.meta.url);
@@ -36,12 +35,14 @@ const wasmPath = require.resolve('pacer/pacer.wasm');
 if (!existsSync(wasmPath)) {
   throw new Error(
     `pacer.wasm is missing at ${wasmPath} — run \`cd ../../../pacer && zig build wasm\` ` +
-      'and copy it per pacer\'s `build:wasm-copy` (or `npm run pretest` here).',
+      "and copy it per pacer's `build:wasm-copy` (or `npm run pretest` here).",
   );
 }
 const wasmModule = new WebAssembly.Module(readFileSync(wasmPath));
 
-const landing = JSON.parse(readFileSync(new URL('./fixtures/landing.json', import.meta.url), 'utf8'));
+const landing = JSON.parse(
+  readFileSync(new URL('./fixtures/landing.json', import.meta.url), 'utf8'),
+);
 
 /** One probe target, ncomp 4, so all four trigger lanes come through. */
 const REGISTRIES = [[{ name: 'probe', ncomp: 4 }]];
@@ -88,7 +89,11 @@ test('landing: every printed position lands on the tick tempura claims', async (
       const at = slice.map((t) => g.rows.get(t)).join(' ');
       const score = `(transport :bpm 120 :meter [${g.n} ${g.d}])\n(trigger :target probe :at [${at}])`;
       const driver = await Pacer.load(wasmModule, score, { registries: REGISTRIES });
-      assert.deepEqual(driver.diagnostics, [], `[${g.n} ${g.d}] batch at ${slice[0]} did not compile`);
+      assert.deepEqual(
+        driver.diagnostics,
+        [],
+        `[${g.n} ${g.d}] batch at ${slice[0]} did not compile`,
+      );
       assert.equal(driver.ok, true);
 
       for (const tick of slice) {
@@ -151,10 +156,12 @@ test('landing: a position one tick short is caught (the mutation the proof exist
  * entries carry NAMES, which is what the landing assertion selects by.
  */
 function registriesOf(text) {
-  const targets = [...text.matchAll(/\(target :name (\S+) :arity (\d+)\)/g)].map(([, name, arity]) => ({
-    name,
-    ncomp: Number(arity),
-  }));
+  const targets = [...text.matchAll(/\(target :name (\S+) :arity (\d+)\)/g)].map(
+    ([, name, arity]) => ({
+      name,
+      ncomp: Number(arity),
+    }),
+  );
   assert.ok(targets.length > 0, 'a golden score declares no targets');
   return [targets];
 }
@@ -170,7 +177,10 @@ function registriesOf(text) {
  * one it caught was a three-component keyframe on an arity-1 target.
  */
 test('scores: every golden skeleton loads clean through pacer.wasm', async () => {
-  assert.ok(Array.isArray(landing.scores) && landing.scores.length > 0, 'no golden scores — run `zig build landing`');
+  assert.ok(
+    Array.isArray(landing.scores) && landing.scores.length > 0,
+    'no golden scores — run `zig build landing`',
+  );
 
   for (const { file } of landing.scores) {
     const text = readFileSync(new URL(`./fixtures/scores/${file}`, import.meta.url), 'utf8');
