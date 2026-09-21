@@ -132,6 +132,7 @@ pub const usage_text =
     \\  --in-place              Write back onto the anchor's own file.
     \\  --no-residue            Write a file that carries no timeline.
     \\  --force-residue         Overwrite a newer tempura's residue (plan 04, rule 3).
+    \\  --section-markers       A marker per section start (.mid).
     \\
     \\Options for timeline:
     \\  --json                  The same data as JSON.
@@ -143,7 +144,7 @@ pub const usage_text =
     \\  --no-hints              Ignore every easing hint.
     \\  --tempo-eps F           How close two tempo segments coalesce, in pacer bpm.
     \\  --max-keys-per-track N  The per-track share of pacer's key budget.
-    \\  --section-markers       Carried through to a .mid build's section markers.
+    \\  --section-markers       Also a .mid build's section markers (see above).
     \\
     \\Options for at:
     \\  --seconds F             Where on the clock.

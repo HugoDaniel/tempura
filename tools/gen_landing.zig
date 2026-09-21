@@ -120,15 +120,19 @@ fn exampleNative(gpa: Allocator) !support.Fixture {
     defer schema.deinit();
 
     var loaded = try tempura.doc.fromSource(gpa, &schema, @embedFile("example_native"), null);
-    errdefer loaded.deinit();
+    // The map and the report are the BRIDGE's and are finished with
+    // here: `derive` builds its own map from the same points and that is
+    // the one the exporter reads. Only the DOCUMENT survives, so it is
+    // taken out below and owned by exactly one name — two `errdefer`s
+    // over the same document (one through `loaded`, one through `d`)
+    // would double-free it on a failing `derive`.
+    defer loaded.map.deinit();
+    defer loaded.diags.deinit();
     if (loaded.diags.hasErrors()) {
         for (loaded.diags.items()) |d| std.debug.print("examples/native.sjon: {t}: {s}\n", .{ d.code, d.message });
+        loaded.doc.deinit();
         return error.ExampleDoesNotLoad;
     }
-    // The map `fromSource` returns is the bridge's; `derive` builds its
-    // own from the same points, and that is the one the exporter reads.
-    loaded.map.deinit();
-    loaded.diags.deinit();
 
     var d = loaded.doc;
     errdefer d.deinit();

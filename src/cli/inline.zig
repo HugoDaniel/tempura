@@ -219,10 +219,12 @@ const Planned = union(enum) { ok: edit.Plan, failed: u8 };
 /// the encoding SJON decodes and prints on the way back in, which is why
 /// the tier lands as the forms it was rather than as a string.
 ///
-/// The plan is built by hand rather than by an operation's planner
-/// because `inline` is not one of plan 07's operations: it changes what
-/// the document HOLDS rather than what it says about the music, and no
-/// selection resolves against a file that is not in the document yet.
+/// There is no OPERATION here, because `inline` is not one of plan 07's:
+/// it changes what the document HOLDS rather than what it says about the
+/// music, and no selection resolves against a file that is not in the
+/// document yet. So the actions are written straight and handed to
+/// `edit.fromActionsJson`, which is the engine's own reader for exactly
+/// this — a host that has actions and wants a plan.
 fn planInsert(ctx: *const Cli.Ctx, tier: []const u8, at: u32) Cli.Error!Planned {
     const text = try ctx.a.dupeZ(u8, tier);
     var tree = try sjon.parse(ctx.gpa, text);
@@ -249,38 +251,42 @@ fn planInsert(ctx: *const Cli.Ctx, tier: []const u8, at: u32) Cli.Error!Planned 
         else => &.{},
     };
 
-    var arena: std.heap.ArenaAllocator = .init(ctx.gpa);
-    errdefer arena.deinit();
-    var diags: tempura.Diag.List = .init(ctx.gpa);
-    errdefer diags.deinit();
-    const a = arena.allocator();
-
-    const actions = try a.alloc(edit.Action, roots.len);
-    for (roots, actions, 0..) |value, *action, i| {
-        const slot: u32 = at + @as(u32, @intCast(i));
-        const json = std.json.Stringify.valueAlloc(a, value, .{}) catch |e| switch (e) {
-            error.OutOfMemory => return error.OutOfMemory,
-        };
-        action.* = .{
-            .json = try std.fmt.allocPrint(
-                a,
-                "{{\"op\":\"insert_root\",\"index\":{d},\"value\":{s}}}",
-                .{ slot, json },
-            ),
-            .kind = .insert_root,
-            // The two forest operations carry the root list's own empty
-            // address and say everything in `slot` (§11.3).
-            .site = .{ .root = 0, .path = &.{} },
-            .slot = slot,
-        };
+    // The action LIST as text, then the engine's own reader. `Plan` is a
+    // value with public fields and building one by hand would work — and
+    // it would be a second author of the action grammar, which is
+    // exactly the thing `Plan.fromActionsJson` exists to stop being
+    // necessary (`edit/Plan.zig`: "`fromActionsJson(p.text())` gives
+    // `p.text()` again"). So the JSON goes through the front door: the
+    // engine parses each action, decides its kind, its site and its
+    // slot, and refuses anything that is not an action list.
+    var list: std.Io.Writer.Allocating = .init(ctx.a);
+    const w = &list.writer;
+    // `Plan.text` spells an empty plan `[]`, and so does this: a tier
+    // with no roots is not a thing this verb produces, and the reader
+    // should not have to take a list that is only whitespace.
+    if (roots.len == 0) {
+        try w.writeAll("[]\n");
+    } else {
+        try w.writeAll("[\n");
+        for (roots, 0..) |value, i| {
+            if (i > 0) try w.writeAll(",\n");
+            try w.print("{{\"op\":\"insert_root\",\"index\":{d},\"value\":", .{at + @as(u32, @intCast(i))});
+            std.json.Stringify.value(value, .{}, w) catch |e| switch (e) {
+                error.WriteFailed => return error.WriteFailed,
+            };
+            try w.writeAll("}");
+        }
+        try w.writeAll("\n]\n");
     }
 
-    return .{ .ok = .{
-        .actions = actions,
-        .diags = diags,
-        .summary = .{ .inserted = @intCast(actions.len) },
-        .arena = arena,
-    } };
+    var plan = try edit.fromActionsJson(ctx.gpa, list.written());
+    errdefer plan.deinit();
+    if (plan.summary.refused or plan.actions.len != roots.len) {
+        try Diags.render(ctx.err, "<inline>", .bytes, plan.diags.items(), ctx.style);
+        try ctx.err.writeAll("tempura: the anchor's dump did not read back as an action list (a tempura defect)\n");
+        return .{ .failed = Cli.Exit.internal };
+    }
+    return .{ .ok = plan };
 }
 
 const t = std.testing;

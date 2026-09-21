@@ -1,5 +1,6 @@
 ; `quantize` at full strength onto the QUARTER grid: 0.4q moves back to
 ; 0q, 1.6q forward to 2q and 2.9q forward to 3q. The grid lines are the
-; METER's, under the map the document derives, and the tie at exactly
-; half a step breaks downwards.
+; METER's, under the map the document derives — and 0.5q, which is
+; exactly half a step from the lines on both sides of it, goes DOWN to
+; 0bar, which is the tie rule.
 (plan quantize :args (a :sel (s :lanes [flash] :kinds [note]) :grid "1/4" :strength 1))

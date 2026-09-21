@@ -6,9 +6,17 @@
 ; TPQ), so every position a case asks for is a round musical number. The
 ; first cell carries an effect and the second carries none: one has no
 ; room for the `SDx` a sub-row move needs and the other has.
+;
+; `x.it` is beside it: plan 02 verifies an anchor's `:size` and `:sha256`
+; before it honours a single offset, and a case with no file would load
+; with `anchor_unavailable`. `zig build fixtures` writes it as the
+; canonical write of exactly the module spelled below, so the file and the
+; dump are one thing said twice and a drift between them is loud. This is
+; one of the two bound cases `tempura edit` itself drives
+; (`src/cli/edit.zig`'s tests and the CLI goldens).
 (timeline :title "bound" :conductor mod :length 4bar)
 
-(anchor :id mod :kind it :file "x.it")
+(anchor :id mod :kind it :file "x.it" :size 259 :sha256 "be67b684da072985e92b1a25125b285105b39a70bf87999d77bda58935750da7")
 (it/module :title "bound"
   (it/timing :speed 24 :tempo 125)
   (it/orders 0 1 2 2 end)

@@ -123,8 +123,11 @@ pub const ScoreOpts = struct {
     tempo_eps: ?f64 = null,
     /// `--max-keys-per-track N`: the per-track share of pacer's MAX_KEYS.
     max_keys_per_track: ?u32 = null,
-    /// `--section-markers`: also carried by `build`'s renderer, where it
-    /// writes a `marker` per section start.
+    /// `--section-markers`. Read by THREE verbs and stored once: the
+    /// exporter ignores it (a pacer score gets `(scene …)` forms, which
+    /// is the same information in pacer's own vocabulary) and plan 08's
+    /// `.mid` renderer writes a `marker` per section start, so `build`
+    /// and `export` read this same field.
     section_markers: bool = false,
 };
 
@@ -200,6 +203,10 @@ const Group = enum {
     build,
     timeline,
     score,
+    /// `--section-markers` alone: plan 08 gives it to the `.mid` RENDER
+    /// (a `marker` per section start) and plan 10 lists it on
+    /// `export-score`, so it is one flag read by three verbs.
+    markers,
     at,
     anchor,
     edit,
@@ -210,6 +217,7 @@ const Group = enum {
             .build => "build and export",
             .timeline => "timeline",
             .score => "export-score",
+            .markers => "export-score, build and export",
             .at => "at",
             .anchor => "inline",
             .edit => "edit",
@@ -222,6 +230,7 @@ const Group = enum {
             .build => verb == .build or verb == .@"export",
             .timeline => verb == .timeline,
             .score => verb == .export_score,
+            .markers => verb == .export_score or verb == .build or verb == .@"export",
             .at => verb == .at,
             .anchor => verb == .@"inline",
             .edit => verb == .edit,
@@ -241,9 +250,10 @@ fn owner(flag: []const u8) ?Group {
         eq(flag, "--no-residue") or eq(flag, "--force-residue") or eq(flag, "--cc") or
         eq(flag, "--compress")) return .build;
     if (eq(flag, "--json")) return .timeline;
+    if (eq(flag, "--section-markers")) return .markers;
     if (eq(flag, "--velocity") or eq(flag, "--ease") or eq(flag, "--eps") or
         eq(flag, "--no-hints") or eq(flag, "--tempo-eps") or
-        eq(flag, "--max-keys-per-track") or eq(flag, "--section-markers")) return .score;
+        eq(flag, "--max-keys-per-track")) return .score;
     if (eq(flag, "--seconds") or eq(flag, "--pos")) return .at;
     if (eq(flag, "--anchor")) return .anchor;
     if (eq(flag, "--op") or eq(flag, "--select") or eq(flag, "--dry-run")) return .edit;

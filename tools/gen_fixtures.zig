@@ -96,6 +96,8 @@ const cases = [_]Case{
     .{ .name = "residue-stale-lane", .file = "song.mid", .build = residueStaleLane },
     .{ .name = "residue-stale-conductor", .file = "song.mid", .build = residueStaleConductor },
     .{ .name = "residue-tail-only", .file = "song.it", .build = residueTailOnly },
+    .{ .name = "edit-bound-smf-pair", .file = "x.mid", .build = boundSmfAnchor },
+    .{ .name = "edit-bound-it-cell", .file = "x.it", .build = boundItAnchor },
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -787,6 +789,70 @@ fn walkCxxPastEnd(gpa: Allocator) ![]u8 {
     const p0 = try b.addPattern(2);
     _ = try b.addPattern(2);
     p0.at(0, 0).* = .{ .fx = fx_c, .param = 5 };
+    return finishIt(gpa, &b, null, walk_opts);
+}
+
+// ---------------------------------------------------------------------------
+// The two bound-edit anchors — a file for a document that carries its dump
+// ---------------------------------------------------------------------------
+//
+// Every `edit-bound-*` case is a document whose anchor carries its dump
+// INLINE, which is what a bound operation acts on. The anchor still names
+// a file, and plan 02 verifies that file's `:size` and `:sha256` before it
+// honours a single offset — so a case with no file beside it loads with
+// `anchor_unavailable`, and `tempura edit` used to refuse it outright.
+//
+// These two are the pair the CLI drives end to end: one SMF and one IT,
+// each the canonical write of exactly the module its case's `doc.sjon`
+// spells inline. The two documents carry these bytes' own `:size` and
+// `:sha256`, so a change here needs one hand edit there — which is the
+// point: the file and the dump are one thing said twice, and a drift
+// between them should be loud.
+
+/// `edit-bound-smf-pair/x.mid` — one format-0 track at 480 PPQ: three
+/// notes on channel 1 and two controller events, the shape plan 07's SMF
+/// pairing rules are exercised over.
+fn boundSmfAnchor(gpa: Allocator) ![]u8 {
+    var b: smf.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.format = 0;
+    b.division = .{ .ppq = 480 };
+
+    const t = try b.addTrack();
+    try b.addEvent(t, 0, .set_tempo, .{ .tempo = 500_000 });
+    try b.addEvent(t, 0, .control_change, .{ .control = .{ .ch = 1, .num = 74, .val = 10 } });
+    try b.addEvent(t, 0, .note_on, .{ .note = .{ .ch = 1, .key = 36, .vel = 100 } });
+    try b.addEvent(t, 240, .note_off, .{ .note = .{ .ch = 1, .key = 36, .vel = 64 } });
+    try b.addEvent(t, 480, .note_on, .{ .note = .{ .ch = 1, .key = 38, .vel = 90 } });
+    try b.addEvent(t, 720, .note_off, .{ .note = .{ .ch = 1, .key = 38, .vel = 64 } });
+    try b.addEvent(t, 960, .control_change, .{ .control = .{ .ch = 1, .num = 74, .val = 100 } });
+    try b.addEvent(t, 960, .note_on, .{ .note = .{ .ch = 1, .key = 41, .vel = 80 } });
+    try b.addEvent(t, 1200, .note_off, .{ .note = .{ .ch = 1, .key = 41, .vel = 64 } });
+    try b.addEvent(t, 1920, .end_of_track, .empty);
+    return finishSmf(gpa, &b, .{});
+}
+
+/// `edit-bound-it-cell/x.it` — three four-row patterns played by the
+/// order list `0 1 2 2`, at speed 24 so a row is one quarter note
+/// exactly. Written `:loose`, because IT's floor is 32 rows and the row
+/// arithmetic the case is about should be readable rather than padded.
+fn boundItAnchor(gpa: Allocator) ![]u8 {
+    var b: itf.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.setTitle("bound");
+    b.module.header.initial_speed = 24;
+    b.module.header.initial_tempo = 125;
+    try b.addOrder(0);
+    try b.addOrder(1);
+    try b.addOrder(2);
+    try b.addOrder(2);
+
+    const p0 = try b.addPattern(4);
+    p0.at(0, 0).* = .{ .note = 60, .ins = 1, .vol = 64, .fx = 'G' - '@', .param = 1 };
+    p0.at(2, 0).* = .{ .note = 64, .ins = 1 };
+    const p1 = try b.addPattern(4);
+    p1.at(0, 0).* = .{ .note = 67, .ins = 1 };
+    _ = try b.addPattern(4);
     return finishIt(gpa, &b, null, walk_opts);
 }
 

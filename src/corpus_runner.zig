@@ -931,7 +931,7 @@ fn renderCase(
     defer if (loaded) |*l| l.deinit();
     for (directives) |d| {
         if (!d.needsDocument()) continue;
-        loaded = (try loadDocument(gpa, a, env, fixture, rep)) orelse return false;
+        loaded = (try loadDocument(gpa, a, env, fixture)) orelse return false;
         if (!try renderEcho(a, w, &loaded.?, rep)) return false;
         break;
     }
@@ -1504,9 +1504,7 @@ fn loadDocument(
     a: Allocator,
     env: Env,
     fixture: Fixture,
-    rep: Report,
 ) Error!?Loaded {
-    _ = rep;
     const case_dir = try std.fs.path.join(a, &.{ env.root, env.name });
     var store = doc.fs(gpa, env.io, case_dir);
     errdefer store.deinit();

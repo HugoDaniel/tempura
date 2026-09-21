@@ -80,7 +80,7 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     if (ctx.cmd.dump.spans) {
         const block = try spansBlock(ctx, kind, bytes);
         defer ctx.gpa.free(block);
-        try spliceAfterAnchor(&art.writer, dumped.text, block);
+        try spliceAt(&art.writer, dumped.text, tierAt(&dumped), block);
     } else {
         try art.writer.writeAll(dumped.text);
     }
@@ -130,25 +130,39 @@ fn spansBlock(ctx: *const Cli.Ctx, kind: Args.Kind, bytes: []const u8) Cli.Error
     return out.toOwnedSlice();
 }
 
-/// Write `text` with `block` inserted straight after its `(anchor …)`
-/// line — in front of the tier the pipeline spliced there.
+/// Where the file tier begins in the dumped text: the byte after the
+/// line the carrying `(anchor …)` ENDS on.
 ///
-/// The printer emits an anchor on ONE line and the tier follows it,
-/// because plan 02's anchor/dump pairing is positional. When there is no
-/// anchor at all (nothing in this verb produces that, but a renderer must
-/// not be the thing that panics), the block is appended, which is still
-/// the order it was written in.
-pub fn spliceAfterAnchor(w: *Writer, text: []const u8, block: []const u8) Writer.Error!void {
-    const at = std.mem.indexOf(u8, text, "(anchor ") orelse {
-        try w.writeAll(text);
-        try w.writeAll(block);
-        return;
-    };
-    const eol = std.mem.indexOfScalarPos(u8, text, at, '\n') orelse text.len;
-    const cut = @min(eol + 1, text.len);
-    try w.writeAll(text[0..cut]);
+/// The anchor's own SPAN, not the first `(anchor ` the text happens to
+/// spell. A restored document is the author's text (plan 04's rule 2),
+/// and an author may write that word in a comment, in a title, or write
+/// two anchors — so the coordinate comes from the document the pipeline
+/// handed back, where the walk recorded it. Plan 02's anchor/dump pairing
+/// is positional, so the tier follows the anchor it belongs to; the one
+/// that carries an inline dump is that anchor, and a document with none
+/// (nothing in this verb produces one) puts the block at the end, which
+/// is still the order it was written in.
+fn tierAt(dumped: *const pipeline.Dumped) usize {
+    var span: ?tempura.Diag.Span = null;
+    for (dumped.doc.anchors) |anchor| {
+        if (span == null) span = anchor.span;
+        if (anchor.inline_dump) {
+            span = anchor.span;
+            break;
+        }
+    }
+    const end = (span orelse return dumped.text.len).end;
+    const at = @min(@as(usize, end), dumped.text.len);
+    const eol = std.mem.indexOfScalarPos(u8, dumped.text, at, '\n') orelse dumped.text.len;
+    return @min(eol + 1, dumped.text.len);
+}
+
+/// Write `text` with `block` spliced in at `cut`.
+pub fn spliceAt(w: *Writer, text: []const u8, cut: usize, block: []const u8) Writer.Error!void {
+    const at = @min(cut, text.len);
+    try w.writeAll(text[0..at]);
     try w.writeAll(block);
-    try w.writeAll(text[cut..]);
+    try w.writeAll(text[at..]);
 }
 
 /// What the dumped anchor's `:file` says.
@@ -170,14 +184,11 @@ const t = std.testing;
 // Tests
 // ---------------------------------------------------------------------------
 
-test "spliceAfterAnchor: the block lands on the line after the anchor, never elsewhere" {
+test "spliceAt: the block goes in at the byte it was given, and a cut past the end appends" {
+    const text = "(timeline :conductor song)\n\n(anchor :id song :kind it :file \"x.it\")\n(it/module)\n";
     var out: Writer.Allocating = .init(t.allocator);
     defer out.deinit();
-    try spliceAfterAnchor(
-        &out.writer,
-        "(timeline :conductor song)\n\n(anchor :id song :kind it :file \"x.it\")\n(it/module)\n",
-        "; spans\n",
-    );
+    try spliceAt(&out.writer, text, std.mem.indexOf(u8, text, "(it/module").?, "; spans\n");
     try t.expectEqualStrings(
         \\(timeline :conductor song)
         \\
@@ -186,13 +197,59 @@ test "spliceAfterAnchor: the block lands on the line after the anchor, never els
         \\(it/module)
         \\
     , out.written());
+
+    var end: Writer.Allocating = .init(t.allocator);
+    defer end.deinit();
+    try spliceAt(&end.writer, "(timeline)\n", 1 << 20, "; spans\n");
+    try t.expectEqualStrings("(timeline)\n; spans\n", end.written());
 }
 
-test "spliceAfterAnchor: no anchor appends rather than panicking" {
-    var out: Writer.Allocating = .init(t.allocator);
-    defer out.deinit();
-    try spliceAfterAnchor(&out.writer, "(timeline)\n", "; spans\n");
-    try t.expectEqualStrings("(timeline)\n; spans\n", out.written());
+test "dump --spans: the block goes in at the ANCHOR's span, not at the first `(anchor `" {
+    // A restored document is the AUTHOR's text (plan 04, rule 2), and an
+    // author may spell `(anchor ` in a comment above their own header —
+    // which is where a textual search would put the block, ahead of the
+    // document rather than in front of the tier. The document below does
+    // exactly that, so the round trip is the test.
+    const a = t.allocator;
+    const src: []const u8 =
+        \\; the anchor below is by reference, and this comment says `(anchor `
+        \\; on purpose: a splice that searched for those bytes would land here.
+        \\(timeline :title "spans" :length 1bar)
+        \\
+        \\(tempo-point :at 0bar :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\
+        \\(lane :name kick :kind notes :target kick
+        \\  (note :at 0bar :dur 1q :key 36 :vel 100))
+        \\
+    ;
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    const doc_path = try std.fmt.allocPrintSentinel(a, "{s}/doc.sjon", .{dir}, 0);
+    defer a.free(doc_path);
+    const built = try std.fmt.allocPrintSentinel(a, "{s}/song.mid", .{dir}, 0);
+    defer a.free(built);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "doc.sjon", .data = src });
+
+    var b = try Cli.invoke(&.{ "tempura", "build", doc_path, "-o", built });
+    defer b.deinit();
+    try t.expectEqual(Cli.Exit.ok, b.code);
+
+    var d = try Cli.invoke(&.{ "tempura", "dump", built, "--spans" });
+    defer d.deinit();
+    try t.expectEqual(Cli.Exit.ok, d.code);
+
+    const text = d.out.written();
+    const comment = std.mem.indexOf(u8, text, "a splice that searched for those bytes").?;
+    const spans = std.mem.indexOf(u8, text, "; spans: the reader's byte offsets").?;
+    const tier = std.mem.indexOf(u8, text, "(midi/smf ").?;
+    // The block sits between the author's own text and the tier, and the
+    // decoy comment is still above all of it.
+    try t.expect(comment < spans);
+    try t.expect(spans < tier);
 }
 
 test "dump: an SMF with no residue derives its tier and says so on the first line" {

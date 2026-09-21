@@ -134,6 +134,9 @@ fn options(
         .ppq = b.ppq,
         .round = b.round,
         .cc = b.cc,
+        // One flag, one field, three verbs (`Args.ScoreOpts`): plan 08
+        // gives `--section-markers` to the `.mid` render.
+        .section_markers = ctx.cmd.score.section_markers,
         .format0 = b.format0,
         .running_status = b.running_status,
         .loose = b.loose,
@@ -182,6 +185,8 @@ fn refuseForeignFlag(ctx: *const Cli.Ctx, kind: Args.Kind) Cli.Error!?u8 {
             "--no-running-status"
         else if (b.cc != null)
             "--cc"
+        else if (ctx.cmd.score.section_markers)
+            "--section-markers"
         else
             null,
         .mid => if (b.loose) "--loose" else null,
@@ -463,6 +468,41 @@ test "build: a native document renders through plan 08's renderers" {
     defer it.deinit();
     try t.expectEqual(Cli.Exit.ok, it.code);
     try t.expect(std.mem.startsWith(u8, it.out.written(), "IMPM"));
+}
+
+test "build --section-markers: the .mid render gains a marker per section start" {
+    // Plan 08 gives the flag to the `.mid` RENDER, and plan 10 lists it
+    // on `export-score`; it is one flag read by three verbs, and the
+    // help text claiming it for `build` has to be true.
+    const path = try Cli.repoPath(t.allocator, "corpus/playhead-sections-cues/doc.sjon");
+    defer t.allocator.free(path);
+
+    var plain = try Cli.invoke(&.{ "tempura", "build", path, "--kind", "mid", "--no-residue" });
+    defer plain.deinit();
+    try t.expectEqual(Cli.Exit.ok, plain.code);
+
+    var marked = try Cli.invoke(&.{
+        "tempura", "build", path, "--kind", "mid", "--no-residue", "--section-markers",
+    });
+    defer marked.deinit();
+    try t.expectEqual(Cli.Exit.ok, marked.code);
+
+    // The section names ride in the file as `marker` meta text.
+    try t.expect(std.mem.indexOf(u8, plain.out.written(), "intro") == null);
+    try t.expect(std.mem.indexOf(u8, marked.out.written(), "intro") != null);
+    try t.expect(std.mem.indexOf(u8, marked.out.written(), "outro") != null);
+    try t.expect(marked.out.written().len > plain.out.written().len);
+
+    // …and it shapes a `.mid`, so a `.it` build refuses it rather than
+    // ignoring it.
+    var s = try Scratch.init("corpus/it-minimal/song.it", "song.it");
+    defer s.deinit();
+    var refused = try Cli.invoke(&.{
+        "tempura", "build", s.doc, "--kind", "it", "--no-residue", "--section-markers",
+    });
+    defer refused.deinit();
+    try t.expectEqual(Cli.Exit.usage, refused.code);
+    try t.expect(std.mem.indexOf(u8, refused.err.written(), "--section-markers") != null);
 }
 
 test "build: a cross-kind build is refused with plan 08's diagnostic" {

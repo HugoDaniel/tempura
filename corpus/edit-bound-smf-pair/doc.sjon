@@ -1,7 +1,15 @@
 ; A document whose one anchor is an INLINE `.mid` — the shape every bound
 ; SMF operation is exercised against (plan 07, "Bound content,
-; precisely"). The anchor carries its dump, so no file is read and the
-; case is one text.
+; precisely"). The anchor carries its dump, so the file is never read
+; FOR its content.
+;
+; `x.mid` IS beside it, all the same: plan 02 verifies an anchor's `:size`
+; and `:sha256` before it honours a single offset, and a case with no file
+; would load with `anchor_unavailable`. `zig build fixtures` writes it as
+; the canonical write of exactly the module spelled below, so the file and
+; the dump are one thing said twice and a drift between them is loud. This
+; is one of the two bound cases `tempura edit` itself drives
+; (`src/cli/edit.zig`'s tests and the CLI goldens).
 ;
 ; One track at 480 PPQ with three notes on channel 1 and a controller the
 ; `filter` lane reads: a note whose neighbours leave it room to move in
@@ -10,7 +18,7 @@
 ; own. `spare` is native and empty, which is what a `bind` needs.
 (timeline :title "bound" :conductor song :length 2bar)
 
-(anchor :id song :kind smf :file "x.mid")
+(anchor :id song :kind smf :file "x.mid" :size 71 :sha256 "2544df61847d62d7996a53c3a28b6b88197d6a93d1c42f7fa4574318dc1dc30f")
 (midi/smf :format 0 :division 480)
 (midi/mtrk
   (set-tempo      :at 0    :us 500000)

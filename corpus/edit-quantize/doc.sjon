@@ -1,6 +1,9 @@
-; Three notes NOT on any grid line — the only document a quantize or a
+; Four notes NOT on any grid line — the only document a quantize or a
 ; nudge has anything to say about. 0.4q, 1.6q and 2.9q are freely played
-; positions, and each moves to a different line under a different rule.
+; positions, and each moves to a different line under a different rule;
+; 0.5q sits at exactly half a quarter-note step from the lines on either
+; side of it, which is the TIE, and it is on a key of its own so the two
+; notes that land on 0bar together do not overlap.
 (timeline :title "off grid" :length 1bar)
 
 (tempo-point :at 0q :qpm 120)
@@ -8,5 +11,6 @@
 
 (lane :name flash :target flash
   (note :at 0.4q :dur 0.25q :key 36 :vel 100)
+  (note :at 0.5q :dur 0.25q :key 42 :vel 100)
   (note :at 1.6q :dur 0.25q :key 38 :vel 100)
   (note :at 2.9q :dur 0.25q :key 40 :vel 100))

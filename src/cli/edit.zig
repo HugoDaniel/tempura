@@ -24,6 +24,18 @@
 //! be a second thing to get wrong. Given both, `--select` wins, because a
 //! flag on the command line is the later word.
 //!
+//! ## Which load errors stop an edit
+//!
+//! All of them but two, and `blocksEdit` says which two and why: an
+//! anchor's FILE being unreadable or not matching its `:size` /
+//! `:sha256` is not about anything an edit acts on, because a bound
+//! operation walks the inline dump's own forms in the tree. Such a
+//! diagnostic is still PRINTED — it is an error and the user hears it —
+//! and the edit goes through, so the exit code is 0 with an error line
+//! on stderr. That combination is deliberate: the verb's product is the
+//! document's text, the document's text was produced correctly, and the
+//! thing that is wrong is a file this invocation never needed.
+//!
 //! ## A refusal is an answer
 //!
 //! Plan 07: "an operation that cannot be done yields an empty action list
@@ -50,13 +62,13 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     defer loaded.deinit();
 
     // An edit over a document that does not hold together would plan
-    // against addresses the document layer has already complained about.
-    // `build`'s rule, for `build`'s reason: the product is a document
-    // somebody keeps.
-    if (loaded.result.diags.hasErrors()) {
-        try ctx.report(loaded.space(), loaded.result.diags.items());
-        return Cli.Exit.errors;
-    }
+    // against addresses the document layer has already complained
+    // about — so a load error stops the verb, with two exceptions named
+    // in `blocksEdit`. The report goes out either way: a tolerated error
+    // is still an error and the user hears it.
+    const blocking = firstBlocker(loaded.result.diags.items());
+    try ctx.report(loaded.space(), loaded.result.diags.items());
+    if (blocking) return Cli.Exit.errors;
 
     const op_json = switch (try merged(ctx)) {
         .ok => |text| text,
@@ -104,6 +116,45 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     return Cli.Exit.ok;
 }
 
+/// Whether any of these diagnostics stops the edit.
+fn firstBlocker(diags: []const tempura.Diag.Diagnostic) bool {
+    for (diags) |d| {
+        if (d.severity == .err and blocksEdit(d.code)) return true;
+    }
+    return false;
+}
+
+/// Which load errors an edit cannot be planned over.
+///
+/// **Every one but two.** A plan's addresses come from a fresh parse of
+/// the document's own text and its targets from the `Doc` the walk built,
+/// so anything that made either of those wrong makes the plan wrong: a
+/// parse error, a duplicate `(timeline …)`, a lane that names itself
+/// twice, an address the schema cannot read. Those stop the verb, for
+/// `build`'s reason — the product is a document somebody keeps.
+///
+/// The two exceptions are the two that are about an anchor's FILE rather
+/// than about the document: `anchor_unavailable` (no resolver could read
+/// it) and `anchor_mismatch` (it was read and does not match the `:size`
+/// or `:sha256` the anchor declares). Neither touches what an edit acts
+/// on. A NATIVE operation never looks at an anchor at all, and a BOUND
+/// one walks the inline dump's own `(midi/mtrk …)` events or
+/// `(it/pattern …)` cells IN THE TREE — the file is where those bytes
+/// came from, not where they are. The one thing the file does carry is an
+/// `it/` tier's `(bin :at :len)` regions, and a selection over a tier
+/// that kept its patterns by reference finds no `(ev …)` form to address,
+/// so the plan comes back empty rather than wrong.
+///
+/// Refusing them was this verb's own bug: every `edit-bound-*` document
+/// names a file that is not beside it, so no bound edit was reachable
+/// through the CLI at all while the engine planned them correctly.
+fn blocksEdit(code: tempura.Diag.Code) bool {
+    return switch (code) {
+        .anchor_unavailable, .anchor_mismatch => false,
+        else => true,
+    };
+}
+
 const Merged = union(enum) { ok: []const u8, failed: u8 };
 
 /// `--op`, with `--select`'s object under its `"sel"` key.
@@ -141,12 +192,40 @@ fn merged(ctx: *const Cli.Ctx) Cli.Error!Merged {
         return .{ .failed = Cli.Exit.usage };
     }
 
-    var object = op.value.object;
-    object.put(ctx.gpa, "sel", sel.value) catch return error.OutOfMemory;
-    const text = std.json.Stringify.valueAlloc(ctx.a, std.json.Value{ .object = object }, .{}) catch |e| switch (e) {
-        error.OutOfMemory => return error.OutOfMemory,
+    // WRITTEN, never mutated. `parseFromSlice`'s `ObjectMap` holds its
+    // storage in the `Parsed`'s own arena, and `put`ting into it with any
+    // other allocator frees the old index header with the wrong one the
+    // moment the map outgrows its capacity — a heap corruption this verb
+    // shipped for an afternoon, reachable from an `--op` with fifteen
+    // keys and a `--select` beside it. So the merge emits TEXT: each of
+    // the operation's own pairs, then `"sel"`, into the invocation's
+    // arena, with nothing written back into either parse.
+    var out: std.Io.Writer.Allocating = .init(ctx.a);
+    const w = &out.writer;
+    try w.writeByte('{');
+    var it = op.value.object.iterator();
+    while (it.next()) |entry| {
+        // The flag is the later word, so the operation's own `"sel"` is
+        // dropped rather than emitted twice.
+        if (std.mem.eql(u8, entry.key_ptr.*, "sel")) continue;
+        try writeJson(w, entry.key_ptr.*);
+        try w.writeByte(':');
+        try writeJson(w, entry.value_ptr.*);
+        try w.writeByte(',');
+    }
+    try w.writeAll("\"sel\":");
+    try writeJson(w, sel.value);
+    try w.writeByte('}');
+    return .{ .ok = out.written() };
+}
+
+/// One JSON value onto `w`. `Stringify.value` fails only the way the
+/// writer does, and this one is allocating, so the only failure is
+/// exhaustion.
+fn writeJson(w: *std.Io.Writer, v: anytype) Cli.Error!void {
+    std.json.Stringify.value(v, .{}, w) catch |e| switch (e) {
+        error.WriteFailed => return error.WriteFailed,
     };
-    return .{ .ok = text };
 }
 
 const t = std.testing;
@@ -287,6 +366,138 @@ test "edit: a refusal writes no document and carries the engine's diagnostic" {
     try t.expectEqual(Cli.Exit.errors, c.code);
     try t.expectEqualStrings("", c.out.written());
     try t.expect(std.mem.indexOf(u8, c.err.written(), "edit_off_bar") != null);
+}
+
+test "edit --select: a large --op object merges without freeing anybody else's memory" {
+    // The bug: `--select` used to `put` into the `ObjectMap`
+    // `parseFromSlice` returned, with the CLI's allocator rather than the
+    // parse's arena. Under sixteen keys the map never grows and nothing
+    // happens; past a capacity boundary the old index header is freed
+    // with the wrong allocator and the process aborts (exit 134 under a
+    // non-debug allocator, a detected invalid free under this one).
+    //
+    // Twenty keys, so the boundary is crossed whatever the growth policy,
+    // and the merge is checked to have kept every one of them.
+    const a = t.allocator;
+    var d = try Doc.init();
+    defer d.deinit();
+
+    var op: std.Io.Writer.Allocating = .init(a);
+    defer op.deinit();
+    try op.writer.writeAll("{\"op\":\"transpose\",\"semitones\":12");
+    for (0..20) |i| try op.writer.print(",\"k{d}\":{d}", .{ i, i });
+    try op.writer.writeAll("}");
+    const op_json = try a.dupeZ(u8, op.written());
+    defer a.free(op_json);
+
+    var c = try Cli.invoke(&.{
+        "tempura", "edit",  d.path,     "--dry-run",
+        "--op",    op_json, "--select", "{\"lanes\":[\"flash\"],\"kinds\":[\"note\"]}",
+    });
+    defer c.deinit();
+    try t.expectEqual(Cli.Exit.ok, c.code);
+    // The operation still transposes — the merge kept `"op"` and
+    // `"semitones"` and did not truncate at the boundary.
+    try t.expectEqual(@as(usize, 3), std.mem.count(u8, c.out.written(), "set_keyword"));
+    try t.expect(std.mem.indexOf(u8, c.out.written(), "\"value\":48") != null);
+}
+
+test "edit --select: the flag's selection replaces the operation's own" {
+    var d = try Doc.init();
+    defer d.deinit();
+
+    // Both carry a `"sel"`; the flag is the later word, and the merged
+    // object carries exactly one.
+    var c = try Cli.invoke(&.{
+        "tempura",
+        "edit",
+        d.path,
+        "--dry-run",
+        "--op",
+        "{\"op\":\"transpose\",\"semitones\":1,\"sel\":{\"lanes\":[\"glow\"]}}",
+        "--select",
+        "{\"lanes\":[\"flash\"],\"keys\":[60]}",
+    });
+    defer c.deinit();
+    try t.expectEqual(Cli.Exit.ok, c.code);
+    // Key 60 is the one note the flag's selection covers; `glow` has no
+    // notes at all, so the operation's own `"sel"` would have planned
+    // nothing.
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, c.out.written(), "set_keyword"));
+    try t.expect(std.mem.indexOf(u8, c.out.written(), "\"value\":61") != null);
+}
+
+test "edit: an unresolved anchor does not block an edit whose tier is inline" {
+    // The bug: the verb refused ANY load error, and every bound fixture
+    // names a file that is not beside it (`anchor_unavailable`), so no
+    // bound edit was reachable through the CLI at all. The diagnostic is
+    // still printed — it is an error and the user hears it — and the
+    // edit goes through.
+    const a = t.allocator;
+    const path = try Cli.repoPath(a, "corpus/edit-bound-it-shared/doc.sjon");
+    defer a.free(path);
+
+    var c = try Cli.invoke(&.{
+        "tempura", "edit",                                                                                  path, "--dry-run",
+        "--op",    "{\"op\":\"velocity\",\"sel\":{\"lanes\":[\"lead\"]},\"vel\":64,\"allow-shared\":true}",
+    });
+    defer c.deinit();
+    try t.expectEqual(Cli.Exit.ok, c.code);
+    try t.expect(std.mem.indexOf(u8, c.err.written(), "anchor_unavailable") != null);
+    // 64 · 64/127 = 32, written into the volume column of the one cell.
+    try t.expect(std.mem.indexOf(u8, c.out.written(), "\"key\":\"vol\",\"value\":32") != null);
+}
+
+test "edit: a document that does not PARSE is still refused" {
+    // The narrowing is two codes wide and no wider: a parse error means
+    // the addresses a plan names do not exist.
+    const path = try Cli.repoPath(t.allocator, "src/cli/testdata/bad-doc.sjon");
+    defer t.allocator.free(path);
+    var c = try Cli.invoke(&.{
+        "tempura", "edit",                          path, "--dry-run",
+        "--op",    "{\"op\":\"merge\",\"sel\":{}}",
+    });
+    defer c.deinit();
+    try t.expectEqual(Cli.Exit.errors, c.code);
+    try t.expectEqualStrings("", c.out.written());
+    try t.expect(std.mem.indexOf(u8, c.err.written(), "lane_duplicate") != null);
+}
+
+test "edit: the two bound corpus cases run through the verb, not only the engine" {
+    // `corpus/edit-bound-{smf-pair,it-cell}` carry their anchor's file
+    // beside them (`zig build fixtures`), so they load clean and the
+    // operation the corpus pins as a PLAN is applied here as TEXT — the
+    // two halves of plan 07's contract over one document.
+    const a = t.allocator;
+    const cases = [_]struct { case: []const u8, op: [:0]const u8, want: []const u8 }{
+        .{
+            .case = "corpus/edit-bound-smf-pair/doc.sjon",
+            .op = "{\"op\":\"retime\",\"sel\":{\"lanes\":[\"kick\"],\"kinds\":[\"note\"],\"range\":[0,1]},\"delta\":92252160}",
+            // The pair moved a whole bar's half: the `note-on` is now at
+            // SMF tick 960 and the `note-off` at 1200, after the events
+            // it crossed.
+            .want = "(note-on :at 960 :ch 1 :key 36 :vel 100)",
+        },
+        .{
+            .case = "corpus/edit-bound-it-cell/doc.sjon",
+            .op = "{\"op\":\"retime\",\"sel\":{\"lanes\":[\"lead\"],\"kinds\":[\"note\"],\"range\":[92252160,92252161]},\"delta\":5765760}",
+            // Three of the twenty-four ticks a row holds at speed 24, so
+            // the cell is delayed inside the row it already sits in.
+            .want = "SD3",
+        },
+    };
+
+    for (cases) |c| {
+        const path = try Cli.repoPath(a, c.case);
+        defer a.free(path);
+        var got = try Cli.invoke(&.{ "tempura", "edit", path, "--op", c.op });
+        defer got.deinit();
+        try t.expectEqual(Cli.Exit.ok, got.code);
+        try t.expectEqualStrings("", got.err.written());
+        try t.expect(std.mem.indexOf(u8, got.out.written(), c.want) != null);
+        // Layout preserved: the document's own header comment survives.
+        try t.expect(std.mem.startsWith(u8, got.out.written(), "; A document whose one anchor is an INLINE"));
+    }
 }
 
 test "edit: -o writes the edited document, and the input is left alone" {
