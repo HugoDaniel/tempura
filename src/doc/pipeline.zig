@@ -2523,20 +2523,16 @@ test "pipeline.build: every allocation failure is OutOfMemory, cleanly, with not
     // arena-backed deinit": at EVERY allocation index the call fails
     // with error.OutOfMemory and testing.allocator sees no leak; past
     // the last index it succeeds. Bounded by the number of allocations
-    // the call makes, which the loop discovers. The `.mid` build, with
-    // its residue, so the records and the SMF carrier are swept.
-    //
-    // The `.it` build is NOT swept yet: it fails the sweep outside this
-    // part, in `residue/it.zig`'s `tail`, which frees `t.line` and then
-    // frees it again from its `errdefer` when the `toOwnedSlice` after
-    // it fails. Add `.it` here once that is fixed.
+    // the call makes, which the loop discovers. Both kinds, each with its
+    // residue, so the records and both carriers — the SMF events, the
+    // `TMPU` chunk and the message tail — are swept.
     const gpa = testing.allocator;
     var schema = try Schema.load(gpa);
     defer schema.deinit();
     var fx = try ready(gpa, &schema, native_doc);
     defer fx.deinit();
 
-    for ([_]Doc.AnchorKind{.smf}) |kind| {
+    for ([_]Doc.AnchorKind{ .smf, .it }) |kind| {
         var fail_index: usize = 0;
         while (true) : (fail_index += 1) {
             var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
