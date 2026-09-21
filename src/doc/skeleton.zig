@@ -124,6 +124,37 @@ const Seen = struct {
     }
 };
 
+/// What one SMF track's events say, channel by channel: whether it
+/// sounded, and how many values each controller surface took.
+const Census = struct {
+    /// Sixteen channels of 128 controllers, the caller's buffer.
+    cc: []Seen,
+    sounds: [16]bool = @splat(false),
+    bend: [16]Seen = @splat(.{}),
+    pressure: [16]Seen = @splat(.{}),
+
+    fn saw(self: *Census, e: smf.Event) void {
+        switch (e.kind) {
+            // A note-off alone does not make an address a lane: an
+            // orphan off is what a DAW leaves behind, not music.
+            .note_on => if (e.payload.note.vel > 0 and e.payload.note.ch < 16) {
+                self.sounds[e.payload.note.ch] = true;
+            },
+            .control_change => {
+                const c = e.payload.control;
+                if (c.ch < 16 and c.num < 128) self.cc[@as(usize, c.ch) * 128 + c.num].saw(c.val);
+            },
+            .pitch_bend => if (e.payload.bend.ch < 16) {
+                self.bend[e.payload.bend.ch].saw(e.payload.bend.value);
+            },
+            .channel_pressure => if (e.payload.pressure.ch < 16) {
+                self.pressure[e.payload.pressure.ch].saw(e.payload.pressure.val);
+            },
+            else => {},
+        }
+    }
+};
+
 const Deriver = struct {
     gpa: Allocator,
     /// The result's arena — every name and every slice lands here.
@@ -138,70 +169,52 @@ const Deriver = struct {
     fn smfTier(self: *Deriver, tier: *const Doc.SmfTier) Error!void {
         const seq = &tier.sequence;
         const ppq = seq.division.pulsesPerQuarter();
+        // The census's controller table, on the heap and reset per
+        // track: sixteen channels of 128 controllers is more than a
+        // stack frame should carry.
+        const cc = try self.gpa.alloc(Seen, 16 * 128);
+        defer self.gpa.free(cc);
 
         for (seq.tracks, 0..) |track, index| {
-            // One census per track, on the heap: sixteen channels of
-            // 128 controllers is more than a stack frame should carry.
-            const cc = try self.gpa.alloc(Seen, 16 * 128);
-            defer self.gpa.free(cc);
+            // A `(lane :track …)` is a u16, so a track past 65,535 has no
+            // lane to derive — and no count to warn in: `smf/read` has
+            // said `smf_ntrks_mismatch`, a header's u16 being unable to
+            // number them either, and rule 1 raises nothing of its own.
+            const number = std.math.cast(u16, index + 1) orelse break;
             @memset(cc, .{});
-            var sounds: [16]bool = @splat(false);
-            var bend: [16]Seen = @splat(.{});
-            var pressure: [16]Seen = @splat(.{});
-
+            var census: Census = .{ .cc = cc };
             for (track.events) |e| switch (e.kind) {
-                // A note-off alone does not make an address a lane: an
-                // orphan off is what a DAW leaves behind, not music.
-                .note_on => if (e.payload.note.vel > 0 and e.payload.note.ch < 16) {
-                    sounds[e.payload.note.ch] = true;
-                },
-                .control_change => {
-                    const c = e.payload.control;
-                    if (c.ch < 16 and c.num < 128) cc[@as(usize, c.ch) * 128 + c.num].saw(c.val);
-                },
-                .pitch_bend => if (e.payload.bend.ch < 16) bend[e.payload.bend.ch].saw(
-                    e.payload.bend.value,
-                ),
-                .channel_pressure => if (e.payload.pressure.ch < 16) {
-                    pressure[e.payload.pressure.ch].saw(e.payload.pressure.val);
-                },
                 .marker, .cue_point => try self.smfCue(seq, e, ppq),
-                else => {},
+                else => census.saw(e),
             };
+            for (0..16) |ch| try self.smfChannel(tier.anchor, number, @intCast(ch), &census);
+        }
+    }
 
-            const number: u16 = @intCast(index + 1);
-            for (0..16) |ch| {
-                const wire: u4 = @intCast(ch);
-                const base = try std.fmt.allocPrint(self.arena, "t{d}-ch{d}", .{ number, ch + 1 });
-                if (sounds[ch]) try self.smfLane(tier.anchor, base, .notes, number, wire, null);
-                for (0..128) |num| {
-                    if (!cc[ch * 128 + num].moved()) continue;
-                    try self.smfLane(
-                        tier.anchor,
-                        try std.fmt.allocPrint(self.arena, "{s}-cc{d}", .{ base, num }),
-                        .curve,
-                        number,
-                        wire,
-                        .{ .cc = @intCast(num) },
-                    );
-                }
-                if (bend[ch].moved()) try self.smfLane(
-                    tier.anchor,
-                    try std.fmt.allocPrint(self.arena, "{s}-bend", .{base}),
-                    .curve,
-                    number,
-                    wire,
-                    .bend,
-                );
-                if (pressure[ch].moved()) try self.smfLane(
-                    tier.anchor,
-                    try std.fmt.allocPrint(self.arena, "{s}-pressure", .{base}),
-                    .curve,
-                    number,
-                    wire,
-                    .pressure,
-                );
-            }
+    /// The lanes one channel of one track earns: a notes lane when it
+    /// sounded, a curve per surface that moved.
+    fn smfChannel(
+        self: *Deriver,
+        anchor: Doc.AnchorId,
+        number: u16,
+        ch: u4,
+        census: *const Census,
+    ) Error!void {
+        const at: usize = ch;
+        const base = try std.fmt.allocPrint(self.arena, "t{d}-ch{d}", .{ number, at + 1 });
+        if (census.sounds[at]) try self.smfLane(anchor, base, .notes, number, ch, null);
+        for (0..128) |num| {
+            if (!census.cc[at * 128 + num].moved()) continue;
+            const name = try std.fmt.allocPrint(self.arena, "{s}-cc{d}", .{ base, num });
+            try self.smfLane(anchor, name, .curve, number, ch, .{ .cc = @intCast(num) });
+        }
+        if (census.bend[at].moved()) {
+            const name = try std.fmt.allocPrint(self.arena, "{s}-bend", .{base});
+            try self.smfLane(anchor, name, .curve, number, ch, .bend);
+        }
+        if (census.pressure[at].moved()) {
+            const name = try std.fmt.allocPrint(self.arena, "{s}-pressure", .{base});
+            try self.smfLane(anchor, name, .curve, number, ch, .pressure);
         }
     }
 
@@ -379,6 +392,31 @@ fn smfFixture(gpa: Allocator) !smf.Sequence {
     try b.addEvent(drums, 15360, .end_of_track, .empty);
 
     return b.finish();
+}
+
+test "skeleton: tracks past the 65,535 a lane can address derive no lane, and never trap" {
+    // `smf/read` keeps every MTrk it finds, and 65,536 empty ones fit in
+    // half a mebibyte. The track number was `@intCast` to the `u16` a
+    // `(lane :track …)` holds; past it there is no lane to derive.
+    const gpa = testing.allocator;
+    var b: smf.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.division = .{ .ppq = 480 };
+    for (0..65_537) |_| _ = try b.addTrack();
+    const last_addressable: u32 = 65_534;
+    for ([_]u32{ last_addressable, 65_535, 65_536 }) |t| {
+        try b.addEvent(t, 0, .note_on, .{ .note = .{ .ch = 0, .key = 60, .vel = 90 } });
+    }
+
+    var tiers = [_]Doc.SmfTier{.{ .anchor = "wide", .sequence = try b.finish() }};
+    var doc = docWith(gpa, &tiers, &.{});
+    defer doc.deinit();
+
+    var sk = try derive(gpa, &doc, .{});
+    defer sk.deinit();
+    try testing.expectEqual(@as(usize, 1), sk.lanes.len);
+    try testing.expectEqualStrings("t65535-ch1", sk.lanes[0].name);
+    try testing.expectEqual(@as(u16, 65_535), sk.lanes[0].binding.?.address.smf.track);
 }
 
 test "skeleton: an SMF tier names one notes lane per address and one curve per mover" {
