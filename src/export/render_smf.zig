@@ -1174,3 +1174,27 @@ test "renderSmf: a lane renders onto the base track a dump left empty for it" {
     // No track was new to the base's format, so nothing was promoted.
     try testing.expectEqual(@as(usize, 0), out.diags.count(.render_format_promoted));
 }
+
+test "renderSmf: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers.
+    const gpa = testing.allocator;
+    var fx = try load(gpa, test_support.native_source);
+    defer fx.deinit();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = renderSmf(failing.allocator(), &fx.doc, &fx.derived, null, .{});
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var value = try result;
+            value.deinit();
+            break;
+        }
+    }
+}

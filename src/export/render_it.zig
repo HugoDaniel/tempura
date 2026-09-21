@@ -1174,3 +1174,40 @@ test "renderIt: the lane record's hash is the hash of the module that comes back
         &records.hashItConductor(&back.module),
     );
 }
+
+test "renderIt: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers.
+    // A notes lane, a curve lane and a tempo change: the three kinds of
+    // cell the render places, so every allocating path is on the way.
+    const gpa = testing.allocator;
+    var fx = try load(gpa,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :qpm 125)
+        \\(tempo-point :at 2q :qpm 150)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name kick :kind notes
+        \\  (note :at 0q :dur 1q :key 60 :vel 127)
+        \\  (note :at 2q :dur 1q :key 62 :vel 64))
+        \\(lane :name swell :kind curve :range [0 1]
+        \\  (keyframe :at 0q :value 0 :ease linear)
+        \\  (keyframe :at 4q :value 1 :ease in-cubic))
+    );
+    defer fx.deinit();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = renderIt(failing.allocator(), &fx.doc, &fx.derived, null, .{});
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var value = try result;
+            value.deinit();
+            break;
+        }
+    }
+}

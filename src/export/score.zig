@@ -1176,3 +1176,27 @@ fn reDerive(fx: *support.Fixture) !void {
     fx.derived.deinit();
     fx.derived = try derive.derive(gpa, &fx.doc);
 }
+
+test "score.exportScore: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers.
+    const gpa = testing.allocator;
+    var fx = try support.native(gpa);
+    defer fx.deinit();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = exportScore(failing.allocator(), &fx.doc, &fx.derived, &.{}, .{});
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var score = try result;
+            score.deinit();
+            break;
+        }
+    }
+}
