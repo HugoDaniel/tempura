@@ -237,42 +237,24 @@ const Walk = struct {
         }
 
         var pos = start;
+        // Bounded by the file: every chunk moves the cursor past its
+        // eight-byte header.
         while (pos + 8 <= end) {
-            const tag: [4]u8 = self.bytes[pos..][0..4].*;
-            const declared = std.mem.readInt(u32, self.bytes[pos + 4 ..][0..4], .big);
-            const body = pos + 8;
-            const available = end - body;
-            var len: usize = declared;
-            if (len > available) {
-                len = available;
-                try self.diag(
-                    .smf_chunk_truncated,
-                    .err,
-                    pos,
-                    body,
-                    "chunk {s} claims {d} bytes and the file holds {d}",
-                    .{ &tag, declared, available },
-                );
-            }
-
             const index: u32 = @intCast(self.chunks.items.len);
-            try self.chunks.append(self.arena.allocator(), .{
-                .tag = tag,
-                .offset = @intCast(pos),
-                .len = declared,
-                .clamped_len = @intCast(len),
-            });
+            const chunk = try self.chunkHeader(pos, end);
+            const body = pos + 8;
+            const chunk_end = body + chunk.clamped_len;
 
-            if (std.mem.eql(u8, &tag, "MThd") and !self.header_seen) {
-                try self.header(body, body + len);
-            } else if (std.mem.eql(u8, &tag, "MTrk")) {
+            if (std.mem.eql(u8, &chunk.tag, "MThd") and !self.header_seen) {
+                try self.header(body, chunk_end);
+            } else if (std.mem.eql(u8, &chunk.tag, "MTrk")) {
                 self.mtrk_count += 1;
-                try self.track(index, body, body + len);
+                try self.track(index, body, chunk_end);
             } else {
-                try self.foreignChunk(index, tag, body, body + len);
+                try self.foreignChunk(index, chunk.tag, body, chunk_end);
             }
 
-            pos = body + len;
+            pos = chunk_end;
         }
 
         // Trailing bytes after the last chunk are junk appended to a
@@ -307,6 +289,38 @@ const Walk = struct {
                 .{ self.ntrks, self.mtrk_count },
             );
         }
+    }
+
+    /// The chunk header at `pos` (the caller has checked eight bytes are
+    /// there): its tag, its DECLARED length and the length that is
+    /// actually inside `end` — a claim past the file is clamped and
+    /// diagnosed. Recorded on the map before it is returned, so the
+    /// caller's index into `chunks` is this chunk's.
+    fn chunkHeader(self: *Walk, pos: usize, end: usize) Error!Chunk {
+        const tag: [4]u8 = self.bytes[pos..][0..4].*;
+        const declared = std.mem.readInt(u32, self.bytes[pos + 4 ..][0..4], .big);
+        const body = pos + 8;
+        const available = end - body;
+        var len: usize = declared;
+        if (len > available) {
+            len = available;
+            try self.diag(
+                .smf_chunk_truncated,
+                .err,
+                pos,
+                body,
+                "chunk {s} claims {d} bytes and the file holds {d}",
+                .{ &tag, declared, available },
+            );
+        }
+        const chunk: Chunk = .{
+            .tag = tag,
+            .offset = @intCast(pos),
+            .len = declared,
+            .clamped_len = @intCast(len),
+        };
+        try self.chunks.append(self.arena.allocator(), chunk);
+        return chunk;
     }
 
     /// `RIFF <size le> RMID data <size le> <the SMF>` — the `.rmi`
@@ -410,116 +424,57 @@ const Walk = struct {
         );
     }
 
+    /// Running status, as the walk carries it from event to event: the
+    /// last CHANNEL status byte, and whether a meta or a sysex has come
+    /// since. RP-001 forbids reusing it across one; the reader tolerates
+    /// that the way OpenMPT does and says so.
+    const Running = struct { last: u8 = 0, cancelled: bool = false };
+
+    /// The status an event is read under, and whether the file implied
+    /// it rather than spelling it.
+    const Status = struct { byte: u8, running: bool };
+
     /// One `MTrk` body: `<delta event>*`, ending at `FF 2F 00`.
+    ///
+    /// The parent keeps the cursor, the running tick and the three
+    /// verdicts (an end of track seen, the walk aborted); each leaf
+    /// below reads one thing and answers null when the bytes gave out,
+    /// having said so.
     fn track(self: *Walk, chunk_index: u32, body: usize, end: usize) Error!void {
         const ti = try self.builder.addTrack();
         var sites: std.ArrayList(EventSite) = .empty;
 
         var pos = body;
         var at: i64 = 0;
-        // The last CHANNEL status byte, whatever came after it.
-        var last_status: u8 = 0;
-        // RP-001 forbids running status across a meta or a sysex; the
-        // reader tolerates it the way OpenMPT does and says so.
-        var cancelled = false;
+        var running: Running = .{};
         var saw_end = false;
         var aborted = false;
 
+        // Bounded by the track's bytes: every turn consumes at least one.
         while (pos < end) {
-            switch (vlq.read(self.bytes[0..end], &pos)) {
-                .ok => |delta| at +|= delta,
-                .err => |code| {
-                    try self.diag(code, .err, pos, @min(pos + 1, end), "a delta time that is not one", .{});
-                    aborted = true;
-                    break;
-                },
-            }
-
-            if (pos >= end) {
-                try self.diag(.smf_track_truncated, .err, pos, end, "the track ends after a delta time", .{});
+            const delta = try self.readDelta(&pos, end) orelse {
                 aborted = true;
                 break;
-            }
+            };
+            at +|= delta;
 
             const at_offset = pos;
-            var running = false;
-            var status = self.bytes[pos];
-            if (status >= 0x80) {
-                pos += 1;
-                if (status < 0xF0) {
-                    last_status = status;
-                    cancelled = false;
-                }
-            } else {
-                if (last_status == 0) {
-                    try self.diag(
-                        .smf_status_invalid,
-                        .err,
-                        pos,
-                        pos + 1,
-                        "a data byte {x:0>2} where a status byte was due and no running status is in effect",
-                        .{status},
-                    );
-                    aborted = true;
-                    break;
-                }
-                status = last_status;
-                running = true;
-                if (cancelled) try self.diag(
-                    .smf_running_status_across_meta,
-                    .warning,
-                    pos,
-                    pos + 1,
-                    "running status reused across a meta or sysex event",
-                    .{},
-                );
-            }
+            const status = try self.resolveStatus(&pos, &running) orelse {
+                aborted = true;
+                break;
+            };
 
-            // A system common or real-time byte has no place in a file
-            // (RP-001 gives them none, and they do not update running
-            // status) but plenty of files carry one anyway, dumped from
-            // a live stream. It is skipped with its data bytes and the
-            // track goes on — the reader keeps what it parsed.
-            if (status >= 0xF1 and status != 0xF7 and status != 0xFF) {
-                const data = systemDataBytes(status);
-                try self.diag(
-                    .smf_status_invalid,
-                    .warning,
-                    at_offset,
-                    at_offset + 1,
-                    "status {x:0>2} is a system message a file has no room for; skipped",
-                    .{status},
-                );
-                if (pos + data > end) {
-                    try self.diag(
-                        .smf_track_truncated,
-                        .err,
-                        pos,
-                        end,
-                        "a system message needs {d} data bytes and the track holds {d}",
-                        .{ data, end - pos },
-                    );
+            if (isSystemMessage(status.byte)) {
+                if (!try self.skipSystemMessage(status.byte, at_offset, &pos, end)) {
                     aborted = true;
                     break;
                 }
-                pos += data;
                 continue;
             }
 
-            const parsed = if (status < 0xF0)
-                try self.channelEvent(status, &pos, end)
-            else switch (status) {
-                0xF0, 0xF7 => blk: {
-                    cancelled = true;
-                    break :blk try self.bytesEvent(status, &pos, end);
-                },
-                else => blk: {
-                    cancelled = true;
-                    break :blk try self.metaEvent(&pos, end);
-                },
-            };
-
-            const event = parsed orelse {
+            // RP-001: a meta or a sysex cancels running status.
+            if (status.byte >= 0xF0) running.cancelled = true;
+            const event = try self.parseEvent(status.byte, &pos, end) orelse {
                 aborted = true;
                 break;
             };
@@ -527,38 +482,13 @@ const Walk = struct {
             try self.builder.addEvent(ti, at, event.kind, event.payload);
             try sites.append(self.arena.allocator(), .{
                 .offset = @intCast(at_offset),
-                .running_status = running,
+                .running_status = status.running,
             });
-
-            if (event.kind == .set_tempo) {
-                if (event.payload.tempo == 0) try self.diag(
-                    .smf_set_tempo_zero,
-                    .err,
-                    at_offset,
-                    pos,
-                    "a set-tempo of zero microseconds per quarter note",
-                    .{},
-                );
-                if (self.smpte != null) try self.diag(
-                    .smpte_tempo_ignored,
-                    .info,
-                    at_offset,
-                    pos,
-                    "a SMPTE file's tempo event is kept and not believed",
-                    .{},
-                );
-            }
+            try self.tempoDiagnostics(event, at_offset, pos);
 
             if (event.kind == .end_of_track) {
                 saw_end = true;
-                if (pos < end) try self.diag(
-                    .end_of_track_early,
-                    .warning,
-                    at_offset,
-                    pos,
-                    "end of track with {d} bytes of the chunk left",
-                    .{end - pos},
-                );
+                try self.endOfTrack(at_offset, pos, end);
                 break;
             }
         }
@@ -578,8 +508,154 @@ const Walk = struct {
         });
     }
 
+    /// The delta time at `pos`, or null (diagnosed) when the bytes are
+    /// not one or nothing follows it. On success the cursor sits on the
+    /// event's first byte, which is inside the track.
+    fn readDelta(self: *Walk, pos: *usize, end: usize) Error!?u32 {
+        const delta: u32 = switch (vlq.read(self.bytes[0..end], pos)) {
+            .ok => |d| d,
+            .err => |code| {
+                const span_end = @min(pos.* + 1, end);
+                try self.diag(code, .err, pos.*, span_end, "a delta time that is not one", .{});
+                return null;
+            },
+        };
+        if (pos.* >= end) {
+            const msg = "the track ends after a delta time";
+            try self.diag(.smf_track_truncated, .err, pos.*, end, msg, .{});
+            return null;
+        }
+        return delta;
+    }
+
+    /// The status the event at `pos` is read under: the byte there when
+    /// it is one (a channel status becomes the running one), or the
+    /// running status when a data byte sits there instead. Null
+    /// (diagnosed) when a data byte is due and nothing is running —
+    /// guessing would invent music.
+    fn resolveStatus(self: *Walk, pos: *usize, running: *Running) Error!?Status {
+        const byte = self.bytes[pos.*];
+        if (byte >= 0x80) {
+            pos.* += 1;
+            if (byte < 0xF0) running.* = .{ .last = byte, .cancelled = false };
+            return .{ .byte = byte, .running = false };
+        }
+        if (running.last == 0) {
+            try self.diag(
+                .smf_status_invalid,
+                .err,
+                pos.*,
+                pos.* + 1,
+                "a data byte {x:0>2} where a status byte was due and no running status " ++
+                    "is in effect",
+                .{byte},
+            );
+            return null;
+        }
+        if (running.cancelled) try self.diag(
+            .smf_running_status_across_meta,
+            .warning,
+            pos.*,
+            pos.* + 1,
+            "running status reused across a meta or sysex event",
+            .{},
+        );
+        return .{ .byte = running.last, .running = true };
+    }
+
+    /// A system common or real-time byte has no place in a file (RP-001
+    /// gives them none, and they do not update running status) but
+    /// plenty of files carry one anyway, dumped from a live stream.
+    /// Skipped with its data bytes so the track goes on — the reader
+    /// keeps what it parsed; false (diagnosed) when the data bytes run
+    /// past the track.
+    fn skipSystemMessage(
+        self: *Walk,
+        status: u8,
+        at_offset: usize,
+        pos: *usize,
+        end: usize,
+    ) Error!bool {
+        const data = systemDataBytes(status);
+        try self.diag(
+            .smf_status_invalid,
+            .warning,
+            at_offset,
+            at_offset + 1,
+            "status {x:0>2} is a system message a file has no room for; skipped",
+            .{status},
+        );
+        if (pos.* + data > end) {
+            try self.diag(
+                .smf_track_truncated,
+                .err,
+                pos.*,
+                end,
+                "a system message needs {d} data bytes and the track holds {d}",
+                .{ data, end - pos.* },
+            );
+            return false;
+        }
+        pos.* += data;
+        return true;
+    }
+
+    /// The event `status` starts at `pos`: a channel message, a sysex or
+    /// an escape, or a meta event. Null (diagnosed) when the bytes ran
+    /// out inside it.
+    fn parseEvent(self: *Walk, status: u8, pos: *usize, end: usize) Error!?Parsed {
+        if (status < 0xF0) return self.channelEvent(status, pos, end);
+        return switch (status) {
+            0xF0, 0xF7 => self.bytesEvent(status, pos, end),
+            else => self.metaEvent(pos, end),
+        };
+    }
+
+    /// The end of track ends the track: what follows it in the chunk is
+    /// not the track's, and the walk says so.
+    fn endOfTrack(self: *Walk, at_offset: usize, pos: usize, end: usize) Error!void {
+        if (pos < end) try self.diag(
+            .end_of_track_early,
+            .warning,
+            at_offset,
+            pos,
+            "end of track with {d} bytes of the chunk left",
+            .{end - pos},
+        );
+    }
+
+    /// What the walk says about a `set_tempo` it kept: a zero is refused
+    /// (and still kept), and one in a SMPTE file is kept and not believed
+    /// (plan 03).
+    fn tempoDiagnostics(self: *Walk, event: Parsed, at_offset: usize, pos: usize) Error!void {
+        if (event.kind != .set_tempo) return;
+        if (event.payload.tempo == 0) try self.diag(
+            .smf_set_tempo_zero,
+            .err,
+            at_offset,
+            pos,
+            "a set-tempo of zero microseconds per quarter note",
+            .{},
+        );
+        if (self.smpte != null) try self.diag(
+            .smpte_tempo_ignored,
+            .info,
+            at_offset,
+            pos,
+            "a SMPTE file's tempo event is kept and not believed",
+            .{},
+        );
+    }
+
     /// An event the walk built, or nothing when the bytes ran out.
     const Parsed = struct { kind: Kind, payload: Payload };
+
+    /// Whether a status byte is a system common or real-time message —
+    /// everything from `F1` up but the escape (`F7`) and the meta prefix
+    /// (`FF`), which RP-001 does give a file.
+    fn isSystemMessage(status: u8) bool {
+        return status >= 0xF1 and status != 0xF7 and status != 0xFF;
+    }
 
     /// How many data bytes follow a system common or real-time status:
     /// one for MIDI time code (`F1`) and song select (`F3`), two for song

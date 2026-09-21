@@ -220,6 +220,8 @@ const Emit = struct {
     /// one but the last is a `end_of_track_early`.
     fn track(self: *Emit, events: []Event, ends_at: ?i64) Fail!void {
         std.mem.sort(Event, events, {}, byTick);
+        // Sorted, so every delta below is non-negative by construction.
+        std.debug.assert(std.sort.isSorted(Event, events, {}, byTick));
 
         var body: Writer.Allocating = .init(self.arena);
         const w = &body.writer;
@@ -319,30 +321,12 @@ const Emit = struct {
         try vlq.write(w, @intCast(value));
     }
 
+    /// One event's bytes, after its delta. A channel message rides on
+    /// running status; everything else resets it and is spelled from
+    /// the bytes it holds.
     fn event(self: *Emit, w: *Writer, e: Event, running: *u8) Fail!void {
-        if (e.kind.status()) |high| {
-            const p = e.payload;
-            const parts: struct { u8, u8, u8 } = switch (e.kind) {
-                .note_off, .note_on => .{ p.note.ch, p.note.key, p.note.vel },
-                .poly_pressure => .{ p.poly.ch, p.poly.key, p.poly.val },
-                .control_change => .{ p.control.ch, p.control.num, p.control.val },
-                .program_change => .{ p.program.ch, p.program.num, 0 },
-                .channel_pressure => .{ p.pressure.ch, p.pressure.val, 0 },
-                // 14 bits, LSB first, centre 8192.
-                else => .{
-                    p.bend.ch,
-                    @truncate(p.bend.value & 0x7F),
-                    @truncate((p.bend.value >> 7) & 0x7F),
-                },
-            };
-            const status = high | (parts[0] & 0x0F);
-            if (!self.opts.running_status or running.* != status) {
-                try w.writeByte(status);
-                running.* = status;
-            }
-            try w.writeByte(parts[1] & 0x7F);
-            if (e.kind.dataBytes() == 2) try w.writeByte(parts[2] & 0x7F);
-            return;
+        if (e.payload.channelData(e.kind)) |data| {
+            return self.channelEvent(w, e.kind, data, running);
         }
 
         // RP-001: a meta or a sysex cancels running status.
@@ -352,66 +336,103 @@ const Emit = struct {
                 try w.writeByte(if (e.kind == .sysex) @as(u8, 0xF0) else 0xF7);
                 try self.payload(w, self.seq.bytesOf(e.payload.bytes));
             },
-            .sequence_number => try self.meta(w, 0x00, &[_]u8{
-                @truncate(e.payload.number >> 8),
-                @truncate(e.payload.number),
-            }),
-            .midi_channel_prefix, .midi_port => try self.meta(
+            .meta_unknown => try self.meta(
                 w,
-                e.kind.metaType().?,
-                &[_]u8{e.payload.byte},
+                e.payload.meta.meta_type,
+                self.seq.bytesOf(e.payload.meta.bytes),
             ),
+            .tempura_residue => try self.residueEvent(w, e.payload.residue),
+            else => {
+                var buf: [5]u8 = undefined;
+                if (self.fixedMeta(e, &buf)) |bytes| {
+                    try self.meta(w, e.kind.metaType().?, bytes);
+                } else {
+                    // Every text meta, the sequencer-specific ones, and
+                    // the easing hint: the stored bytes, whatever they
+                    // are. Which kinds those are is `payloadField() ==
+                    // .bytes`, asked through `poolBytes` so the table
+                    // lives in one file.
+                    try self.meta(
+                        w,
+                        e.kind.metaType() orelse 0x7F,
+                        self.seq.bytesOf(e.payload.poolBytes(e.kind).?),
+                    );
+                }
+            },
+        }
+    }
+
+    /// A channel message: its status byte unless running status already
+    /// says it, then its data bytes, each masked to seven bits so a value
+    /// a builder seated out of range can never be read as a status.
+    fn channelEvent(
+        self: *Emit,
+        w: *Writer,
+        kind: Kind,
+        data: sequence.ChannelData,
+        running: *u8,
+    ) Fail!void {
+        const status = kind.status().? | (data.ch & 0x0F);
+        if (!self.opts.running_status or running.* != status) {
+            try w.writeByte(status);
+            running.* = status;
+        }
+        try w.writeByte(data.d1 & 0x7F);
+        if (kind.dataBytes() == 2) try w.writeByte(data.d2 & 0x7F);
+    }
+
+    /// The payload of a meta event whose fields are numbers of a fixed
+    /// width — a sequence number, a channel prefix or port, a tempo, a
+    /// SMPTE offset, a time or key signature — spelled into `buf` and
+    /// returned as the bytes RP-001 gives that type. Null for every
+    /// kind whose payload is a run in the pool.
+    fn fixedMeta(self: *const Emit, e: Event, buf: *[5]u8) ?[]const u8 {
+        const p = e.payload;
+        switch (e.kind) {
+            .sequence_number => {
+                buf[0..2].* = .{ @truncate(p.number >> 8), @truncate(p.number) };
+                return buf[0..2];
+            },
+            .midi_channel_prefix, .midi_port => {
+                buf[0] = p.byte;
+                return buf[0..1];
+            },
             .set_tempo => {
                 // The number on the file's grid, not the number as read:
                 // for a SMPTE sequence that is 500 000 µs whatever the
                 // event said, or the converted division would be
                 // conducted at a tempo it was never derived for
                 // (`Division.tempoOnGrid`).
-                const us = self.seq.division.tempoOnGrid(e.payload.tempo);
-                try self.meta(w, 0x51, &[_]u8{
-                    @truncate(us >> 16),
-                    @truncate(us >> 8),
-                    @truncate(us),
-                });
+                const us = self.seq.division.tempoOnGrid(p.tempo);
+                buf[0..3].* = .{ @truncate(us >> 16), @truncate(us >> 8), @truncate(us) };
+                return buf[0..3];
             },
             .smpte_offset => {
-                const s = e.payload.smpte;
-                try self.meta(w, 0x54, &[_]u8{ s.hr, s.mn, s.se, s.fr, s.ff });
+                buf.* = .{ p.smpte.hr, p.smpte.mn, p.smpte.se, p.smpte.fr, p.smpte.ff };
+                return buf[0..5];
             },
             .time_signature => {
-                const t = e.payload.time_sig;
-                try self.meta(w, 0x58, &[_]u8{ t.nn, t.dd, t.cc, t.bb });
+                buf[0..4].* = .{ p.time_sig.nn, p.time_sig.dd, p.time_sig.cc, p.time_sig.bb };
+                return buf[0..4];
             },
             .key_signature => {
-                const k = e.payload.key_sig;
-                try self.meta(w, 0x59, &[_]u8{ @bitCast(k.sf), k.mi });
+                buf[0..2].* = .{ @bitCast(p.key_sig.sf), p.key_sig.mi };
+                return buf[0..2];
             },
-            .meta_unknown => try self.meta(
-                w,
-                e.payload.meta.meta_type,
-                self.seq.bytesOf(e.payload.meta.bytes),
-            ),
-            .tempura_residue => {
-                // The envelope is rebuilt from the typed fields, so the
-                // payload is byte-identical to the one that was read
-                // (plan 04, "The SMF carrier").
-                const r = e.payload.residue;
-                const body = self.seq.bytesOf(r.body);
-                try w.writeAll(&[_]u8{ 0xFF, 0x7F });
-                try vlq.write(w, @intCast(@min(body.len + 8, vlq.MAX)));
-                try w.writeAll(&[_]u8{ 0x7D, 't', 'e', 'm', r.ver, r.kind, r.seq, r.total });
-                try w.writeAll(body[0..@min(body.len, vlq.MAX - 8)]);
-            },
-            // Every text meta, the sequencer-specific ones, and the
-            // easing hint: the stored bytes, whatever they are. Which
-            // kinds those are is `payloadField() == .bytes`, asked
-            // through `poolBytes` so the table lives in one file.
-            else => try self.meta(
-                w,
-                e.kind.metaType() orelse 0x7F,
-                self.seq.bytesOf(e.payload.poolBytes(e.kind).?),
-            ),
+            else => return null,
         }
+    }
+
+    /// tempura's residue record: the envelope is rebuilt from the typed
+    /// fields, so the payload is byte-identical to the one that was read
+    /// (plan 04, "The SMF carrier"). A body a VLQ cannot measure is cut,
+    /// as `payload` cuts.
+    fn residueEvent(self: *Emit, w: *Writer, r: sequence.TempuraResidue) Fail!void {
+        const body = self.seq.bytesOf(r.body);
+        try w.writeAll(&[_]u8{ 0xFF, 0x7F });
+        try vlq.write(w, @intCast(@min(body.len + 8, vlq.MAX)));
+        try w.writeAll(&[_]u8{ 0x7D, 't', 'e', 'm', r.ver, r.kind, r.seq, r.total });
+        try w.writeAll(body[0..@min(body.len, vlq.MAX - 8)]);
     }
 
     fn meta(self: *Emit, w: *Writer, meta_type: u8, bytes: []const u8) Fail!void {
