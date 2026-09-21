@@ -567,8 +567,8 @@ pub const Builder = struct {
 
     /// Appends an empty track and returns its index.
     pub fn addTrack(self: *Builder) Error!u32 {
-        const a = self.arena.allocator();
-        try self.tracks.append(a, .empty);
+        const arena = self.arena.allocator();
+        try self.tracks.append(arena, .empty);
         return @intCast(self.tracks.items.len - 1);
     }
 
@@ -576,9 +576,9 @@ pub const Builder = struct {
     /// The copy is why a caller may hand in a stack buffer or a slice of
     /// the file it is reading.
     pub fn addBytes(self: *Builder, bytes: []const u8) Error!Bytes {
-        const a = self.arena.allocator();
+        const arena = self.arena.allocator();
         const off: u32 = @intCast(self.pool.items.len);
-        try self.pool.appendSlice(a, bytes);
+        try self.pool.appendSlice(arena, bytes);
         return .{ .off = off, .len = @intCast(bytes.len) };
     }
 
@@ -596,8 +596,8 @@ pub const Builder = struct {
 
     /// Appends an event to `track`, in document order.
     pub fn addEvent(self: *Builder, track: u32, at: i64, kind: Kind, payload: Payload) Error!void {
-        const a = self.arena.allocator();
-        try self.tracks.items[track].append(a, .{ .at = at, .kind = kind, .payload = payload });
+        const arena = self.arena.allocator();
+        try self.tracks.items[track].append(arena, .{ .at = at, .kind = kind, .payload = payload });
     }
 
     /// How many events `track` holds so far.
@@ -607,15 +607,15 @@ pub const Builder = struct {
 
     /// Freezes the builder into a `Sequence` that owns the arena.
     pub fn finish(self: *Builder) Error!Sequence {
-        const a = self.arena.allocator();
-        const tracks = try a.alloc(Track, self.tracks.items.len);
-        for (self.tracks.items, 0..) |*t, i| tracks[i] = .{ .events = try t.toOwnedSlice(a) };
-        const pool = try self.pool.toOwnedSlice(a);
+        const arena = self.arena.allocator();
+        const tracks = try arena.alloc(Track, self.tracks.items.len);
+        for (self.tracks.items, 0..) |*t, i| tracks[i] = .{ .events = try t.toOwnedSlice(arena) };
+        const pool = try self.pool.toOwnedSlice(arena);
         return .{
             .format = self.format,
             .division = self.division,
             .tracks = tracks,
-            .foreign = try self.foreign.toOwnedSlice(a),
+            .foreign = try self.foreign.toOwnedSlice(arena),
             .pool = pool,
             .arena = self.arena,
         };
