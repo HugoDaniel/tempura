@@ -42,7 +42,11 @@ tuplets; and 2^53 of headroom is still tens of thousands of hours.
 A SMPTE division is wall-clock, not musical: it converts through OpenMPT's
 `frames · subframes / 2` and the file's `set-tempo` events stop conducting
 (`smpte_tempo_ignored`). The canonical SMF writer always emits a pulses-per-quarter
-division, so a file read with a SMPTE one is written on the grid it converted to.
+division, so a file read with a SMPTE one is written on the grid it converted to —
+and every `set-tempo` on that grid is written as 500 000 µs, the tempo the conversion
+assumed (`Division.tempoOnGrid`), because a tempo copied verbatim onto a grid derived
+at 120 QPM would conduct it and change the clock. The `midi/` dump spells the same
+tier the same way, and its `; smpte …` note counts the events rewritten.
 
 ## The pacer divisors
 

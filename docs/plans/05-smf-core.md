@@ -40,6 +40,12 @@ MTrk  length    <delta event>*   ...ends with FF 2F 00 (end-of-track)
   of a SMPTE file is one segment at 120 quarter notes per minute over the converted PPQ, which
   reproduces every tick's wall-clock time exactly, and the file's `set-tempo` events are kept
   in the dump but ignored for timing with `smpte_tempo_ignored` ([03](03-time-model.md)).
+  On the way OUT — the canonical writer and the `midi/` dump, both of which put the file on
+  its converted PPQ — every `set-tempo` is spelled as 500 000 µs, the tempo the conversion
+  assumed (`Division.tempoOnGrid`, the one seam beside `pulsesPerQuarter`; 2026-09-21): a
+  tempo copied verbatim onto that grid would conduct it, and a `build` of the dump would
+  change the clock the reader had promised to keep. The `Sequence` value stays as read; the
+  rewrite is the emitters', and the dump's `; smpte …` note counts the events it rewrote.
 - Unknown chunk types are skipped by length and preserved in the `SourceMap` as foreign
   regions (RP-001 requires readers to skip them). `RIFF`-wrapped files (`.rmi`) are unwrapped
   when the outer chunk is `RIFF` / `RMID` (`Load_mid.cpp:587-613`).
