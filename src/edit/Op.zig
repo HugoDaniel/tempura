@@ -1598,3 +1598,35 @@ test "Op.fromJson: :strength and :swing are clamped onto the range their rule ha
     try testing.expectEqual(@as(f64, 0.5), r.op.?.quantize.strength);
     try testing.expectEqual(@as(f64, 0.25), r.op.?.quantize.swing);
 }
+
+test "Op.fromJson: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers. Two texts: an operation that
+    // reads (strings, a selection, a key list into the arena) and one
+    // that is refused (the diagnostic's own allocation).
+    const texts = [_][]const u8{
+        \\{"op":"retime","sel":{"lanes":["flash"],"kinds":["note"],"keys":[36]},"delta":46126080}
+        ,
+        \\{"op":"rename","what":"phrase","from":"fill"}
+        ,
+    };
+    for (texts) |text| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(testing.allocator, .{
+                .fail_index = fail_index,
+            });
+            const result = fromJson(failing.allocator(), text);
+            if (failing.has_induced_failure) {
+                try testing.expectError(error.OutOfMemory, result);
+            } else {
+                var value = try result;
+                value.deinit();
+                break;
+            }
+        }
+    }
+}

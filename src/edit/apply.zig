@@ -315,3 +315,37 @@ test "apply: an action SJON refuses leaves the document alone and says so" {
     try testing.expectEqual(Diag.Code.sjon_diagnostic, applied.diags.items()[0].code);
     try testing.expectEqualStrings(fixture, applied.text);
 }
+
+test "apply: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers. The plan is built once, with the
+    // testing allocator, and holds one action of each pass so every
+    // stage of the sequencing and every splice is reached.
+    const gpa = testing.allocator;
+    var b: Plan.Builder = .init(gpa);
+    errdefer b.deinit();
+    const lane: locate.Site = .{ .root = 1, .path = &.{} };
+    try b.setKeyword(.{ .root = 1, .path = &.{0} }, "vel", "120");
+    try b.removePositional(lane, 2);
+    try b.insertPositional(lane, 0, "{\"$form\":\"note\",\"at\":{\"$num\":[4,\"q\"]},\"key\":64}");
+    try b.insertRoot(null, "{\"$form\":\"cue\",\"name\":\"end\",\"at\":{\"$num\":[1,\"bar\"]}}");
+    var p = try b.finish();
+    defer p.deinit();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = apply(failing.allocator(), fixture, &p);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var value = try result;
+            defer value.deinit();
+            try testing.expect(!value.diags.hasErrors());
+            break;
+        }
+    }
+}

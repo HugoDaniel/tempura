@@ -2543,3 +2543,94 @@ test "bound IT: a (row N …) or an (ev N …) past the module's own domain cann
         p.deinit();
     }
 }
+
+test "planWith: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations each plan
+    // makes, which the loop discovers.
+    //
+    // One row per path the planners take through an allocation: a native
+    // move past a neighbour (the running model, a remove and an insert),
+    // a copy, a stretch, a rename, an insert that builds nested forms and
+    // one that parses an easing; a bound SMF pair and a controller step
+    // moved, a materialize; a bound IT cell delayed in its row, one moved
+    // into a pattern with no such row, one into a row that survives.
+    const Case = struct { source: [:0]const u8, op: Op.Op };
+    const cases = [_]Case{
+        .{ .source = test_support.native, .op = .{ .retime = .{
+            .sel = .{ .lanes = &.{"flash"}, .kinds = .notes, .range = .{ 0, 1 } },
+            .to = 3 * TPQ,
+        } } },
+        .{ .source = test_support.native, .op = .{ .duplicate = .{
+            .sel = .{ .lanes = &.{"flash"}, .kinds = .notes },
+            .delta = 4 * TPQ,
+        } } },
+        .{ .source = test_support.native, .op = .{ .stretch = .{
+            .from = 0,
+            .to = 2 * TPQ,
+            .p = 3,
+            .q = 2,
+        } } },
+        .{ .source = test_support.native, .op = .{ .rename = .{
+            .what = .lane,
+            .from = "flash",
+            .to = "strobe",
+        } } },
+        .{ .source = test_support.native, .op = .{ .insert = .{ .what = .{ .phrase = .{
+            .name = "roll",
+            .length = 4 * TPQ,
+            .lanes = &.{ "flash", "glow" },
+        } } } } },
+        .{ .source = test_support.native, .op = .{ .insert = .{ .lane = "glow", .what = .{
+            .keyframe = .{ .at = 2 * TPQ, .value = .{ 0.5, 0, 0, 0 }, .ease = "in-cubic" },
+        } } } },
+        .{ .source = test_support.bound_smf, .op = .{ .retime = .{
+            .sel = .{ .lanes = &.{"kick"}, .kinds = .notes, .range = .{ 0, 1 } },
+            .delta = 2 * TPQ,
+        } } },
+        .{ .source = test_support.bound_smf, .op = .{ .retime = .{
+            .sel = .{
+                .lanes = &.{"filter"},
+                .kinds = .keyframes,
+                .range = .{ 2 * TPQ, 2 * TPQ + 1 },
+            },
+            .delta = -TPQ,
+        } } },
+        .{ .source = test_support.bound_smf, .op = .{ .materialize = .{ .lane = "kick" } } },
+        .{ .source = test_support.bound_it, .op = .{ .retime = .{
+            .sel = .{ .lanes = &.{"lead"}, .kinds = .notes, .keys = &.{64} },
+            .delta = @divExact(TPQ, 4),
+        } } },
+        .{ .source = test_support.bound_it, .op = .{ .retime = .{
+            .sel = .{ .lanes = &.{"lead"}, .kinds = .notes, .keys = &.{64} },
+            .delta = 3 * TPQ,
+        } } },
+        .{ .source = test_support.bound_it_rows, .op = .{ .retime = .{
+            .sel = .{ .lanes = &.{"lead"}, .kinds = .notes, .keys = &.{60} },
+            .delta = 4 * TPQ,
+        } } },
+    };
+    const gpa = testing.allocator;
+    for (cases) |case| {
+        var fx = try test_support.Fixture.init(gpa, case.source);
+        defer fx.deinit();
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+            const planning = failing.allocator();
+            const result = planWith(planning, fx.doc_(), &fx.tree, &fx.loaded.map, case.op);
+            if (failing.has_induced_failure) {
+                try testing.expectError(error.OutOfMemory, result);
+            } else {
+                var planned = try result;
+                defer planned.deinit();
+                // The plan the sweep ends on is an accepted one: a row
+                // that refused would prove the refusal path, not the plan.
+                try testing.expect(!planned.summary.refused);
+                break;
+            }
+        }
+    }
+}

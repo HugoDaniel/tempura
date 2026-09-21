@@ -687,3 +687,37 @@ test "Plan.fromActionsJson: what is not an action list is a refusal, never an er
         try testing.expectEqual(@as(usize, 1), back.diags.count(.sjon_diagnostic));
     }
 }
+
+test "Plan.fromActionsJson: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails with
+    // error.OutOfMemory and testing.allocator sees no leak; past the last
+    // index it succeeds. Bounded by the number of allocations the call
+    // makes, which the loop discovers. Two lists: one that reads back
+    // whole and one refused in its second element, after an action has
+    // already been kept.
+    const texts = [_][]const u8{
+        \\[{"op":"set_keyword","root":3,"path":[1],"key":"at","value":{"$num":[2,"q"]}},
+        \\{"op":"remove_positional","root":3,"path":[],"index":0},
+        \\{"op":"insert_root","value":{"$form":"cue","name":"end"}}]
+        ,
+        \\[{"op":"remove_root","index":4},{"op":"nope","root":0,"path":[]}]
+        ,
+    };
+    for (texts) |text| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(testing.allocator, .{
+                .fail_index = fail_index,
+            });
+            const result = fromActionsJson(failing.allocator(), text);
+            if (failing.has_induced_failure) {
+                try testing.expectError(error.OutOfMemory, result);
+            } else {
+                var value = try result;
+                value.deinit();
+                break;
+            }
+        }
+    }
+}
