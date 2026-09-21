@@ -225,6 +225,17 @@ pub const note_max: u8 = 119;
 /// No volume-column entry in this cell.
 pub const vol_none: u8 = 255;
 
+/// The letter a command byte names — `A` for 1 through `Z` for 26,
+/// ITTECH's `cmd = letter - '@'` read the other way — or null for 0 (no
+/// command) and for every byte past 26, which no letter spells.
+/// `Module.invariants` claims nothing of a cell's values, so a builder
+/// may seat any byte, and `'@' + fx` on one past 191 is past a u8; this
+/// is the one place a command becomes its letter.
+pub fn fxLetter(fx: u8) ?u8 {
+    if (fx < 1 or fx > 26) return null;
+    return '@' + fx;
+}
+
 /// One event: a note, an instrument, a volume-column byte and a command,
 /// each with its own "absent" spelling. The volume column keeps IT's RAW
 /// byte (0–64 volume, 65–124 the slide families, 128–192 pan, 193–202
@@ -831,6 +842,14 @@ test "Module.Region: slicing is bounded and never wraps" {
         (Region{ .off = 0xFFFF_FFFF, .len = 2 }).slice(source),
     );
     try testing.expect((Region.none).isEmpty());
+}
+
+test "Module.fxLetter: A through Z, and nothing for 0 or past 26" {
+    try testing.expectEqual(@as(?u8, 'A'), fxLetter(1));
+    try testing.expectEqual(@as(?u8, 'Z'), fxLetter(26));
+    try testing.expectEqual(@as(?u8, null), fxLetter(0));
+    try testing.expectEqual(@as(?u8, null), fxLetter(27));
+    try testing.expectEqual(@as(?u8, null), fxLetter(255));
 }
 
 test "Module: names are NUL-padded and read back to their text" {

@@ -559,20 +559,21 @@ const Writer = struct {
                     // Every channel on that row already carries a
                     // command: the break has to displace one, and which
                     // rows caused it is the diagnostic's whole point.
+                    var name_buf: [5]u8 = undefined;
                     try self.note(
                         .it_pattern_rows_out_of_range,
                         .err,
                         at,
                         at + 8,
                         "pattern {d} has {d} rows, under IT's {d}; the C00 break on row {d} " ++
-                            "overwrote channel {d}'s command {c}{x:0>2}",
+                            "overwrote channel {d}'s command {s}{x:0>2}",
                         .{
                             index,
                             rows,
                             self.limits.rows_min,
                             last,
                             channel + 1,
-                            '@' + slot.fx,
+                            commandName(&name_buf, slot.fx),
                             slot.param,
                         },
                     );
@@ -743,6 +744,17 @@ const Writer = struct {
 
 fn setBit(value: u16, bit: u16, on: bool) u16 {
     return if (on) value | bit else value & ~bit;
+}
+
+/// A command as a diagnostic names it: its letter (`A`), or `#200 ` for
+/// a byte no letter spells — a builder may seat any.
+fn commandName(buf: *[5]u8, fx: u8) []const u8 {
+    if (model.fxLetter(fx)) |letter| {
+        buf[0] = letter;
+        return buf[0..1];
+    }
+    // `#`, at most three digits and a space: five bytes, the buffer's.
+    return std.fmt.bufPrint(buf, "#{d} ", .{fx}) catch unreachable;
 }
 
 /// The leftmost channel with no command on that row — where a
@@ -986,6 +998,25 @@ test "write: a C00 break with nowhere free overwrites a command, loudly" {
     try testing.expectEqual(@as(u8, 0), back.at(3, 63).param);
     try testing.expectEqual(@as(u8, 1), back.at(3, 0).fx); // every other channel kept its own
     try testing.expectEqual(@as(u8, 5), back.at(3, 0).param);
+}
+
+test "write: a displaced command that is no letter is named without a letter, never a wrap" {
+    // `Module.invariants` lets a builder seat any `fx`, and `'@' + 200`
+    // is past a u8: the diagnostic names the command by its number.
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    const p = try b.addPattern(4);
+    for (0..model.channels) |ch| p.at(3, ch).* = .{ .fx = 200, .param = 5 };
+    var m = b.finish();
+    defer m.deinit();
+
+    var w = try write(gpa, &m, null, .{});
+    defer w.deinit();
+    try testing.expectEqual(@as(usize, 1), w.diags.count(.it_pattern_rows_out_of_range));
+    const message = w.diags.items()[0].message;
+    try testing.expect(std.mem.indexOf(u8, message, "command #200 05") != null);
 }
 
 test "write: strict clamps are diagnostics, and --loose lifts the counts" {

@@ -594,9 +594,9 @@ const Printer = struct {
             try self.int(c.ins);
         }
         try self.volume(c.vol);
-        if (c.fx != 0 and c.fx <= 26) {
+        if (model.fxLetter(c.fx)) |letter| {
             try self.raw(" :fx \"");
-            try self.raw(&[_]u8{'@' + c.fx});
+            try self.raw(&[_]u8{letter});
             var buf: [2]u8 = undefined;
             // `{X:0>2}` of a u8 is exactly two digits, and the buffer is two.
             _ = std.fmt.bufPrint(&buf, "{X:0>2}", .{c.param}) catch unreachable;
