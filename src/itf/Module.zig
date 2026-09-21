@@ -463,11 +463,11 @@ pub const Builder = struct {
     /// A new empty pattern. The returned value borrows the cells, which
     /// never move, so it stays usable after further `addPattern` calls.
     pub fn addPattern(self: *Builder, rows: u16) Error!Pattern {
-        const a = self.module.allocator();
-        const cells = try a.alloc(Cell, @as(usize, rows) * channels);
+        const arena = self.module.allocator();
+        const cells = try arena.alloc(Cell, @as(usize, rows) * channels);
         @memset(cells, .empty);
         const p: Pattern = .{ .rows = rows, .cells = cells };
-        try self.patterns.append(a, p);
+        try self.patterns.append(arena, p);
         return p;
     }
 
@@ -579,80 +579,83 @@ pub const Text = struct {
 /// diagnostics list comes back empty. CR and NUL pass through as
 /// themselves.
 pub fn cp437ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) Error!Text {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
-    const a = arena.allocator();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     var out: std.ArrayList(u8) = .empty;
-    try out.ensureTotalCapacity(a, bytes.len);
+    try out.ensureTotalCapacity(arena, bytes.len);
     for (bytes) |b| {
         if (b < 0x80) {
-            try out.append(a, b);
+            try out.append(arena, b);
         } else {
             var buf: [4]u8 = undefined;
             const n = std.unicode.utf8Encode(cp437_high[b - 0x80], &buf) catch unreachable;
-            try out.appendSlice(a, buf[0..n]);
+            try out.appendSlice(arena, buf[0..n]);
         }
     }
 
-    return .{ .arena = arena, .bytes = out.items, .diags = .init(gpa) };
+    return .{ .arena = arena_state, .bytes = out.items, .diags = .init(gpa) };
 }
 
 /// UTF-8 → CP437. Partial: a codepoint CP437 cannot spell (and any
 /// invalid UTF-8) becomes `?` with an `it_message_encoding_lossy`
 /// diagnostic spanning the offending bytes of the INPUT.
 pub fn utf8ToCp437(gpa: std.mem.Allocator, text: []const u8) Error!Text {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
-    const a = arena.allocator();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
 
     var out: std.ArrayList(u8) = .empty;
-    try out.ensureTotalCapacity(a, text.len);
+    try out.ensureTotalCapacity(arena, text.len);
 
     var i: usize = 0;
+    // Bounded by the text: every turn consumes at least one byte.
     while (i < text.len) {
         const lead = text[i];
         if (lead < 0x80) {
-            try out.append(a, lead);
+            try out.append(arena, lead);
             i += 1;
             continue;
         }
         const n = std.unicode.utf8ByteSequenceLength(lead) catch {
-            try lossy(&diags, &out, a, i, i + 1, null);
+            try lossy(&diags, &out, arena, i, i + 1, null);
             i += 1;
             continue;
         };
         if (i + n > text.len) {
-            try lossy(&diags, &out, a, i, text.len, null);
+            try lossy(&diags, &out, arena, i, text.len, null);
             break;
         }
         const cp = std.unicode.utf8Decode(text[i..][0..n]) catch {
-            try lossy(&diags, &out, a, i, i + n, null);
+            try lossy(&diags, &out, arena, i, i + n, null);
             i += n;
             continue;
         };
         if (std.mem.indexOfScalar(u21, &cp437_high, cp)) |at| {
-            try out.append(a, @intCast(0x80 + at));
+            try out.append(arena, @intCast(0x80 + at));
         } else {
-            try lossy(&diags, &out, a, i, i + n, cp);
+            try lossy(&diags, &out, arena, i, i + n, cp);
         }
         i += n;
     }
 
-    return .{ .arena = arena, .bytes = out.items, .diags = diags };
+    return .{ .arena = arena_state, .bytes = out.items, .diags = diags };
 }
 
+/// A `?` for what CP437 cannot spell, and the diagnostic that says what
+/// was lost. `out` grows in the `Text`'s arena.
 fn lossy(
     diags: *Diag.List,
     out: *std.ArrayList(u8),
-    a: std.mem.Allocator,
+    arena: std.mem.Allocator,
     start: usize,
     end: usize,
     cp: ?u21,
 ) Error!void {
-    try out.append(a, '?');
+    try out.append(arena, '?');
     const span: Diag.Span = .{ .start = @intCast(start), .end = @intCast(end) };
     if (cp) |c| {
         try diags.add(.it_message_encoding_lossy, .warning, span, "U+{X:0>4} has no CP437 spelling; wrote '?'", .{c});

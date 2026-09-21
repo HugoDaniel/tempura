@@ -89,12 +89,12 @@ pub const Unpacked = struct {
 /// Packed stream → dense cells. Spans are offsets into `bytes`; a caller
 /// that read `bytes` out of a file rebases them onto the file.
 pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8, rows: u16) Error!Unpacked {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
 
-    const cells = try arena.allocator().alloc(Cell, @as(usize, rows) * model.channels);
+    const cells = try arena_state.allocator().alloc(Cell, @as(usize, rows) * model.channels);
     @memset(cells, .empty);
 
     var cache: [model.channels]Cache = @splat(.{});
@@ -187,7 +187,7 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8, rows: u16) Error!Unpack
         cells[@as(usize, row) * model.channels + channel] = cell;
     }
 
-    return .{ .arena = arena, .cells = cells, .diags = diags };
+    return .{ .arena = arena_state, .cells = cells, .diags = diags };
 }
 
 fn truncated(diags: *Diag.List, at: usize, end: usize) Error!void {
@@ -240,11 +240,11 @@ pub const Packed = struct {
 /// the pattern in a file rebases them), because there is no input file to
 /// point at — the rows are named in the message instead.
 pub fn pack(gpa: std.mem.Allocator, cells: []const Cell, rows: u16) Error!Packed {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
-    const a = arena.allocator();
+    const arena = arena_state.allocator();
 
     var out: std.ArrayList(u8) = .empty;
     var cache: [model.channels]Cache = @splat(.{});
@@ -303,21 +303,21 @@ pub fn pack(gpa: std.mem.Allocator, cells: []const Cell, rows: u16) Error!Packed
 
             const lead: u8 = @intCast(channel + 1);
             if (mask != c.mask) {
-                try out.append(a, lead | 0x80);
-                try out.append(a, mask);
+                try out.append(arena, lead | 0x80);
+                try out.append(arena, mask);
                 c.mask = mask;
             } else {
-                try out.append(a, lead);
+                try out.append(arena, lead);
             }
-            if (mask & mask_note != 0) try out.append(a, encodeNote(cell.note));
-            if (mask & mask_ins != 0) try out.append(a, cell.ins);
-            if (mask & mask_vol != 0) try out.append(a, cell.vol);
+            if (mask & mask_note != 0) try out.append(arena, encodeNote(cell.note));
+            if (mask & mask_ins != 0) try out.append(arena, cell.ins);
+            if (mask & mask_vol != 0) try out.append(arena, cell.vol);
             if (mask & mask_cmd != 0) {
-                try out.append(a, cell.fx);
-                try out.append(a, cell.param);
+                try out.append(arena, cell.fx);
+                try out.append(arena, cell.param);
             }
         }
-        try out.append(a, 0);
+        try out.append(arena, 0);
 
         if (out.items.len > max_packed) {
             // The refusal has to say WHICH rows to split (it 05's risk
@@ -335,7 +335,7 @@ pub fn pack(gpa: std.mem.Allocator, cells: []const Cell, rows: u16) Error!Packed
         }
     }
 
-    return .{ .arena = arena, .bytes = out.items, .diags = diags };
+    return .{ .arena = arena_state, .bytes = out.items, .diags = diags };
 }
 
 test "pattern.unpack: ITTECH's mask algorithm over hand-packed rows" {

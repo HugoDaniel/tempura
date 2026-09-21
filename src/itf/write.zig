@@ -118,14 +118,14 @@ pub fn write(
     opts: Options,
 ) Error!Written {
     module.invariants();
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
 
     var w: Writer = .{
         .gpa = gpa,
-        .a = arena.allocator(),
+        .arena = arena_state.allocator(),
         .module = module,
         .source = source,
         .opts = opts,
@@ -134,13 +134,16 @@ pub fn write(
     };
     try w.run();
 
-    return .{ .arena = arena, .bytes = w.out.items, .diags = diags };
+    return .{ .arena = arena_state, .bytes = w.out.items, .diags = diags };
 }
 
 /// The emission in progress.
 const Writer = struct {
+    /// The caller's, for the pattern packer's own transient results.
     gpa: std.mem.Allocator,
-    a: std.mem.Allocator,
+    /// The `Written`'s arena: the output and every scratch list live in
+    /// it and are freed with it, never one by one.
+    arena: std.mem.Allocator,
     module: *const Module,
     source: ?[]const u8,
     opts: Options,
@@ -153,23 +156,23 @@ const Writer = struct {
     }
 
     fn byte(self: *Writer, v: u8) Error!void {
-        try self.out.append(self.a, v);
+        try self.out.append(self.arena, v);
     }
 
     fn word(self: *Writer, v: u16) Error!void {
-        try self.out.appendSlice(self.a, &std.mem.toBytes(std.mem.nativeToLittle(u16, v)));
+        try self.out.appendSlice(self.arena, &std.mem.toBytes(std.mem.nativeToLittle(u16, v)));
     }
 
     fn dword(self: *Writer, v: u32) Error!void {
-        try self.out.appendSlice(self.a, &std.mem.toBytes(std.mem.nativeToLittle(u32, v)));
+        try self.out.appendSlice(self.arena, &std.mem.toBytes(std.mem.nativeToLittle(u32, v)));
     }
 
     fn blob(self: *Writer, s: []const u8) Error!void {
-        try self.out.appendSlice(self.a, s);
+        try self.out.appendSlice(self.arena, s);
     }
 
     fn zeros(self: *Writer, n: usize) Error!void {
-        try self.out.appendNTimes(self.a, 0, n);
+        try self.out.appendNTimes(self.arena, 0, n);
     }
 
     fn patchWord(self: *Writer, at: u32, v: u16) void {
@@ -266,7 +269,7 @@ const Writer = struct {
             try self.copyRegion(instrument.raw, model.instrument_size, .it_parapointer_out_of_range, "an instrument body");
         }
 
-        const sample_headers = try self.a.alloc(u32, smp_count);
+        const sample_headers = try self.arena.alloc(u32, smp_count);
         for (m.samples[0..smp_count], 0..) |sample, i| {
             self.patchDword(smp_pp + @as(u32, @intCast(i)) * 4, self.here());
             sample_headers[i] = self.here();
@@ -370,9 +373,9 @@ const Writer = struct {
         }
 
         var out: std.ArrayList(u8) = .empty;
-        try out.appendSlice(self.a, orders[0..n]);
-        try out.append(self.a, 255);
-        if (out.items.len < 2) try out.append(self.a, 255);
+        try out.appendSlice(self.arena, orders[0..n]);
+        try out.append(self.arena, 255);
+        if (out.items.len < 2) try out.append(self.arena, 255);
         return out.items;
     }
 
@@ -384,14 +387,14 @@ const Writer = struct {
         if (body.len == 0 and tail.len == 0) return &.{};
 
         var out: std.ArrayList(u8) = .empty;
-        try out.appendSlice(self.a, body);
-        try out.appendSlice(self.a, tail);
+        try out.appendSlice(self.arena, body);
+        try out.appendSlice(self.arena, tail);
         // `MsgLgth` is a u16 (it 04's header table), terminator included.
         if (out.items.len > max_message) {
             try self.note(.it_truncated, .warning, hdr.message_length, hdr.message_length + 2, "the song message is {d} bytes; MsgLgth is a u16, so it was cut to {d}", .{ out.items.len, max_message });
             out.shrinkRetainingCapacity(max_message);
         }
-        try out.append(self.a, 0);
+        try out.append(self.arena, 0);
         return out.items;
     }
 
@@ -407,7 +410,8 @@ const Writer = struct {
         } else if (rows < self.limits.rows_min) {
             // IT's shortest pattern is 32 rows, so a shorter one is
             // padded and told to break where it used to end (it 05).
-            const padded = try self.a.alloc(Cell, @as(usize, self.limits.rows_min) * model.channels);
+            const padded_len = @as(usize, self.limits.rows_min) * model.channels;
+            const padded = try self.arena.alloc(Cell, padded_len);
             @memset(padded, .empty);
             @memcpy(padded[0..@min(cells.len, padded.len)], cells[0..@min(cells.len, padded.len)]);
 

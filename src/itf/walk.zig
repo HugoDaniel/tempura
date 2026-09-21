@@ -135,13 +135,13 @@ pub const order_end: u8 = 255;
 /// module always gives the same map.
 pub fn derive(gpa: std.mem.Allocator, module: *const Module, opts: Options) Error!RowMap {
     module.invariants();
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
 
     var w: Walker = .{
-        .a = arena.allocator(),
+        .arena = arena_state.allocator(),
         .module = module,
         .opts = opts,
         .diags = &diags,
@@ -149,11 +149,11 @@ pub fn derive(gpa: std.mem.Allocator, module: *const Module, opts: Options) Erro
         .tempo = module.header.effectiveTempo(),
     };
     // "the first at tick 0 with the initial tempo" (plan 06).
-    try w.segments.append(w.a, .{ .start_tick = 0, .tempo = w.tempo });
+    try w.segments.append(w.arena, .{ .start_tick = 0, .tempo = w.tempo });
     try w.run(gpa);
 
     return .{
-        .arena = arena,
+        .arena = arena_state,
         .rows = w.rows.items,
         .segments = w.segments.items,
         .onsets = w.onsets.items,
@@ -261,7 +261,9 @@ const Next = struct {
 };
 
 const Walker = struct {
-    a: std.mem.Allocator,
+    /// The `RowMap`'s arena: the rows, segments and onsets grow in it
+    /// and are freed with it, never one by one.
+    arena: std.mem.Allocator,
     module: *const Module,
     opts: Options,
     diags: *Diag.List,
@@ -331,7 +333,7 @@ const Walker = struct {
             last.tempo = self.tempo;
             return;
         }
-        try self.segments.append(self.a, .{ .start_tick = at, .tempo = self.tempo });
+        try self.segments.append(self.arena, .{ .start_tick = at, .tempo = self.tempo });
     }
 
     /// The order list's next playable entry at or after `from`, skipping
@@ -475,7 +477,7 @@ const Walker = struct {
             if (c.note == model.note_none) continue;
             const delay = delays[ch];
             if (delay >= first_ticks) continue;
-            try self.onsets.append(self.a, .{
+            try self.onsets.append(self.arena, .{
                 .channel = @intCast(ch),
                 .tick = start + delay,
                 .row_index = row_index,
@@ -602,7 +604,7 @@ const Walker = struct {
             // `speed`, because the row's effects do not run again.
             const first_ticks: u16 = self.speed + r.frame_delay;
             const ticks: u16 = first_ticks + (r.row_plays - 1) * self.speed;
-            try self.rows.append(self.a, .{
+            try self.rows.append(self.arena, .{
                 .order = order,
                 .pattern = pat_idx,
                 .row = row,
