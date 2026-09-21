@@ -299,6 +299,12 @@ pub const Lane = struct {
     target: []const u8,
     /// `:range`, a `curve` lane's key only (the controller's ruling).
     range: ?[2]f32,
+    /// `:cc` on a NATIVE curve lane: the controller a `.mid` build
+    /// renders its keyframes onto (plan 08 — the lane's own `:cc`, or
+    /// `--cc` for a lane without one). Only `cc` and `cc14` are ever set
+    /// here; a BOUND lane's controller is the one in its `binding`, and
+    /// this stays null beside it.
+    cc: ?SmfCurve = null,
     binding: ?Binding,
     notes: []Note,
     keyframes: []Keyframe,
@@ -654,6 +660,8 @@ fn lanesEql(a: []const Lane, b: []const Lane) bool {
                 },
             }
         }
+        if ((x.cc == null) != (y.cc == null)) return false;
+        if (x.cc) |c| if (!std.meta.eql(c, y.cc.?)) return false;
         if (x.notes.len != y.notes.len) return false;
         for (x.notes, y.notes) |nx, ny| {
             if (nx.at != ny.at or nx.dur != ny.dur) return false;
@@ -768,6 +776,38 @@ test "Doc.eql: ignores spans and notices every other field" {
     // The TICK is what they have to agree on.
     b.length = 4097;
     try testing.expect(!a.eql(&b));
+    b.length = 4096;
+
+    // A native curve lane's `:cc` is a field like any other: the
+    // controller a build renders onto (plan 08).
+    var la = [_]Lane{bareCurve("glow")};
+    var lb = [_]Lane{bareCurve("glow")};
+    a.lanes = &la;
+    b.lanes = &lb;
+    try testing.expect(a.eql(&b));
+    lb[0].cc = .{ .cc = 74 };
+    try testing.expect(!a.eql(&b));
+    la[0].cc = .{ .cc = 74 };
+    try testing.expect(a.eql(&b));
+    lb[0].cc = .{ .cc14 = .{ 74, 106 } };
+    try testing.expect(!a.eql(&b));
+}
+
+/// A native curve lane with nothing in it, for the test above.
+fn bareCurve(name: []const u8) Lane {
+    return .{
+        .name = name,
+        .kind = .curve,
+        .target = name,
+        .range = null,
+        .binding = null,
+        .notes = &.{},
+        .keyframes = &.{},
+        .clips = &.{},
+        .query_src = null,
+        .expr_src = null,
+        .span = .{ .start = 0, .end = 0 },
+    };
 }
 
 test "Doc.eql: a pass-through form re-laid-out is the same form" {

@@ -1326,6 +1326,11 @@ const Ctx = struct {
         // the content itself.
         try self.b.removeKeyword(lane_site, "from");
         for (ops_native.address_keys) |key| {
+            // `:cc` stays: on a native curve lane it is the controller a
+            // build renders onto (plan 08), so the lane keeps the number
+            // its values came from. The other keys read an anchor and
+            // mean nothing without `:from`.
+            if (std.mem.eql(u8, key, "cc")) continue;
             if (kvNode(self.tree, self.tree.root[lane_root], key) == null) continue;
             try self.b.removeKeyword(lane_site, key);
         }
@@ -1856,10 +1861,13 @@ test "bound SMF: materialize copies the notes in and takes the events out" {
     );
 }
 
-test "bound SMF: materialize of a curve lane writes keyframes" {
+test "bound SMF: materialize of a curve lane writes keyframes and keeps its :cc" {
     // A controller's values are normalised 0..1 the way a bound curve
     // reads them; `:range` scales them at export, and the easing between
     // two of them is the schema's own `linear`, so neither is written.
+    // `:cc` STAYS: on a native curve lane it is the controller a build
+    // renders onto (plan 08), so the lane keeps the number it came from
+    // and a later `.mid` puts it back on the same controller.
     try expectEdit(
         test_support.bound_smf,
         .{ .materialize = .{ .lane = "filter" } },
@@ -1870,8 +1878,7 @@ test "bound SMF: materialize of a curve lane writes keyframes" {
         \\{"op":"remove_positional","root":3,"path":[],"index":6},
         \\{"op":"remove_keyword","root":5,"path":[],"key":"from"},
         \\{"op":"remove_keyword","root":5,"path":[],"key":"track"},
-        \\{"op":"remove_keyword","root":5,"path":[],"key":"ch"},
-        \\{"op":"remove_keyword","root":5,"path":[],"key":"cc"}
+        \\{"op":"remove_keyword","root":5,"path":[],"key":"ch"}
         \\]
         \\
     ,
@@ -1880,7 +1887,7 @@ test "bound SMF: materialize of a curve lane writes keyframes" {
             .{ .from = "  (control-change :at 960  :ch 1 :num 74 :val 100)\n", .to = "" },
             .{
                 .from = "(lane :name filter :kind curve :from song :track 1 :ch 1 :cc 74)",
-                .to = "(lane :name filter :kind curve (keyframe :at 0bar :value 0.07874016) (keyframe :at 2q :value 0.78740156))",
+                .to = "(lane :name filter :kind curve :cc 74 (keyframe :at 0bar :value 0.07874016) (keyframe :at 2q :value 0.78740156))",
             },
         },
     );

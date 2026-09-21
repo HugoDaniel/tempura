@@ -1,0 +1,8 @@
+; Without `--cc`: `glow` and `shine` render onto their own controllers,
+; `wide` and `plain` ride in the residue alone, each with its own
+; `render_cc_missing` wording — the pair because it is not one 7-bit
+; controller, `plain` because nothing names one.
+(build :kind mid)
+; With `--cc 7`: only `plain` takes it. `wide` still does not render —
+; the author named a controller, and 7 is not it.
+(build :kind mid :cc 7)

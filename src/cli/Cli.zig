@@ -127,7 +127,7 @@ pub const usage_text =
     \\  --ppq N                 Rescale onto an N-pulse division (.mid).
     \\  --round                 Accept an inexact rescale, rounding half to even.
     \\  --no-running-status     Write every status byte (.mid).
-    \\  --cc N                  The controller a native curve lane renders onto (.mid).
+    \\  --cc N                  Controller for a native curve lane with no :cc (.mid).
     \\  --loose                 OpenMPT's itEx bounds instead of IT's clamps (.it).
     \\  --in-place              Write back onto the anchor's own file.
     \\  --no-residue            Write a file that carries no timeline.

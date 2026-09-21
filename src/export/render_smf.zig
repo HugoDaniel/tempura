@@ -12,7 +12,8 @@
 //!     with its own `:off-vel`, at `k · PPQ / TPQ`, exact iff the
 //!     division divides the tick and counted in `render_inexact`
 //!     otherwise; clips already expanded by `time/derive.zig`;
-//!   * `curve` → `control-change` on `opts.cc`, the value
+//!   * `curve` → `control-change` on the lane's own `:cc`, or on
+//!     `opts.cc` for a lane that names none, the value
 //!     `round((v − lo) / (hi − lo) · 127)` under the lane's `:range`;
 //!     one event per keyframe for `hold`, one event per `cc_rate` for a
 //!     `linear` segment, and **every other easing as its keyframes
@@ -61,11 +62,13 @@
 //!
 //! **Three things this layer cannot know.**
 //!
-//!   1. A native curve lane's controller number. `:cc` is a BOUND lane's
-//!      key — `doc/fromSjon.zig` records it inside a `Binding` and a
-//!      native lane has none — so the number comes from `opts.cc`
-//!      (`--cc`) and a curve with neither is `render_cc_missing`, its
-//!      content left to the essence.
+//!   1. A native curve lane's controller number, when the lane names
+//!      none. `:cc` on a native curve lane is the controller it renders
+//!      onto (plan 08; `doc/fromSjon.zig` reads it into `Lane.cc`), and
+//!      a lane without one takes `opts.cc` (`--cc`). A curve with neither
+//!      is `render_cc_missing`, its content left to the essence — as is a
+//!      lane whose `:cc` is a 14-bit pair, which this renderer does not
+//!      write and `--cc` does not stand in for.
 //!   2. A note with no `:off-vel` has no release velocity to write, so
 //!      it gets 64 — the value every sequencer writes for a note off
 //!      with nothing to say. A note that HAS one keeps it.
@@ -103,7 +106,8 @@ pub const Options = struct {
     /// already on its own division and rescaling them is the writer's
     /// `--ppq`, not the renderer's.
     ppq: u15 = default_ppq,
-    /// `--cc`: which controller a native curve lane renders onto.
+    /// `--cc`: which controller a native curve lane WITHOUT its own `:cc`
+    /// renders onto (`Lane.cc` wins when the lane names one).
     cc: ?u7 = null,
     /// `--cc-rate`: how often a `linear` segment is sampled.
     cc_rate: i64 = default_cc_rate,
@@ -309,12 +313,33 @@ const Render = struct {
         switch (lane.kind) {
             .notes => return true,
             .curve => {
-                if (self.opts.cc != null) return true;
+                if (self.controllerOf(lane) != null) return true;
+                if (lane.cc) |c| {
+                    // Named, and not one 7-bit controller: the surfaces a
+                    // bound lane may READ are not all ones this renderer
+                    // writes, and `--cc` is no substitute for what the
+                    // author named.
+                    const what: []const u8 = switch (c) {
+                        .cc => "a controller",
+                        .cc14 => "a 14-bit controller pair",
+                        .bend => "the pitch bend",
+                        .pressure => "the channel pressure",
+                        .velocity => "note velocities",
+                    };
+                    try self.diags.add(
+                        .render_cc_missing,
+                        .warning,
+                        lane.span,
+                        "the curve lane '{s}' names {s} as its :cc, and this renderer writes one 7-bit controller; its keyframes ride in the residue alone and no DAW will hear them",
+                        .{ lane.name, what },
+                    );
+                    return false;
+                }
                 try self.diags.add(
                     .render_cc_missing,
                     .warning,
                     lane.span,
-                    "the curve lane '{s}' has no controller to render onto (--cc), so its keyframes ride in the residue alone and no DAW will hear them",
+                    "the curve lane '{s}' has no controller to render onto (:cc on the lane, or --cc), so its keyframes ride in the residue alone and no DAW will hear them",
                     .{lane.name},
                 );
                 return false;
@@ -460,6 +485,16 @@ const Render = struct {
 
     // ---- a curve lane ----
 
+    /// The 7-bit controller a native curve lane renders onto: its own
+    /// `:cc` when that is one number, else `opts.cc`, else none.
+    fn controllerOf(self: *const Render, lane: *const Doc.Lane) ?u7 {
+        if (lane.cc) |c| return switch (c) {
+            .cc => |n| n,
+            else => null,
+        };
+        return self.opts.cc;
+    }
+
     fn curveLane(
         self: *Render,
         b: *Sequence.Builder,
@@ -467,7 +502,7 @@ const Render = struct {
         lane: *const Doc.Lane,
         index: *const derive.LaneIndex,
     ) Error!void {
-        const num = self.opts.cc.?;
+        const num = self.controllerOf(lane).?;
         const range = lane.range orelse [2]f32{ 0, 1 };
         const rate = @max(self.opts.cc_rate, 1);
 
@@ -936,6 +971,49 @@ test "renderSmf: a curve with no controller is render_cc_missing and rides in th
     try testing.expectEqual(@as(usize, 1), out.diags.count(.render_cc_missing));
     try testing.expectEqual(@as(usize, 1), out.seq.tracks.len);
     try testing.expectEqual(@as(usize, 0), out.lanes.len);
+}
+
+test "renderSmf: a native curve lane renders onto its own :cc, ahead of --cc, and a pair is not written" {
+    const gpa = testing.allocator;
+    var fx = try load(gpa,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :us 500000)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name glow :kind curve :cc 74
+        \\  (keyframe :at 0q :value 0.5))
+        \\(lane :name shine :kind curve :cc 1
+        \\  (keyframe :at 0q :value 0.5))
+        \\(lane :name wide :kind curve :cc [1 33]
+        \\  (keyframe :at 0q :value 0.5))
+        \\(lane :name plain :kind curve
+        \\  (keyframe :at 0q :value 0.5))
+    );
+    defer fx.deinit();
+
+    // `--cc 7` reaches only the lane that names no controller of its own.
+    var out = try renderSmf(gpa, &fx.doc, &fx.derived, null, .{ .cc = 7 });
+    defer out.deinit();
+
+    try testing.expectEqual(@as(usize, 3), out.lanes.len);
+    try testing.expectEqual(Doc.SmfCurve{ .cc = 74 }, out.lanes[0].address.smf.curve.?);
+    try testing.expectEqual(Doc.SmfCurve{ .cc = 1 }, out.lanes[1].address.smf.curve.?);
+    try testing.expectEqual(Doc.SmfCurve{ .cc = 7 }, out.lanes[2].address.smf.curve.?);
+    // The pair is the one lane left to the essence, and the diagnostic
+    // says so by name.
+    try testing.expectEqual(@as(usize, 1), out.diags.count(.render_cc_missing));
+
+    // The bytes agree with the records: each lane's track carries its
+    // control-change on that lane's own number and no other.
+    for (out.lanes) |rec| {
+        const track = out.seq.tracks[rec.address.smf.track - 1];
+        var seen: usize = 0;
+        for (track.events) |e| {
+            if (e.kind != .control_change) continue;
+            try testing.expectEqual(@as(u8, rec.address.smf.curve.?.cc), e.payload.control.num);
+            seen += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), seen);
+    }
 }
 
 test "renderSmf: a query and a formula lane are residue_only" {

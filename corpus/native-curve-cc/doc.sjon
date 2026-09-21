@@ -1,0 +1,25 @@
+; Plan 08's rule for a native curve lane rendered to `.mid`: it goes onto
+; the lane's OWN `:cc`, or onto the build's `--cc` when it names none.
+; Until 2026-09-21 the manifest accepted `:cc` on a native lane and the
+; loader dropped it, so `--cc` was one controller for every curve in the
+; document and two of them collided on it.
+;
+; Four lanes, one per case: `glow` and `shine` name their controllers
+; and must land on 74 and 1 whatever `--cc` says; `wide` names a 14-bit
+; pair, which is read and printed but not written (one 7-bit controller
+; is all this renderer writes, and `--cc` does not stand in for what the
+; author named); `plain` names none and is the one lane `--cc` reaches.
+(timeline :title "native-curve-cc" :length 1bar)
+
+(tempo-point :at 0q :us 500000)
+(meter-point :at 0bar :sig [4 4])
+
+(lane :name glow :kind curve :cc 74
+  (keyframe :at 0bar :value 0.25 :ease hold)
+  (keyframe :at 2q :value 0.75))
+(lane :name shine :kind curve :cc 1 :range [0 1]
+  (keyframe :at 0bar :value 0.5))
+(lane :name wide :kind curve :cc [1 33]
+  (keyframe :at 0bar :value 0.5))
+(lane :name plain :kind curve
+  (keyframe :at 0bar :value 0.5))

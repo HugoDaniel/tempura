@@ -290,7 +290,8 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
   - **`:cc` on a native curve lane** is accepted by `schema/tempura.sjon` and DROPPED by the
     loader. `build --cc N` plus `render_cc_missing` is the faithful reading today: a curve
     lane with no controller rides in the residue alone. Either the key becomes load-bearing
-    per lane or the manifest loses it.
+    per lane or the manifest loses it. **Closed** 2026-09-21 in the backlog pass below: the
+    key is load-bearing per lane.
   - **Five it-manifest asks** from the bridge work: the reserved header fields, the MIDI
     macro binary blob, the ADPCM sample encoding, an unused-channel marker, and a channel
     prefix above 15. None is implemented; `schema/it.sjon` is the owner when batida decides
@@ -408,6 +409,16 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
     jumped through the bar table, the meter past the map's end one repeating window — would
     make any count legal and is the follow-up if a real edit ever wants more than 4096 bars
     of sixteenths.
+  - **`:cc` on a native curve lane is load-bearing** — plan 08's own rule ("`--cc` or the
+    lane's `:cc`"), which the schema accepted and the loader dropped. `Lane.cc` is read by
+    `fromSjon` (one reader, `ccAddress`, for the bound address and the native key), printed
+    by `toSjon`, compared by `Doc.eql`, and `render_smf` renders onto it ahead of `--cc`,
+    which now reaches only a lane that names none — so two native curves no longer collide
+    on one controller of channel 0. A `[msb lsb]` pair on a native lane is kept but not
+    written (`render_cc_missing` says so; `--cc` does not stand in for what the author
+    named), and `materialize` keeps `:cc`, so a materialized curve rebuilds onto the
+    controller it came from. `corpus/native-curve-cc/` pins it. Still dropped on a native
+    lane: `:bend`, `:pressure` and `:velocity`, surfaces no renderer writes.
 
 ## Status board
 

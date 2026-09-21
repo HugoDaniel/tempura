@@ -286,6 +286,7 @@ const Printer = struct {
             try self.single(r[1]);
             try self.raw("]");
         }
+        if (l.cc) |c| try self.smfCurve(c);
         if (l.query_src) |q| {
             try self.raw(" :query ");
             try self.raw(q);
@@ -296,6 +297,27 @@ const Printer = struct {
         }
         try self.children(l, indent);
         try self.raw(")");
+    }
+
+    /// One MIDI surface, as a lane spells it: a bound lane's read
+    /// address, or a native curve lane's own `:cc`.
+    fn smfCurve(self: *Printer, c: Doc.SmfCurve) Error!void {
+        switch (c) {
+            .cc => |n| {
+                try self.raw(" :cc ");
+                try self.int(n);
+            },
+            .cc14 => |pair| {
+                try self.raw(" :cc [");
+                try self.int(pair[0]);
+                try self.raw(" ");
+                try self.int(pair[1]);
+                try self.raw("]");
+            },
+            .bend => try self.raw(" :bend true"),
+            .pressure => try self.raw(" :pressure true"),
+            .velocity => try self.raw(" :velocity true"),
+        }
     }
 
     fn binding(self: *Printer, b: Doc.Binding) Error!void {
@@ -326,22 +348,7 @@ const Printer = struct {
                     try self.raw(" :key ");
                     try self.int(k);
                 }
-                if (s.curve) |c| switch (c) {
-                    .cc => |n| {
-                        try self.raw(" :cc ");
-                        try self.int(n);
-                    },
-                    .cc14 => |pair| {
-                        try self.raw(" :cc [");
-                        try self.int(pair[0]);
-                        try self.raw(" ");
-                        try self.int(pair[1]);
-                        try self.raw("]");
-                    },
-                    .bend => try self.raw(" :bend true"),
-                    .pressure => try self.raw(" :pressure true"),
-                    .velocity => try self.raw(" :velocity true"),
-                };
+                if (s.curve) |c| try self.smfCurve(c);
             },
             .it => |s| {
                 try self.raw(" :channel ");
@@ -671,6 +678,35 @@ test "toSjon: the print reads back as the same document, field for field" {
 
     var schema = try Schema.load(gpa);
     defer schema.deinit();
+    try expectRoundTrip(gpa, &schema, source);
+}
+
+test "toSjon: a native curve lane's :cc is read, kept and printed back" {
+    // Plan 08: a native curve lane renders onto `--cc` OR the lane's own
+    // `:cc`. Until 2026-09-21 the manifest accepted the key on a native
+    // lane and `fromSjon` read it only inside a binding, so it was
+    // validated and then dropped — and `--cc` was one controller for
+    // every curve lane in the document, so two of them collided on it.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    const source: [:0]const u8 =
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :us 500000)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name glow :kind curve :cc 74
+        \\  (keyframe :at 0q :value 0.2))
+        \\(lane :name shine :kind curve :cc [1 33] :range [0 1]
+        \\  (keyframe :at 0q :value 0.2))
+    ;
+    var fx = try loaded(gpa, &schema, source);
+    defer fx.deinit(gpa);
+
+    try testing.expectEqual(Doc.SmfCurve{ .cc = 74 }, fx.res.doc.lanes[0].cc.?);
+    try testing.expectEqual(Doc.SmfCurve{ .cc14 = .{ 1, 33 } }, fx.res.doc.lanes[1].cc.?);
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":cc 74") != null);
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":cc [1 33]") != null);
     try expectRoundTrip(gpa, &schema, source);
 }
 

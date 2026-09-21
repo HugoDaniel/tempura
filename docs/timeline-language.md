@@ -109,7 +109,7 @@ Positional children: `form: (note …, local) | (keyframe …, local) | (clip �
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
 | `:range` | `vector<number>` | no | — | len 2; repr f32<br>The [lo hi] a bound curve's normalised value is scaled into at export. |
-| `:cc` | `cc-number \| cc-pair` | no | — | integer; min 0; max 127; len 2; integer; min 0; max 127<br>Read a controller of a bound SMF anchor: one number, or [msb lsb] for a 14-bit pair. |
+| `:cc` | `cc-number \| cc-pair` | no | — | integer; min 0; max 127; len 2; integer; min 0; max 127<br>The lane's MIDI controller: one number, or [msb lsb] for a 14-bit pair. Bound with :from, the controller of the SMF anchor the lane reads. Native, the controller a .mid build renders the keyframes onto — one number only: a pair is kept but not written (render_cc_missing says so), and a native lane that names none takes the build's --cc. |
 | `:bend` | `boolean` | no | — | Read the pitch bend of a bound SMF anchor. |
 | `:pressure` | `boolean` | no | — | Read the channel pressure of a bound SMF anchor. |
 | `:velocity` | `boolean` | no | — | Read note velocities of a bound SMF anchor as a curve. |

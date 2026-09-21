@@ -1203,6 +1203,12 @@ const Ctx = struct {
             );
         }
 
+        // ---- a native curve lane's own controller ----
+        // `:cc` without `:from` is the controller a `.mid` build renders
+        // the keyframes onto (plan 08: "`--cc` or the lane's `:cc`");
+        // bound, the same key is the address inside the binding above.
+        if (kind == .curve and from == null) lane.cc = ccAddress(tree, children);
+
         // ---- the children ----
         var notes: std.ArrayList(Doc.Note) = .empty;
         var keyframes: std.ArrayList(Doc.Keyframe) = .empty;
@@ -1286,21 +1292,15 @@ const Ctx = struct {
                     );
                     return null;
                 }
-                var curve: ?Doc.SmfCurve = null;
-                if (kvNode(tree, children, "cc")) |node| {
-                    if (tree.tagOf(node) == .vector) {
-                        const elems = tree.vectorElements(node);
-                        if (elems.len == 2) curve = .{ .cc14 = .{
-                            castU7(readNumber(tree, elems[0])),
-                            castU7(readNumber(tree, elems[1])),
-                        } };
-                    } else curve = .{ .cc = castU7(readNumber(tree, node)) };
-                } else if (boolAt(tree, children, "bend")) {
-                    curve = .bend;
-                } else if (boolAt(tree, children, "pressure")) {
-                    curve = .pressure;
-                } else if (boolAt(tree, children, "velocity")) {
-                    curve = .velocity;
+                var curve: ?Doc.SmfCurve = ccAddress(tree, children);
+                if (curve == null) {
+                    if (boolAt(tree, children, "bend")) {
+                        curve = .bend;
+                    } else if (boolAt(tree, children, "pressure")) {
+                        curve = .pressure;
+                    } else if (boolAt(tree, children, "velocity")) {
+                        curve = .velocity;
+                    }
                 }
                 // The manifest's exclusive group is AT-MOST-ONE by
                 // design, because a native curve lane carries keyframes
@@ -2106,6 +2106,23 @@ fn literalOf(tree: *const Ast.Tree, node: NodeIndex) ?Pos.Literal {
 fn castU8(v: ?f64) u8 {
     const x = v orelse return 0;
     return if (x >= 0 and x <= 255) @intFromFloat(x) else 0;
+}
+
+/// `:cc` as a curve lane spells it — one number, or `[msb lsb]` for a
+/// 14-bit pair — or null when the key is absent or not one of those two
+/// shapes. Read the same way for a bound lane's address and for a native
+/// lane's own controller, so the two cannot disagree on a spelling.
+fn ccAddress(tree: *const Ast.Tree, children: []const NodeIndex) ?Doc.SmfCurve {
+    const node = kvNode(tree, children, "cc") orelse return null;
+    if (tree.tagOf(node) == .vector) {
+        const elems = tree.vectorElements(node);
+        if (elems.len != 2) return null;
+        return .{ .cc14 = .{
+            castU7(readNumber(tree, elems[0])),
+            castU7(readNumber(tree, elems[1])),
+        } };
+    }
+    return .{ .cc = castU7(readNumber(tree, node)) };
 }
 
 fn castU7(v: ?f64) u7 {

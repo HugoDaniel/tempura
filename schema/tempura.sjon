@@ -454,7 +454,7 @@
       (key :name range :type value-range :optional true
         :description "The [lo hi] a bound curve's normalised value is scaled into at export.")
       (key :name cc :type cc-address :optional true
-        :description "Read a controller of a bound SMF anchor: one number, or [msb lsb] for a 14-bit pair.")
+        :description "The lane's MIDI controller: one number, or [msb lsb] for a 14-bit pair. Bound with :from, the controller of the SMF anchor the lane reads. Native, the controller a .mid build renders the keyframes onto — one number only: a pair is kept but not written (render_cc_missing says so), and a native lane that names none takes the build's --cc.")
       (key :name bend :type boolean :optional true
         :description "Read the pitch bend of a bound SMF anchor.")
       (key :name pressure :type boolean :optional true
@@ -466,8 +466,8 @@
       (key :name fx :type fx-letter :optional true :requires [column]
         :description "Which effect letter's parameter to read. Meaningless without :column fx, hence :requires — an :fx alone is dependent_key_missing rather than a silent no-op.")
       ; At-most-one rather than exactly-one: a NATIVE curve lane carries
-      ; keyframes and addresses nothing, and a bound IT lane addresses a
-      ; column instead. What a count can see is that these four name four
+      ; keyframes and names at most the controller it renders onto, and a
+      ; bound IT lane addresses a column instead. What a count can see is that these four name four
       ; different surfaces on one MIDI channel, and a lane reads one.
       (exclusive-group :cardinality at-most-one
         (alt :keys [cc])
