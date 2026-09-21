@@ -318,20 +318,34 @@ fn runCase(
     // Everything this case allocates dies together.
     var case_arena = std.heap.ArenaAllocator.init(gpa);
     defer case_arena.deinit();
-    const a = case_arena.allocator();
+    const arena = case_arena.allocator();
 
-    const harness_src = readCaseFile(a, io, out, root, name, "times.sjon") orelse return .failed;
-    const directives = (try parseHarness(a, gpa, harness_schema, out, name, harness_src)) orelse return .failed;
-    const fixture = (try findFixture(a, io, out, root, name)) orelse return .failed;
+    const harness_src = readCaseFile(
+        arena,
+        io,
+        out,
+        root,
+        name,
+        "times.sjon",
+    ) orelse return .failed;
+    const directives = (try parseHarness(
+        arena,
+        gpa,
+        harness_schema,
+        out,
+        name,
+        harness_src,
+    )) orelse return .failed;
+    const fixture = (try findFixture(arena, io, out, root, name)) orelse return .failed;
 
-    var aw: Io.Writer.Allocating = .init(a);
+    var aw: Io.Writer.Allocating = .init(arena);
     defer aw.deinit();
     const rep: Report = .{ .out = out, .name = name };
     const env: Env = .{ .io = io, .schema = doc_schema, .root = root, .name = name };
-    if (!try renderCase(gpa, a, env, &aw.writer, fixture, directives, rep)) return .failed;
+    if (!try renderCase(gpa, arena, env, &aw.writer, fixture, directives, rep)) return .failed;
     const actual = aw.toOwnedSlice() catch return error.OutOfMemory;
 
-    const expected_path = try std.fs.path.join(a, &.{ root, name, "expected.sjon" });
+    const expected_path = try std.fs.path.join(arena, &.{ root, name, "expected.sjon" });
     if (update) {
         Io.Dir.cwd().writeFile(io, .{ .sub_path = expected_path, .data = actual }) catch |err| {
             try out.print("corpus: {s}: cannot write expected.sjon: {s}\n", .{ name, @errorName(err) });
@@ -341,25 +355,39 @@ fn runCase(
         return .updated;
     }
 
-    const expected = readCaseFile(a, io, out, root, name, "expected.sjon") orelse return .failed;
+    const expected = readCaseFile(
+        arena,
+        io,
+        out,
+        root,
+        name,
+        "expected.sjon",
+    ) orelse return .failed;
     const diff = firstDifference(expected, actual) orelse return .ok;
     try reportMismatch(out, name, diff);
     return .failed;
 }
 
 fn readCaseFile(
-    a: Allocator,
+    arena: Allocator,
     io: Io,
     out: *Io.Writer,
     root: []const u8,
     name: []const u8,
     file: []const u8,
 ) ?[:0]u8 {
-    const path = std.fs.path.join(a, &.{ root, name, file }) catch |err| {
+    const path = std.fs.path.join(arena, &.{ root, name, file }) catch |err| {
         out.print("corpus: {s}: cannot join path for {s}: {s}\n", .{ name, file, @errorName(err) }) catch {};
         return null;
     };
-    return Io.Dir.cwd().readFileAllocOptions(io, path, a, .limited(MAX_FILE_BYTES), .of(u8), 0) catch |err| {
+    return Io.Dir.cwd().readFileAllocOptions(
+        io,
+        path,
+        arena,
+        .limited(MAX_FILE_BYTES),
+        .of(u8),
+        0,
+    ) catch |err| {
         out.print("corpus: {s}: cannot read {s}: {s}\n", .{ name, file, @errorName(err) }) catch {};
         return null;
     };
@@ -390,7 +418,7 @@ const Fixture = struct {
 /// beside it as the anchor's referent — is read as the document it is
 /// rather than as the file it names.
 fn findFixture(
-    a: Allocator,
+    arena: Allocator,
     io: Io,
     out: *Io.Writer,
     root: []const u8,
@@ -402,8 +430,15 @@ fn findFixture(
         .{ .file = "song.it", .kind = .it },
     };
     for (candidates) |c| {
-        const path = try std.fs.path.join(a, &.{ root, name, c.file });
-        const bytes = Io.Dir.cwd().readFileAllocOptions(io, path, a, .limited(MAX_FILE_BYTES), .of(u8), 0) catch continue;
+        const path = try std.fs.path.join(arena, &.{ root, name, c.file });
+        const bytes = Io.Dir.cwd().readFileAllocOptions(
+            io,
+            path,
+            arena,
+            .limited(MAX_FILE_BYTES),
+            .of(u8),
+            0,
+        ) catch continue;
         return .{ .file = c.file, .bytes = bytes, .kind = c.kind };
     }
     try out.print("corpus: {s}: no fixture (expected doc.sjon, song.mid or song.it)\n", .{name});
@@ -427,6 +462,9 @@ const BuildAsk = struct { kind: BuildKind, cc: ?u7 };
 /// and the key budget to show it under.
 const ScoreAsk = struct { lines: u32, max_keys: u32 };
 
+/// What a `(snap …)` asks for: `Playhead.snap`'s three arguments.
+const SnapAsk = struct { tick: i64, grid: Playhead.SnapGrid, swing: f64 };
+
 /// One directive, executed in document order against the case's fixture.
 const Directive = union(enum) {
     /// What the core made of the bytes, and everything it complained of.
@@ -442,7 +480,7 @@ const Directive = union(enum) {
     /// The same answer, asked by tick.
     at: i64,
     /// `Playhead.snap` under the meter in force.
-    snap: struct { tick: i64, grid: Playhead.SnapGrid, swing: f64 },
+    snap: SnapAsk,
     /// The document, re-printed: its timeline tier, verbatim.
     dump,
     /// The document as a file: its inline tier through the canonical
@@ -480,7 +518,7 @@ const Directive = union(enum) {
 /// form-at-a-time schema cannot see: document ORDER, "at least one
 /// directive", and which heads this half implements at all.
 fn parseHarness(
-    a: Allocator,
+    arena: Allocator,
     gpa: Allocator,
     harness_schema: *const Schema,
     out: *Io.Writer,
@@ -497,7 +535,12 @@ fn parseHarness(
         try out.print("corpus: {s}: times.sjon does not validate:\n", .{name});
         for (v.diagnostics) |d| {
             if (d.severity != .err) continue;
-            try out.print("  {s}: {d}..{d}: {s}\n", .{ @tagName(d.code), d.span.start, d.span.end, d.message });
+            try out.print("  {s}: {d}..{d}: {s}\n", .{
+                @tagName(d.code),
+                d.span.start,
+                d.span.end,
+                d.message,
+            });
         }
         return null;
     }
@@ -510,83 +553,123 @@ fn parseHarness(
             // A bare value at the root is not a form, so no `(form …)`
             // declaration governs it and the validator has nothing to
             // say about it.
-            try out.print("corpus: {s}: times.sjon: only directive forms are allowed at the root\n", .{name});
+            try out.print(
+                "corpus: {s}: times.sjon: only directive forms are allowed at the root\n",
+                .{name},
+            );
             return null;
         }
-        const hdr = tree.formHeader(idx);
-        if (std.mem.eql(u8, hdr.head, "read")) {
-            try directives.append(a, .read);
-        } else if (std.mem.eql(u8, hdr.head, "roundtrip")) {
-            try directives.append(a, .roundtrip);
-        } else if (std.mem.eql(u8, hdr.head, "walk")) {
-            try directives.append(a, .{ .walk = @intCast(effInt(&view, tree, idx, "max-rows")) });
-        } else if (std.mem.eql(u8, hdr.head, "write")) {
-            try directives.append(a, .{ .write = .{ .format0 = effBool(&view, tree, idx, "format0") } });
-        } else if (std.mem.eql(u8, hdr.head, "times")) {
-            // The bit patterns, in the order written. Their WIDTH is
-            // this file's check: a string carries none, so the manifest
-            // cannot state it (its own header says so).
-            var secs: std.ArrayList(f64) = .empty;
-            for (hdr.children) |child| {
-                if (tree.tagOf(child) != .string) continue;
-                const bits_ = parseBits(tree.stringText(child)) orelse {
-                    try reportBadBits(out, name, tree.stringText(child));
-                    return null;
-                };
-                try secs.append(a, @bitCast(bits_));
-            }
-            if (secs.items.len == 0) {
-                try out.print("corpus: {s}: times.sjon: (times …) with no seconds asks nothing\n", .{name});
-                return null;
-            }
-            try directives.append(a, .{ .times = secs.items });
-        } else if (std.mem.eql(u8, hdr.head, "at")) {
-            try directives.append(a, .{ .at = @intCast(effInt(&view, tree, idx, "tick")) });
-        } else if (std.mem.eql(u8, hdr.head, "snap")) {
-            const swing_text = effStr(&view, tree, idx, "swing");
-            const swing_bits = parseBits(swing_text) orelse {
-                try reportBadBits(out, name, swing_text);
-                return null;
-            };
-            try directives.append(a, .{
-                .snap = .{
-                    .tick = @intCast(effInt(&view, tree, idx, "tick")),
-                    // The member set is the schema's, and it is exactly
-                    // `Playhead.SnapGrid`'s field list — so a name that got
-                    // past validation converts, and the test below is what
-                    // keeps the two spellings from drifting.
-                    .grid = std.meta.stringToEnum(Playhead.SnapGrid, effSym(&view, tree, idx, "grid")).?,
-                    .swing = @bitCast(swing_bits),
-                },
-            });
-        } else if (std.mem.eql(u8, hdr.head, "dump")) {
-            try directives.append(a, .dump);
-        } else if (std.mem.eql(u8, hdr.head, "plan")) {
-            const json = (try opJson(a, tree, idx, out, name)) orelse return null;
-            try directives.append(a, .{ .plan = json });
-        } else if (std.mem.eql(u8, hdr.head, "export-score")) {
-            try directives.append(a, .{ .export_score = .{
-                .lines = @intCast(effInt(&view, tree, idx, "lines")),
-                .max_keys = @intCast(effInt(&view, tree, idx, "max-keys")),
-            } });
-        } else if (std.mem.eql(u8, hdr.head, "build")) {
-            try directives.append(a, .{ .build = .{
-                .kind = std.meta.stringToEnum(BuildKind, effSym(&view, tree, idx, "kind")).?,
-                .cc = if (optInt(&view, tree, idx, "cc")) |n| @intCast(n) else null,
-            } });
-        } else {
-            // `unknown_form` is an error and an erroring document never
-            // reaches here, so the head is one the manifest declares —
-            // and one P107's documents half implements.
-            try directives.append(a, .{ .unrun = try a.dupe(u8, hdr.head) });
-        }
+        const d = (try readDirective(arena, &view, tree, idx, out, name)) orelse return null;
+        try directives.append(arena, d);
     }
 
     if (directives.items.len == 0) {
-        try out.print("corpus: {s}: times.sjon: no directives (a case has to ask something)\n", .{name});
+        try out.print(
+            "corpus: {s}: times.sjon: no directives (a case has to ask something)\n",
+            .{name},
+        );
         return null;
     }
     return directives.items;
+}
+
+/// One root form as the directive it spells. Its SHAPE was the schema's;
+/// what is read here is the author's literal or the manifest's default,
+/// through the view. Null = the case is void (already reported).
+fn readDirective(
+    arena: Allocator,
+    view: *const sjon.EffectiveView.EffectiveView,
+    tree: *const Ast.Tree,
+    idx: NodeIndex,
+    out: *Io.Writer,
+    name: []const u8,
+) !?Directive {
+    const hdr = tree.formHeader(idx);
+    const head = hdr.head;
+    if (std.mem.eql(u8, head, "read")) return .read;
+    if (std.mem.eql(u8, head, "roundtrip")) return .roundtrip;
+    if (std.mem.eql(u8, head, "walk"))
+        return .{ .walk = @intCast(effInt(view, tree, idx, "max-rows")) };
+    if (std.mem.eql(u8, head, "write"))
+        return .{ .write = .{ .format0 = effBool(view, tree, idx, "format0") } };
+    if (std.mem.eql(u8, head, "times")) {
+        const secs = (try readTimes(arena, tree, hdr.children, out, name)) orelse return null;
+        return .{ .times = secs };
+    }
+    if (std.mem.eql(u8, head, "at"))
+        return .{ .at = @intCast(effInt(view, tree, idx, "tick")) };
+    if (std.mem.eql(u8, head, "snap")) {
+        const ask = (try readSnap(view, tree, idx, out, name)) orelse return null;
+        return .{ .snap = ask };
+    }
+    if (std.mem.eql(u8, head, "dump")) return .dump;
+    if (std.mem.eql(u8, head, "plan")) {
+        const json = (try opJson(arena, tree, idx, out, name)) orelse return null;
+        return .{ .plan = json };
+    }
+    if (std.mem.eql(u8, head, "export-score")) return .{ .export_score = .{
+        .lines = @intCast(effInt(view, tree, idx, "lines")),
+        .max_keys = @intCast(effInt(view, tree, idx, "max-keys")),
+    } };
+    if (std.mem.eql(u8, head, "build")) return .{ .build = .{
+        .kind = std.meta.stringToEnum(BuildKind, effSym(view, tree, idx, "kind")).?,
+        .cc = if (optInt(view, tree, idx, "cc")) |n| @intCast(n) else null,
+    } };
+    // `unknown_form` is an error and an erroring document never reaches
+    // here, so the head is one the manifest declares — and one P107's
+    // documents half implements.
+    return .{ .unrun = try arena.dupe(u8, head) };
+}
+
+/// The seconds a `(times …)` asks about, as bit patterns in the order
+/// written. Their WIDTH is this file's check: a string carries none, so
+/// the manifest cannot state it (its own header says so). Null = the
+/// case is void (already reported).
+fn readTimes(
+    arena: Allocator,
+    tree: *const Ast.Tree,
+    children: []const NodeIndex,
+    out: *Io.Writer,
+    name: []const u8,
+) !?[]const f64 {
+    var secs: std.ArrayList(f64) = .empty;
+    for (children) |child| {
+        if (tree.tagOf(child) != .string) continue;
+        const bits_ = parseBits(tree.stringText(child)) orelse {
+            try reportBadBits(out, name, tree.stringText(child));
+            return null;
+        };
+        try secs.append(arena, @bitCast(bits_));
+    }
+    if (secs.items.len == 0) {
+        try out.print("corpus: {s}: times.sjon: (times …) with no seconds asks nothing\n", .{name});
+        return null;
+    }
+    return secs.items;
+}
+
+/// A `(snap …)`'s ask. Null = its swing is not a bit pattern (reported).
+fn readSnap(
+    view: *const sjon.EffectiveView.EffectiveView,
+    tree: *const Ast.Tree,
+    idx: NodeIndex,
+    out: *Io.Writer,
+    name: []const u8,
+) !?SnapAsk {
+    const swing_text = effStr(view, tree, idx, "swing");
+    const swing_bits = parseBits(swing_text) orelse {
+        try reportBadBits(out, name, swing_text);
+        return null;
+    };
+    return .{
+        .tick = @intCast(effInt(view, tree, idx, "tick")),
+        // The member set is the schema's, and it is exactly
+        // `Playhead.SnapGrid`'s field list — so a name that got past
+        // validation converts, and the test below is what keeps the two
+        // spellings from drifting.
+        .grid = std.meta.stringToEnum(Playhead.SnapGrid, effSym(view, tree, idx, "grid")).?,
+        .swing = @bitCast(swing_bits),
+    };
 }
 
 /// The effective `:key` on `form` as a non-negative integer — the
@@ -720,7 +803,7 @@ fn effBool(
 /// declares `:args` opaque, so it needs a head to be a form at all and
 /// nothing reads it. Null = the case is void (already reported).
 fn opJson(
-    a: Allocator,
+    arena: Allocator,
     tree: *const Ast.Tree,
     form: NodeIndex,
     out: *Io.Writer,
@@ -746,7 +829,7 @@ fn opJson(
         return null;
     };
 
-    var buf: Io.Writer.Allocating = .init(a);
+    var buf: Io.Writer.Allocating = .init(arena);
     try p(&buf.writer, "{{\"op\":\"{s}\"", .{head});
     if (args) |node| {
         if (tree.tagOf(node) != .form) {
@@ -921,7 +1004,7 @@ fn renderText(w: *Io.Writer, text: []const u8, rep: Report) Error!bool {
 /// directive this half does not implement, an unrenderable byte.
 fn renderCase(
     gpa: Allocator,
-    a: Allocator,
+    arena: Allocator,
     env: Env,
     w: *Io.Writer,
     fixture: Fixture,
@@ -945,15 +1028,15 @@ fn renderCase(
     defer if (loaded) |*l| l.deinit();
     for (directives) |d| {
         if (!d.needsDocument()) continue;
-        loaded = (try loadDocument(gpa, a, env, fixture)) orelse return false;
-        if (!try renderEcho(a, w, &loaded.?, rep)) return false;
+        loaded = (try loadDocument(gpa, arena, env, fixture)) orelse return false;
+        if (!try renderEcho(arena, w, &loaded.?, rep)) return false;
         break;
     }
     const doc_ptr: ?*Loaded = if (loaded) |*l| l else null;
 
     return switch (fixture.kind) {
-        .smf => try renderSmfCase(gpa, a, w, fixture, directives, doc_ptr, rep),
-        .it => try renderItCase(gpa, a, w, fixture, directives, doc_ptr, rep),
+        .smf => try renderSmfCase(gpa, arena, w, fixture, directives, doc_ptr, rep),
+        .it => try renderItCase(gpa, arena, w, fixture, directives, doc_ptr, rep),
         .doc => try renderDocCase(gpa, w, fixture, directives, doc_ptr, rep),
     };
 }
@@ -996,7 +1079,7 @@ fn renderDocCase(
 
 fn renderSmfCase(
     gpa: Allocator,
-    a: Allocator,
+    arena: Allocator,
     w: *Io.Writer,
     fixture: Fixture,
     directives: []const Directive,
@@ -1009,81 +1092,19 @@ fn renderSmfCase(
     defer r.deinit();
 
     for (directives) |d| switch (d) {
-        .read => {
-            try pw(w, "(read\n  ");
-            const seq = &r.sequence;
-            try p(w, "(smf :format {d} :division {d} :smpte ", .{
-                seq.format,
-                seq.division.pulsesPerQuarter(),
-            });
-            switch (seq.division) {
-                // `:division` is always the GRID the file's ticks are
-                // on; `:smpte` is what the header actually spelled, so
-                // a SMPTE case pins both the file and the conversion.
-                .ppq => try pw(w, "none"),
-                .smpte => |s| try p(w, "[{d} {d}]", .{ s.fps, s.tpf }),
-            }
-            // How many events were read ON running status — the one
-            // fact about a `.mid`'s LAYOUT that survives into the value,
-            // and what `smf-running-status` is a case about.
-            var on_running: usize = 0;
-            for (r.source_map.tracks) |tm| {
-                for (tm.events) |site| {
-                    if (site.running_status) on_running += 1;
-                }
-            }
-            try p(w, " :tracks {d} :events {d} :running-status {d} :foreign {d})", .{
-                seq.tracks.len,
-                seq.eventCount(),
-                on_running,
-                seq.foreign.len,
-            });
-            if (!try renderDiags(w, "  ", &r.diags, rep)) return false;
-            try pw(w, ")\n");
-        },
+        .read => if (!try renderSmfRead(w, &r, rep)) return false,
         .roundtrip => {
-            // Rung 1: the canonical writer's output against the very
-            // bytes it is supposed to reproduce.
-            var rewrite = try smf.write(gpa, &r.sequence, .{});
-            defer rewrite.deinit();
-            try p(w, "(roundtrip\n  (rung1 :ok {} :sha256 \"", .{
-                std.mem.eql(u8, rewrite.bytes, fixture.bytes),
-            });
-            try writeDigest(w, rewrite.bytes);
-            try pw(w, "\"");
-            if (!try renderDiags(w, "    ", &rewrite.diags, rep)) return false;
-            try pw(w, ")\n");
-
-            // Rung 2: the same events came back, whatever the layout.
-            var again = try smf.read(gpa, rewrite.bytes);
-            defer again.deinit();
-            const differs = try smfDifference(a, &r.sequence, &again.sequence);
-            try p(w, "  (rung2 :ok {}", .{differs == null});
-            if (differs) |why| {
-                try pw(w, " :differs \"");
-                if (!try renderText(w, why, rep)) return false;
-                try pw(w, "\"");
-            }
-            if (!try renderDiags(w, "    ", &again.diags, rep)) return false;
-            try pw(w, "))\n");
+            if (!try renderSmfRoundtrip(
+                gpa,
+                arena,
+                w,
+                fixture.bytes,
+                &r.sequence,
+                rep,
+            )) return false;
         },
         .write => |opts| {
-            var written = try smf.write(gpa, &r.sequence, .{ .format0 = opts.format0 });
-            defer written.deinit();
-            // Read the output back for the counts: a file nobody can
-            // read is not a file, and the merge's event count is the
-            // point of the directive.
-            var back = try smf.read(gpa, written.bytes);
-            defer back.deinit();
-            try p(w, "(write :format0 {} :sha256 \"", .{opts.format0});
-            try writeDigest(w, written.bytes);
-            try p(w, "\" :bytes {d} :tracks {d} :events {d}", .{
-                written.bytes.len,
-                back.sequence.tracks.len,
-                back.sequence.eventCount(),
-            });
-            if (!try renderDiags(w, "  ", &written.diags, rep)) return false;
-            try pw(w, ")\n");
+            if (!try renderSmfWrite(gpa, w, &r.sequence, opts.format0, rep)) return false;
         },
         .walk => {
             rep.say("(walk …) needs an .it fixture; this case's is {s}\n", .{fixture.file});
@@ -1105,6 +1126,105 @@ fn renderSmfCase(
     return true;
 }
 
+/// `(read …)` over a `.mid`: what the core made of the bytes, and
+/// everything it complained of.
+fn renderSmfRead(w: *Io.Writer, r: *const smf.Result, rep: Report) Error!bool {
+    try pw(w, "(read\n  ");
+    const seq = &r.sequence;
+    try p(w, "(smf :format {d} :division {d} :smpte ", .{
+        seq.format,
+        seq.division.pulsesPerQuarter(),
+    });
+    switch (seq.division) {
+        // `:division` is always the GRID the file's ticks are on;
+        // `:smpte` is what the header actually spelled, so a SMPTE case
+        // pins both the file and the conversion.
+        .ppq => try pw(w, "none"),
+        .smpte => |s| try p(w, "[{d} {d}]", .{ s.fps, s.tpf }),
+    }
+    try p(w, " :tracks {d} :events {d} :running-status {d} :foreign {d})", .{
+        seq.tracks.len,
+        seq.eventCount(),
+        runningStatusCount(r),
+        seq.foreign.len,
+    });
+    if (!try renderDiags(w, "  ", &r.diags, rep)) return false;
+    try pw(w, ")\n");
+    return true;
+}
+
+/// How many events were read ON running status — the one fact about a
+/// `.mid`'s LAYOUT that survives into the value, and what
+/// `smf-running-status` is a case about.
+fn runningStatusCount(r: *const smf.Result) usize {
+    var on_running: usize = 0;
+    for (r.source_map.tracks) |tm| {
+        for (tm.events) |site| {
+            if (site.running_status) on_running += 1;
+        }
+    }
+    return on_running;
+}
+
+/// `(roundtrip …)` over a `.mid`. Rung 1: the canonical writer's output
+/// against the very bytes it is supposed to reproduce. Rung 2: the same
+/// events came back, whatever the layout.
+fn renderSmfRoundtrip(
+    gpa: Allocator,
+    arena: Allocator,
+    w: *Io.Writer,
+    bytes: []const u8,
+    sequence: *const smf.Sequence,
+    rep: Report,
+) Error!bool {
+    var rewrite = try smf.write(gpa, sequence, .{});
+    defer rewrite.deinit();
+    try p(w, "(roundtrip\n  (rung1 :ok {} :sha256 \"", .{std.mem.eql(u8, rewrite.bytes, bytes)});
+    try writeDigest(w, rewrite.bytes);
+    try pw(w, "\"");
+    if (!try renderDiags(w, "    ", &rewrite.diags, rep)) return false;
+    try pw(w, ")\n");
+
+    var again = try smf.read(gpa, rewrite.bytes);
+    defer again.deinit();
+    const differs = try smfDifference(arena, sequence, &again.sequence);
+    try p(w, "  (rung2 :ok {}", .{differs == null});
+    if (differs) |why| {
+        try pw(w, " :differs \"");
+        if (!try renderText(w, why, rep)) return false;
+        try pw(w, "\"");
+    }
+    if (!try renderDiags(w, "    ", &again.diags, rep)) return false;
+    try pw(w, "))\n");
+    return true;
+}
+
+/// `(write …)` over a `.mid`: the writer's output hashed, then read back
+/// for the counts — a file nobody can read is not a file, and the
+/// merge's event count is the point of the directive.
+fn renderSmfWrite(
+    gpa: Allocator,
+    w: *Io.Writer,
+    sequence: *const smf.Sequence,
+    format0: bool,
+    rep: Report,
+) Error!bool {
+    var written = try smf.write(gpa, sequence, .{ .format0 = format0 });
+    defer written.deinit();
+    var back = try smf.read(gpa, written.bytes);
+    defer back.deinit();
+    try p(w, "(write :format0 {} :sha256 \"", .{format0});
+    try writeDigest(w, written.bytes);
+    try p(w, "\" :bytes {d} :tracks {d} :events {d}", .{
+        written.bytes.len,
+        back.sequence.tracks.len,
+        back.sequence.eventCount(),
+    });
+    if (!try renderDiags(w, "  ", &written.diags, rep)) return false;
+    try pw(w, ")\n");
+    return true;
+}
+
 /// Null when two sequences hold the same events — rung 2's question.
 /// Otherwise the first difference, named well enough to find it: the
 /// golden carries the sentence, so a regression is a diff and not a
@@ -1115,46 +1235,84 @@ fn renderSmfCase(
 /// comparison allowed), the pool bytes each payload names, and the
 /// foreign chunks the reader preserved.
 fn smfDifference(
-    a: Allocator,
+    arena: Allocator,
     x: *const smf.Sequence,
     y: *const smf.Sequence,
 ) Error!?[]const u8 {
-    if (x.format != y.format) return try std.fmt.allocPrint(a, "format {d} became {d}", .{ x.format, y.format });
+    if (x.format != y.format) return try std.fmt.allocPrint(
+        arena,
+        "format {d} became {d}",
+        .{ x.format, y.format },
+    );
     if (x.division.pulsesPerQuarter() != y.division.pulsesPerQuarter()) return try std.fmt.allocPrint(
-        a,
+        arena,
         "the grid {d} became {d}",
         .{ x.division.pulsesPerQuarter(), y.division.pulsesPerQuarter() },
     );
-    if (x.tracks.len != y.tracks.len) return try std.fmt.allocPrint(a, "{d} tracks became {d}", .{ x.tracks.len, y.tracks.len });
+    if (x.tracks.len != y.tracks.len) return try std.fmt.allocPrint(
+        arena,
+        "{d} tracks became {d}",
+        .{ x.tracks.len, y.tracks.len },
+    );
 
     for (x.tracks, y.tracks, 0..) |tx, ty, ti| {
-        if (tx.events.len != ty.events.len) return try std.fmt.allocPrint(
-            a,
-            "track {d}: {d} events became {d}",
-            .{ ti, tx.events.len, ty.events.len },
-        );
-        for (tx.events, ty.events, 0..) |ex, ey, ei| {
-            if (ex.at != ey.at) return try std.fmt.allocPrint(a, "track {d} event {d}: tick {d} became {d}", .{ ti, ei, ex.at, ey.at });
-            if (ex.kind != ey.kind) return try std.fmt.allocPrint(a, "track {d} event {d}: {s} became {s}", .{ ti, ei, @tagName(ex.kind), @tagName(ey.kind) });
-            if (!ex.payload.eqlOutsidePool(ey.payload, ex.kind)) return try std.fmt.allocPrint(
-                a,
-                "track {d} event {d}: the {s} payload changed",
-                .{ ti, ei, @tagName(ex.kind) },
-            );
-            const bx = ex.payload.poolBytes(ex.kind);
-            const by = ey.payload.poolBytes(ey.kind);
-            if (bx != null and !std.mem.eql(u8, x.bytesOf(bx.?), y.bytesOf(by.?))) return try std.fmt.allocPrint(
-                a,
-                "track {d} event {d}: the {s} bytes changed",
-                .{ ti, ei, @tagName(ex.kind) },
-            );
-        }
+        if (try smfTrackDifference(arena, x, y, ti, tx.events, ty.events)) |why| return why;
     }
 
-    if (x.foreign.len != y.foreign.len) return try std.fmt.allocPrint(a, "{d} foreign chunks became {d}", .{ x.foreign.len, y.foreign.len });
+    if (x.foreign.len != y.foreign.len) return try std.fmt.allocPrint(
+        arena,
+        "{d} foreign chunks became {d}",
+        .{ x.foreign.len, y.foreign.len },
+    );
     for (x.foreign, y.foreign, 0..) |fx, fy, i| {
-        if (!std.mem.eql(u8, &fx.tag, &fy.tag)) return try std.fmt.allocPrint(a, "foreign chunk {d} changed tag", .{i});
-        if (!std.mem.eql(u8, x.bytesOf(fx.bytes), y.bytesOf(fy.bytes))) return try std.fmt.allocPrint(a, "foreign chunk {d} changed bytes", .{i});
+        if (!std.mem.eql(u8, &fx.tag, &fy.tag))
+            return try std.fmt.allocPrint(arena, "foreign chunk {d} changed tag", .{i});
+        if (!std.mem.eql(u8, x.bytesOf(fx.bytes), y.bytesOf(fy.bytes)))
+            return try std.fmt.allocPrint(arena, "foreign chunk {d} changed bytes", .{i});
+    }
+    return null;
+}
+
+/// Track `ti` of both sequences, event for event: the tick, the kind,
+/// the active payload, and the pool bytes the payload names (read
+/// against each event's own sequence). Null when all agree.
+fn smfTrackDifference(
+    arena: Allocator,
+    x: *const smf.Sequence,
+    y: *const smf.Sequence,
+    ti: usize,
+    x_events: []const smf.Event,
+    y_events: []const smf.Event,
+) Error!?[]const u8 {
+    if (x_events.len != y_events.len) return try std.fmt.allocPrint(
+        arena,
+        "track {d}: {d} events became {d}",
+        .{ ti, x_events.len, y_events.len },
+    );
+    for (x_events, y_events, 0..) |ex, ey, ei| {
+        if (ex.at != ey.at) return try std.fmt.allocPrint(
+            arena,
+            "track {d} event {d}: tick {d} became {d}",
+            .{ ti, ei, ex.at, ey.at },
+        );
+        if (ex.kind != ey.kind) return try std.fmt.allocPrint(
+            arena,
+            "track {d} event {d}: {s} became {s}",
+            .{ ti, ei, @tagName(ex.kind), @tagName(ey.kind) },
+        );
+        if (!ex.payload.eqlOutsidePool(ey.payload, ex.kind)) return try std.fmt.allocPrint(
+            arena,
+            "track {d} event {d}: the {s} payload changed",
+            .{ ti, ei, @tagName(ex.kind) },
+        );
+        const bx = ex.payload.poolBytes(ex.kind);
+        const by = ey.payload.poolBytes(ey.kind);
+        const pool_differs = bx != null and !std.mem.eql(u8, x.bytesOf(bx.?), y.bytesOf(by.?));
+        if (pool_differs) return try std.fmt.allocPrint(
+            arena,
+            "track {d} event {d}: the {s} bytes changed",
+            .{ ti, ei, @tagName(ex.kind) },
+        );
     }
     return null;
 }
@@ -1163,7 +1321,7 @@ fn smfDifference(
 
 fn renderItCase(
     gpa: Allocator,
-    a: Allocator,
+    arena: Allocator,
     w: *Io.Writer,
     fixture: Fixture,
     directives: []const Directive,
@@ -1177,45 +1335,9 @@ fn renderItCase(
     defer r.deinit();
 
     for (directives) |d| switch (d) {
-        .read => {
-            const m = &r.module;
-            try pw(w, "(read\n  (it :title \"");
-            if (!try renderText(w, itf.model.nameText(&m.header.title), rep)) return false;
-            try p(w, "\" :speed {d} :tempo {d} :orders {d} :patterns {d} :instruments {d} :samples {d} :message-len {d} :tmpu {})", .{
-                m.header.initial_speed,
-                m.header.initial_tempo,
-                m.orders.len,
-                m.patterns.len,
-                m.instruments.len,
-                m.samples.len,
-                m.message.len,
-                m.tmpu != null,
-            });
-            if (!try renderDiags(w, "  ", &r.diags, rep)) return false;
-            try pw(w, ")\n");
-        },
+        .read => if (!try renderItRead(w, &r, rep)) return false,
         .roundtrip => {
-            var rewrite = try itf.write.write(gpa, &r.module, fixture.bytes, .{});
-            defer rewrite.deinit();
-            try p(w, "(roundtrip\n  (rung1 :ok {} :sha256 \"", .{
-                std.mem.eql(u8, rewrite.bytes, fixture.bytes),
-            });
-            try writeDigest(w, rewrite.bytes);
-            try pw(w, "\"");
-            if (!try renderDiags(w, "    ", &rewrite.diags, rep)) return false;
-            try pw(w, ")\n");
-
-            var again = try itf.read.read(gpa, rewrite.bytes);
-            defer again.deinit();
-            const differs = try itDifference(a, &r.module, fixture.bytes, &again.module, rewrite.bytes);
-            try p(w, "  (rung2 :ok {}", .{differs == null});
-            if (differs) |why| {
-                try pw(w, " :differs \"");
-                if (!try renderText(w, why, rep)) return false;
-                try pw(w, "\"");
-            }
-            if (!try renderDiags(w, "    ", &again.diags, rep)) return false;
-            try pw(w, "))\n");
+            if (!try renderItRoundtrip(gpa, arena, w, fixture.bytes, &r.module, rep)) return false;
         },
         .walk => |max_rows| {
             if (!try renderWalk(gpa, w, &r.module, max_rows, rep)) return false;
@@ -1225,23 +1347,12 @@ fn renderItCase(
                 // `:format0` is the SMF merge; an IT module has no
                 // tracks to merge and the schema says so in the key's
                 // own description.
-                rep.say("(write :format0 true) is the SMF merge; this case's fixture is {s}\n", .{fixture.file});
+                rep.say("(write :format0 true) is the SMF merge; this case's fixture is {s}\n", .{
+                    fixture.file,
+                });
                 return false;
             }
-            var written = try itf.write.write(gpa, &r.module, fixture.bytes, .{});
-            defer written.deinit();
-            var back = try itf.read.read(gpa, written.bytes);
-            defer back.deinit();
-            try pw(w, "(write :sha256 \"");
-            try writeDigest(w, written.bytes);
-            try p(w, "\" :bytes {d} :orders {d} :patterns {d} :samples {d}", .{
-                written.bytes.len,
-                back.module.orders.len,
-                back.module.patterns.len,
-                back.module.samples.len,
-            });
-            if (!try renderDiags(w, "  ", &written.diags, rep)) return false;
-            try pw(w, ")\n");
+            if (!try renderItWrite(gpa, w, &r.module, fixture.bytes, rep)) return false;
         },
         .unrun => |head| {
             rep.say("UNRUN {s} — the directive lands with a later part\n", .{head});
@@ -1252,6 +1363,87 @@ fn renderItCase(
             if (!try renderDocDirective(gpa, w, d, loaded.?, rep)) return false;
         },
     };
+    return true;
+}
+
+/// `(read …)` over a `.it`: the header's facts and the module's counts,
+/// and everything the reader complained of.
+fn renderItRead(w: *Io.Writer, r: *const itf.read.Result, rep: Report) Error!bool {
+    const m = &r.module;
+    try pw(w, "(read\n  (it :title \"");
+    if (!try renderText(w, itf.model.nameText(&m.header.title), rep)) return false;
+    try p(w, "\" :speed {d} :tempo {d} :orders {d} :patterns {d} :instruments {d}" ++
+        " :samples {d} :message-len {d} :tmpu {})", .{
+        m.header.initial_speed,
+        m.header.initial_tempo,
+        m.orders.len,
+        m.patterns.len,
+        m.instruments.len,
+        m.samples.len,
+        m.message.len,
+        m.tmpu != null,
+    });
+    if (!try renderDiags(w, "  ", &r.diags, rep)) return false;
+    try pw(w, ")\n");
+    return true;
+}
+
+/// `(roundtrip …)` over a `.it`: rung 1 against the fixture's own bytes,
+/// then rung 2 with every pass-through region compared against its own
+/// anchor.
+fn renderItRoundtrip(
+    gpa: Allocator,
+    arena: Allocator,
+    w: *Io.Writer,
+    bytes: []const u8,
+    module: *const itf.Module,
+    rep: Report,
+) Error!bool {
+    var rewrite = try itf.write.write(gpa, module, bytes, .{});
+    defer rewrite.deinit();
+    try p(w, "(roundtrip\n  (rung1 :ok {} :sha256 \"", .{std.mem.eql(u8, rewrite.bytes, bytes)});
+    try writeDigest(w, rewrite.bytes);
+    try pw(w, "\"");
+    if (!try renderDiags(w, "    ", &rewrite.diags, rep)) return false;
+    try pw(w, ")\n");
+
+    var again = try itf.read.read(gpa, rewrite.bytes);
+    defer again.deinit();
+    const differs = try itDifference(arena, module, bytes, &again.module, rewrite.bytes);
+    try p(w, "  (rung2 :ok {}", .{differs == null});
+    if (differs) |why| {
+        try pw(w, " :differs \"");
+        if (!try renderText(w, why, rep)) return false;
+        try pw(w, "\"");
+    }
+    if (!try renderDiags(w, "    ", &again.diags, rep)) return false;
+    try pw(w, "))\n");
+    return true;
+}
+
+/// `(write …)` over a `.it`: the writer's output hashed, then read back
+/// for the module's own counts.
+fn renderItWrite(
+    gpa: Allocator,
+    w: *Io.Writer,
+    module: *const itf.Module,
+    bytes: []const u8,
+    rep: Report,
+) Error!bool {
+    var written = try itf.write.write(gpa, module, bytes, .{});
+    defer written.deinit();
+    var back = try itf.read.read(gpa, written.bytes);
+    defer back.deinit();
+    try pw(w, "(write :sha256 \"");
+    try writeDigest(w, written.bytes);
+    try p(w, "\" :bytes {d} :orders {d} :patterns {d} :samples {d}", .{
+        written.bytes.len,
+        back.module.orders.len,
+        back.module.patterns.len,
+        back.module.samples.len,
+    });
+    if (!try renderDiags(w, "  ", &written.diags, rep)) return false;
+    try pw(w, ")\n");
     return true;
 }
 
@@ -1309,15 +1501,41 @@ fn renderWalk(
 /// it unless `preserve_history` asks for it (it 03), so its absence is
 /// policy rather than loss.
 fn itDifference(
-    a: Allocator,
+    arena: Allocator,
     x: *const itf.Module,
     x_src: []const u8,
     y: *const itf.Module,
     y_src: []const u8,
 ) Error!?[]const u8 {
-    const hx = &x.header;
-    const hy = &y.header;
-    if (!std.mem.eql(u8, &hx.title, &hy.title)) return try std.fmt.allocPrint(a, "the title changed", .{});
+    if (try itHeaderDifference(arena, &x.header, &y.header)) |why| return why;
+    if (!std.mem.eql(u8, x.orders, y.orders)) return try std.fmt.allocPrint(
+        arena,
+        "the order list changed ({d} entries against {d})",
+        .{ x.orders.len, y.orders.len },
+    );
+    if (!std.mem.eql(u8, x.message, y.message))
+        return try std.fmt.allocPrint(arena, "the song message changed", .{});
+    if (try itPatternsDifference(arena, x, y)) |why| return why;
+
+    const src: Anchors = .{ .x = x_src, .y = y_src };
+    if (try itInstrumentsDifference(arena, x, y, src)) |why| return why;
+    if (try itSamplesDifference(arena, x, y, src)) |why| return why;
+    return itTrailerDifference(arena, x, y, src);
+}
+
+/// The two modules' anchors: the bytes each one's opaque regions are
+/// offsets into.
+const Anchors = struct { x: []const u8, y: []const u8 };
+
+/// The header's title, its twelve scalar fields and its two channel
+/// tables, in that order. Null when all agree.
+fn itHeaderDifference(
+    arena: Allocator,
+    hx: *const itf.model.Header,
+    hy: *const itf.model.Header,
+) Error!?[]const u8 {
+    if (!std.mem.eql(u8, &hx.title, &hy.title))
+        return try std.fmt.allocPrint(arena, "the title changed", .{});
     const fields = [_]struct { name: []const u8, x: u32, y: u32 }{
         .{ .name = "highlight-minor", .x = hx.highlight_minor, .y = hy.highlight_minor },
         .{ .name = "highlight-major", .x = hx.highlight_major, .y = hy.highlight_major },
@@ -1333,62 +1551,122 @@ fn itDifference(
         .{ .name = "pitch-wheel-depth", .x = hx.pitch_wheel_depth, .y = hy.pitch_wheel_depth },
     };
     for (fields) |f| {
-        if (f.x != f.y) return try std.fmt.allocPrint(a, "{s} {d} became {d}", .{ f.name, f.x, f.y });
+        if (f.x != f.y)
+            return try std.fmt.allocPrint(arena, "{s} {d} became {d}", .{ f.name, f.x, f.y });
     }
-    if (!std.mem.eql(u8, &hx.channel_pan, &hy.channel_pan)) return try std.fmt.allocPrint(a, "the channel pan table changed", .{});
-    if (!std.mem.eql(u8, &hx.channel_vol, &hy.channel_vol)) return try std.fmt.allocPrint(a, "the channel volume table changed", .{});
+    if (!std.mem.eql(u8, &hx.channel_pan, &hy.channel_pan))
+        return try std.fmt.allocPrint(arena, "the channel pan table changed", .{});
+    if (!std.mem.eql(u8, &hx.channel_vol, &hy.channel_vol))
+        return try std.fmt.allocPrint(arena, "the channel volume table changed", .{});
+    return null;
+}
 
-    if (!std.mem.eql(u8, x.orders, y.orders)) return try std.fmt.allocPrint(
-        a,
-        "the order list changed ({d} entries against {d})",
-        .{ x.orders.len, y.orders.len },
+/// The patterns, row count then cell by cell. Null when all agree.
+fn itPatternsDifference(
+    arena: Allocator,
+    x: *const itf.Module,
+    y: *const itf.Module,
+) Error!?[]const u8 {
+    if (x.patterns.len != y.patterns.len) return try std.fmt.allocPrint(
+        arena,
+        "{d} patterns became {d}",
+        .{ x.patterns.len, y.patterns.len },
     );
-    if (!std.mem.eql(u8, x.message, y.message)) return try std.fmt.allocPrint(a, "the song message changed", .{});
-
-    if (x.patterns.len != y.patterns.len) return try std.fmt.allocPrint(a, "{d} patterns became {d}", .{ x.patterns.len, y.patterns.len });
     for (x.patterns, y.patterns, 0..) |px, py, i| {
-        if (px.rows != py.rows) return try std.fmt.allocPrint(a, "pattern {d}: {d} rows became {d}", .{ i, px.rows, py.rows });
+        if (px.rows != py.rows) return try std.fmt.allocPrint(
+            arena,
+            "pattern {d}: {d} rows became {d}",
+            .{ i, px.rows, py.rows },
+        );
         for (px.cells, py.cells, 0..) |cx, cy, at| {
             if (std.meta.eql(cx, cy)) continue;
-            return try std.fmt.allocPrint(a, "pattern {d} row {d} channel {d} changed", .{
+            return try std.fmt.allocPrint(arena, "pattern {d} row {d} channel {d} changed", .{
                 i,
                 at / itf.model.channels,
                 at % itf.model.channels,
             });
         }
     }
+    return null;
+}
 
-    if (x.instruments.len != y.instruments.len) return try std.fmt.allocPrint(a, "{d} instruments became {d}", .{ x.instruments.len, y.instruments.len });
+/// The instruments: the count, then each one's name and raw bytes.
+fn itInstrumentsDifference(
+    arena: Allocator,
+    x: *const itf.Module,
+    y: *const itf.Module,
+    src: Anchors,
+) Error!?[]const u8 {
+    if (x.instruments.len != y.instruments.len) return try std.fmt.allocPrint(
+        arena,
+        "{d} instruments became {d}",
+        .{ x.instruments.len, y.instruments.len },
+    );
     for (x.instruments, y.instruments, 0..) |ix, iy, i| {
-        if (!std.mem.eql(u8, &ix.name, &iy.name)) return try std.fmt.allocPrint(a, "instrument {d} changed name", .{i});
-        if (try regionDiffers(a, "instrument", i, ix.raw, x_src, iy.raw, y_src)) |why| return why;
+        if (!std.mem.eql(u8, &ix.name, &iy.name))
+            return try std.fmt.allocPrint(arena, "instrument {d} changed name", .{i});
+        if (try regionDiffers(arena, "instrument", i, ix.raw, iy.raw, src)) |why| return why;
     }
+    return null;
+}
 
-    if (x.samples.len != y.samples.len) return try std.fmt.allocPrint(a, "{d} samples became {d}", .{ x.samples.len, y.samples.len });
+/// The samples: the count, then each one's name, descriptor, header
+/// bytes and data bytes.
+fn itSamplesDifference(
+    arena: Allocator,
+    x: *const itf.Module,
+    y: *const itf.Module,
+    src: Anchors,
+) Error!?[]const u8 {
+    if (x.samples.len != y.samples.len) return try std.fmt.allocPrint(
+        arena,
+        "{d} samples became {d}",
+        .{ x.samples.len, y.samples.len },
+    );
     for (x.samples, y.samples, 0..) |sx, sy, i| {
-        if (!std.mem.eql(u8, &sx.name, &sy.name)) return try std.fmt.allocPrint(a, "sample {d} changed name", .{i});
-        if (sx.bits != sy.bits or sx.channels != sy.channels or sx.enc != sy.enc) return try std.fmt.allocPrint(
-            a,
+        if (!std.mem.eql(u8, &sx.name, &sy.name))
+            return try std.fmt.allocPrint(arena, "sample {d} changed name", .{i});
+        const same_shape = sx.bits == sy.bits and sx.channels == sy.channels and sx.enc == sy.enc;
+        if (!same_shape) return try std.fmt.allocPrint(
+            arena,
             "sample {d}'s descriptor changed ({d}-bit {s} became {d}-bit {s})",
             .{ i, sx.bits, @tagName(sx.enc), sy.bits, @tagName(sy.enc) },
         );
-        if (try regionDiffers(a, "sample header", i, sx.raw, x_src, sy.raw, y_src)) |why| return why;
-        if (try regionDiffers(a, "sample data", i, sx.data, x_src, sy.data, y_src)) |why| return why;
+        if (try regionDiffers(arena, "sample header", i, sx.raw, sy.raw, src)) |why| return why;
+        if (try regionDiffers(arena, "sample data", i, sx.data, sy.data, src)) |why| return why;
     }
+    return null;
+}
 
-    if (x.foreign.len != y.foreign.len) return try std.fmt.allocPrint(a, "{d} foreign chunks became {d}", .{ x.foreign.len, y.foreign.len });
+/// What follows the samples: the foreign chunks, the embedded MIDI
+/// configuration and the `TMPU` payload, each by its own bytes.
+fn itTrailerDifference(
+    arena: Allocator,
+    x: *const itf.Module,
+    y: *const itf.Module,
+    src: Anchors,
+) Error!?[]const u8 {
+    if (x.foreign.len != y.foreign.len) return try std.fmt.allocPrint(
+        arena,
+        "{d} foreign chunks became {d}",
+        .{ x.foreign.len, y.foreign.len },
+    );
     for (x.foreign, y.foreign, 0..) |fx, fy, i| {
-        if (!std.mem.eql(u8, &fx.tag, &fy.tag)) return try std.fmt.allocPrint(a, "foreign chunk {d} changed tag", .{i});
-        if (try regionDiffers(a, "foreign chunk", i, fx.raw, x_src, fy.raw, y_src)) |why| return why;
+        if (!std.mem.eql(u8, &fx.tag, &fy.tag))
+            return try std.fmt.allocPrint(arena, "foreign chunk {d} changed tag", .{i});
+        if (try regionDiffers(arena, "foreign chunk", i, fx.raw, fy.raw, src)) |why| return why;
     }
 
-    if ((x.midi_config == null) != (y.midi_config == null)) return try std.fmt.allocPrint(a, "the MIDI configuration appeared or vanished", .{});
-    if (x.midi_config != null) {
-        if (try regionDiffers(a, "MIDI configuration", 0, x.midi_config.?, x_src, y.midi_config.?, y_src)) |why| return why;
+    if ((x.midi_config == null) != (y.midi_config == null))
+        return try std.fmt.allocPrint(arena, "the MIDI configuration appeared or vanished", .{});
+    if (x.midi_config) |mx| {
+        const my = y.midi_config.?;
+        if (try regionDiffers(arena, "MIDI configuration", 0, mx, my, src)) |why| return why;
     }
-    if ((x.tmpu == null) != (y.tmpu == null)) return try std.fmt.allocPrint(a, "the TMPU chunk appeared or vanished", .{});
-    if (x.tmpu != null) {
-        if (try regionDiffers(a, "TMPU payload", 0, x.tmpu.?, x_src, y.tmpu.?, y_src)) |why| return why;
+    if ((x.tmpu == null) != (y.tmpu == null))
+        return try std.fmt.allocPrint(arena, "the TMPU chunk appeared or vanished", .{});
+    if (x.tmpu) |tx| {
+        if (try regionDiffers(arena, "TMPU payload", 0, tx, y.tmpu.?, src)) |why| return why;
     }
     return null;
 }
@@ -1396,23 +1674,22 @@ fn itDifference(
 /// Two opaque regions, each read against its OWN anchor: pass-through
 /// means the bytes come back, not that the offsets do.
 fn regionDiffers(
-    a: Allocator,
+    arena: Allocator,
     comptime what: []const u8,
     index: usize,
     rx: itf.Region,
-    x_src: []const u8,
     ry: itf.Region,
-    y_src: []const u8,
+    src: Anchors,
 ) Error!?[]const u8 {
-    const bx = rx.slice(x_src);
-    const by = ry.slice(y_src);
+    const bx = rx.slice(src.x);
+    const by = ry.slice(src.y);
     if (bx == null or by == null) return try std.fmt.allocPrint(
-        a,
+        arena,
         what ++ " {d} left its anchor's bytes",
         .{index},
     );
     if (!std.mem.eql(u8, bx.?, by.?)) return try std.fmt.allocPrint(
-        a,
+        arena,
         what ++ " {d} changed bytes ({d} against {d})",
         .{ index, bx.?.len, by.?.len },
     );
@@ -1515,11 +1792,11 @@ const Loaded = struct {
 /// tier they produced.
 fn loadDocument(
     gpa: Allocator,
-    a: Allocator,
+    arena: Allocator,
     env: Env,
     fixture: Fixture,
 ) Error!?Loaded {
-    const case_dir = try std.fs.path.join(a, &.{ env.root, env.name });
+    const case_dir = try std.fs.path.join(arena, &.{ env.root, env.name });
     var store = doc.fs(gpa, env.io, case_dir);
     errdefer store.deinit();
 
@@ -1575,8 +1852,8 @@ fn loadDocument(
 ///
 /// This is the header the three `tempo-three-conductors*` cases must
 /// agree on byte for byte (plan 03, phase 3).
-fn renderEcho(a: Allocator, w: *Io.Writer, loaded: *const Loaded, rep: Report) Error!bool {
-    var buf: Io.Writer.Allocating = .init(a);
+fn renderEcho(arena: Allocator, w: *Io.Writer, loaded: *const Loaded, rep: Report) Error!bool {
+    var buf: Io.Writer.Allocating = .init(arena);
     loaded.derived.echo(&buf.writer) catch return error.OutOfMemory;
 
     try pw(w, "(echo");
@@ -2144,11 +2421,11 @@ const t_ = std.testing;
 /// layer refused, the schema or the runner.
 const ParseProbe = struct { directives: ?[]const Directive, report: []const u8 };
 
-fn testParse(a: Allocator, src: [:0]const u8) !ParseProbe {
+fn testParse(arena: Allocator, src: [:0]const u8) !ParseProbe {
     var hs = try Schema.loadCorpus(t_.allocator);
     defer hs.deinit();
-    var sink: Io.Writer.Allocating = .init(a);
-    const d = try parseHarness(a, t_.allocator, &hs, &sink.writer, "test", src);
+    var sink: Io.Writer.Allocating = .init(arena);
+    const d = try parseHarness(arena, t_.allocator, &hs, &sink.writer, "test", src);
     return .{ .directives = d, .report = sink.written() };
 }
 
@@ -2177,11 +2454,11 @@ test "corpus harness: the embedded manifest preloads clean and declares every di
 }
 
 test "corpus harness: a well-formed file reads through the schema, defaults and all" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
-    const d = (try testParse(a,
+    const d = (try testParse(arena,
         \\(read)
         \\(roundtrip)
         \\(walk)
@@ -2203,9 +2480,9 @@ test "corpus harness: a well-formed file reads through the schema, defaults and 
 }
 
 test "corpus harness: the schema refuses what the runner would otherwise hand-check" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     // Each of these is an SJON diagnostic carrying a span, pinned by
     // CODE — so a runner check quietly taking the refusal back would
@@ -2220,7 +2497,7 @@ test "corpus harness: the schema refuses what the runner would otherwise hand-ch
         .{ .src = "(rewind :to 0)", .code = "unknown_form" },
     };
     for (cases) |c| {
-        const probe = try testParse(a, c.src);
+        const probe = try testParse(arena, c.src);
         try t_.expect(probe.directives == null);
         try t_.expect(std.mem.indexOf(u8, probe.report, SCHEMA_REFUSED) != null);
         try t_.expect(std.mem.indexOf(u8, probe.report, c.code) != null);
@@ -2228,9 +2505,9 @@ test "corpus harness: the schema refuses what the runner would otherwise hand-ch
 }
 
 test "corpus harness: what a schema cannot see stays the runner's" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     // A bare value at the root is governed by no `(form …)` declaration,
     // and "at least one directive" is a document-level fact. Neither is
@@ -2241,19 +2518,19 @@ test "corpus harness: what a schema cannot see stays the runner's" {
         "; a harness that asks nothing at all\n",
     };
     for (srcs) |src| {
-        const probe = try testParse(a, src);
+        const probe = try testParse(arena, src);
         try t_.expect(probe.directives == null);
         try t_.expect(std.mem.indexOf(u8, probe.report, SCHEMA_REFUSED) == null);
     }
 }
 
 test "corpus harness: every declared directive is one this half implements" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     // `plan` and `export-score` reach the edit engine and the exporter.
-    const d = (try testParse(a,
+    const d = (try testParse(arena,
         \\(read)
         \\(plan transpose :args (a :semitones 12))
         \\(export-score)
@@ -2271,7 +2548,7 @@ test "corpus harness: every declared directive is one this half implements" {
     // was the only thing keeping it alive, so removing it from there is
     // the whole change: the head is now an SJON `unknown_form`, refused
     // with a span before the dispatch is reached.
-    const probe = try testParse(a, "(read)\n(timing)\n");
+    const probe = try testParse(arena, "(read)\n(timing)\n");
     try t_.expect(probe.directives == null);
     try t_.expect(std.mem.indexOf(u8, probe.report, SCHEMA_REFUSED) != null);
 }
@@ -2281,11 +2558,11 @@ test "corpus harness: an operation's :args cross into the engine's JSON unchange
     // harness's language and JSON is the engine's, so the keys, the
     // numbers, the symbols, the vectors and the nested forms cross and
     // nothing is interpreted on the way.
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
-    const d = (try testParse(a,
+    const d = (try testParse(arena,
         \\(plan retime :args (a :sel (s :lanes [flash glow] :kinds [note] :range [0 46126080]) :delta -120 :allow-shared true))
         \\(plan rename :args (a :what lane :from "old name" :to roll))
         \\(plan merge)
@@ -2304,16 +2581,16 @@ test "corpus harness: an operation's :args cross into the engine's JSON unchange
 }
 
 test "corpus verdict: byte-equal is silence, and a difference names the first line" {
-    try t_.expectEqual(@as(?Mismatch, null), firstDifference("(a)\n(b)\n", "(a)\n(b)\n"));
+    try t_.expectEqual(@as(?Mismatch, null), firstDifference("(arena)\n(b)\n", "(arena)\n(b)\n"));
 
-    const diff = firstDifference("(a)\n(b)\n", "(a)\n(c)\n").?;
+    const diff = firstDifference("(arena)\n(b)\n", "(arena)\n(c)\n").?;
     try t_.expectEqual(@as(usize, 2), diff.line);
     try t_.expectEqualStrings("(b)", diff.expected.?);
     try t_.expectEqualStrings("(c)", diff.actual.?);
 
     // A golden that ends early, and one that runs on: the side that ran
     // out is `null`, which the report spells `<end of file>`.
-    const short = firstDifference("(a)\n", "(a)\n(b)\n").?;
+    const short = firstDifference("(arena)\n", "(arena)\n(b)\n").?;
     try t_.expectEqual(@as(usize, 2), short.line);
     try t_.expectEqualStrings("", short.expected.?);
     try t_.expectEqualStrings("(b)", short.actual.?);
@@ -2322,7 +2599,7 @@ test "corpus verdict: byte-equal is silence, and a difference names the first li
     // in any line's text. It shows up as the line PAST the shorter
     // text's last: nothing on one side, an empty line on the other, and
     // the report spells the nothing `<end of file>`.
-    const trailing = firstDifference("(a)", "(a)\n").?;
+    const trailing = firstDifference("(arena)", "(arena)\n").?;
     try t_.expectEqual(@as(usize, 2), trailing.line);
     try t_.expectEqual(@as(?[]const u8, null), trailing.expected);
     try t_.expectEqualStrings("", trailing.actual.?);
@@ -2335,14 +2612,14 @@ test "corpus verdict: byte-equal is silence, and a difference names the first li
 /// is bytes a `Builder` wrote, so `root` and `name` name a directory that
 /// is never opened unless a directive asks for an anchor — which none of
 /// these do.
-fn testRender(a: Allocator, fixture: Fixture, directives: []const Directive) ![]const u8 {
+fn testRender(arena: Allocator, fixture: Fixture, directives: []const Directive) ![]const u8 {
     var schema = try Schema.load(t_.allocator);
     defer schema.deinit();
-    var report: Io.Writer.Allocating = .init(a);
-    var aw: Io.Writer.Allocating = .init(a);
+    var report: Io.Writer.Allocating = .init(arena);
+    var aw: Io.Writer.Allocating = .init(arena);
     const rep: Report = .{ .out = &report.writer, .name = "test" };
     const env: Env = .{ .io = t_.io, .schema = &schema, .root = "corpus", .name = "test" };
-    try t_.expect(try renderCase(t_.allocator, a, env, &aw.writer, fixture, directives, rep));
+    try t_.expect(try renderCase(t_.allocator, arena, env, &aw.writer, fixture, directives, rep));
     try t_.expectEqualStrings("", report.written());
     return aw.written();
 }
@@ -2350,16 +2627,16 @@ fn testRender(a: Allocator, fixture: Fixture, directives: []const Directive) ![]
 /// The lowercase hex digest, as the golden spells it — the test's own
 /// hand on the same bytes, so an expectation below says WHICH buffer the
 /// renderer was supposed to hash.
-fn testDigest(a: Allocator, bytes: []const u8) ![]const u8 {
-    var out: Io.Writer.Allocating = .init(a);
+fn testDigest(arena: Allocator, bytes: []const u8) ![]const u8 {
+    var out: Io.Writer.Allocating = .init(arena);
     try writeDigest(&out.writer, bytes);
     return out.written();
 }
 
 test "corpus render: an SMF case — the fixture line, the read echo, both rungs and the writer" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
     const gpa = t_.allocator;
 
     // One canonical file: the writer's own output, so rung 1 holds.
@@ -2383,13 +2660,17 @@ test "corpus render: an SMF case — the fixture line, the read echo, both rungs
     var merged = try smf.write(gpa, &back.sequence, .{ .format0 = true });
     defer merged.deinit();
 
-    const text = try testRender(a, .{ .file = "song.mid", .bytes = try a.dupeZ(u8, file.bytes), .kind = .smf }, &.{
-        .read,
-        .roundtrip,
-        .{ .write = .{ .format0 = true } },
-    });
+    const text = try testRender(
+        arena,
+        .{ .file = "song.mid", .bytes = try arena.dupeZ(u8, file.bytes), .kind = .smf },
+        &.{
+            .read,
+            .roundtrip,
+            .{ .write = .{ .format0 = true } },
+        },
+    );
 
-    const want = try std.fmt.allocPrint(a,
+    const want = try std.fmt.allocPrint(arena,
         \\; tempura corpus golden — GENERATED by `zig build corpus -- --update`; do not hand-edit.
         \\(fixture :file "song.mid" :bytes {d} :sha256 "{s}")
         \\(read
@@ -2401,18 +2682,18 @@ test "corpus render: an SMF case — the fixture line, the read echo, both rungs
         \\
     , .{
         file.bytes.len,
-        try testDigest(a, file.bytes),
-        try testDigest(a, file.bytes),
-        try testDigest(a, merged.bytes),
+        try testDigest(arena, file.bytes),
+        try testDigest(arena, file.bytes),
+        try testDigest(arena, merged.bytes),
         merged.bytes.len,
     });
     try t_.expectEqualStrings(want, text);
 }
 
 test "corpus render: an IT case — the read echo and the walk's row map" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
     const gpa = t_.allocator;
 
     // `walk-constant`'s module: four rows of six ticks, one note.
@@ -2429,16 +2710,20 @@ test "corpus render: an IT case — the read echo and the walk's row map" {
     var file = try itf.write.write(gpa, &m, null, .{ .loose = true });
     defer file.deinit();
 
-    const text = try testRender(a, .{ .file = "song.it", .bytes = try a.dupeZ(u8, file.bytes), .kind = .it }, &.{
-        .read,
-        .{ .walk = 1 << 20 },
-    });
+    const text = try testRender(
+        arena,
+        .{ .file = "song.it", .bytes = try arena.dupeZ(u8, file.bytes), .kind = .it },
+        &.{
+            .read,
+            .{ .walk = 1 << 20 },
+        },
+    );
 
     var read_back = try itf.read.read(gpa, file.bytes);
     defer read_back.deinit();
     const rows_diag = read_back.diags.items()[0];
 
-    const want = try std.fmt.allocPrint(a,
+    const want = try std.fmt.allocPrint(arena,
         \\; tempura corpus golden — GENERATED by `zig build corpus -- --update`; do not hand-edit.
         \\(fixture :file "song.it" :bytes {d} :sha256 "{s}")
         \\(read
@@ -2455,7 +2740,7 @@ test "corpus render: an IT case — the read echo and the walk's row map" {
         \\
     , .{
         file.bytes.len,
-        try testDigest(a, file.bytes),
+        try testDigest(arena, file.bytes),
         @intFromEnum(Diag.Code.it_pattern_rows_out_of_range),
         rows_diag.span.start,
         rows_diag.span.end,
@@ -2464,9 +2749,9 @@ test "corpus render: an IT case — the read echo and the walk's row map" {
 }
 
 test "corpus render: diagnostics carry the ordinal, the span and an escaped message" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     var diags: Diag.List = .init(t_.allocator);
     defer diags.deinit();
@@ -2474,13 +2759,13 @@ test "corpus render: diagnostics carry the ordinal, the span and an escaped mess
     try diags.add(.it_command_unknown, .warning, .{ .start = 3, .end = 5 }, "a \"quoted\" \\ word", .{});
     try diags.add(.smpte_tempo_ignored, .info, .{ .start = 0, .end = 0 }, "kept, not believed", .{});
 
-    var aw: Io.Writer.Allocating = .init(a);
+    var aw: Io.Writer.Allocating = .init(arena);
     try t_.expect(try renderDiags(&aw.writer, "  ", &diags, .{ .out = null, .name = "test" }));
 
     // The CODE is the numeric ordinal, not the name: the ordinal is the
     // wire, and `zig build audit-diagnostics` is what keeps every name
     // in a test. A quote and a backslash are escaped; nothing else is.
-    const want = try std.fmt.allocPrint(a,
+    const want = try std.fmt.allocPrint(arena,
         \\
         \\  (diag :code {d} :severity error :start 1 :end 2 :message "gave up")
         \\  (diag :code {d} :severity warning :start 3 :end 5 :message "a \"quoted\" \\ word")
@@ -2494,9 +2779,9 @@ test "corpus render: diagnostics carry the ordinal, the span and an escaped mess
 }
 
 test "corpus render: a walk longer than the echo cap says how much it left out" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
     const gpa = t_.allocator;
 
     // 22 orders of one 200-row pattern, a note on every row: 4400 rows
@@ -2510,7 +2795,7 @@ test "corpus render: a walk longer than the echo cap says how much it left out" 
     var m = b.finish();
     defer m.deinit();
 
-    var aw: Io.Writer.Allocating = .init(a);
+    var aw: Io.Writer.Allocating = .init(arena);
     try t_.expect(try renderWalk(gpa, &aw.writer, &m, 1 << 20, .{ .out = null, .name = "test" }));
     const text = aw.written();
 
@@ -2526,11 +2811,11 @@ test "corpus render: a walk longer than the echo cap says how much it left out" 
 // ---- the document half (10b) ----
 
 test "corpus harness: the document half's directives read" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
-    const d = (try testParse(a,
+    const d = (try testParse(arena,
         \\(times "0000000000000000" "3FE0000000000000")
         \\(at :tick 46126080)
         \\(snap :tick 100 :grid q16)
@@ -2556,9 +2841,9 @@ test "corpus harness: the document half's directives read" {
 }
 
 test "corpus harness: the schema refuses the document half's malformed shapes" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     const cases = [_]struct { src: [:0]const u8, code: []const u8 }{
         .{ .src = "(snap :tick 100)", .code = "missing_required_key" },
@@ -2573,7 +2858,7 @@ test "corpus harness: the schema refuses the document half's malformed shapes" {
         .{ .src = "(times 0.5)", .code = "wrong_underlying" },
     };
     for (cases) |c| {
-        const probe = try testParse(a, c.src);
+        const probe = try testParse(arena, c.src);
         try t_.expect(probe.directives == null);
         try t_.expect(std.mem.indexOf(u8, probe.report, SCHEMA_REFUSED) != null);
         try t_.expect(std.mem.indexOf(u8, probe.report, c.code) != null);
@@ -2581,9 +2866,9 @@ test "corpus harness: the schema refuses the document half's malformed shapes" {
 }
 
 test "corpus harness: a bit pattern's WIDTH is the runner's, not the schema's" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     // 16 hex digits for an f64 — a string carries no width, so the
     // manifest cannot state it and the runner does. Not a diagnostic.
@@ -2593,7 +2878,7 @@ test "corpus harness: a bit pattern's WIDTH is the runner's, not the schema's" {
         "(times \"3FE000000000000G\")",
         "(snap :tick 0 :grid q16 :swing \"1\")",
     }) |src| {
-        const probe = try testParse(a, src);
+        const probe = try testParse(arena, src);
         try t_.expect(probe.directives == null);
         try t_.expect(std.mem.indexOf(u8, probe.report, SCHEMA_REFUSED) == null);
         try t_.expect(std.mem.indexOf(u8, probe.report, "16 hex digits") != null);
@@ -2757,9 +3042,9 @@ fn testDocFixture() Fixture {
 }
 
 test "corpus render: a document case — the echo header, both queries and a snap" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     // Hand computation. 500 000 microseconds to the quarter is two ticks
     // of the clock per bar: 1 s is two quarters, which is tick
@@ -2768,7 +3053,7 @@ test "corpus render: a document case — the echo header, both queries and a sna
     // A `q16` line is TPQ / 4 = 11 531 520 ticks; tick 100 000 000 sits
     // between lines 8 and 9 of the bar, nearer 9. Bar 0 starts at tick 0,
     // so `:into-bar` is the whole second the query asked about.
-    const text = try testRender(a, testDocFixture(), &.{
+    const text = try testRender(arena, testDocFixture(), &.{
         .{ .times = &.{1.0} },
         .{ .at = 92_252_160 },
         .{ .snap = .{ .tick = 100_000_000, .grid = .q16, .swing = 0 } },
@@ -2792,9 +3077,9 @@ test "corpus render: a document case — the echo header, both queries and a sna
 }
 
 test "corpus render: a seconds query that no clock can answer is refused by NAME" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     // `at` takes seconds from OUTSIDE, so the two host guards ride out
     // with it. A golden spells the refusal the way it spells every other
@@ -2812,7 +3097,7 @@ test "corpus render: a seconds query that no clock can answer is refused by NAME
         \\(meter-point :at 0bar :sig [4 4])
         \\
     ;
-    const text = try testRender(a, .{ .file = "doc.sjon", .bytes = source, .kind = .doc }, &.{
+    const text = try testRender(arena, .{ .file = "doc.sjon", .bytes = source, .kind = .doc }, &.{
         .{ .times = &.{ std.math.nan(f64), std.math.inf(f64) } },
     });
     try t_.expect(std.mem.indexOf(u8, text, "(at :seconds \"7FF8000000000000\" :refused non-finite-time)") != null);
@@ -2991,11 +3276,11 @@ test "corpus render: a native document is RENDERED into both kinds, with rung 1 
     // The half plan 08 phase 5 added: a document with no tier is not
     // unanswerable any more, it is rendered — and the golden carries the
     // bytes, what the residue cost, and both rungs.
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
-    const text = try testRender(a, testDocFixture(), &.{
+    const text = try testRender(arena, testDocFixture(), &.{
         .{ .build = .{ .kind = .mid, .cc = 74 } },
         .{ .build = .{ .kind = .it, .cc = null } },
     });
@@ -3027,27 +3312,31 @@ test "corpus render: the snap grids the manifest offers are exactly the ones the
 
 /// A case the renderer REFUSES, with what it said about it. The mirror
 /// of `testRender`, for the defects that void a golden.
-fn testRenderRefused(a: Allocator, fixture: Fixture, directives: []const Directive) ![]const u8 {
+fn testRenderRefused(
+    arena: Allocator,
+    fixture: Fixture,
+    directives: []const Directive,
+) ![]const u8 {
     var schema = try Schema.load(t_.allocator);
     defer schema.deinit();
-    var report: Io.Writer.Allocating = .init(a);
-    var aw: Io.Writer.Allocating = .init(a);
+    var report: Io.Writer.Allocating = .init(arena);
+    var aw: Io.Writer.Allocating = .init(arena);
     const rep: Report = .{ .out = &report.writer, .name = "test" };
     const env: Env = .{ .io = t_.io, .schema = &schema, .root = "corpus", .name = "test" };
-    try t_.expect(!try renderCase(t_.allocator, a, env, &aw.writer, fixture, directives, rep));
+    try t_.expect(!try renderCase(t_.allocator, arena, env, &aw.writer, fixture, directives, rep));
     return report.written();
 }
 
 test "corpus render: a directive nothing implements is UNRUN, whatever the fixture is" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
     const gpa = t_.allocator;
 
     // A document case: no document directive precedes the unrun one, so
     // nothing was loaded — and the refusal has to say so without
     // reaching for a document that is not there.
-    const on_doc = try testRenderRefused(a, testDocFixture(), &.{.{ .unrun = "plan" }});
+    const on_doc = try testRenderRefused(arena, testDocFixture(), &.{.{ .unrun = "plan" }});
     try t_.expect(std.mem.indexOf(u8, on_doc, "UNRUN plan") != null);
 
     // …and a byte case, where the same arm sits beside the ones that do
@@ -3064,22 +3353,22 @@ test "corpus render: a directive nothing implements is UNRUN, whatever the fixtu
     defer file.deinit();
 
     const on_bytes = try testRenderRefused(
-        a,
-        .{ .file = "song.mid", .bytes = try a.dupeZ(u8, file.bytes), .kind = .smf },
+        arena,
+        .{ .file = "song.mid", .bytes = try arena.dupeZ(u8, file.bytes), .kind = .smf },
         &.{ .read, .{ .unrun = "export-score" } },
     );
     try t_.expect(std.mem.indexOf(u8, on_bytes, "UNRUN export-score") != null);
 }
 
 test "corpus render: a byte directive on a document case names what it needed" {
-    var arena = std.heap.ArenaAllocator.init(t_.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     // `doc.sjon` is source, not a file either core would recognise, so
     // `(read)` and `(walk …)` have nothing to read.
     for ([_]Directive{ .read, .roundtrip, .{ .walk = 16 }, .{ .write = .{ .format0 = false } } }) |d| {
-        const said = try testRenderRefused(a, testDocFixture(), &.{ .dump, d });
+        const said = try testRenderRefused(arena, testDocFixture(), &.{ .dump, d });
         try t_.expect(std.mem.indexOf(u8, said, "needs a song.mid or song.it fixture") != null);
     }
 }
