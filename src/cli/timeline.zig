@@ -67,6 +67,10 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     return Diags.exitCode(all.items);
 }
 
+/// The JSON envelope: the header, the verdict, the diagnostics and the
+/// timeline, one helper per section, in the order the keys ride. The
+/// helpers write into one `Stringify` so the nesting is checked by the
+/// one writer that can check it.
 fn writeJson(
     w: *Writer,
     ctx: *const Cli.Ctx,
@@ -78,6 +82,34 @@ fn writeJson(
     var j: Stringify = .{ .writer = w, .options = .{ .whitespace = .indent_2 } };
 
     try j.beginObject();
+    try writeHeader(&j, ctx, source);
+    try writeVerdict(&j, diags);
+    try writeDiagnostics(&j, index, diags);
+
+    try j.objectField("timeline");
+    try j.beginObject();
+    try j.objectField("integral");
+    try j.write(d.map.integral);
+    try writeSegments(&j, d.map.segments);
+    try writeMeters(&j, d.map.meters);
+    // The bar table is a long list of ticks and a consumer wants the
+    // whole thing — it is the grid a timeline strip draws.
+    try j.objectField("bars");
+    try j.beginArray();
+    for (d.map.bars) |b| try j.write(b);
+    try j.endArray();
+    try writeLength(&j, &d.map);
+    try writeSections(&j, d.sections);
+    try writeCues(&j, d.cues);
+    try writeLanes(&j, d.lanes);
+    try j.endObject();
+
+    try j.endObject();
+    try w.writeAll("\n");
+}
+
+/// `tempura`, `command` and `source`: who wrote this and over what.
+fn writeHeader(j: *Stringify, ctx: *const Cli.Ctx, source: []const u8) Cli.Error!void {
     try j.objectField("tempura");
     try j.beginObject();
     try j.objectField("version");
@@ -96,7 +128,10 @@ fn writeJson(
     try j.objectField("bytes");
     try j.write(source.len);
     try j.endObject();
+}
 
+/// `ok` and `counts`: the verdict a consumer reads before anything else.
+fn writeVerdict(j: *Stringify, diags: []const tempura.Diag.Diagnostic) Cli.Error!void {
     const counts = Diags.count(diags);
     try j.objectField("ok");
     try j.write(counts.errors == 0);
@@ -109,7 +144,17 @@ fn writeJson(
     try j.objectField("infos");
     try j.write(counts.infos);
     try j.endObject();
+}
 
+/// `diagnostics`: one object per entry, in producer order, with the raw
+/// byte offsets AND the 1-based line/column — the offsets are what every
+/// other tempura surface speaks, the line and column are what a person
+/// reads.
+fn writeDiagnostics(
+    j: *Stringify,
+    index: *const Diags.LineIndex,
+    diags: []const tempura.Diag.Diagnostic,
+) Cli.Error!void {
     try j.objectField("diagnostics");
     try j.beginArray();
     for (diags) |x| {
@@ -123,9 +168,6 @@ fn writeJson(
         try j.objectField("message");
         try j.write(x.message);
         try j.objectField("span");
-        // The raw byte offsets AND the 1-based line/column: the offsets
-        // are what every other tempura surface speaks, the line and
-        // column are what a person reads.
         const start = index.at(x.span.start);
         const end = index.at(x.span.end);
         try j.beginObject();
@@ -145,16 +187,14 @@ fn writeJson(
         try j.endObject();
     }
     try j.endArray();
+}
 
-    try j.objectField("timeline");
-    try j.beginObject();
-
-    try j.objectField("integral");
-    try j.write(d.map.integral);
-
+/// `segments`: each tempo segment with its two floats spelled twice (the
+/// number, and the bits — see the header).
+fn writeSegments(j: *Stringify, segments: []const tempura.time.TimeMap.Segment) Cli.Error!void {
     try j.objectField("segments");
     try j.beginArray();
-    for (d.map.segments) |s| {
+    for (segments) |s| {
         try j.beginObject();
         try j.objectField("tick");
         try j.write(s.tick);
@@ -163,18 +203,21 @@ fn writeJson(
         try j.objectField("tps");
         try j.write(s.tps);
         try j.objectField("tps_bits");
-        try writeBits(&j, s.tps);
+        try writeBits(j, s.tps);
         try j.objectField("start_sec");
         try j.write(s.start_sec);
         try j.objectField("start_sec_bits");
-        try writeBits(&j, s.start_sec);
+        try writeBits(j, s.start_sec);
         try j.endObject();
     }
     try j.endArray();
+}
 
+/// `meters`: each meter segment with its signature as a pair.
+fn writeMeters(j: *Stringify, meters: []const tempura.time.TimeMap.MeterSeg) Cli.Error!void {
     try j.objectField("meters");
     try j.beginArray();
-    for (d.map.meters) |m| {
+    for (meters) |m| {
         try j.beginObject();
         try j.objectField("tick");
         try j.write(m.tick);
@@ -190,29 +233,28 @@ fn writeJson(
         try j.endObject();
     }
     try j.endArray();
+}
 
-    // The bar table is a long list of ticks and a consumer wants the
-    // whole thing — it is the grid a timeline strip draws.
-    try j.objectField("bars");
-    try j.beginArray();
-    for (d.map.bars) |b| try j.write(b);
-    try j.endArray();
-
+/// `length`: the end tick, the end behaviour and the loop point.
+fn writeLength(j: *Stringify, map: *const tempura.time.TimeMap.TimeMap) Cli.Error!void {
     try j.objectField("length");
     try j.beginObject();
     try j.objectField("tick");
-    try j.write(d.map.length);
+    try j.write(map.length);
     try j.objectField("end");
-    try j.write(@tagName(d.map.end));
+    try j.write(@tagName(map.end));
     try j.objectField("loop_secs");
-    try j.write(d.map.loop_secs);
+    try j.write(map.loop_secs);
     try j.objectField("loop_secs_bits");
-    try writeBits(&j, d.map.loop_secs);
+    try writeBits(j, map.loop_secs);
     try j.endObject();
+}
 
+/// `sections`: the named windows.
+fn writeSections(j: *Stringify, sections: []const tempura.time.derive.Section) Cli.Error!void {
     try j.objectField("sections");
     try j.beginArray();
-    for (d.sections) |s| {
+    for (sections) |s| {
         try j.beginObject();
         try j.objectField("name");
         try j.write(s.name);
@@ -223,10 +265,13 @@ fn writeJson(
         try j.endObject();
     }
     try j.endArray();
+}
 
+/// `cues`: the named points.
+fn writeCues(j: *Stringify, cues: []const tempura.time.derive.Cue) Cli.Error!void {
     try j.objectField("cues");
     try j.beginArray();
-    for (d.cues) |c| {
+    for (cues) |c| {
         try j.beginObject();
         try j.objectField("name");
         try j.write(c.name);
@@ -235,10 +280,14 @@ fn writeJson(
         try j.endObject();
     }
     try j.endArray();
+}
 
+/// `lanes`: one object per lane with the content the echo only counts —
+/// every onset and every step, spelled out.
+fn writeLanes(j: *Stringify, lanes: []const tempura.time.derive.LaneIndex) Cli.Error!void {
     try j.objectField("lanes");
     try j.beginArray();
-    for (d.lanes) |l| {
+    for (lanes) |l| {
         try j.beginObject();
         try j.objectField("name");
         try j.write(l.name);
@@ -246,49 +295,57 @@ fn writeJson(
         try j.write(@tagName(l.kind));
         try j.objectField("bound");
         try j.write(l.bound);
-        try j.objectField("onsets");
-        try j.beginArray();
-        for (l.onsets) |o| {
-            try j.beginObject();
-            try j.objectField("tick");
-            try j.write(o.tick);
-            try j.objectField("dur");
-            try j.write(o.dur);
-            try j.objectField("key");
-            try j.write(o.key);
-            try j.objectField("vel");
-            try j.write(o.vel);
-            try j.endObject();
-        }
-        try j.endArray();
-        try j.objectField("steps");
-        try j.beginArray();
-        for (l.steps) |s| {
-            try j.beginObject();
-            try j.objectField("tick");
-            try j.write(s.tick);
-            try j.objectField("value");
-            try j.beginArray();
-            for (s.value[0..s.ncomp]) |v| try j.write(v);
-            try j.endArray();
-            try j.objectField("ease");
-            try j.write(s.ease_src);
-            try j.endObject();
-        }
-        try j.endArray();
+        try writeOnsets(j, l.onsets);
+        try writeSteps(j, l.steps);
         try j.endObject();
     }
     try j.endArray();
+}
 
-    try j.endObject();
-    try j.endObject();
-    try w.writeAll("\n");
+/// A lane's `onsets`.
+fn writeOnsets(j: *Stringify, onsets: []const tempura.time.derive.Onset) Cli.Error!void {
+    try j.objectField("onsets");
+    try j.beginArray();
+    for (onsets) |o| {
+        try j.beginObject();
+        try j.objectField("tick");
+        try j.write(o.tick);
+        try j.objectField("dur");
+        try j.write(o.dur);
+        try j.objectField("key");
+        try j.write(o.key);
+        try j.objectField("vel");
+        try j.write(o.vel);
+        try j.endObject();
+    }
+    try j.endArray();
+}
+
+/// A lane's `steps`: the value's live components and the easing source.
+fn writeSteps(j: *Stringify, steps: []const tempura.time.derive.Step) Cli.Error!void {
+    try j.objectField("steps");
+    try j.beginArray();
+    for (steps) |s| {
+        try j.beginObject();
+        try j.objectField("tick");
+        try j.write(s.tick);
+        try j.objectField("value");
+        try j.beginArray();
+        for (s.value[0..s.ncomp]) |v| try j.write(v);
+        try j.endArray();
+        try j.objectField("ease");
+        try j.write(s.ease_src);
+        try j.endObject();
+    }
+    try j.endArray();
 }
 
 /// One f64's bits, spelled exactly as `TimeMap.echo` spells them, so the
 /// two renderings of one map are comparable digit for digit.
 fn writeBits(j: *Stringify, x: f64) Cli.Error!void {
     var buf: [16]u8 = undefined;
+    // A u64 has at most 16 hex digits and `{X:0>16}` pads to exactly 16,
+    // so the 16-byte buffer is never short.
     const text = std.fmt.bufPrint(&buf, "{X:0>16}", .{@as(u64, @bitCast(x))}) catch unreachable;
     try j.write(text);
 }
