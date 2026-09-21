@@ -33,7 +33,7 @@
 (built :kind it :len 8130 :sha256 "41336ff237f7bd6f38d6ffa659eb2d6649223fb1dc654b69db3871be32f07d0a"
   (rung1 :ok true)
   (residue :essence 6737 :lanes 2 :conductor true)
-  (rung3 :ok false)
+  (rung3 :ok true)
   (diag :code 13 :severity warning :start 1650 :end 1730 :message "the anchor 'song' (impulse-04.it) carries no inline dump, so this build renders the document's own lanes into a FRESH file and the anchor's own content is not in it")
   (diag :code 53 :severity warning :start 0 :end 0 :message "this module carries no instrument or sample, so every rendered cell names instrument 1: the file holds the timing and a tracker brings the sound")
   (diag :code 55 :severity warning :start 2747 :end 2815 :message "the query lane 'hats' is computed, and a .it holds no query or formula: it rides in the residue alone")

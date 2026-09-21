@@ -49,9 +49,13 @@ and every lane kind reaches pacer's vocabulary — a notes lane as a
 formula lane as an `(expr …)`. `npm/tempura/test/landing.test.js` loads
 that score through the real `pacer.wasm` and reads every position back.
 
-`corpus/examples-native/` pins the score's text and both builds. Its
-golden is the one place in the corpus where rung 3 is false, and its
-`times.sjon` says exactly why: `Doc.eql` compares a pass-through pacer
-form by its source text, and restoring `(control :id glow-amt …)` from
-the essence re-prints it across seven lines. The document's meaning is
-unchanged; its layout is not.
+`corpus/examples-native/` pins the score's text and both builds,
+including rung 3 — plan 09's essence-exactness, over the one shipped
+example that carries a pacer pass-through form. That rung read false
+until 2026-09-21 for two reasons, both of them defects of the comparison
+rather than of the round trip, and its `times.sjon` keeps them written
+down: `Doc.eql` compared a pass-through form by its source text (so a
+`(control :id glow-amt …)` the essence re-printed across seven lines
+counted as a loss), and the corpus runner lifted the file's half off one
+side only (so the anchor this document names counted against the dump's
+empty list).

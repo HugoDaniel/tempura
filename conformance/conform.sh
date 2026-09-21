@@ -18,10 +18,14 @@
 # actually runs (`docs/plans/09-conformance.md`, "CI shape").
 #
 # What this script does NOT do: compare against tempura's own reading.
-# That comparison is the `conform` build verb's, which has the CLI built
-# and can diff `tempura inspect --csv` against midicsv's rows. This is
-# the half that only needs the oracles and the fixtures, so it runs on
-# its own and says plainly what it could not run.
+# Plan 09 describes that comparison — `tempura inspect --csv` diffed
+# against midicsv's rows — and NOTHING IMPLEMENTS IT. `zig build conform`
+# only invokes this script, and does not even hand it the built CLI
+# (`addArtifactArg`), so the oracles' output is read by a person and not
+# by a gate. Filed and dated in docs/plans/11 ("Filed and routed at the
+# whole-branch review's fix wave"). What runs here is the half that needs
+# only the oracles and the fixtures, and it says plainly what it could
+# not run.
 set -eu
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

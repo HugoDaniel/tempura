@@ -1,0 +1,13 @@
+; `tempo-three-conductors-smf`'s script, minus the two directives that
+; ask about an INLINE tier (`(build :kind mid)` writes one back out and
+; `(dump)` re-prints one) and plus the score — so what is left is exactly
+; the derivation, which is what has to agree with the other three
+; spellings of this conductor, and the one artifact C1 got wrong.
+;
+; 0.48 s is where segment 1 begins (one quarter at 480 000 us) and 0.88 s
+; where segment 2 does (0.48 + 400 000 us).
+(times "0000000000000000" "3FDEB851EB851EB8" "3FEC28F5C28F5C29")
+(at :tick 0)
+(at :tick 46126080)
+(at :tick 92252160)
+(export-score :lines 4)

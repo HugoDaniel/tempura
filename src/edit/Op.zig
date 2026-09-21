@@ -312,6 +312,20 @@ pub fn fromJson(gpa: std.mem.Allocator, text: []const u8) Error!Parsed {
     defer json.deinit();
 
     const op = try reader.op(json.value);
+    // A number no field of the grammar can hold is a REFUSAL, not a
+    // saturation: `{"at":1e30}` means nothing, and quietly editing at
+    // `maxInt(i64)` — or at the default the field would otherwise take —
+    // would move somebody's notes somewhere they never asked for. The
+    // reason is collected rather than raised where it is met, because
+    // every one of those casts sits inside a struct literal with no room
+    // for a diagnostic; this is the one funnel every operation passes.
+    if (reader.out_of_range) |x| {
+        try reader.fail(
+            "{d} is outside the range the field it was written for can hold; this operation names no edit",
+            .{x},
+        );
+        return .{ .op = null, .diags = diags, .arena = arena };
+    }
     return .{ .op = op, .diags = diags, .arena = arena };
 }
 
@@ -322,6 +336,15 @@ const Reader = struct {
     a: std.mem.Allocator,
     diags: *Diag.List,
     span: Diag.Span,
+    /// The first user number that no field of the grammar could hold — a
+    /// float past `i64` (`{"at":1e30}`) or an integer past the `u32` /
+    /// `i32` / `u16` a field narrows to (`{"repeat":5000000000}`).
+    ///
+    /// Recorded here and refused ONCE, in `fromJson`: `int` and `narrow`
+    /// are called from inside struct literals that have nowhere to put a
+    /// diagnostic, and a cast that panicked on user input was the whole
+    /// defect (`root.zig`: "user input is never asserted on").
+    out_of_range: ?f64 = null,
 
     fn fail(self: *Reader, comptime fmt: []const u8, args: anytype) Error!void {
         try self.diags.add(.sjon_diagnostic, .err, self.span, fmt, args);
@@ -380,7 +403,7 @@ const Reader = struct {
         if (eql(name, "resize")) return .{ .resize = .{
             .sel = try self.select(o.get("sel")),
             .dur = self.optInt(o.get("dur")),
-            .repeat = if (self.optInt(o.get("repeat"))) |r| @intCast(@max(1, r)) else null,
+            .repeat = if (self.optInt(o.get("repeat"))) |r| self.narrow(u32, @max(1, r), 1) else null,
         } };
         if (eql(name, "velocity")) return .{ .velocity = .{
             .sel = try self.select(o.get("sel")),
@@ -408,8 +431,8 @@ const Reader = struct {
         if (eql(name, "quantize")) return .{ .quantize = .{
             .sel = try self.select(o.get("sel")),
             .grid = try self.grid(o.get("grid")) orelse return null,
-            .strength = self.optFloat(o.get("strength")) orelse 1,
-            .swing = self.optFloat(o.get("swing")) orelse 0,
+            .strength = self.fraction(o.get("strength"), 1, 0, 1),
+            .swing = self.fraction(o.get("swing"), 0, -1, 1),
             .dur_too = self.optBool(o.get("dur-too")) orelse false,
         } };
         if (eql(name, "nudge")) {
@@ -420,7 +443,7 @@ const Reader = struct {
             const g = try self.grid(o.get("grid")) orelse return null;
             return .{ .nudge = .{ .sel = sel, .delta = .{ .steps = .{
                 .grid = g,
-                .count = @intCast(self.optInt(o.get("count")) orelse 1),
+                .count = self.narrow(i32, self.optInt(o.get("count")) orelse 1, 1),
             } } } };
         }
         if (eql(name, "transpose")) return .{ .transpose = .{
@@ -430,8 +453,8 @@ const Reader = struct {
         if (eql(name, "stretch")) return .{ .stretch = .{
             .from = self.optInt(o.get("from")) orelse 0,
             .to = self.optInt(o.get("to")) orelse 0,
-            .p = @intCast(@max(0, self.optInt(o.get("p")) orelse 0)),
-            .q = @intCast(@max(0, self.optInt(o.get("q")) orelse 0)),
+            .p = self.narrow(u32, @max(0, self.optInt(o.get("p")) orelse 0), 0),
+            .q = self.narrow(u32, @max(0, self.optInt(o.get("q")) orelse 0), 0),
         } };
         if (eql(name, "insert-tempo")) {
             const at = self.optInt(o.get("at")) orelse 0;
@@ -554,7 +577,7 @@ const Reader = struct {
                 try self.fail("a clip names its \"phrase\"", .{});
                 return null;
             },
-            .repeat = if (self.optInt(o.get("repeat"))) |x| @intCast(@max(1, x)) else null,
+            .repeat = if (self.optInt(o.get("repeat"))) |x| self.narrow(u32, @max(1, x), 1) else null,
             .offset = self.optInt(o.get("offset")),
             .length = self.optInt(o.get("length")),
             .transpose = if (self.optInt(o.get("transpose"))) |x| @intCast(std.math.clamp(x, -120, 120)) else null,
@@ -709,13 +732,57 @@ const Reader = struct {
         return out.toOwnedSlice(self.a);
     }
 
+    /// One JSON number as a tick. The ONE place a float becomes an i64
+    /// in this grammar, and every operation's every integer field goes
+    /// through it.
+    ///
+    /// `2^63` as an f64 is exact, so `@abs(f) < 2^63` is precisely the
+    /// domain `@intFromFloat(@trunc(f))` has: anything at or past it —
+    /// `1e30`, an infinity, a NaN — is recorded in `out_of_range` and
+    /// refused by `fromJson` rather than truncated into whatever the
+    /// bit pattern happens to be.
     fn int(self: *Reader, v: std.json.Value) ?i64 {
-        _ = self;
-        return switch (v) {
-            .integer => |n| n,
-            .float => |f| if (std.math.isFinite(f)) @intFromFloat(@trunc(f)) else null,
-            else => null,
+        switch (v) {
+            .integer => |n| return n,
+            .float => |f| {
+                if (std.math.isFinite(f) and @abs(f) < 9_223_372_036_854_775_808.0) {
+                    return @intFromFloat(@trunc(f));
+                }
+                if (self.out_of_range == null) self.out_of_range = f;
+                return null;
+            },
+            else => return null,
+        }
+    }
+
+    /// One tick narrowed to the field that holds it — `:repeat`'s `u32`,
+    /// `:count`'s `i32`, a ratio's `u32`.
+    ///
+    /// `std.math.cast` or a refusal: a `@intCast` here was a panic
+    /// waiting for `{"repeat":5000000000}`, and a CLAMP would be a
+    /// different edit than the one that was asked for (`:repeat
+    /// 5000000000` is not `:repeat 4294967295`). The fallback is only
+    /// ever the value the refused operation never reaches production
+    /// with.
+    fn narrow(self: *Reader, comptime T: type, v: i64, fallback: T) T {
+        return std.math.cast(T, v) orelse {
+            if (self.out_of_range == null) self.out_of_range = @floatFromInt(v);
+            return fallback;
         };
+    }
+
+    /// A user fraction clamped onto the range its rule is defined over —
+    /// `:strength` in 0..1, `:swing` in −1..1.
+    ///
+    /// Clamping IS the rule here, unlike `narrow`: a swing past ±1 is
+    /// not a different edit, it is the same shuffle asked for too
+    /// loudly, and the grid it offsets has no line past one step. NaN
+    /// takes the fallback, which `std.math.clamp` alone would let
+    /// through.
+    fn fraction(self: *Reader, v: ?std.json.Value, fallback: f64, lo: f64, hi: f64) f64 {
+        const x = self.optFloat(v) orelse return fallback;
+        if (std.math.isNan(x)) return fallback;
+        return std.math.clamp(x, lo, hi);
     }
 
     fn optInt(self: *Reader, v: ?std.json.Value) ?i64 {
@@ -1049,4 +1116,74 @@ test "Op.fromJson: what is not an operation is a diagnostic, never an error" {
         try testing.expect(p.diags.hasErrors());
         try testing.expectEqual(Diag.Code.sjon_diagnostic, p.diags.items()[0].code);
     }
+}
+
+test "Op.fromJson: a number no field can hold is refused, never truncated" {
+    // The final review's I1 at this boundary. Each of these panicked —
+    // `@intFromFloat` past `i64` for the floats, `@intCast` past the
+    // field's own width for the integers — on text `--op` and `tpr_plan`
+    // accept from anybody. A refusal is the only honest answer: a
+    // saturated `{"at":1e30}` would edit at tick 9223372036854775807 and
+    // a defaulted one would edit at 0, and neither is what was asked.
+    const refused = [_][]const u8{
+        // `int()`: any integer field, as a float past 2^63.
+        \\{"op":"retime","sel":{},"delta":1e30}
+        ,
+        \\{"op":"retime","sel":{},"delta":-1e30}
+        ,
+        \\{"op":"split","sel":{},"at":1e300}
+        ,
+        \\{"op":"insert","lane":"flash","note":{"at":1e30,"dur":0,"key":60}}
+        ,
+        // the narrowing fields: `:repeat` u32, `:count` i32, `p`/`q` u32.
+        \\{"op":"resize","sel":{},"repeat":5000000000}
+        ,
+        \\{"op":"nudge","sel":{},"grid":"1/16","count":5000000000}
+        ,
+        \\{"op":"stretch","from":0,"to":184504320,"p":5000000000,"q":2}
+        ,
+        \\{"op":"stretch","from":0,"to":184504320,"p":3,"q":5000000000}
+        ,
+        \\{"op":"insert","lane":"flash","clip":{"at":0,"phrase":"fill","repeat":5000000000}}
+        ,
+    };
+    for (refused) |text| {
+        var p = try fromJson(testing.allocator, text);
+        defer p.deinit();
+        if (p.op != null) {
+            std.debug.print("not refused: {s}\n", .{text});
+            return error.NumberNotRefused;
+        }
+        try testing.expect(p.diags.hasErrors());
+        try testing.expectEqual(Diag.Code.sjon_diagnostic, p.diags.items()[p.diags.items().len - 1].code);
+    }
+}
+
+test "Op.fromJson: :strength and :swing are clamped onto the range their rule has" {
+    // Clamped rather than refused, and that is the difference between
+    // the two helpers: a swing past ±1 asks for the same shuffle too
+    // loudly (the offset would be longer than the step it is a fraction
+    // of), while a `:repeat` past `u32` asks for a different edit.
+    // `-1e300` reached `Snap.lineOf`'s truncation and panicked there.
+    var p = try parsed(
+        \\{"op":"quantize","sel":{},"grid":"1/8","strength":9,"swing":-1e300}
+    );
+    defer p.deinit();
+    try testing.expectEqual(@as(f64, 1), p.op.?.quantize.strength);
+    try testing.expectEqual(@as(f64, -1), p.op.?.quantize.swing);
+
+    var q = try parsed(
+        \\{"op":"quantize","sel":{},"grid":"1/8","strength":-4,"swing":1e300}
+    );
+    defer q.deinit();
+    try testing.expectEqual(@as(f64, 0), q.op.?.quantize.strength);
+    try testing.expectEqual(@as(f64, 1), q.op.?.quantize.swing);
+
+    // …and a value inside the range crosses unchanged.
+    var r = try parsed(
+        \\{"op":"quantize","sel":{},"grid":"1/8","strength":0.5,"swing":0.25}
+    );
+    defer r.deinit();
+    try testing.expectEqual(@as(f64, 0.5), r.op.?.quantize.strength);
+    try testing.expectEqual(@as(f64, 0.25), r.op.?.quantize.swing);
 }

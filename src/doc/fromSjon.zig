@@ -211,13 +211,15 @@ pub fn contentEnd(doc: *const Doc.Doc) i64 {
 ///
 /// It reproduces `finalMap` exactly:
 ///
-///   * the CONDUCTOR's tables when the document names one and holds its
-///     inline dump (plan 03's rules 2 and 3, through `smfConductor` /
-///     `itConductor`);
+///   * the CONDUCTOR's tables when the document names one and either
+///     holds its inline dump or carries the anchor's verified bytes
+///     (plan 03's rules 2 and 3, through `conductorOf`);
 ///   * plan 03's placeholder — 500 000 microseconds per quarter note in
-///     `[4 4]` — when it names one and carries no dump and no points of
-///     its own, so a conducted document is never told it needs a point
-///     at tick 0;
+///     `[4 4]` — when it names one and neither is in hand, so a
+///     conducted document is never told it needs a point at tick 0. The
+///     LOAD raised `anchor_unavailable` for that document already
+///     (`conductedPlaceholder`); a map is not the place to hear it
+///     twice;
 ///   * otherwise the document's own `(tempo-point …)` and
 ///     `(meter-point …)`;
 ///   * `:length`, or `contentEnd` — the anchor's own end included —
@@ -231,21 +233,7 @@ pub fn contentEnd(doc: *const Doc.Doc) i64 {
 pub fn mapOf(gpa: Allocator, doc: *const Doc.Doc) Error!TimeMap.TimeMap {
     var cond: ?Conductor = null;
     defer if (cond) |*c| c.deinit();
-    if (doc.conductor) |id| conducted: {
-        const anchor = doc.anchorById(id) orelse break :conducted;
-        for (doc.midi) |*tier| {
-            if (std.mem.eql(u8, tier.anchor, id)) {
-                cond = try smfConductor(gpa, &tier.sequence, anchor.span);
-                break :conducted;
-            }
-        }
-        for (doc.it) |*tier| {
-            if (std.mem.eql(u8, tier.anchor, id)) {
-                cond = try itConductor(gpa, &tier.module, anchor.span);
-                break :conducted;
-            }
-        }
-    }
+    if (doc.conductor) |id| cond = try conductorOf(gpa, doc, id, doc.conductor_bytes);
 
     const seeded_tempo = [_]Doc.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
     const seeded_meter = [_]Doc.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
@@ -800,8 +788,15 @@ const Ctx = struct {
             else
                 "";
             const file = if (kvNode(self.tree, children, "file")) |n| try self.text(n) else "";
+            // `:size` is a USER number and the schema's bounds are not a
+            // cast's: `1e30` has no `u64` to be truncated to, and an
+            // `@intFromFloat` past the range is a panic on user input
+            // (the root contract forbids one). Saturating instead, with
+            // `bridge_it.castInt` — the doc layer's one such reader — so
+            // an impossible `:size` cannot match the file's length and
+            // comes back as `anchor_mismatch` with a span.
             const size: ?u64 = if (kvNode(self.tree, children, "size")) |n|
-                if (readNumber(self.tree, n)) |v| @intFromFloat(@max(0, v)) else null
+                if (readNumber(self.tree, n)) |v| bridge_it.castInt(u64, v, 0) else null
             else
                 null;
             const sha_src: ?[]const u8 = if (kvNode(self.tree, children, "sha256")) |n|
@@ -994,24 +989,42 @@ const Ctx = struct {
     /// `(timeline :conductor …)` names (plan 03, "Three conductors",
     /// rules 2 and 3).
     ///
-    /// Nothing happens without BOTH a conductor and an inline dump for
-    /// it: a by-reference anchor's file is not read here, and the
-    /// document keeps the placeholder `derive` seeds it with.
-    fn conductorTables(self: *Ctx, doc: *const Doc.Doc) Error!void {
+    /// The tier is read when the anchor carries one, and the anchor's
+    /// own VERIFIED BYTES are read when it conducts by reference — one
+    /// owner, `conductorOf`, for both, because plan 03's rules draw no
+    /// line there. Only a conductor nobody could produce at all keeps
+    /// the placeholder, and that is an error rather than a silence.
+    fn conductorTables(self: *Ctx, doc: *Doc.Doc) Error!void {
         const id = self.conductor orelse return;
         const anchor = doc.anchorById(id) orelse return;
 
-        var built: Conductor = built: {
-            for (doc.midi) |*tier| {
-                if (std.mem.eql(u8, tier.anchor, id)) {
-                    break :built try smfConductor(self.gpa, &tier.sequence, anchor.span);
+        // A by-reference conductor's file, copied onto the DOCUMENT so
+        // the layers above answer with this same one (`Doc`'s
+        // `conductor_bytes`). `resolved` is the verdict `readAnchors`
+        // already reached through `checks.anchorBytes`, so nothing is
+        // verified twice and nothing is reported twice.
+        if (!anchor.inline_dump and anchor.resolved) {
+            if (self.resolver) |r| {
+                if (r.read(anchor.file)) |bytes| {
+                    doc.conductor_bytes = try self.a.dupe(u8, bytes);
                 }
             }
-            for (doc.it) |*tier| {
-                if (std.mem.eql(u8, tier.anchor, id)) {
-                    break :built try itConductor(self.gpa, &tier.module, anchor.span);
-                }
-            }
+        }
+
+        var built: Conductor = (try conductorOf(self.gpa, doc, id, doc.conductor_bytes)) orelse {
+            // Neither a tier nor a file: the placeholder stays, and says
+            // so. Plan 03 makes no inline/by-reference distinction, so a
+            // conducted document whose file is not here is not merely an
+            // unresolved anchor — every position it answers is 120
+            // quarter notes per minute in [4 4], and a score exported
+            // from it is wrong rather than approximate.
+            if (conductedPlaceholder(doc)) try self.diags.add(
+                .anchor_unavailable,
+                .err,
+                anchor.span,
+                "the anchor '{s}' conducts this document and its file ({s}) is not here, so every position is the placeholder's 120 quarter notes per minute in [4 4]: inline the tier (`tempura inline`) or hand the host the file",
+                .{ id, anchor.file },
+            );
             return;
         };
         defer built.deinit();
@@ -1664,6 +1677,97 @@ pub const Conductor = struct {
     }
 };
 
+/// The conductor's tables for the anchor named `id` — the ONE owner of
+/// plan 03's rules 2 and 3 over a finished `Doc`.
+///
+/// Three layers ask this question: the load, while it is lowering the
+/// source (`Ctx.conductorTables`); `mapOf`, for a consumer that holds a
+/// document; and `time/derive.conduct`, for the derivation. Each used to
+/// choose an arm for itself, and the by-reference arm was missing from
+/// all three — a conducted anchor whose file the resolver had ALREADY
+/// read and verified was timed by the placeholder, with no diagnostic
+/// anywhere (the final review's C1). There is one arm-chooser now:
+///
+///   * the anchor's INLINE tier when the document carries one — the
+///     `Sequence` / `Module` is right there;
+///   * otherwise the anchor's own bytes, read into a transient
+///     `Sequence` / `Module` and handed to the same two functions. Plan
+///     02 makes a by-reference anchor first class and plan 03 draws no
+///     line at all, so neither does this;
+///   * `null` when neither is in hand, which is the only case that keeps
+///     the placeholder (`conductedPlaceholder`).
+///
+/// `bytes` is `Doc.conductor_bytes`: verified against `:size` and
+/// `:sha256` and copied into the document's arena while it was read, so
+/// no caller here needs a resolver and no two callers can disagree.
+///
+/// The transient read is released before returning, which is sound
+/// because `Conductor` copies both tables into an arena of its own and
+/// an IT `RowMap` is arena-backed with nothing borrowed from the module
+/// it walked. The READER's own report is not forwarded: these bytes were
+/// verified byte for byte against what the anchor declared, how the file
+/// parses is `tempura dump`'s question, and what matters for TIME —
+/// format 2, an inexact division, a walk past the ceiling — is said by
+/// `smfConductor` / `itConductor` themselves.
+///
+/// Caller releases with `deinit()`.
+pub fn conductorOf(
+    gpa: Allocator,
+    doc: *const Doc.Doc,
+    id: Doc.AnchorId,
+    bytes: ?[]const u8,
+) Error!?Conductor {
+    const anchor = doc.anchorById(id) orelse return null;
+    for (doc.midi) |*tier| {
+        if (std.mem.eql(u8, tier.anchor, id)) {
+            return try smfConductor(gpa, &tier.sequence, anchor.span);
+        }
+    }
+    for (doc.it) |*tier| {
+        if (std.mem.eql(u8, tier.anchor, id)) {
+            return try itConductor(gpa, &tier.module, anchor.span);
+        }
+    }
+    const raw = bytes orelse return null;
+    switch (anchor.kind) {
+        .smf => {
+            var read = try smf.read(gpa, raw);
+            defer read.deinit();
+            return try smfConductor(gpa, &read.sequence, anchor.span);
+        },
+        .it => {
+            var read = try itf.read.read(gpa, raw);
+            defer read.deinit();
+            return try itConductor(gpa, &read.module, anchor.span);
+        },
+    }
+}
+
+/// Whether `doc` is conducted by an anchor whose time nobody could
+/// produce: it names a `:conductor`, the anchor exists, and neither an
+/// inline tier nor the anchor's verified bytes are here — so every
+/// position the document answers is plan 03's placeholder (500 000
+/// microseconds per quarter note in `[4 4]`) and not the file's.
+///
+/// One predicate, three readings of it: the load and `time/derive` raise
+/// `anchor_unavailable` as an ERROR on it, and `tempura export-score`
+/// refuses — a transport of `:bpm 120` under a header that names a
+/// conductor is a wrong score, not a score with a warning. The states it
+/// is FALSE for are the honest ones: an inline tier, a file that was read
+/// and verified, and a document that conducts itself.
+pub fn conductedPlaceholder(doc: *const Doc.Doc) bool {
+    const id = doc.conductor orelse return false;
+    if (doc.anchorById(id) == null) return false;
+    if (doc.conductor_bytes != null) return false;
+    for (doc.midi) |*tier| {
+        if (std.mem.eql(u8, tier.anchor, id)) return false;
+    }
+    for (doc.it) |*tier| {
+        if (std.mem.eql(u8, tier.anchor, id)) return false;
+    }
+    return true;
+}
+
 /// Rule 2: every `set-tempo` in EVERY track merged by tick, each `us` as
 /// written, and `time-signature` likewise with `nn` and `2^dd` as
 /// `[n d]`. Equal ticks keep file order and the last wins. SMF tick `k`
@@ -2081,11 +2185,22 @@ test "fromSjon: a conductor plus the document's own points is conductor_conflict
 test "fromSjon: a conducted document owes no tempo or meter point of its own" {
     // The other side of `conductor_conflict`: the tick-0 requirement is
     // what the conductor answers, so a conducted document with no points
-    // is silent rather than doubly wrong.
-    try expectClean(
+    // is not doubly wrong.
+    //
+    // The claim is exactly that and no wider: this anchor's file is not
+    // in anybody's hands, which is its own error since the by-reference
+    // conductor was fixed — and it is the one the document gets.
+    const gpa = testing.allocator;
+    var res = try load(gpa,
         \\(timeline :conductor song)
         \\(anchor :id song :kind it :file "x.it")
-    );
+    , null);
+    defer res.deinit();
+
+    try testing.expectEqual(@as(usize, 0), res.diags.count(.tempo_map_invalid));
+    try testing.expectEqual(@as(usize, 0), res.diags.count(.meter_map_invalid));
+    try testing.expectEqual(@as(usize, 1), res.diags.items().len);
+    try testing.expectEqual(@as(usize, 1), res.diags.count(.anchor_unavailable));
 }
 
 test "fromSjon: an inline dump with no anchor before it is anchor_missing" {
@@ -2836,6 +2951,162 @@ test "fromSjon: an SMF conductor's tempo is honoured on any track, and its meter
     try testing.expectEqual(@as(f64, 400_000), res.map.segments[1].us);
     // …and the file's `[3 4]` is what `1bar` means in the document.
     try testing.expectEqual(@as(i64, 3 * Grid.TPQ), res.doc.cues[0].at);
+}
+
+/// `conducted_smf`'s inline tier as a FILE, plus a document that only
+/// names it: the same conductor said by reference. The bytes come out of
+/// the canonical writer rather than a literal so the two spellings
+/// cannot drift apart, and the anchor's `:size` / `:sha256` are that
+/// file's own — a by-reference anchor that declares neither is
+/// `anchor_mismatch` the moment a resolver reads it.
+const ByReference = struct {
+    inline_res: Result,
+    written: smf.Written,
+    source: [:0]u8,
+    entries: [1]Resolver.Memory.Entry,
+
+    fn init(gpa: Allocator) !ByReference {
+        var inline_res = try load(gpa, conducted_smf, null);
+        errdefer inline_res.deinit();
+        var written = try smf.write(gpa, &inline_res.doc.midi[0].sequence, .{});
+        errdefer written.deinit();
+
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(written.bytes, &digest, .{});
+        var hex: [64]u8 = undefined;
+        for (digest, 0..) |b, i| {
+            _ = std.fmt.bufPrint(hex[i * 2 ..][0..2], "{x:0>2}", .{b}) catch unreachable;
+        }
+
+        const source = try std.fmt.allocPrintSentinel(gpa,
+            \\(timeline :conductor song)
+            \\(anchor :id song :kind smf :file "x.mid" :size {d} :sha256 "{s}")
+            \\(cue :name "two" :at 1bar)
+            \\
+        , .{ written.bytes.len, hex }, 0);
+        errdefer gpa.free(source);
+
+        return .{
+            .inline_res = inline_res,
+            .written = written,
+            .source = source,
+            .entries = .{.{ .path = "x.mid", .bytes = written.bytes }},
+        };
+    }
+
+    /// A resolver over the one file. Borrows `self`, so the caller keeps
+    /// it alive for the load.
+    fn table(self: *const ByReference) Resolver.Memory {
+        return .{ .entries = &self.entries };
+    }
+
+    fn deinit(self: *ByReference, gpa: Allocator) void {
+        gpa.free(self.source);
+        self.written.deinit();
+        self.inline_res.deinit();
+    }
+};
+
+test "fromSjon: a by-reference conductor is timed by the file the resolver read" {
+    // The final review's C1: the resolver had already read and VERIFIED
+    // these bytes, and the document was timed by the placeholder anyway
+    // — `validate` said nothing, `timeline` said 500 000 microseconds
+    // and `export-score` said `:bpm 120`. Plan 03's rules 2 and 3 make
+    // no inline/by-reference distinction, so the two spellings of one
+    // conductor give one map, segment for segment and bar for bar.
+    const gpa = testing.allocator;
+    var fx = try ByReference.init(gpa);
+    defer fx.deinit(gpa);
+
+    const t = fx.table();
+    var res = try load(gpa, fx.source, Resolver.memory(&t));
+    defer res.deinit();
+
+    for (res.diags.items()) |d| std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
+    try testing.expectEqual(@as(usize, 0), res.diags.items().len);
+    try testing.expect(res.doc.anchors[0].resolved);
+    try testing.expect(!res.doc.anchors[0].inline_dump);
+    // The bytes travel with the document, which is what lets the layers
+    // above build the same tables with no resolver of their own.
+    try testing.expect(res.doc.conductor_bytes != null);
+    try testing.expect(!conductedPlaceholder(&res.doc));
+
+    // The FILE's two segments, not the placeholder's one.
+    try testing.expectEqual(@as(usize, 2), res.map.segments.len);
+    try testing.expectEqual(@as(f64, 500_000), res.map.segments[0].us);
+    try testing.expectEqual(@as(i64, 2 * Grid.TPQ), res.map.segments[1].tick);
+    try testing.expectEqual(@as(f64, 400_000), res.map.segments[1].us);
+    // …and the file's `[3 4]`, which is what makes `1bar` three quarters.
+    try testing.expectEqual(@as(i64, 3 * Grid.TPQ), res.doc.cues[0].at);
+
+    // The inline twin, echoed against it: one text or a bug.
+    var from_inline: std.Io.Writer.Allocating = .init(gpa);
+    defer from_inline.deinit();
+    var from_ref: std.Io.Writer.Allocating = .init(gpa);
+    defer from_ref.deinit();
+    try fx.inline_res.map.echo(&from_inline.writer);
+    try res.map.echo(&from_ref.writer);
+    try testing.expectEqualStrings(from_inline.written(), from_ref.written());
+
+    // `mapOf` over the finished value takes the same arm — the one
+    // owner is `conductorOf` and nothing else chooses.
+    var again = try mapOf(gpa, &res.doc);
+    defer again.deinit();
+    var from_mapof: std.Io.Writer.Allocating = .init(gpa);
+    defer from_mapof.deinit();
+    try again.echo(&from_mapof.writer);
+    try testing.expectEqualStrings(from_ref.written(), from_mapof.written());
+}
+
+test "fromSjon: a by-reference conductor nobody can read is anchor_unavailable, not a silence" {
+    // The other half of C1's fix: with no resolver (wasm without
+    // `tpr_attachAnchor`, a host with no filesystem) the placeholder
+    // STAYS — plan 03 needs a document to be answerable — but a
+    // conducted document is told, as an ERROR, that the answers are the
+    // placeholder's. Plan 02's "recorded unresolved and silent" holds for
+    // an anchor that merely carries content; it cannot hold for the one
+    // that keeps time.
+    const gpa = testing.allocator;
+    var fx = try ByReference.init(gpa);
+    defer fx.deinit(gpa);
+
+    var res = try load(gpa, fx.source, null);
+    defer res.deinit();
+
+    try testing.expectEqual(@as(usize, 1), res.diags.count(.anchor_unavailable));
+    try testing.expect(res.diags.hasErrors());
+    try testing.expect(res.doc.conductor_bytes == null);
+    try testing.expect(conductedPlaceholder(&res.doc));
+    // One segment at the placeholder's 500 000 microseconds, and `1bar`
+    // is four quarters again because the file's `[3 4]` is not here.
+    try testing.expectEqual(@as(usize, 1), res.map.segments.len);
+    try testing.expectEqual(@as(f64, 500_000), res.map.segments[0].us);
+    try testing.expectEqual(@as(i64, 4 * Grid.TPQ), res.doc.cues[0].at);
+}
+
+test "fromSjon: an anchor :size no u64 can hold saturates and says anchor_mismatch" {
+    // `:size 1e30` used to panic in `readAnchors` on an
+    // `@intFromFloat` — a defect of the CAST, over user input the root
+    // contract says is never asserted on. Saturated, it disagrees with
+    // the file the resolver read and is a diagnostic with a span.
+    const gpa = testing.allocator;
+    const table: Resolver.Memory = .{ .entries = &.{
+        .{ .path = "x.it", .bytes = "IMPMbytes" },
+    } };
+    var res = try load(
+        gpa,
+        \\(timeline)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(anchor :id song :kind it :file "x.it" :size 1e30 :sha256 "9f2a00000000000000000000000000000000000000000000000000000000abcd")
+        ,
+        Resolver.memory(&table),
+    );
+    defer res.deinit();
+
+    try testing.expectEqual(@as(u64, std.math.maxInt(u64)), res.doc.anchors[0].size.?);
+    try testing.expectEqual(@as(usize, 1), res.diags.count(.anchor_mismatch));
+    try testing.expect(!res.doc.anchors[0].resolved);
 }
 
 test "fromSjon.mapOf: the map a Doc answers with is the map its load stored" {

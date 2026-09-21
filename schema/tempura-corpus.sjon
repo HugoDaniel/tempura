@@ -7,13 +7,23 @@
 ; `song.mid` or `song.it`. `src/corpus_runner.zig` embeds this manifest
 ; via the `corpus_schema` build import and PRELOADS it once for the whole
 ; walk, exactly as `src/Schema.zig` preloads the timeline vocabulary — two
-; disjoint vocabularies, two bundles, NEVER composed into one. Both
-; declare a `timing` form (the it tier's header section, and the verb that
-; echoes an IT conductor's walk), so a shared schema would make every
-; unqualified `(timing …)` `ambiguous_form` in timeline documents AND in
-; harness files. One project, one vocabulary; the harness files trade
-; editor support for the document's, which is why this manifest is
-; deliberately absent from `sjon-project.sjon`.
+; disjoint vocabularies, two bundles, NEVER composed into one. A harness
+; file is not a document and shares no form with one, so composing the two
+; would only put every document's vocabulary within reach of a typo in a
+; `times.sjon` (and, until 2026-09-21, made every unqualified `(timing …)`
+; `ambiguous_form` in both: the it tier declares one for its header section
+; and this manifest declared one for a verb — see the note below). One
+; project, one vocabulary; the harness files trade editor support for the
+; document's, which is why this manifest is deliberately absent from
+; `sjon-project.sjon`.
+;
+; 2026-09-21 — the `timing` verb is GONE from this manifest. It echoed the
+; derived TimeMap for the studio's timing provider; pstudio is not a host,
+; nothing ever implemented it, and the runner answered `UNRUN timing` and
+; FAILED any case that asked — a declared verb that could only ever fail is
+; not a vocabulary, it is a trap. `(echo …)` already carries the whole
+; derivation at the top of every document case, which is what the verb
+; would have printed.
 ;
 ; What lives HERE is SHAPE. What stays in the runner is everything a
 ; schema cannot see: document order (the script runs top to bottom), the
@@ -27,7 +37,7 @@
 ; No `:version`, for the reason `schema/tempura.sjon` declares none.
 
 (plugin :name tempura-corpus
-  :description "The golden corpus's harness vocabulary: the ordered script of queries and verbs a case replays — the format cores' read, round trip, walk and write, then positions, snaps, edit plans, the score export, the timing walk, the built file and the re-dump."
+  :description "The golden corpus's harness vocabulary: the ordered script of queries and verbs a case replays — the format cores' read, round trip, walk and write, then positions, snaps, edit plans, the score export, the built file and the re-dump."
 
   ; ---- value kinds ----
 
@@ -88,7 +98,7 @@
     :description "The two fidelity rungs of plan 09 over the case's fixture. Rung 1 is `write(read(bytes)) == bytes`, which holds for a file tempura's own canonical writer produced; rung 2 is `read(write(read(bytes)))` equal to `read(bytes)` event for event for a `.mid` (every `at`, kind and active payload, foreign chunks included) and field for field for an `.it` (header, orders, patterns cell by cell, every pass-through region byte-equal). A FOREIGN fixture — one the canonical writer would never have produced, a SMPTE division or a command byte no IT effect names — is what rung 2 is for, and its golden pins `(rung1 :ok false)` as a fact the case's own `times.sjon` explains: the verdict is the golden's byte-equality, never the flag's value. Takes no rows.")
 
   (form :name walk
-    :description "Echo the IT timing walk's `RowMap`: one row per row PLAYED with its start and length, the tempo segments, the note onsets, the total and the loop point, then the walk's diagnostics. An `.it` fixture only — an SMF conductor is the `timing` verb's business."
+    :description "Echo the IT timing walk's `RowMap`: one row per row PLAYED with its start and length, the tempo segments, the note onsets, the total and the loop point, then the walk's diagnostics. An `.it` fixture only: it is the tracker's own row clock, and an SMF conductor has no rows. What an SMF conductor derives is in the `(echo …)` header every document case opens with."
     (key :name max-rows :type row-cap :optional true :default 1048576
       :description "Stop the walk after this many rows and raise `walk_runaway`. The default is the walk's own ceiling, so only a runaway case states it."))
 
@@ -127,11 +137,6 @@
       :description "How many leading lines of the exported score to render beside the hash.")
     (key :name max-keys :type tick-value :optional true :default 512
       :description "The per-track share of pacer's key budget (plan 08, \"The key budget\"; the CLI's --max-keys-per-track). The default is the exporter's own, and a case lowers it so the budget warning can be pinned over a lane a reviewer can read rather than over six hundred keyframes nobody will."))
-
-  (form :name timing
-    :description "Echo the derived TimeMap: the tempo segments, the meter and bar tables, the sections and cues in ticks, the per-lane onsets, the length and the loop point. For an IT conductor it also echoes the timing walk's (order, row) -> tick map. Takes no rows."
-    (key :name segments :type tick-value :optional true
-      :description "Cap on how many tempo segments to render, for a case whose walk produces thousands. Absent means all of them."))
 
   (form :name build
     :description "Build the case's document into a file of the given kind and render the bytes' length and hash, then rung 1 over what was written. An ANCHORED document is its inline tier through the canonical writer; a NATIVE one goes through plan 08's renderers and plan 04's carriers, and the golden carries rung 3 — the dump of what was built, against the document that built it — beside rung 1. Same document must give the same bytes on x86_64, aarch64 and wasm32 — that is what the hash is for."

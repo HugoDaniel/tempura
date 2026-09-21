@@ -41,10 +41,20 @@
 //!     (plan retime :args (a :sel (s :lanes [flash]) :delta 46126080))
 //!     (export-score :lines 12)
 //!
-//! `timing` is the one directive the manifest declares and nothing
-//! implements — it existed for the studio's timing provider, and pstudio
-//! is not a host — so meeting it is `UNRUN <directive>` and a FAILED
-//! case. An unrun case is never reported green.
+//! The manifest declares nothing this half does not implement. It used to
+//! declare one thing — `timing`, which echoed the derived `TimeMap` for
+//! the studio's timing provider — and since pstudio is not a host, that
+//! verb had no implementation and never would: the runner answered
+//! `UNRUN timing` and FAILED any case that asked for it. A declared verb
+//! that can only ever fail is a trap rather than a vocabulary, so it is
+//! gone from `schema/tempura-corpus.sjon` (2026-09-21), and `(echo …)`
+//! at the top of every document case is what it would have printed.
+//!
+//! `.unrun` STAYS as the fallback for a head the manifest declares and
+//! this half has not caught up with: an `unknown_form` is an SJON error
+//! and never reaches the dispatch, so without it a newly declared verb
+//! would silently be a no-op case. Meeting one is `UNRUN <directive>` and
+//! a FAILED case; an unrun case is never reported green.
 //!
 //! ## The document
 //!
@@ -2018,17 +2028,31 @@ fn rung1Of(gpa: Allocator, kind: doc.AnchorKind, bytes: []const u8) Error!bool {
 }
 
 /// `dump(build(doc))` against `doc`, timeline tier for timeline tier.
+///
+/// The file's half is lifted off BOTH sides. The anchor and the dump a
+/// build had to invent are the file's, and so is the anchor the AUTHOR
+/// wrote: a native document arranged around `impulse-04.it` names one
+/// file before the build and another after it, and comparing one
+/// document's anchors against the other's empty list made the rung false
+/// for every anchored document at once — `corpus/examples-native` was the
+/// one case that had an anchor, and it reported a loss that had not
+/// happened (the final review's D1, second half). What rung 3 claims is
+/// plan 09's essence-exactness: the TIMELINE tier comes back.
 fn rung3Of(gpa: Allocator, loaded: *Loaded, kind: doc.AnchorKind, bytes: []const u8) Error!bool {
     var dumped = try doc.pipeline.dump(gpa, loaded.schema, bytes, kind, .{});
     defer dumped.deinit();
     if (dumped.diags.hasErrors()) return false;
-    // A shallow copy with the FILE tiers emptied — never deinitialised,
-    // because the arena it names is still the dumped document's.
+    // Shallow copies with the FILE tiers emptied — never deinitialised,
+    // because the arenas they name are still the two documents'.
     var tier_free = dumped.doc;
     tier_free.anchors = &.{};
     tier_free.midi = &.{};
     tier_free.it = &.{};
-    return tier_free.eql(loaded.doc_());
+    var want = loaded.doc_().*;
+    want.anchors = &.{};
+    want.midi = &.{};
+    want.it = &.{};
+    return tier_free.eql(&want);
 }
 
 fn renderBuilt(
@@ -2127,12 +2151,16 @@ test "corpus harness: the embedded manifest preloads clean and declares every di
     try t_.expectEqual(@as(usize, 1), hs.preloaded.plugins.len);
     try t_.expectEqualStrings("tempura-corpus", hs.preloaded.plugins[0].name);
     for ([_][]const u8{
-        "read", "roundtrip", "walk",   "write", "at",
-        "snap", "plan",      "timing", "build", "export-score",
-        "dump",
+        "read", "roundtrip", "walk",  "write", "at",
+        "snap", "plan",      "build", "export-score",
+        "dump", "times",
     }) |head| {
         try t_.expect(hs.preloaded.schema.lookupForm(head, null) == .found);
     }
+    // …and `timing` is not one of them any more: the verb it declared
+    // had no implementation and never would (pstudio is not a host), so
+    // a case that asked for it validated and then failed as `UNRUN`.
+    try t_.expect(hs.preloaded.schema.lookupForm("timing", null) != .found);
 }
 
 test "corpus harness: a well-formed file reads through the schema, defaults and all" {
@@ -2206,28 +2234,33 @@ test "corpus harness: what a schema cannot see stays the runner's" {
     }
 }
 
-test "corpus harness: `timing` is the one directive no part implements" {
+test "corpus harness: every declared directive is one this half implements" {
     var arena = std.heap.ArenaAllocator.init(t_.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    // `plan` and `export-score` are this task's, and a harness that asks
-    // for them now gets the edit engine and the exporter. `timing` is
-    // the row plan 10 has and this CLI does not (pstudio is not a host),
-    // so it validates — it is the same vocabulary — and comes back
-    // `unrun`, which FAILS the case rather than passing it silently.
+    // `plan` and `export-score` reach the edit engine and the exporter.
     const d = (try testParse(a,
         \\(read)
         \\(plan transpose :args (a :semitones 12))
         \\(export-score)
-        \\(timing)
     )).directives.?;
-    try t_.expectEqual(@as(usize, 4), d.len);
+    try t_.expectEqual(@as(usize, 3), d.len);
     try t_.expectEqual(Directive.read, d[0]);
     try t_.expectEqualStrings("{\"op\":\"transpose\",\"semitones\":12}", d[1].plan);
     try t_.expectEqual(@as(u32, 12), d[2].export_score.lines);
     try t_.expectEqual(@as(u32, 512), d[2].export_score.max_keys);
-    try t_.expectEqualStrings("timing", d[3].unrun);
+
+    // …and `timing` is no longer a directive at all. It was the one head
+    // the manifest declared and nothing implemented — the studio's
+    // timing provider, and pstudio is not a host — so a case that asked
+    // for it validated and then FAILED as `UNRUN timing`. The manifest
+    // was the only thing keeping it alive, so removing it from there is
+    // the whole change: the head is now an SJON `unknown_form`, refused
+    // with a span before the dispatch is reached.
+    const probe = try testParse(a, "(read)\n(timing)\n");
+    try t_.expect(probe.directives == null);
+    try t_.expect(std.mem.indexOf(u8, probe.report, SCHEMA_REFUSED) != null);
 }
 
 test "corpus harness: an operation's :args cross into the engine's JSON unchanged" {
@@ -2579,16 +2612,22 @@ fn readCorpusFile(gpa: Allocator, case: []const u8, file: []const u8) ![]u8 {
     return Io.Dir.cwd().readFileAlloc(t_.io, path, gpa, .limited(MAX_FILE_BYTES));
 }
 
+/// Every spelling of plan 03's three-segment map: the document's own
+/// points, an inline SMF dump, an inline IT module — and the same SMF
+/// file named BY REFERENCE, which is the spelling the final review's C1
+/// found being timed by the placeholder instead.
 const three_conductors = [_][]const u8{
     "tempo-three-conductors-native",
     "tempo-three-conductors-smf",
     "tempo-three-conductors-it",
+    "tempo-by-reference-conductor",
 };
 
-test "corpus: the three conductors' echo headers are byte-identical" {
+test "corpus: every spelling of one conductor has the same echo header" {
     // Plan 03, phase 3's red: the same three-segment map authored
-    // natively, as an SMF with tempo on TRACK 2, and as an IT module with
-    // `Txx` rows produces byte-identical `TimeMap` text.
+    // natively, as an SMF with tempo on TRACK 2, as an IT module with
+    // `Txx` rows, and as a by-reference anchor produces byte-identical
+    // `TimeMap` text.
     //
     // Asserted over the committed GOLDENS, which is the strongest place
     // to put it: `zig build corpus` already pins each golden against what
@@ -2770,12 +2809,20 @@ test "corpus render: a seconds query that no clock can answer is refused by NAME
 /// Load one of the corpus's own `doc.sjon` files and derive it — the
 /// join the tests below need, over documents a reviewer can open.
 const LoadedCase = struct {
+    /// The case's own directory, as a resolver — the same store
+    /// `loadDocument` builds for the real walk, because an anchor's
+    /// `:file` is resolved relative to the document (plan 02) and a
+    /// conducted anchor's bytes ARE its time (plan 03). It outlives the
+    /// document: an inline IT tier's opaque regions are offsets into the
+    /// bytes it cached.
+    store: doc.Fs,
     result: doc.Result,
     derived: time.derive.Derived,
 
     fn deinit(self: *LoadedCase) void {
         self.derived.deinit();
         self.result.deinit();
+        self.store.deinit();
     }
 
     // The three questions `Loaded` answers, spelled the same way, so a
@@ -2815,10 +2862,19 @@ fn loadCaseDoc(gpa: Allocator, schema: *const Schema, case: []const u8, edit: ?S
     const source = try gpa.dupeZ(u8, text);
     defer gpa.free(source);
 
-    var result = try doc.fromSource(gpa, schema, source, null);
+    const case_dir = try std.fs.path.join(gpa, &.{
+        @import("build_options").repo_root,
+        "corpus",
+        case,
+    });
+    defer gpa.free(case_dir);
+    var store = doc.fs(gpa, t_.io, case_dir);
+    errdefer store.deinit();
+
+    var result = try doc.fromSource(gpa, schema, source, store.resolver());
     errdefer result.deinit();
     const derived = try time.derive.derive(gpa, &result.doc);
-    return .{ .result = result, .derived = derived };
+    return .{ .store = store, .result = result, .derived = derived };
 }
 
 /// Every field of a `Position`, one against the other. `seconds_into_bar`
@@ -3014,3 +3070,4 @@ test "corpus render: a byte directive on a document case names what it needed" {
         try t_.expect(std.mem.indexOf(u8, said, "needs a song.mid or song.it fixture") != null);
     }
 }
+

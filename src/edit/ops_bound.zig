@@ -1155,13 +1155,13 @@ const Ctx = struct {
                 for (going) |c| {
                     if (c.node == ev.node) leaving = true;
                 }
-                if (!leaving) try channels.append(arena, @intCast(@max(0, ev.number - 1)));
+                if (!leaving) try channels.append(arena, narrowed(u32, ev.number -| 1));
             }
             // A row every cell left is removed, so it is not a row an
             // insert may land in.
             if (channels.items.len == 0) continue;
             try rows.append(arena, .{
-                .number = @intCast(@max(0, r.number)),
+                .number = narrowed(u16, r.number),
                 .slot = r.slot,
                 .channels = channels,
             });
@@ -1469,6 +1469,22 @@ fn kvNode(tree: *const Ast.Tree, form: NodeIndex, key: []const u8) ?NodeIndex {
         if (std.mem.eql(u8, kv.key, key)) return kv.value;
     }
     return null;
+}
+
+/// A leading number off the DOCUMENT's own text, narrowed to the domain
+/// the module keeps it in — a `(row N …)`'s `u16`, an `(ev N …)`'s
+/// channel `u32` — by clamping to that domain's ends.
+///
+/// An `@intCast` here was a panic waiting for `(row 70000 …)` in an
+/// inline IT tier: the schema's bounds are a diagnostic on the SOURCE
+/// and this walk runs over a document that already collected it, so the
+/// cast has to survive what the walk was handed. Clamping is right
+/// rather than merely safe: the numbers name cells in a module whose
+/// rows stop at 1023 and whose channels stop at 64, so a clamped one
+/// matches nothing and the edit finds no target — which is the answer a
+/// row that does not exist deserves.
+fn narrowed(comptime T: type, n: i64) T {
+    return @intCast(std.math.clamp(n, std.math.minInt(T), std.math.maxInt(T)));
 }
 
 fn kvInt(tree: *const Ast.Tree, form: NodeIndex, key: []const u8) ?i64 {
@@ -2244,4 +2260,52 @@ test "bound IT: :allow-shared writes the volume, in both occurrences at once" {
             .to = "(row 0 (ev 1 \"C-5\" :ins 1 :vol 50))",
         }},
     );
+}
+
+test "bound IT: a (row N …) or an (ev N …) past the module's own domain cannot panic" {
+    // The final review's I1, last row. `@intCast(@max(0, r.number))`
+    // into a `u16` and `@intCast(@max(0, ev.number - 1))` into a `u32`
+    // are casts over DOCUMENT TEXT: the schema bounds both numbers and
+    // says so with a span, but this walk runs over the document that
+    // COLLECTED that complaint (collection over abort), so the cast has
+    // to survive whatever the walk was handed.
+    //
+    // Clamping to the domain's ends is also the right answer rather than
+    // merely the safe one: the module has no row 70 000 and no channel
+    // five billion, so a clamped number matches no cell and the edit
+    // finds nothing — which is what a row that does not exist deserves.
+    try testing.expectEqual(@as(u16, 0), narrowed(u16, -5));
+    try testing.expectEqual(@as(u16, std.math.maxInt(u16)), narrowed(u16, 70_000));
+    try testing.expectEqual(@as(u16, 12), narrowed(u16, 12));
+    try testing.expectEqual(@as(u32, std.math.maxInt(u32)), narrowed(u32, 5_000_000_000));
+    try testing.expectEqual(@as(u32, 0), narrowed(u32, std.math.minInt(i64)));
+
+    // …and end to end, over a document that really does say so. The plan
+    // is TOTAL — refused or not, it comes back — and nothing asserts.
+    const gpa = testing.allocator;
+    const source: [:0]const u8 =
+        \\(timeline :title "wild" :conductor mod :length 2bar)
+        \\
+        \\(anchor :id mod :kind it :file "y.it")
+        \\(it/module :title "wild"
+        \\  (it/timing :speed 24 :tempo 125)
+        \\  (it/orders 0 end)
+        \\  (it/pattern 0 :rows 8
+        \\    (row 0 (ev 1 "C-5" :ins 1))
+        \\    (row 70000 (ev 5000000000 "E-5" :ins 1))))
+        \\
+        \\(lane :name lead :kind notes :from mod :channel 1)
+        \\
+    ;
+    var fx = try test_support.Fixture.initUnchecked(gpa, source);
+    defer fx.deinit();
+
+    for ([_]Op.Op{
+        .{ .retime = .{ .sel = .{ .lanes = &.{"lead"}, .kinds = .notes }, .delta = TPQ } },
+        .{ .remove = .{ .sel = .{ .lanes = &.{"lead"}, .kinds = .notes } } },
+        .{ .velocity = .{ .sel = .{ .lanes = &.{"lead"}, .kinds = .notes }, .vel = 64 } },
+    }) |op| {
+        var p = try plan(gpa, fx.doc_(), &fx.tree, op);
+        p.deinit();
+    }
 }

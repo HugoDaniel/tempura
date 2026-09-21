@@ -32,15 +32,22 @@
 ; `(build :kind it)` writes a FRESH module — the anchor carries no inline
 ; dump, so the anchor's own content is not in the file, which the build
 ; says in as many words. Rung 1 holds (the bytes re-read and re-write
-; identically). Rung 3 does NOT, and this is the only case in the corpus
-; where it does not, so here is exactly why: `Doc.eql` compares a
-; pass-through pacer form by its SOURCE TEXT, and this document has one —
-; `(control :id glow-amt …)`, written on one line. The essence carries
-; the form, and restoring it re-prints it through SJON's printer, which
-; breaks a seven-keyword form across seven lines. Nothing the document
-; MEANS changed; its layout did. Essence-exactness over documents without
-; a pass-through form is pinned green by `render-it`, `render-smf` and
-; the six `residue-*` cases.
+; identically) and so does rung 3, which is plan 09's essence-exactness:
+; the dump of what was just built is this document again, form for form
+; at the timeline tier.
+;
+; Rung 3 read FALSE here until 2026-09-21, and the two reasons are worth
+; keeping written down because both were defects of the COMPARISON and
+; not of the round trip. `Doc.eql` compared a pass-through pacer form by
+; its SOURCE TEXT, and this document has one — `(control :id glow-amt …)`,
+; written on one line — which the essence restores through SJON's printer
+; across seven lines: the same form, laid out differently. And the
+; runner's own `rung3Of` lifted the file's half off ONE side, so the
+; anchor this document names counted against the dump's empty list. Both
+; are fixed (`Value.passthroughEql`, `corpus_runner.rung3Of`), and this
+; case is now what it always should have been: the anchored document that
+; proves essence-exactness, beside `render-it`, `render-smf` and the seven
+; `residue-*` cases that prove it without an anchor.
 (export-score)
 (build :kind mid)
 (build :kind it)

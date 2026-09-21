@@ -1138,8 +1138,23 @@ const Ctx = struct {
         // follows moves, and rounding it is one fact about the stretch
         // rather than one document position that landed off the grid.
         var growth_rounded: u32 = 0;
-        const span = x.to - x.from;
-        const growth = scaleTicks(span, x.p, x.q, &growth_rounded) - span;
+        const span = x.to -| x.from;
+        const grown = scaleTicks(span, x.p, x.q, &growth_rounded);
+        // The ratio and the range are user numbers, and `p/q` over a
+        // range near the ceiling leaves the grid: plan 03 makes that a
+        // diagnostic and never a wrap, so it is refused HERE — before an
+        // action is written — rather than saturating every position onto
+        // one tick.
+        if (grown > Grid.MAX_TICK) {
+            try self.b.refuse(
+                .tick_overflow,
+                .{ .start = 0, .end = 0 },
+                "{d} ticks scaled by {d}/{d} is past the grid ceiling ({d})",
+                .{ span, x.p, x.q, Grid.MAX_TICK },
+            );
+            return;
+        }
+        const growth = grown -| span;
 
         var r = try Select.resolve(self.gpa, self.d, .{});
         defer r.deinit();
@@ -1151,6 +1166,19 @@ const Ctx = struct {
 
         for (r.targets) |t| {
             const to = stretched(x, growth, t.at, &inexact);
+            // …and the same ceiling per target: a position BEFORE the
+            // range stays, one after it moves by the growth, and the
+            // growth alone can push the tail off the grid even where the
+            // range itself scaled cleanly.
+            if (to > Grid.MAX_TICK or to < 0) {
+                try self.b.refuse(
+                    .tick_overflow,
+                    t.span,
+                    "this stretch would put a position at tick {d}, past the grid ceiling ({d})",
+                    .{ to, Grid.MAX_TICK },
+                );
+                return;
+            }
             const w = (try self.where(t.span)) orelse return;
             if (to != t.at) try self.b.setKeyword(w.site, "at", try self.positionJson(to));
 
@@ -1193,9 +1221,40 @@ const Ctx = struct {
 
     // ---- the map operations ----
 
+    /// Refuse a map edit on a CONDUCTED document. True = refused.
+    ///
+    /// Plan 03: "one owner of time per document". A `:conductor` hands
+    /// that ownership to the anchor, and a document that carries its own
+    /// `(tempo-point …)` beside one is `conductor_conflict` the moment it
+    /// is read — by the loader (`fromSjon`) and by the derivation
+    /// (`time/derive.conduct`) alike. So the planner that INSERTS one was
+    /// planning a document that will not load: the plan came back as an
+    /// `insert_root`, the splice succeeded, and the reload the edit ends
+    /// with raised `conductor_conflict` on text the author never asked
+    /// for. Plan 07's contract is that a refused plan is diagnostics and
+    /// an accepted one is applicable, so this is a refusal with the code
+    /// the reload would have raised, named at the anchor that owns the
+    /// time (the final review's I3).
+    ///
+    /// `tempura inline` and `materialize` are not the way out either:
+    /// what moves the ownership back to the document is taking the
+    /// `:conductor` off the `(timeline …)`, which is an edit to make
+    /// deliberately and not a side effect of inserting a point.
+    fn refuseIfConducted(self: *Ctx, what: []const u8) Error!bool {
+        const id = self.d.conductor orelse return false;
+        try self.b.refuse(
+            .conductor_conflict,
+            if (self.d.anchorById(id)) |anchor| anchor.span else .{ .start = 0, .end = 0 },
+            "this document names the :conductor '{s}', which owns its time: a {s} point of its own would not load (one owner of time per document). Take the :conductor off the (timeline …) first",
+            .{ id, what },
+        );
+        return true;
+    }
+
     /// A tempo point, and — in `wall_clock` mode — the retime that keeps
     /// every later event at the second it was already at.
     fn insertTempo(self: *Ctx, x: Op.InsertTempo) Error!void {
+        if (try self.refuseIfConducted("tempo")) return;
         var points: std.ArrayList(doc.TempoPoint) = .empty;
         defer points.deinit(self.gpa);
         try points.appendSlice(self.gpa, self.d.tempo);
@@ -1260,6 +1319,7 @@ const Ctx = struct {
     /// new map, in the same plan. A `q`, a `t` and an `s` stand: they name
     /// the grid and the clock, neither of which a meter touches.
     fn insertMeter(self: *Ctx, x: Op.InsertMeter) Error!void {
+        if (try self.refuseIfConducted("meter")) return;
         if (self.map.isBarLine(x.point.tick) == null) {
             try self.b.refuse(
                 .edit_off_bar,
@@ -1649,17 +1709,31 @@ fn stretched(x: Op.Stretch, growth: i64, tick: i64, inexact: *u32) i64 {
 /// other rounding in this repo that has a choice makes the same one. The
 /// product is taken in `i128`, so a tick near the grid ceiling times a
 /// large numerator cannot wrap.
+///
+/// It can, however, exceed `i64` — `{"to":9223372036854775807,"p":
+/// 4294967295}` is user input like any other — so the way back down
+/// SATURATES rather than asserting. Saturating and not wrapping is what
+/// lets `stretch` see it: the result is then far past `Grid.MAX_TICK` and
+/// the caller refuses with `tick_overflow` before a single action is
+/// written (plan 03: "past it is a `tick_overflow` diagnostic, never a
+/// wrap").
 fn scaleTicks(n: i64, p: u32, q: u32, inexact: *u32) i64 {
     if (q == 0) return n;
     const num = @as(i128, n) * @as(i128, p);
     const den = @as(i128, q);
     const quo = @divFloor(num, den);
     const rem = num - quo * den;
-    if (rem == 0) return @intCast(quo);
+    if (rem == 0) return saturated(quo);
     inexact.* += 1;
     const twice = rem * 2;
     const up = if (twice > den) true else if (twice < den) false else @rem(quo, 2) != 0;
-    return @intCast(if (up) quo + 1 else quo);
+    return saturated(if (up) quo + 1 else quo);
+}
+
+/// An `i128` back down to the tick domain, pinned at either end.
+fn saturated(x: i128) i64 {
+    return std.math.cast(i64, x) orelse
+        if (x > 0) std.math.maxInt(i64) else std.math.minInt(i64);
 }
 
 // ---------------------------------------------------------------------------
@@ -2114,6 +2188,78 @@ test "ops: insert-meter off a bar line is edit_off_bar" {
 
     try testing.expectEqual(@as(usize, 0), p.actions.len);
     try testing.expect(p.findDiag(.edit_off_bar) != null);
+}
+
+test "ops: insert-tempo and insert-meter on a CONDUCTED document are refused" {
+    // The final review's I3. The plan used to come back as an
+    // `insert_root` of a `(tempo-point …)` against the conducted
+    // document's own (empty) table; the splice succeeded, and the reload
+    // an edit ends with raised `conductor_conflict` on text nobody asked
+    // for. Plan 07's contract is that an accepted plan is applicable, so
+    // the planner refuses — with the code the reload would have raised,
+    // at the span of the anchor that owns the time.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.conducted);
+    defer fx.deinit();
+
+    for ([_]Op.Op{
+        .{ .insert_tempo = .{ .point = .{ .tick = 0, .tempo = .{ .qpm = 140 } } } },
+        .{ .insert_meter = .{ .point = .{ .tick = 0, .n = 3, .d = 4 } } },
+    }) |op| {
+        var p = try plan(gpa, fx.doc_(), &fx.tree, op);
+        defer p.deinit();
+
+        try testing.expectEqual(@as(usize, 0), p.actions.len);
+        try testing.expect(p.summary.refused);
+        const d = p.findDiag(.conductor_conflict) orelse return error.NotRefused;
+        // Named at the anchor, and naming it: a refusal a host shows has
+        // to say which form owns the time.
+        try testing.expect(std.mem.indexOf(u8, d.message, "'song'") != null);
+        try testing.expect(d.span.end > d.span.start);
+    }
+
+    // …and the same two operations on the same document with the
+    // `:conductor` gone are not refused, so the guard is the conductor's
+    // and not the tick's.
+    var free = try test_support.Fixture.init(gpa, test_support.native);
+    defer free.deinit();
+    var ok = try plan(gpa, free.doc_(), &free.tree, .{
+        .insert_tempo = .{ .point = .{ .tick = 0, .tempo = .{ .qpm = 140 } } },
+    });
+    defer ok.deinit();
+    try testing.expect(ok.findDiag(.conductor_conflict) == null);
+    try testing.expect(ok.actions.len > 0);
+}
+
+test "ops: a stretch that would leave the grid is tick_overflow, not a panic" {
+    // `scaleTicks` took its product in `i128` and cast the quotient back
+    // with `@intCast` — which panicked for `{"to":9223372036854775807,
+    // "p":4294967295}`, a number `--op` accepts like any other. The cast
+    // saturates now, and the ratio is refused before an action is
+    // written: plan 03 makes a tick past the ceiling a diagnostic and
+    // never a wrap.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.native);
+    defer fx.deinit();
+
+    for ([_]Op.Stretch{
+        .{ .from = 0, .to = std.math.maxInt(i64), .p = std.math.maxInt(u32), .q = 1 },
+        .{ .from = 0, .to = 4 * TPQ, .p = std.math.maxInt(u32), .q = 1 },
+    }) |x| {
+        var p = try plan(gpa, fx.doc_(), &fx.tree, .{ .stretch = x });
+        defer p.deinit();
+
+        try testing.expectEqual(@as(usize, 0), p.actions.len);
+        try testing.expect(p.findDiag(.tick_overflow) != null);
+    }
+
+    // The ratio that fits still plans: the guard is the ceiling's.
+    var fine = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .stretch = .{ .from = 0, .to = 4 * TPQ, .p = 3, .q = 2 },
+    });
+    defer fine.deinit();
+    try testing.expect(fine.findDiag(.tick_overflow) == null);
+    try testing.expect(fine.actions.len > 0);
 }
 
 test "ops: rename a phrase, and every clip that places it" {

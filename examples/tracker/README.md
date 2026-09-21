@@ -29,7 +29,7 @@ The build prints two warnings:
 examples/tracker/piece.sjon:0x00000000: warning it_no_instrument: this
 module carries no instrument or sample, so every rendered cell names
 instrument 1: the file holds the timing and a tracker brings the sound
-examples/tracker/piece.sjon:0x000008C8: warning residue_only: the query
+examples/tracker/piece.sjon:0x000008E8: warning residue_only: the query
 lane 'hats' is computed, and a .it holds no query or formula: it rides in
 the residue alone
 ```
@@ -57,7 +57,7 @@ shows it over the file alone, with no document and no schema:
 $ zig-out/bin/tempura check-residue examples/tracker/piece.it
 chunk: present, read
 tail: present
-essence: 5406 bytes, envelope version 1
+essence: 5448 bytes, envelope version 1
 conductor: hash matches
 lane bass: channel 1, hash matches
 lane chord: channel 2, hash matches
@@ -83,5 +83,6 @@ UNMEASURED: the procedure is `conformance/CHECKLIST.md` section C.
 Speed 6 and 24 IT ticks to the quarter make a row a sixteenth, so a
 64-row pattern is four bars of `[4 4]` and this piece is one pattern.
 A meter whose bar does not divide 64 rows is a known gap in the
-renderer's pattern sizing, recorded in the plan set's progress notes
+renderer's pattern sizing (`src/export/render_it.zig` fixes a pattern at
+64 rows), filed and dated in `docs/plans/11-demos-and-milestones.md`
 rather than papered over in an example.

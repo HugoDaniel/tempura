@@ -765,13 +765,25 @@ const example_source =
     \\
 ;
 
+/// The example, loaded with NO resolver — these tests are about the
+/// carriers and not about the file.
+///
+/// `anchor_unavailable` is expected and skipped over: the example is
+/// conducted by an anchor whose file nobody here hands over, so the load
+/// says (correctly, since plan 03's C1 fix) that every position is the
+/// placeholder's. That is the document's condition and not a defect of
+/// the tail, the chunk or the budget these tests pin. Every OTHER error
+/// still fails the test.
 fn loadExample(gpa: Allocator, schema: *const Schema, source: [:0]const u8) !fromSjon.Result {
     var res = try fromSjon.fromSource(gpa, schema, source, null);
     errdefer res.deinit();
-    if (res.diags.hasErrors()) {
-        for (res.diags.items()) |d| std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
-        return error.UnexpectedDiagnostics;
+    var unexpected = false;
+    for (res.diags.items()) |d| {
+        if (d.severity != .err or d.code == .anchor_unavailable) continue;
+        std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
+        unexpected = true;
     }
+    if (unexpected) return error.UnexpectedDiagnostics;
     return res;
 }
 

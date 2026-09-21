@@ -15,8 +15,9 @@
 ; column, and the query lane is something a `.it` cannot hold at all.
 ;
 ; The meter stays [4 4] on purpose: a meter whose bar does not divide 64
-; rows is a known gap in the renderer's pattern sizing, recorded in the
-; plan set's progress notes rather than papered over here.
+; rows is a known gap in the renderer's pattern sizing (render_it fixes a
+; pattern at 64 rows), filed and dated in docs/plans/11 rather than
+; papered over here.
 (timeline :title "impulse-lab" :length 4bar :end loop)
 (tempo-point :at 0bar :qpm 125)
 ; the document conducts itself
@@ -75,7 +76,7 @@
 (target :name chord :arity 4)
 (target :name sweep :arity 1)
 (target :name hats :arity 1)
-(anchor :id song :kind it :file "piece.it" :size 6607 :sha256 "899b938a9aa286a0f4e2a5c0ce4ae7c1bac57e0bf6341dde34da97c1bd264cab")
+(anchor :id song :kind it :file "piece.it" :size 6649 :sha256 "eb2e82a5099b799d44fbf4483362cbf68bcf991c9b87c6cd4c5f759055aea940")
 (it/module :title "impulse-lab"
   (it/timing :speed 6 :tempo 125 :highlight [4 16])
   (it/options :instruments false)

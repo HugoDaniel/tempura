@@ -267,19 +267,33 @@ fn conduct(
     );
 
     const anchor = doc.anchorById(id) orelse return seeded();
-    var built: fromSjon.Conductor = switch (anchor.kind) {
-        .smf => if (smfTier(doc, id)) |t|
-            try fromSjon.smfConductor(gpa, &t.sequence, anchor.span)
-        else
-            // A by-reference anchor nothing has read yet: the document
-            // says the file conducts, and until the file is here the
-            // tables are the fallback. `anchor_unavailable` belongs to
-            // the resolver, not here.
-            return seeded(),
-        .it => if (itTier(doc, id)) |t|
-            try fromSjon.itConductor(gpa, &t.module, anchor.span)
-        else
-            return seeded(),
+    var built: fromSjon.Conductor = (try fromSjon.conductorOf(
+        gpa,
+        doc,
+        id,
+        doc.conductor_bytes,
+    )) orelse {
+        // Neither an inline tier nor the anchor's own verified bytes, so
+        // the tables are plan 03's placeholder — and that is SAID, not
+        // assumed. This layer answers a `Doc` that may never have been
+        // through a load: a host that derived straight off a value it
+        // built itself would otherwise be timed at 120 quarter notes per
+        // minute with nothing to read about it.
+        //
+        // The document layer says its own half while it loads
+        // (`fromSjon.conductorTables`), so a CLI run that does both
+        // prints two lines. That is this function's existing convention
+        // rather than a new one — `conductor_conflict` above is raised
+        // by both layers too — and the two are worded for the layer that
+        // spoke, so a reader sees two facts and not a stutter.
+        try diags.add(
+            .anchor_unavailable,
+            .err,
+            anchor.span,
+            "the anchor '{s}' conducts this document and its file ({s}) is not here, so this derivation is the placeholder's 120 quarter notes per minute in [4 4] and not the file's time",
+            .{ id, anchor.file },
+        );
+        return seeded();
     };
     defer built.deinit();
 
@@ -2017,6 +2031,110 @@ test "derive: an IT-anchored document's map is the one fromSource built" {
     // …and the walk came back with it, which is what the tracker
     // position and a bound IT lane read.
     try testing.expect(d.rowmap != null);
+}
+
+test "derive: a BY-REFERENCE SMF conductor gives the map its inline twin gives" {
+    // The final review's C1, at this layer: `conduct` returned the
+    // placeholder for "an anchor with no inline tier" whether or not the
+    // file was in hand, so a document the resolver had already read and
+    // verified was timed at 120 quarter notes per minute. Plan 03's
+    // rules draw no such line, and `fromSjon.conductorOf` is now the one
+    // owner both layers and both spellings go through.
+    //
+    // One sequence, two documents: the tier dumped INLINE, and an anchor
+    // that only names the file those same bytes make. The maps are one
+    // text, three times over — the load's, the derivation's, and the
+    // inline twin's.
+    const gpa = testing.allocator;
+
+    var b: Sequence.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.division = .{ .ppq = 960 };
+    _ = try b.addTrack();
+    _ = try b.addTrack();
+    try b.addEvent(1, 0, .set_tempo, .{ .tempo = 480_000 });
+    try b.addEvent(1, 960, .set_tempo, .{ .tempo = 400_000 });
+    try b.addEvent(0, 0, .time_signature, .{ .time_sig = .{ .nn = 3, .dd = 2, .cc = 24, .bb = 8 } });
+    try b.addEvent(0, 2880, .end_of_track, .empty);
+    try b.addEvent(1, 2880, .end_of_track, .empty);
+    var seq = try b.finish();
+    defer seq.deinit();
+
+    // The inline spelling.
+    const dump = try bridge_smf.sequenceToForms(gpa, &seq, null, .{});
+    defer gpa.free(dump);
+    const inline_source = try std.fmt.allocPrintSentinel(gpa,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\{s}
+        \\(cue :name "two" :at 1bar)
+    , .{dump}, 0);
+    defer gpa.free(inline_source);
+
+    var inline_res = try test_support.load(gpa, inline_source);
+    defer inline_res.deinit();
+    try testing.expect(!inline_res.diags.hasErrors());
+
+    // …and the by-reference one, over the file the writer makes of it.
+    var file = try test_support.smfBytes(gpa, &seq);
+    defer file.deinit();
+    const anchor_root = try test_support.anchorByReference(gpa, "song", "smf", "x.mid", file.bytes);
+    defer gpa.free(anchor_root);
+    const ref_source = try std.fmt.allocPrintSentinel(gpa,
+        \\(timeline :conductor song)
+        \\{s}
+        \\(cue :name "two" :at 1bar)
+    , .{anchor_root}, 0);
+    defer gpa.free(ref_source);
+
+    var ref_res = try test_support.loadWithFile(gpa, ref_source, "x.mid", file.bytes);
+    defer ref_res.deinit();
+    for (ref_res.diags.items()) |d| std.debug.print("  {t}: {s}\n", .{ d.code, d.message });
+    try testing.expect(!ref_res.diags.hasErrors());
+
+    var d = try derive(gpa, &ref_res.doc);
+    defer d.deinit();
+    try testing.expect(!d.diags.hasErrors());
+
+    var buf_a: [1024]u8 = undefined;
+    var buf_b: [1024]u8 = undefined;
+    var buf_c: [1024]u8 = undefined;
+    var wa = std.Io.Writer.fixed(&buf_a);
+    var wb = std.Io.Writer.fixed(&buf_b);
+    var wc = std.Io.Writer.fixed(&buf_c);
+    try d.map.echo(&wa);
+    try ref_res.map.echo(&wb);
+    try inline_res.map.echo(&wc);
+    try testing.expectEqualStrings(wb.buffered(), wa.buffered());
+    try testing.expectEqualStrings(wc.buffered(), wa.buffered());
+
+    // The file's two segments and its `[3 4]`, not the placeholder's one
+    // segment at 500 000 in `[4 4]`.
+    try testing.expectEqual(@as(usize, 2), d.map.segments.len);
+    try testing.expectEqual(@as(f64, 400_000), d.map.segments[1].us);
+    try testing.expectEqual(@as(i64, 3 * Grid.TPQ), ref_res.doc.cues[0].at);
+}
+
+test "derive: a conducted document whose file nobody can read says anchor_unavailable" {
+    // The placeholder STAYS — a document has to be answerable — and the
+    // derivation says whose time it is not. Silence here was C1's other
+    // half: `timeline` printed 500 000 microseconds with no diagnostic.
+    const gpa = testing.allocator;
+    var res = try test_support.load(gpa,
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\(cue :name "two" :at 1bar)
+    );
+    defer res.deinit();
+
+    var d = try derive(gpa, &res.doc);
+    defer d.deinit();
+
+    try testing.expectEqual(@as(usize, 1), d.diags.count(.anchor_unavailable));
+    try testing.expect(d.diags.hasErrors());
+    try testing.expectEqual(@as(usize, 1), d.map.segments.len);
+    try testing.expectEqual(@as(f64, 500_000), d.map.segments[0].us);
+    try testing.expect(fromSjon.conductedPlaceholder(&res.doc));
 }
 
 test "derive: a conducted document with no content of its own is as long as its file" {

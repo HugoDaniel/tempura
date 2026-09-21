@@ -15,8 +15,9 @@
 ; column, and the query lane is something a `.it` cannot hold at all.
 ;
 ; The meter stays [4 4] on purpose: a meter whose bar does not divide 64
-; rows is a known gap in the renderer's pattern sizing, recorded in the
-; plan set's progress notes rather than papered over here.
+; rows is a known gap in the renderer's pattern sizing (render_it fixes a
+; pattern at 64 rows), filed and dated in docs/plans/11 rather than
+; papered over here.
 
 (timeline :title "impulse-lab" :length 4bar :end loop)
 

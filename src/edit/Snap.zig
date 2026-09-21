@@ -99,7 +99,17 @@ fn windowOf(map: *const TimeMap.TimeMap, tick: i64, grid: Grid) Window {
 /// the DAW convention, where +0.5 on eighths is the shuffle that lands
 /// the off-beat two thirds of the way through the beat. A bar grid takes
 /// no swing: there is no "every second bar" in the idea.
-fn lineOf(w: Window, k: i64, grid: Grid, swing: f64) i64 {
+///
+/// CLAMPED to −1..1 here, which is where the rule lives: `swing` arrives
+/// from `--op '{"swing":…}'`, from `tpr_snap(tick, grid, swing)` — a
+/// frozen export a host calls with whatever f64 it has — and from the
+/// corpus harness as a raw bit pattern, so no reader upstream can be the
+/// one place it is bounded. Past ±1 the offset would be longer than the
+/// step it is a fraction OF, which no grid has a line for, and at ±1e300
+/// the truncation below had no `i64` to land in and panicked on user
+/// input. A NaN is no swing at all.
+fn lineOf(w: Window, k: i64, grid: Grid, swing_in: f64) i64 {
+    const swing = if (std.math.isNan(swing_in)) 0 else std.math.clamp(swing_in, -1, 1);
     const base = w.start + k * w.step;
     if (grid == .bar or swing == 0 or @rem(k, 2) == 0) return base;
     const off = swing * @as(f64, @floatFromInt(w.step));
@@ -291,6 +301,41 @@ test "Snap.nearest: swing moves every second line by a fraction of the step" {
     try testing.expectEqual(@as(i64, 0), nearest(&res.map, 1000, grid, 1.0 / 3.0));
     // Straight, the same note is exactly on the line it was written on.
     try testing.expectEqual(@as(i64, half), nearest(&res.map, half, grid, 0));
+}
+
+test "Snap.nearest: a swing outside −1..1 is clamped, whatever a host sends" {
+    // `tpr_snap(tick, grid, swing)` is a FROZEN export and takes an f64
+    // from whoever calls it; the corpus harness sends a raw bit pattern;
+    // `--op '{"swing":…}'` is text. `±1e300` reached `lineOf`'s
+    // truncation and panicked (the final review's I1), and a NaN would
+    // have too — so the clamp lives at the rule and not at any one
+    // reader.
+    const gpa = testing.allocator;
+    var res = try changingMeter(gpa);
+    defer res.deinit();
+
+    const grid: Grid = .{ .div = 8 };
+    const half = @divExact(TPQ, 2);
+    // Clamped to exactly 1: the odd line lands a whole step later, which
+    // is where a swing of 1 puts it.
+    try testing.expectEqual(
+        nearest(&res.map, half, grid, 1),
+        nearest(&res.map, half, grid, 1e300),
+    );
+    try testing.expectEqual(
+        nearest(&res.map, half, grid, -1),
+        nearest(&res.map, half, grid, -1e300),
+    );
+    // A NaN is no swing at all rather than a position nobody can name.
+    try testing.expectEqual(
+        nearest(&res.map, half, grid, 0),
+        nearest(&res.map, half, grid, std.math.nan(f64)),
+    );
+    // Every answer is still a tick on the grid's side of the ceiling.
+    for ([_]f64{ 1e300, -1e300, std.math.inf(f64), -std.math.inf(f64) }) |s| {
+        const got = nearest(&res.map, half, grid, s);
+        try testing.expect(got >= 0 and got <= Grid_.MAX_TICK);
+    }
 }
 
 test "Snap.Grid.parse: the three spellings the CLI takes" {

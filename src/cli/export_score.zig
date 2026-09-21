@@ -34,6 +34,19 @@
 //!      `.sjon` carries no verdicts, so on that path there are none to
 //!      pass; on this one there are, and they are passed.
 //!
+//! ## A conducted document whose file is not here is REFUSED
+//!
+//! Plan 03 gives a conducted document's time to its anchor. When neither
+//! an inline tier nor the anchor's own verified bytes are in hand
+//! (`doc.conductedPlaceholder`), every position the document answers is
+//! plan 03's placeholder — 120 quarter notes per minute in `[4 4]` — and
+//! the one line a score exists to carry would say `:bpm 120` under a
+//! header that names the conductor. That is a wrong score, not a score
+//! with a warning, and nothing downstream can tell it from a piece that
+//! really is at 120. So this verb writes NOTHING and exits 1, with the
+//! `anchor_unavailable` the load and the derivation raised as the reason.
+//! `tempura inline` is the verb that fixes it.
+//!
 //! **The other hint source is not wired, and cannot be here.** Plan 08
 //! also names midivia's `ease-hint` events, which the SMF reader types
 //! as `.ease_hint` and keeps as BYTES: decoding that payload into pacer's
@@ -134,6 +147,19 @@ fn emit(
     before: []const tempura.Diag.Diagnostic,
     space: Diags.Space,
 ) Cli.Error!u8 {
+    // A conducted document whose file nobody could produce is REFUSED
+    // rather than exported. Plan 03 says the anchor keeps time, and the
+    // one field a score exists to carry — `(transport :bpm …)` — would
+    // be the placeholder's 120 under a header that names the conductor:
+    // wrong, not approximate, and indistinguishable downstream from a
+    // piece that really is at 120. The load and the derivation already
+    // said why (`anchor_unavailable`, an error), so the reason rides out
+    // on stderr and stdout stays empty.
+    if (tempura.doc.conductedPlaceholder(doc)) {
+        try Diags.render(ctx.err, ctx.cmd.path, space, before, ctx.style);
+        return Cli.Exit.errors;
+    }
+
     var res = try exporter.exportScore(ctx.gpa, doc, derived, hints, options(ctx));
     defer res.deinit();
 
@@ -237,6 +263,39 @@ test "export-score: a .mid is dumped first, and the score is of that document" {
     try t.expectEqual(Cli.Exit.ok, c.code);
     try t.expect(std.mem.indexOf(u8, c.out.written(), "exported from song.mid") != null);
     try t.expect(std.mem.indexOf(u8, c.out.written(), "(transport ") != null);
+}
+
+test "export-score: a conducted document whose file is not here is refused" {
+    // C1's third leg. The other two are the load's and the derivation's
+    // diagnostics; this is the artifact, and the claim is that there
+    // ISN'T one: a score whose transport came from the placeholder must
+    // not leave the process.
+    const path = try Cli.repoPath(t.allocator, "src/cli/testdata/conducted-absent.sjon");
+    defer t.allocator.free(path);
+    var c = try Cli.invoke(&.{ "tempura", "export-score", path });
+    defer c.deinit();
+
+    try t.expectEqual(Cli.Exit.errors, c.code);
+    try t.expectEqualStrings("", c.out.written());
+    try t.expect(std.mem.indexOf(u8, c.err.written(), "anchor_unavailable") != null);
+    try t.expect(std.mem.indexOf(u8, c.err.written(), "(transport") == null);
+}
+
+test "export-score: a BY-REFERENCE conductor's transport is the file's tempo" {
+    // …and the same verb over the same shape WITH the file beside it:
+    // the corpus's `tempo-by-reference-conductor` names `song.mid` and
+    // carries no inline dump, and its tempo track says 480 000
+    // microseconds — 125 quarter notes per minute. Before C1 was fixed
+    // this said `:bpm 120`, from plan 03's placeholder, with no
+    // diagnostic anywhere.
+    const path = try Cli.repoPath(t.allocator, "corpus/tempo-by-reference-conductor/doc.sjon");
+    defer t.allocator.free(path);
+    var c = try Cli.invoke(&.{ "tempura", "export-score", path });
+    defer c.deinit();
+
+    try t.expectEqual(Cli.Exit.ok, c.code);
+    try t.expect(std.mem.indexOf(u8, c.out.written(), "(transport :bpm 125") != null);
+    try t.expect(std.mem.indexOf(u8, c.out.written(), "conductor: song.mid") != null);
 }
 
 test "export-score: --eps and --max-keys-per-track reach the exporter" {

@@ -98,6 +98,12 @@ pub const verify = resolver_file.verify;
 pub const Result = fromSjon.Result;
 /// Validate one `(timeline …)` source and lower it to a `Doc`.
 pub const fromSource = fromSjon.fromSource;
+/// The conductor's tables for one anchor — plan 03's rules 2 and 3 over
+/// a finished value, inline tier or verified bytes alike. One owner.
+pub const conductorOf = fromSjon.conductorOf;
+/// Whether a conducted document's time is not in hand at all, so every
+/// position it answers is plan 03's placeholder.
+pub const conductedPlaceholder = fromSjon.conductedPlaceholder;
 
 // ---- value → text ----
 

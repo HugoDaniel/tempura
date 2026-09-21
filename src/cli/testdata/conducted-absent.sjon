@@ -1,0 +1,22 @@
+; A document CONDUCTED by a file that is not beside it — the one anchor
+; whose absence is not a detail.
+;
+; Plan 03: the anchor keeps time for a conducted document. So with no
+; readable file there is no tempo map to read, and plan 03's placeholder
+; (500 000 microseconds per quarter note in [4 4]) is all any position
+; can be answered with. That used to be SILENT for a by-reference anchor
+; — `validate` said nothing, `timeline` printed the placeholder and
+; `export-score` wrote `:bpm 120` under a header naming the conductor —
+; which is the final review's C1.
+;
+; Now it is an error at the anchor's span, twice over: the resolver's own
+; `anchor_unavailable` (the file could not be read) and the conductor's
+; (so every position is the placeholder's). `export-score` refuses on it
+; and writes nothing at all, because a score is its transport.
+;
+; Compare `missing-anchor.sjon`, whose timeline is native: an anchor that
+; merely carries CONTENT is recorded unresolved and the document is still
+; a document.
+(timeline :length 1bar :conductor song)
+
+(anchor :id song :kind smf :file "absent.mid" :size 76 :sha256 "f2964bb1df2139ef13cbae50f323f2aacdfa7aed09b2dc001765db72baf48d6e")

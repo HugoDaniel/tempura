@@ -154,6 +154,14 @@ run_case timeline-json 0 "timeline
 corpus/playhead-sections-cues/doc.sjon
 --json"
 
+# A conductor named BY REFERENCE: the document carries no inline dump and
+# the resolver reads `song.mid` beside it, so the segments here are the
+# file's three (480 000 / 400 000 / 300 000 microseconds) and not plan
+# 03's placeholder. The symptom the final review's C1 reproduced on this
+# very verb was `(segment :tick 0 :us 500000 …)` with no diagnostic.
+run_case timeline-by-reference-conductor 0 "timeline
+corpus/tempo-by-reference-conductor/doc.sjon"
+
 # ---- validate: the two verdicts ---------------------------------------
 
 run_case validate-clean 0 "validate
@@ -230,6 +238,11 @@ corpus/render-smf/doc.sjon
 run_case export-score-512 0 "export-score
 corpus/export-512/doc.sjon"
 
+# …and the refusal: a document whose CONDUCTOR's file is not here has no
+# transport to export, so stdout is empty and the reason is on stderr.
+run_case export-score-conducted-absent 1 "export-score
+src/cli/testdata/conducted-absent.sjon"
+
 # ---- at: the two spellings of one question, and a refusal ------------
 
 run_case at-seconds 0 "at
@@ -281,6 +294,24 @@ run_case edit-not-an-op 2 "edit
 corpus/edit-insert/doc.sjon
 --op
 {\"op\":\"rewind\"}"
+
+# …and the map operations on a CONDUCTED document. Plan 03 gives its time
+# to the anchor, so a `(tempo-point …)` of its own would not load — the
+# planner refuses with the code the reload would have raised rather than
+# planning a document nobody can read. `edit-bound-smf-pair` is the
+# conducted fixture whose file sits beside it, so nothing else is wrong
+# with it and the refusal is the only thing in the golden.
+run_case edit-conducted-tempo 1 "edit
+corpus/edit-bound-smf-pair/doc.sjon
+--dry-run
+--op
+{\"op\":\"insert-tempo\",\"at\":0,\"qpm\":140}"
+
+run_case edit-conducted-meter 1 "edit
+corpus/edit-bound-smf-pair/doc.sjon
+--dry-run
+--op
+{\"op\":\"insert-meter\",\"at\":0,\"sig\":[3,4]}"
 
 # BOUND content, through the verb and not only through the engine: the
 # two `edit-bound-*` cases whose anchor's file is beside them (so they

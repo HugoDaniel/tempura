@@ -59,14 +59,18 @@ cd ../pacer && ../tempura/tools/zt cli
 (`tools/zt` is tempura's build lock and it serialises `zig build` on the
 whole machine, so pacer's build goes through it too.)
 
+The block below is literally runnable from the tempura checkout: pacer's
+binary lands in its own `zig-out/bin`, and these scores are named
+relative to here.
+
 ```
-$ pacer --version
+$ ../pacer/zig-out/bin/pacer --version
 pacer 0.2.0
-$ pacer check demos/e2-exact-import/tracker.score.sjon
+$ ../pacer/zig-out/bin/pacer check demos/e2-exact-import/tracker.score.sjon
 demos/e2-exact-import/tracker.score.sjon: no diagnostics
-$ pacer check demos/e2-exact-import/daw.score.sjon
+$ ../pacer/zig-out/bin/pacer check demos/e2-exact-import/daw.score.sjon
 demos/e2-exact-import/daw.score.sjon: no diagnostics
-$ pacer check demos/e2-exact-import/native.score.sjon
+$ ../pacer/zig-out/bin/pacer check demos/e2-exact-import/native.score.sjon
 demos/e2-exact-import/native.score.sjon: no diagnostics
 ```
 

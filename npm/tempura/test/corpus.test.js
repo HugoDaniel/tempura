@@ -39,10 +39,18 @@
 //       the runner's own inline-tier writer rather than out of
 //       `pipeline.build`, and the golden says so by carrying no
 //       `(residue …)` child — those are native-only too.
+//   (plan …) — `(planned …)`'s own line is the plan's SUMMARY (targets /
+//       set / inserted / removed / replaced / inexact), which the frozen
+//       surface does not carry. The `;| ` block under it is the ACTION
+//       JSON and IS compared, byte for byte, against `tpr_plan`; so is
+//       the `(applied …)` form under it, against `tpr_apply` + `tpr_text`
+//       — which is plan 00's ladder item 5 ("edit actions … native and
+//       wasm32") and was skipped whole until 2026-09-21.
 //
 // Everything else IS compared, byte for byte: the `(fixture …)` line, the
 // whole `(echo …)` block (from 'TPTL' + 'TPDG'), every `(at …)` from
-// `(times …)` and `(at …)`, and every `(snapped …)`.
+// `(times …)` and `(at …)`, every `(snapped …)`, every edit action list
+// and every applied document.
 //
 // The last test pins the native-only set, so a directive that stops being
 // comparable — or one that starts being — fails loudly instead of
@@ -78,7 +86,7 @@ const REFUSALS = { 'tick-overflow': 'tick-overflow', 'non-finite-time': 'non-fin
 const nativeOnly = new Set();
 
 /** How many of each form this walk actually compared, byte for byte. */
-const compared = { fixture: 0, echo: 0, at: 0, snapped: 0, built: 0 };
+const compared = { fixture: 0, echo: 0, at: 0, snapped: 0, built: 0, actions: 0, applied: 0 };
 
 /**
  * Record that a form went uncompared, and why. The case's own name is
@@ -94,36 +102,236 @@ function skipped(reason) {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse `times.sjon` — the constrained read pacer's corpus test uses:
- * flat forms, no nesting, `;` comments to end of line (stripped outside
- * strings). The native runner parses the same file with real SJON
- * against `schema/tempura-corpus.sjon` and is the stricter check; this
- * only has to agree with it on what was asked and in what order.
+ * Read `times.sjon` into its top-level forms, nesting and all.
+ *
+ * The native runner parses the same file with real SJON against
+ * `schema/tempura-corpus.sjon` and is the stricter check; this only has
+ * to agree with it on what was asked, in what order, and — for a
+ * `(plan …)` — on the operation its `:args` spell.
+ *
+ * It is a real reader and not a regex because of that last part: a
+ * `(plan retime :args (a :sel (s :lanes [flash] :kinds [note]) :delta 1))`
+ * is three forms deep, and the flat scan this file used to do stopped at
+ * the first `)` and silently produced nonsense for every `edit-*` case.
+ * Those cases were then skipped whole, which is what left rung 5's "edit
+ * actions … native and wasm32" unpinned.
+ *
+ * @param {string} src
+ * @returns {Token[]}
+ */
+function tokenize(src) {
+  /** @type {Token[]} */
+  const out = [];
+  const delim = ' \t\r\n,()[]";';
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i] ?? '';
+    if (c === ';') {
+      while (i < src.length && src[i] !== '\n') i++;
+      continue;
+    }
+    if (' \t\r\n,'.includes(c)) {
+      i++;
+      continue;
+    }
+    if ('()[]'.includes(c)) {
+      out.push({ kind: c, text: c });
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      let text = '';
+      while (j < src.length && src[j] !== '"') {
+        if (src[j] === '\\') {
+          text += src.slice(j, j + 2);
+          j += 2;
+          continue;
+        }
+        text += src[j];
+        j++;
+      }
+      out.push({ kind: 'str', text });
+      i = j + 1;
+      continue;
+    }
+    let j = i;
+    while (j < src.length && !delim.includes(src[j] ?? '')) j++;
+    const text = src.slice(i, j);
+    i = j;
+    if (text.startsWith(':')) out.push({ kind: 'key', text: text.slice(1) });
+    else if (/^[-+]?(\d|\.\d)/.test(text)) out.push({ kind: 'num', text });
+    else if (text === 'true' || text === 'false') out.push({ kind: 'bool', text });
+    else out.push({ kind: 'sym', text });
+  }
+  return out;
+}
+
+/**
+ * @typedef {{ kind: string, text: string }} Token
+ * @typedef {{ t: 'form', head: string, children: Node[] }
+ *   | { t: 'kv', key: string, value: Node }
+ *   | { t: 'vec', items: Node[] }
+ *   | { t: 'str' | 'sym' | 'num' | 'bool' | 'key', text: string }} Node
+ */
+
+/**
+ * One value from `toks` at `at`; returns it and the index after it.
+ * @param {Token[]} toks
+ * @param {number} at
+ * @returns {[Node, number]}
+ */
+function parseValue(toks, at) {
+  const tok = toks[at];
+  if (!tok) throw new Error('tempura: times.sjon ended mid-value');
+  if (tok.kind === '(') {
+    const head = toks[at + 1];
+    if (!head || head.kind !== 'sym') throw new Error('tempura: a form opens with its head');
+    /** @type {Node[]} */
+    const children = [];
+    let i = at + 2;
+    while (i < toks.length && toks[i]?.kind !== ')') {
+      const here = toks[i];
+      if (here?.kind === 'key') {
+        const [value, next] = parseValue(toks, i + 1);
+        children.push({ t: 'kv', key: here.text, value });
+        i = next;
+        continue;
+      }
+      const [value, next] = parseValue(toks, i);
+      children.push(value);
+      i = next;
+    }
+    return [{ t: 'form', head: head.text, children }, i + 1];
+  }
+  if (tok.kind === '[') {
+    /** @type {Node[]} */
+    const items = [];
+    let i = at + 1;
+    while (i < toks.length && toks[i]?.kind !== ']') {
+      const [value, next] = parseValue(toks, i);
+      items.push(value);
+      i = next;
+    }
+    return [{ t: 'vec', items }, i + 1];
+  }
+  if (tok.kind === ')' || tok.kind === ']') throw new Error('tempura: a value, not a close');
+  return [{ t: /** @type {'str'} */ (tok.kind), text: tok.text }, at + 1];
+}
+
+/**
+ * The harness's directives, in document order — the flat record the walk
+ * reads (`{ head, <key>: <text>, positional }`) plus, for a `(plan …)`,
+ * the operation JSON its `:args` spell.
  *
  * @param {string} src
  * @returns {Array<Record<string, unknown> & { head: string }>}
  */
 function parseHarness(src) {
-  const stripped = src.replace(/"(?:[^"\\]|\\.)*"|;[^\n]*/g, (m) => (m.startsWith('"') ? m : ''));
+  const toks = tokenize(src);
   /** @type {Array<Record<string, unknown> & { head: string }>} */
   const out = [];
-  for (const m of stripped.matchAll(/\(([a-z][a-z0-9-]*)([^)]*)\)/g)) {
-    const head = m[1] ?? '';
-    const body = m[2] ?? '';
+  let i = 0;
+  while (i < toks.length) {
+    const [node, next] = parseValue(toks, i);
+    i = next;
+    if (node.t !== 'form') continue;
     /** @type {Record<string, unknown> & { head: string }} */
-    const form = { head };
-    for (const kv of body.matchAll(/:([a-z0-9-]+)\s+("[^"]*"|[^\s):]+)/g)) {
-      const key = kv[1] ?? '';
-      const raw = kv[2] ?? '';
-      form[key] = raw.startsWith('"') ? raw.slice(1, -1) : raw;
+    const form = { head: node.head };
+    for (const child of node.children) {
+      if (child.t === 'kv' && child.value.t !== 'form' && child.value.t !== 'vec') {
+        form[child.key] = child.value.text;
+      }
     }
     // `(times …)` carries its seconds positionally, as bit patterns;
-    // every other form's strings are keyed and were read above.
+    // every other form's values are keyed and were read above.
     form.positional =
-      head === 'times' ? [...body.matchAll(/"([0-9A-Fa-f]{16})"/g)].map((x) => x[1] ?? '') : [];
+      node.head === 'times'
+        ? node.children.filter((c) => c.t === 'str').map((c) => /** @type {{text: string}} */ (c).text)
+        : [];
+    // …and a `(plan …)` carries an OPERATION, which is the one thing in
+    // this file that has to be translated rather than read.
+    if (node.head === 'plan') form.op = opJsonOf(node);
     out.push(form);
   }
   return out;
+}
+
+/**
+ * A `(plan <op> :args (a …))` as the edit engine's own `--op` JSON —
+ * `src/corpus_runner.zig`'s `opJson`, in JS.
+ *
+ * The harness spells an operation in SJON and the engine reads it as
+ * JSON, so one of the two has to be translated and this is the seam on
+ * this side. Nothing is INTERPRETED: the keys, the numbers, the symbols,
+ * the vectors and the nested forms cross unchanged, and the engine
+ * answers for every one of them. The `:args` form's HEAD is a marker and
+ * is dropped, exactly as the runner drops it.
+ *
+ * @param {{ t: 'form', head: string, children: Node[] }} form
+ * @returns {string}
+ */
+function opJsonOf(form) {
+  const name = form.children.find((c) => c.t === 'sym');
+  if (!name) throw new Error('tempura: (plan …) names no operation');
+  const args = form.children.find((c) => c.t === 'kv' && c.key === 'args');
+  let out = `{"op":"${/** @type {{text: string}} */ (name).text}"`;
+  if (args && args.t === 'kv') {
+    const node = args.value;
+    if (node.t !== 'form') throw new Error("tempura: (plan …)'s :args is a form of keys");
+    for (const child of node.children) {
+      if (child.t !== 'kv') continue;
+      out += `,"${child.key}":${jsonOfNode(child.value)}`;
+    }
+  }
+  return `${out}}`;
+}
+
+/**
+ * One SJON value as JSON — the runner's `jsonOfNode`. A symbol becomes a
+ * string, because every symbol the operation grammar takes is one there;
+ * anything the grammar has no place for becomes `null`, which is what
+ * the engine complains about by name and with a span.
+ *
+ * @param {Node} node
+ * @returns {string}
+ */
+function jsonOfNode(node) {
+  switch (node.t) {
+    case 'num':
+      return zigDecimal(Number(node.text));
+    case 'bool':
+      return node.text;
+    case 'str':
+    case 'sym':
+    case 'key':
+      return jsonString(node.text);
+    case 'vec':
+      return `[${node.items.map(jsonOfNode).join(',')}]`;
+    case 'form':
+      return `{${node.children
+        .filter((c) => c.t === 'kv')
+        .map((c) => `"${/** @type {{key: string}} */ (c).key}":${jsonOfNode(/** @type {{value: Node}} */ (c).value)}`)
+        .join(',')}}`;
+    default:
+      return 'null';
+  }
+}
+
+/** A string as the runner's `jsonString` writes it. */
+function jsonString(text) {
+  let out = '"';
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (ch === '"') out += '\\"';
+    else if (ch === '\\') out += '\\\\';
+    else if (ch === '\n') out += '\\n';
+    else if (ch === '\r') out += '\\r';
+    else if (ch === '\t') out += '\\t';
+    else if (code < 0x20) out += `\\u${code.toString(16).padStart(4, '0')}`;
+    else out += ch;
+  }
+  return `${out}"`;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +364,45 @@ function chunksOf(text) {
   }
   if (current.length) out.push(`${current.join('\n')}\n`);
   return out;
+}
+
+/**
+ * The `;| ` block of a chunk, unprefixed — the raw text the runner
+ * quoted into the golden (`renderRaw`). An empty line is `;|` with no
+ * trailing space, so one slice covers both.
+ *
+ * @param {string} chunk
+ * @returns {string}
+ */
+function dumpedText(chunk) {
+  const lines = chunk.split('\n').filter((l) => l.startsWith(';|'));
+  return lines.length === 0 ? '' : `${lines.map((l) => l.slice(3)).join('\n')}\n`;
+}
+
+/**
+ * `text` as the runner quotes it into a golden — the inverse of
+ * `dumpedText`, and `src/corpus_runner.zig`'s `renderRaw` line for line:
+ * an empty line is `;|`, and a trailing newline yields no extra line.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function rawLines(text) {
+  const lines = text.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  return lines.map((l) => (l.length === 0 ? ';|\n' : `;| ${l}\n`)).join('');
+}
+
+/**
+ * Every file the document's `(anchor …)` roots name, in document order —
+ * what the runner's filesystem resolver would be asked for.
+ *
+ * @param {string} text
+ * @returns {string[]}
+ */
+function anchorFiles(text) {
+  const stripped = text.replace(/"(?:[^"\\]|\\.)*"|;[^\n]*/g, (m) => (m.startsWith('"') ? m : ''));
+  return [...stripped.matchAll(/\(anchor\b[^)]*?:file\s+"([^"]*)"/g)].map((m) => m[1] ?? '');
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +585,7 @@ for (const name of cases) {
     compared.fixture++;
 
     const needsDoc = directives.some((d) =>
-      ['times', 'at', 'snap', 'dump', 'build'].includes(d.head),
+      ['times', 'at', 'snap', 'dump', 'build', 'plan', 'export-score'].includes(d.head),
     );
     if (!needsDoc) {
       skipped('the whole case asks about bytes, which no export hands out');
@@ -346,15 +593,26 @@ for (const name of cases) {
     }
 
     // Load the case's document exactly as the runner's env does: a
-    // `doc.sjon` is one, and a `song.*` is dumped inside the wasm. A
-    // sibling file is the anchor's referent — the runner reads it off
-    // disk, and here it is attached.
+    // `doc.sjon` is one, and a `song.*` is dumped inside the wasm.
+    //
+    // The runner's resolver is a filesystem store rooted at the case's
+    // own directory, so it reads WHATEVER FILE the document's anchors
+    // name; here that file is attached instead (there is no filesystem
+    // in wasm — plan 10's row, and the reason `tpr_attachAnchor` exists).
+    // Every anchor's `:file` is tried and not just a `song.*`, because
+    // the `edit-bound-*` cases name `x.mid` and `x.it` — and a document
+    // whose conductor is by reference is timed by that file, so guessing
+    // the name would be a native-vs-wasm divergence in the one field a
+    // conductor owns.
+    const loadCase = () => {
+      t.reload(fixture.toString('utf8'));
+      for (const file of anchorFiles(fixture.toString('utf8'))) {
+        if (existsSync(dir + file)) t.attachAnchor(readFileSync(dir + file));
+      }
+    };
     const t = await Tempura.instantiate(wasmModule);
     if (fixtureName === 'doc.sjon') {
-      t.reload(fixture.toString('utf8'));
-      for (const sibling of ['song.mid', 'song.it']) {
-        if (existsSync(dir + sibling)) t.attachAnchor(readFileSync(dir + sibling));
-      }
+      loadCase();
     } else {
       t.loadFile(fixture, fixtureName === 'song.mid' ? 'mid' : 'it');
     }
@@ -421,14 +679,37 @@ for (const name of cases) {
         skipForms('dump');
         skipped('(dump) — the golden hashes a canonical re-print; tpr_text is the source');
       } else if (d.head === 'plan') {
-        // `tpr_plan` hands back exactly `Plan.text()` and `tpr_apply` +
-        // `tpr_text` hand back the applied document, so the ACTIONS and
-        // the applied bytes are within reach — but `(planned …)`'s line
-        // is the plan's SUMMARY (targets / set / inserted / removed /
-        // replaced / inexact), which the frozen surface does not carry,
-        // and a form compared in halves is not compared.
-        skipForms('planned', 'applied');
-        skipped("(plan …) — (planned …) is the plan's summary, which no export carries");
+        // Rung 5's "edit actions … native and wasm32" (plan 00's ladder
+        // item 5), which used to be skipped whole on the reading that
+        // `(planned …)` is a summary no export carries. The summary line
+        // is; the `;| ` block under it is the ACTION JSON, which is
+        // exactly what `tpr_plan` returns, and the `(applied …)` form is
+        // the document `tpr_apply` + `tpr_text` hand back. The edit
+        // engine has the branch's own `@round` sites, so this is
+        // precisely the seam the parity gate exists for.
+        const chunk = take() ?? '';
+        // Planned against the document as COMMITTED: the runner reads
+        // every directive against the case's own source, and an apply
+        // below reloads the wasm's live document.
+        loadCase();
+        const res = t.plan(/** @type {string} */ (d.op));
+        assert.equal(res.actions, dumpedText(chunk), `(plan …) actions on ${name}`);
+        compared.actions++;
+        skipped("(planned …) — the plan's own summary counters, which no export carries");
+
+        if (headOf(chunks[next]) === 'applied') {
+          const appliedChunk = take() ?? '';
+          // A REFUSED plan holds nothing, and the runner's `(applied …)`
+          // for one is the untouched document — so the claim is the same
+          // either way: what the document is after the plan was
+          // committed.
+          if (res.actions !== '[]\n') t.apply();
+          const bytes = Buffer.from(t.text, 'utf8');
+          const head = `(applied :bytes ${bytes.length} :sha256 "${sha256(bytes)}")\n`;
+          assert.equal(head + rawLines(t.text), appliedChunk, `(applied …) on ${name}`);
+          compared.applied++;
+          loadCase();
+        }
       } else if (d.head === 'export-score') {
         // Same shape: `tpr_exportScore(flags)` produces the text, and its
         // hash would match — but `(score …)` also pins `:meter`,
@@ -467,7 +748,7 @@ test('what the walk compared, and the closed set of what it could not', () => {
     "(build …) over an ANCHORED document — the runner writes the inline tier through the core's own writer, not through pipeline.build",
     '(dump) — the golden hashes a canonical re-print; tpr_text is the source',
     '(export-score …) — (score …) pins exporter counts and takes hints no export spells',
-    "(plan …) — (planned …) is the plan's summary, which no export carries",
+    "(planned …) — the plan's own summary counters, which no export carries",
     '(read) — it asks about bytes, which no export hands out',
     '(reconciled …) — the verdict table, which no export hands out',
     '(roundtrip) — it asks about bytes, which no export hands out',
@@ -491,4 +772,6 @@ test('what the walk compared, and the closed set of what it could not', () => {
   assert.ok(compared.at > 0, 'some (at …) answers were compared');
   assert.ok(compared.snapped > 0, 'some (snapped …) answers were compared');
   assert.ok(compared.built > 0, 'some (built …) hashes were compared');
+  assert.ok(compared.actions > 0, 'some edit action lists were compared');
+  assert.ok(compared.applied > 0, 'some applied documents were compared');
 });

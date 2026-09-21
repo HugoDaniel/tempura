@@ -28,7 +28,8 @@ def main(argv):
         print(__doc__, file=sys.stderr)
         return 2
     src, dst = argv[1], argv[2]
-    data = bytearray(open(src, "rb").read())
+    with open(src, "rb") as f:
+        data = bytearray(f.read())
     at = data.find(NEEDLE)
     if at < 0:
         print(f"patch_velocity: {src}: no {NEEDLE.hex()} note-on found", file=sys.stderr)
@@ -39,7 +40,8 @@ def main(argv):
         print(f"patch_velocity: note: {NEEDLE.hex()} occurs more than once; patching the first")
     old = data[at + 2]
     data[at + 2] = NEW_VELOCITY
-    open(dst, "wb").write(bytes(data))
+    with open(dst, "wb") as f:
+        f.write(bytes(data))
     print(f"patch_velocity: {src} -> {dst}")
     print(f"  offset 0x{at + 2:08X}: velocity {old} -> {NEW_VELOCITY}")
     print(f"  {len(data)} bytes in, {len(data)} bytes out")

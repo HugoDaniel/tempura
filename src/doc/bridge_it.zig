@@ -711,7 +711,11 @@ const Reader = struct {
                 if (tree.tagOf(n) == .string) tree.stringText(n) else ""
             else
                 "",
-            .size = if (kvNumber(tree, children, "size")) |v| @intFromFloat(@max(0, v)) else null,
+            // Saturating, for `fromSjon.readAnchors`' reason: a `:size`
+            // no `u64` can hold is user input, not a cast's problem, and
+            // a saturated one disagrees with the file and says
+            // `anchor_conflict` / `anchor_mismatch` with a span.
+            .size = if (kvNumber(tree, children, "size")) |v| castInt(u64, v, 0) else null,
             .sha256 = if (kvNode(tree, children, "sha256")) |n|
                 if (tree.tagOf(n) == .string) tree.stringText(n) else null
             else
@@ -1140,7 +1144,17 @@ fn positionalNumber(tree: *const Ast.Tree, children: []const NodeIndex) ?f64 {
     return null;
 }
 
-fn castInt(comptime T: type, v: ?f64, fallback: T) T {
+/// One user number narrowed to the field that holds it, SATURATING —
+/// the doc layer's only float-to-integer reader, and the shape every one
+/// of them has to have.
+///
+/// A document's numbers are user input, so a narrowing cast on one is a
+/// panic waiting for `1e30` (`root.zig`: "user input is never asserted
+/// on"). NaN takes the fallback, a value past either end takes that end,
+/// and what is left is in range by construction. `fromSjon.readAnchors`
+/// calls it for the same `:size` key this file reads two forms away —
+/// which is why it is public rather than a second copy there.
+pub fn castInt(comptime T: type, v: ?f64, fallback: T) T {
     const x = v orelse return fallback;
     if (std.math.isNan(x)) return fallback;
     const lo: f64 = @floatFromInt(std.math.minInt(T));

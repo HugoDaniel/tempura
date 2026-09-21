@@ -117,8 +117,13 @@ the residue carries and `--no-residue` threw away.
   which is a different thing: an index, not the document's point.)
 * **The lanes come back named by address**, because that is all the bytes
   say: track 2 channel 1, or IT channel 5's volume column. The document's
-  names, targets and bindings are in the essence. The onset counts still
-  agree lane for lane, which is the derivation working.
+  names, targets and bindings are in the essence. For the **`.mid`** the
+  onset counts still agree lane for lane, which is the derivation
+  working. For the **`.it`** they do not, and cannot: the module is
+  played and not read off a clock — the walk visits 161 rows over 11 bars
+  where the document places 4 (the next bullet), so `bass`'s 7 onsets
+  come back as `ch1`'s 11. Restore the residue and `:length 4bar` bounds
+  the derivation again, and the counts agree.
 * **The `.it`'s length is 11 bars, not 4.** The document's `:length 4bar`
   is gone, so the length is derived from what the module plays, and a
   tracker module plays until its timing state repeats: the walk ends at
@@ -131,6 +136,6 @@ the residue carries and `--no-residue` threw away.
   `examples/tracker/README.md` shows.
 
 The two files here are 409 and 489 bytes. Drop `--no-residue` and the
-`.it` is `examples/tracker/piece.it`, 6607 bytes, and it dumps back to
+`.it` is `examples/tracker/piece.it`, 6649 bytes, and it dumps back to
 this document form for form — `examples/tracker/README.md` shows that
 round trip and `corpus/examples-tracker/`'s golden asserts it.

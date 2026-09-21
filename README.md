@@ -36,7 +36,7 @@ zig-out/bin/tempura check-residue piece.it   # and here is why it could
 | Verb | What it answers |
 |---|---|
 | `dump FILE` | a `.mid` or `.it` as a timeline document |
-| `build DOC` | a document as a `.mid` or `.it`, residue attached |
+| `build DOC --kind K` | a document as a `.mid` or `.it`, residue attached (`-o`'s extension or a lone anchor can say `K` instead) |
 | `export DOC --kind K` | the same file with no residue, for playing |
 | `validate DOC` | the schema and host checks, with spans |
 | `inspect FILE` | the annotated byte map of a `.mid` or `.it` |
@@ -65,7 +65,8 @@ machine's memory. If it prints `waiting`, wait.
 | `tools/zt corpus` | the native golden gate; `-- --update` regenerates and the diff is reviewed |
 | `tools/zt fixtures` | re-derive the corpus's committed binary fixtures from the cores' builders |
 | `tools/zt landing` | regenerate `npm/tempura/test/fixtures` for the pacer landing proof |
-| `tools/zt cli` | the native `tempura` binary; `tools/zt run -- <args>` runs it without installing |
+| `tools/zt cli` | the native `tempura` binary, into `zig-out/bin/` |
+| `tools/zt run -- <args>` | the same binary, run without installing it |
 | `tools/zt wasm` | `tempura.wasm`, wasm32-freestanding, ReleaseSmall, and a copy into `npm/tempura/` |
 | `tools/zt wasm-budget` | the wasm against its frozen size ceiling |
 | `tools/zt fuzz` | the never-panic harnesses, separate from `verify` so the gate stays fast |

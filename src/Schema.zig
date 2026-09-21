@@ -182,19 +182,36 @@ test "Schema: the corpus harness vocabulary preloads alone" {
 }
 
 test "Schema: the corpus and timeline vocabularies are never composed" {
-    // Both declare a `timing` form: the `it/` tier's header section, and
-    // the harness verb that echoes a conductor's walk. Composing them is
-    // what the two-bundle rule exists to prevent, and this is the proof
-    // that the collision is real rather than theoretical — the same
-    // aggregate that resolves `timing` cleanly in `load`'s bundle reports
-    // it ambiguous the moment the harness manifest joins.
+    // One project, one vocabulary: a harness file is an ordered script of
+    // verbs and not a document, so nothing it declares belongs in a
+    // `(timeline …)`'s scope — and composing the two bundles would put
+    // every one of its verbs there.
+    //
+    // Until 2026-09-21 the proof was a COLLISION: both manifests
+    // declared a `timing` form — the `it/` tier's header section, and the
+    // harness verb that echoed a conductor's walk — so a composed
+    // aggregate reported `timing` ambiguous. That verb is gone (nothing
+    // ever implemented it; `corpus_runner.zig`'s header has the reason),
+    // and with it the collision, so the claim is made the other way
+    // round: a harness verb is out of a document's reach, and WOULD be in
+    // it if the two bundles were one.
+    const verbs = [_][]const u8{ "plan", "export-score", "roundtrip", "snap", "write" };
+
     var one = try load(t_.allocator);
     defer one.deinit();
+    for (verbs) |verb| {
+        try t_.expect(one.preloaded.schema.lookupForm(verb, null) != .found);
+    }
+    // …and the `it/` tier's own `timing` still resolves in the document
+    // bundle, which is the half of the old collision that was never the
+    // harness's to give up.
     try t_.expect(one.preloaded.schema.lookupForm("timing", null) == .found);
 
     var both = try loadSourcesUnchecked(t_.allocator, &(timeline_manifest_srcs ++ [_][:0]const u8{corpus_manifest_src}));
     defer both.deinit();
-    try t_.expect(both.preloaded.schema.lookupForm("timing", null) == .ambiguous);
+    for (verbs) |verb| {
+        try t_.expect(both.preloaded.schema.lookupForm(verb, null) == .found);
+    }
 }
 
 test "Schema: the timeline vocabulary is reachable through the bundle" {

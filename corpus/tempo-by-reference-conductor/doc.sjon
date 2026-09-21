@@ -1,0 +1,34 @@
+; The same three-segment map as `tempo-three-conductors-smf`, conducted
+; by the same file — BY REFERENCE. There is no `(midi/smf …)` dump here:
+; the document names `song.mid` and nothing else, and the host's resolver
+; (rooted at this directory, because an `:file` is "resolved relative to
+; the document", plan 02) reads it.
+;
+; This case is the final review's C1 as a golden. Plan 03's "Three
+; conductors" rules 2 and 3 draw no inline/by-reference line, and plan 02
+; makes a by-reference anchor first class — yet the document layer used to
+; read the tier when one was inline and keep plan 03's PLACEHOLDER (500
+; 000 microseconds per quarter note in [4 4]) when it was not, even where
+; the resolver had already read the bytes and verified them against
+; `:size` and `:sha256`. `validate` said nothing, `timeline` said 500 000
+; and `export-score` said `:bpm 120`: a wrong score with no diagnostic.
+;
+; So the pin is an EQUALITY, not a number: this case's `(echo …)` header
+; is byte-identical to `tempo-three-conductors-native`'s and
+; `tempo-three-conductors-smf`'s, which a test in `src/corpus_runner.zig`
+; asserts over the three committed goldens. One conductor, four
+; spellings — natively, inline as SMF, inline as IT, and by reference.
+;
+; `song.mid` beside it is `tempo-three-conductors-smf`'s own fixture,
+; regenerated from the same builder by `zig build fixtures`, so a drift of
+; one byte fails both cases at once and both diffs are read together.
+; `:size` and `:sha256` are that file's, and they are what makes the bytes
+; honourable at all (the controller's ruling: an anchor that declares
+; neither is `anchor_mismatch` the moment a resolver reads it).
+;
+; `(export-score …)` is here for the symptom's sake: the transport line is
+; the FILE's tempo and the header names the conductor, which is the score
+; C1 was silently getting wrong.
+(timeline :length 1bar :conductor song)
+
+(anchor :id song :kind smf :file "song.mid" :size 76 :sha256 "f2964bb1df2139ef13cbae50f323f2aacdfa7aed09b2dc001765db72baf48d6e")

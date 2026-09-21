@@ -82,6 +82,15 @@ const residue = @import("residue/residue.zig");
 const records = residue.records;
 const pipeline = @import("doc/pipeline.zig");
 const Doc = @import("doc/Value.zig");
+/// The document PART, for the two harnesses that load a whole document:
+/// `fromSource`, `mapOf` and `conductedPlaceholder` are its, not the
+/// value file's.
+const doc_part = @import("doc/doc.zig");
+const edit = @import("edit/edit.zig");
+/// The edit part's own fixtures — a test-only file, imported by a
+/// test-only target, so an operation harness plans over the same
+/// document the edit tests do.
+const edit_support = @import("edit/test_support.zig");
 
 const Smith = std.testing.Smith;
 const testing = std.testing;
@@ -1154,4 +1163,302 @@ test "fuzz doc.pipeline.dump: arbitrary bytes dump as a document, .it" {
             "\xff" ** 64,
         },
     });
+}
+
+// ---------------------------------------------------------------------------
+// 11. doc.fromSource — a whole DOCUMENT from arbitrary text.
+// ---------------------------------------------------------------------------
+
+/// `hits` is the number of roots the document came back with — anchors,
+/// lanes, phrases and pass-through forms together.
+///
+/// This is the first of the two harnesses over the TEXT boundaries, and
+/// it exists because of what the final review found there: nine
+/// narrowing casts on user numbers, every one of them a panic natively
+/// and a trap in the wasm (`(anchor … :size 1e30)` was the shortest).
+/// `src/fuzz.zig` covered only the byte-eating entry points, so the
+/// class had nowhere to be caught.
+///
+/// What is claimed is what holds for ARBITRARY text: the load RETURNS
+/// (no panic, no assert, no leak), every diagnostic's span does not run
+/// backwards and points inside the source it was read from, a saturated
+/// `:size` is still a `u64`, and — the invariant that ties this to the
+/// conductor rules — `mapOf` over the finished value never disagrees
+/// with the map the load stored. Nothing is claimed about cleanliness:
+/// random text trips every diagnostic there is.
+fn checkFromSource(schema: *const Schema, input: [:0]const u8) !Seen {
+    var seen: Seen = .{};
+    const gpa = testing.allocator;
+
+    var res = try doc_part.fromSource(gpa, schema, input, null);
+    defer res.deinit();
+
+    // Spans index the SOURCE here: one text in, one text's coordinates
+    // out (a dump is the mixed case, and has its own harness).
+    try seen.noteIn(&res.diags, input.len);
+    seen.hits = res.doc.anchors.len + res.doc.lanes.len +
+        res.doc.phrases.len + res.doc.passthrough.len;
+
+    // The map is a map: a length that is not negative, and segments in
+    // tick order.
+    try testing.expect(res.map.length >= 0);
+    var prev: i64 = -1;
+    for (res.map.segments) |s| {
+        try testing.expect(s.tick > prev);
+        prev = s.tick;
+    }
+
+    // `mapOf` is the same answer over the finished value — the property
+    // `fromSjon`'s own test pins over three documents, here over
+    // whatever text came in. One document has one map or the edit engine
+    // and the exporters are measuring different pieces.
+    var again = try doc_part.fromSjon.mapOf(gpa, &res.doc);
+    defer again.deinit();
+    try testing.expectEqual(res.map.length, again.length);
+    try testing.expectEqual(res.map.segments.len, again.segments.len);
+    try testing.expectEqual(res.map.meters.len, again.meters.len);
+
+    // A conducted document is either timed by its conductor or told that
+    // it is not: the placeholder is never silent (the review's C1).
+    if (doc_part.conductedPlaceholder(&res.doc)) {
+        try testing.expect(res.diags.count(.anchor_unavailable) > 0);
+    }
+    return seen;
+}
+
+fn fuzzFromSource(schema: *const Schema, smith: *Smith) anyerror!void {
+    var buf: [MAX_INPUT + 1]u8 = undefined;
+    const len = smith.sliceWithHash(buf[0..MAX_INPUT], 0xD0_C5_00);
+    buf[len] = 0;
+    _ = try checkFromSource(schema, buf[0..len :0]);
+}
+
+/// The known-bad document texts, kept beside the harness: each one
+/// panicked somewhere before the final review's I1 was fixed, or is one
+/// token away from a shape that did.
+const bad_documents = [_][:0]const u8{
+    // `@intFromFloat` to `u64`, `fromSjon.readAnchors`.
+    "(timeline)\n(anchor :id s :kind smf :file \"x.mid\" :size 1e30)\n",
+    "(timeline)\n(anchor :id s :kind smf :file \"x.mid\" :size -1e30)\n",
+    // …and the same key inside an inline module, `bridge_it.readSource`.
+    "(timeline :conductor s)\n(anchor :id s :kind it :file \"x.it\")\n" ++
+        "(it/module (it/source :file \"x.it\" :size 1e30) (it/timing :speed 6 :tempo 125)" ++
+        " (it/orders 0) (it/pattern 0 :rows 4))\n",
+    // A conducted anchor with nothing to read: the placeholder, said.
+    "(timeline :conductor s)\n(anchor :id s :kind smf :file \"x.mid\")\n",
+    // Positions at and past the grid ceiling.
+    "(timeline :length 1e30q)\n(tempo-point :at 0q :qpm 120)\n(meter-point :at 0bar :sig [4 4])\n",
+    "(timeline)\n(tempo-point :at 0q :qpm 1e30)\n(meter-point :at 0bar :sig [4 4])\n",
+    "(timeline)\n(tempo-point :at 0q :us 0)\n(meter-point :at 0bar :sig [0 0])\n",
+    // A row and a cell past the module's own domains.
+    "(timeline :conductor s)\n(anchor :id s :kind it :file \"x.it\")\n" ++
+        "(it/module (it/timing :speed 6 :tempo 125) (it/orders 0)" ++
+        " (it/pattern 0 :rows 8 (row 70000 (ev 5000000000 \"C-5\"))))\n",
+};
+
+/// The corpus's own documents, by name — the seeds that are real
+/// documents rather than corners.
+///
+/// A NAMED list and not a directory walk: the point is a reviewable set
+/// of shapes (native, conducted three ways, bound to each format, every
+/// position unit), and a walk would silently stop covering one the day
+/// somebody renamed a case.
+const corpus_documents = [_][]const u8{
+    "examples-native",
+    "positions-units",
+    "tempo-three-conductors-native",
+    "tempo-three-conductors-smf",
+    "tempo-three-conductors-it",
+    "tempo-by-reference-conductor",
+    "edit-bound-it-cell",
+    "edit-bound-smf-pair",
+    "printer-rule",
+};
+
+/// Read each of `corpus_documents` into `out`, NUL-terminated. Caller
+/// frees every slice.
+fn readCorpusDocuments(gpa: std.mem.Allocator, out: *std.ArrayList([:0]const u8)) !void {
+    const repo_root = @import("build_options").repo_root;
+    for (corpus_documents) |case| {
+        const path = try std.fs.path.join(gpa, &.{ repo_root, "corpus", case, "doc.sjon" });
+        defer gpa.free(path);
+        const text = try std.Io.Dir.cwd().readFileAllocOptions(
+            testing.io,
+            path,
+            gpa,
+            .limited(1 << 20),
+            .of(u8),
+            0,
+        );
+        errdefer gpa.free(text);
+        try out.append(gpa, text);
+    }
+}
+
+test "fuzz doc.fromSource bites: :size 1e30 saturates, a conducted placeholder speaks" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    // The shortest reproduction of the review's I1: the cast is
+    // saturating now, so the anchor's `:size` is `maxInt(u64)` and the
+    // document says `anchor_mismatch` rather than dying.
+    const seen = try checkFromSource(&schema, bad_documents[0]);
+    try testing.expectEqual(@as(usize, 1), seen.hits);
+
+    var res = try doc_part.fromSource(gpa, &schema, bad_documents[0], null);
+    defer res.deinit();
+    try testing.expectEqual(@as(u64, std.math.maxInt(u64)), res.doc.anchors[0].size.?);
+
+    // …and C1's invariant fires on purpose: a conducted anchor with
+    // nothing to read is `anchor_unavailable`, never a silent 120 qpm.
+    var conducted = try doc_part.fromSource(gpa, &schema, bad_documents[3], null);
+    defer conducted.deinit();
+    try testing.expect(doc_part.conductedPlaceholder(&conducted.doc));
+    try testing.expect(conducted.diags.count(.anchor_unavailable) > 0);
+
+    // Every other known-bad text runs through the harness too, so the
+    // whole list is exercised on a plain `zig build fuzz`.
+    for (bad_documents) |text| _ = try checkFromSource(&schema, text);
+}
+
+test "fuzz doc.fromSource: arbitrary text loads as a document, never a panic" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var seeds: std.ArrayList([:0]const u8) = .empty;
+    defer {
+        for (seeds.items) |s| gpa.free(s);
+        seeds.deinit(gpa);
+    }
+    try readCorpusDocuments(gpa, &seeds);
+
+    var corpus: std.ArrayList([]const u8) = .empty;
+    defer corpus.deinit(gpa);
+    try corpus.append(gpa, "");
+    for (bad_documents) |text| try corpus.append(gpa, text);
+    for (seeds.items) |text| try corpus.append(gpa, text);
+
+    const ctx: *const Schema = &schema;
+    try testing.fuzz(ctx, fuzzFromSource, .{ .corpus = corpus.items });
+}
+
+// ---------------------------------------------------------------------------
+// 12. edit.Op.fromJson / edit.fromActionsJson — an operation and an
+//     action list from arbitrary JSON-ish text.
+// ---------------------------------------------------------------------------
+
+/// `hits` is 1 when the text was an operation, 0 when it was refused.
+///
+/// The second text boundary, and the one the review's table is mostly
+/// about: `{"at":1e30}`, `{"repeat":5000000000}`, `{"swing":-1e300}` all
+/// panicked, and every operation goes through the same three readers. An
+/// action list is here beside it because `Plan.fromActionsJson` is the
+/// other half of plan 10's surface (`tpr_apply` takes one) and reads the
+/// same numbers.
+///
+/// What is claimed: both readers RETURN for any text; an operation that
+/// came back is one the planner accepts (so a refusal is a diagnostic
+/// and never a half-built value); a refused one carries at least one
+/// error; and a `:swing` / `:strength` that did come back is inside the
+/// range its rule is defined on.
+fn checkOpJson(fx: *const edit_support.Fixture, input: []const u8) !Seen {
+    var seen: Seen = .{};
+    const gpa = testing.allocator;
+
+    var parsed = try edit.fromJson(gpa, input);
+    defer parsed.deinit();
+    try seen.note(&parsed.diags);
+
+    if (parsed.op) |op| {
+        seen.hits = 1;
+        // The fractions are clamped at the reader, so a value that got
+        // through is one the grid has a line for.
+        if (op == .quantize) {
+            try testing.expect(op.quantize.strength >= 0 and op.quantize.strength <= 1);
+            try testing.expect(op.quantize.swing >= -1 and op.quantize.swing <= 1);
+        }
+        // …and it plans: TOTAL over the fixture, refused or not, with no
+        // assertion on any number it carried in.
+        var planned = try edit.plan(gpa, fx.doc_(), &fx.tree, op);
+        defer planned.deinit();
+        if (planned.summary.refused) try testing.expect(planned.actions.len == 0);
+    } else {
+        try testing.expect(parsed.diags.hasErrors());
+    }
+
+    // The action list reads the same numbers through its own door.
+    var actions = try edit.fromActionsJson(gpa, input);
+    defer actions.deinit();
+    try seen.note(&actions.diags);
+    return seen;
+}
+
+fn fuzzOpJson(fx: *const edit_support.Fixture, smith: *Smith) anyerror!void {
+    var buf: [MAX_INPUT]u8 = undefined;
+    _ = try checkOpJson(fx, buf[0..smith.sliceWithHash(&buf, 0x0E_51_70)]);
+}
+
+/// The known-bad operation texts: the review's table, one row each.
+const bad_ops = [_][]const u8{
+    \\{"op":"retime","sel":{},"delta":1e30}
+    ,
+    \\{"op":"retime","sel":{},"delta":-1e30}
+    ,
+    \\{"op":"split","sel":{},"at":1e300}
+    ,
+    \\{"op":"resize","sel":{},"repeat":5000000000}
+    ,
+    \\{"op":"nudge","sel":{},"grid":"1/16","count":5000000000}
+    ,
+    \\{"op":"stretch","from":0,"to":9223372036854775807,"p":4294967295,"q":1}
+    ,
+    \\{"op":"quantize","sel":{},"grid":"1/8","swing":-1e300}
+    ,
+    \\{"op":"quantize","sel":{},"grid":"1/8","strength":1e300,"swing":1e300}
+    ,
+    \\{"op":"insert","lane":"flash","note":{"at":1e30,"dur":1e30,"key":1e30}}
+    ,
+    \\[{"op":"set_keyword","root":4294967296,"path":[0],"key":"at","value":{"$num":[1e30,"q"]}}]
+    ,
+};
+
+test "fuzz edit.Op.fromJson bites: every number of the review's table is refused" {
+    const gpa = testing.allocator;
+    var fx = try edit_support.Fixture.init(gpa, edit_support.native);
+    defer fx.deinit();
+
+    // The ones that name an impossible NUMBER are refused; the two that
+    // name an impossible FRACTION are clamped and plan.
+    for (bad_ops) |text| {
+        const seen = try checkOpJson(&fx, text);
+        try testing.expect(seen.diags > 0 or seen.hits == 1);
+    }
+
+    var wild = try edit.fromJson(gpa, bad_ops[0]);
+    defer wild.deinit();
+    try testing.expect(wild.op == null);
+    try testing.expect(wild.diags.hasErrors());
+
+    var swung = try edit.fromJson(gpa, bad_ops[6]);
+    defer swung.deinit();
+    try testing.expectEqual(@as(f64, -1), swung.op.?.quantize.swing);
+}
+
+test "fuzz edit.Op.fromJson: arbitrary JSON-ish text is an operation or a refusal" {
+    const gpa = testing.allocator;
+    var fx = try edit_support.Fixture.init(gpa, edit_support.native);
+    defer fx.deinit();
+
+    var corpus: std.ArrayList([]const u8) = .empty;
+    defer corpus.deinit(gpa);
+    try corpus.append(gpa, "");
+    try corpus.append(gpa, "{}");
+    try corpus.append(gpa, "[]");
+    try corpus.append(gpa, "not json");
+    for (bad_ops) |text| try corpus.append(gpa, text);
+
+    const ctx: *const edit_support.Fixture = &fx;
+    try testing.fuzz(ctx, fuzzOpJson, .{ .corpus = corpus.items });
 }

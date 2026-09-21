@@ -282,6 +282,20 @@ pub const Doc = struct {
     length_lit: ?Pos.Literal = null,
     end: TimeMap.End = .hold,
     conductor: ?AnchorId = null,
+    /// The CONDUCTOR anchor's own bytes, when it conducts BY REFERENCE
+    /// and the host could read and verify them — arena-owned, like every
+    /// other slice here.
+    ///
+    /// Plan 03's rules 2 and 3 make no inline/by-reference distinction,
+    /// and the two layers that build a conductor's tables over a finished
+    /// value (`fromSjon.mapOf`, `time/derive.conduct`) hold a `Doc` and
+    /// no resolver — so the file travels WITH the document and
+    /// `fromSjon.conductorOf` is the one owner all three read it through.
+    /// Null for a document that conducts itself, for an inline tier
+    /// (the tier IS the bytes) and for a file nobody could produce, which
+    /// is the one case that keeps the placeholder
+    /// (`fromSjon.conductedPlaceholder`).
+    conductor_bytes: ?[]const u8 = null,
     anchors: []Anchor = &.{},
     tempo: []TempoPoint = &.{},
     meter: []MeterPoint = &.{},
@@ -341,6 +355,12 @@ pub const Doc = struct {
     /// documents have to agree on, and `length` carries that.
     /// `length_lit` rides along for the edit engine and for a host that
     /// wants to show what was typed; nothing downstream compares it.
+    ///
+    /// A PASS-THROUGH form is compared structurally for the same reason
+    /// (`passthroughEql`): its `text` is a source slice, and two
+    /// documents that say the same thing in two layouts are one
+    /// document. The comments an author wrote above a root are still
+    /// compared exactly — the printer is required to put those back.
     pub fn eql(a: *const Doc, b: *const Doc) bool {
         if (!optStrEql(a.title, b.title)) return false;
         if (!optEql(i64, a.length, b.length)) return false;
@@ -398,7 +418,7 @@ pub const Doc = struct {
         if (a.passthrough.len != b.passthrough.len) return false;
         for (a.passthrough, b.passthrough) |x, y| {
             if (!std.mem.eql(u8, x.head, y.head)) return false;
-            if (!std.mem.eql(u8, x.text, y.text)) return false;
+            if (!passthroughEql(x.text, y.text)) return false;
             if (x.comments.len != y.comments.len) return false;
             for (x.comments, y.comments) |cx, cy| {
                 if (!std.mem.eql(u8, cx, cy)) return false;
@@ -415,6 +435,106 @@ pub const Doc = struct {
         // bridges' fixed-point tests. Deferred by the controller.
         if (a.midi.len != b.midi.len or a.it.len != b.it.len) return false;
         return true;
+    }
+};
+
+/// Two pass-through forms compared STRUCTURALLY: the same tokens in the
+/// same order, whatever the layout between them.
+///
+/// `Passthrough.text` is a pacer root's SOURCE SLICE, and comparing two
+/// of those byte for byte compares two texts' typography rather than two
+/// documents. That is exactly what the final review's D1 caught: plan
+/// 04's essence restores a document through SJON's Binary IR and prints
+/// it back with SJON's own printer, so a `(control :id glow-amt …)` an
+/// author had aligned under a trailing comment came back canonically
+/// laid out — semantically the same form, and `rung3 :ok false` on
+/// `corpus/examples-native` for it, which made the branch's
+/// essence-exactness gate report a loss that had not happened.
+///
+/// The comparison is the token stream, and allocation-free because
+/// `eql` takes no allocator (and a round-trip check that could fail on
+/// memory pressure would be a worse gate than this one):
+///
+///   * whitespace between tokens is layout and is skipped;
+///   * a `;` comment to end of line is layout HERE — an interior comment
+///     the printer moved or re-indented is not a changed document. The
+///     comments an author wrote ABOVE a root are still compared byte for
+///     byte, above: those are `Passthrough.comments`, which the printer
+///     is required to put back where a re-read finds them;
+///   * `(`, `)`, `[`, `]`, `{` and `}` are each one token, so nesting is
+///     compared and not merely the leaves;
+///   * a string literal is one token, quotes, escapes and all — its
+///     interior spaces are content, not layout;
+///   * everything else is a run up to the next delimiter: a keyword, a
+///     symbol, a number, a boolean.
+///
+/// What is NOT normalised is a number's spelling: `0.50` and `0.5` are
+/// two tokens here. SJON's printer does not re-spell what Binary IR
+/// carried, so the two sides agree in practice, and a re-spelling IS
+/// something a reviewer should be shown rather than have hidden.
+fn passthroughEql(a: []const u8, b: []const u8) bool {
+    var x: Tokens = .{ .src = a };
+    var y: Tokens = .{ .src = b };
+    while (true) {
+        const ta = x.next();
+        const tb = y.next();
+        if (ta == null or tb == null) return ta == null and tb == null;
+        if (!std.mem.eql(u8, ta.?, tb.?)) return false;
+    }
+}
+
+/// SJON's significant bytes, token by token — enough of a lexer for
+/// `passthroughEql` and deliberately no more (the real one is SJON's,
+/// and it wants an allocator and a diagnostic list).
+const Tokens = struct {
+    src: []const u8,
+    i: usize = 0,
+
+    fn next(self: *Tokens) ?[]const u8 {
+        while (self.i < self.src.len) {
+            const c = self.src[self.i];
+            switch (c) {
+                ' ', '\t', '\r', '\n' => self.i += 1,
+                ';' => while (self.i < self.src.len and self.src[self.i] != '\n') {
+                    self.i += 1;
+                },
+                else => break,
+            }
+        }
+        if (self.i >= self.src.len) return null;
+
+        const start = self.i;
+        switch (self.src[self.i]) {
+            '(', ')', '[', ']', '{', '}' => {
+                self.i += 1;
+                return self.src[start..self.i];
+            },
+            '"' => {
+                self.i += 1;
+                while (self.i < self.src.len) : (self.i += 1) {
+                    if (self.src[self.i] == '\\') {
+                        // A trailing backslash is a truncated literal;
+                        // stop at the end rather than stepping past it.
+                        self.i += 1;
+                        continue;
+                    }
+                    if (self.src[self.i] == '"') {
+                        self.i += 1;
+                        break;
+                    }
+                }
+                return self.src[start..@min(self.i, self.src.len)];
+            },
+            else => {
+                while (self.i < self.src.len) : (self.i += 1) {
+                    switch (self.src[self.i]) {
+                        ' ', '\t', '\r', '\n', ';', '(', ')', '[', ']', '{', '}', '"' => break,
+                        else => {},
+                    }
+                }
+                return self.src[start..self.i];
+            },
+        }
     }
 };
 
@@ -535,6 +655,75 @@ test "Doc.eql: ignores spans and notices every other field" {
     // The TICK is what they have to agree on.
     b.length = 4097;
     try testing.expect(!a.eql(&b));
+}
+
+test "Doc.eql: a pass-through form re-laid-out is the same form" {
+    // The final review's D1. Plan 04's essence restores a document
+    // through SJON's Binary IR and prints it back canonically, so a
+    // pacer root an author had aligned by hand comes back with different
+    // whitespace and the same meaning — and comparing `text` byte for
+    // byte reported `rung3 :ok false` for it, which is a loss the gate
+    // was claiming had happened when it had not.
+    const gpa = testing.allocator;
+    var a: Doc = .empty(gpa);
+    defer a.deinit();
+    var b: Doc = .empty(gpa);
+    defer b.deinit();
+
+    var one = [_]Passthrough{.{
+        .head = "control",
+        .text = "(control :id glow-amt :type slider :min 0 :max 1 :value 0.5 :target glow-amt)",
+        .comments = &.{},
+        .span = .{ .start = 0, .end = 4 },
+    }};
+    var two = [_]Passthrough{.{
+        .head = "control",
+        .text =
+        \\(control
+        \\  :id glow-amt     ; the author's own alignment
+        \\  :type slider
+        \\  :min 0 :max 1
+        \\  :value 0.5
+        \\  :target glow-amt)
+        ,
+        .comments = &.{},
+        .span = .{ .start = 99, .end = 140 },
+    }};
+    a.passthrough = &one;
+    b.passthrough = &two;
+    try testing.expect(a.eql(&b));
+
+    // …and a form that says something DIFFERENT is still different, at
+    // every level: a changed value, a changed key, a changed nesting, a
+    // dropped token.
+    for ([_][]const u8{
+        "(control :id glow-amt :type slider :min 0 :max 1 :value 0.6 :target glow-amt)",
+        "(control :id glow-amt :type knob :min 0 :max 1 :value 0.5 :target glow-amt)",
+        "(control :id glow-amt :type slider :min 0 :max 1 :value 0.5)",
+        "(control :id glow-amt :type slider :range [0 1] :value 0.5 :target glow-amt)",
+        "(control :id glow-amt :type slider :min 0 :max 1 :value (0.5) :target glow-amt)",
+    }) |text| {
+        two[0].text = text;
+        if (a.eql(&b)) {
+            std.debug.print("not distinguished: {s}\n", .{text});
+            return error.StructuralComparisonTooLoose;
+        }
+    }
+
+    // A string's own interior spaces are content and not layout.
+    one[0].text = "(control :id x :label \"two  spaces\")";
+    two[0].text = "(control :id x :label \"two spaces\")";
+    try testing.expect(!a.eql(&b));
+    two[0].text = "(control  :id  x\n  :label \"two  spaces\")";
+    try testing.expect(a.eql(&b));
+
+    // The comments ABOVE a root are the printer's contract and are
+    // compared exactly.
+    one[0].comments = &.{"; pacer's form, pass-through"};
+    two[0].comments = &.{"; pacer's form,  pass-through"};
+    try testing.expect(!a.eql(&b));
+    two[0].comments = &.{"; pacer's form, pass-through"};
+    try testing.expect(a.eql(&b));
 }
 
 test "Doc.anchorById / phraseByName: the two joins the bridge and the printer need" {

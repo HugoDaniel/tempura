@@ -315,6 +315,29 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
     `docs/timeline-language.md` is rendered by concatenating the manifests' own
     `:description`s. The drift gate is unaffected.
 
+- 2026-09-21 — **Filed and routed at the whole-branch review's fix wave.** Two more
+  divergences, and the close of one filed above.
+
+  - **A meter whose bar does not divide 64 rows is a gap in the IT renderer's pattern
+    sizing.** `src/export/render_it.zig:78` fixes `rows: u16 = 64`, which is four bars of
+    `[4 4]` at speed 6 and 24 ticks to the quarter — so a `[3 4]` or a `[7 8]` document
+    renders patterns whose bar lines do not fall on a pattern boundary. `examples/tracker/`
+    keeps `[4 4]` on purpose and says so in its README and in both of its documents; what
+    is missing is the renderer choosing its row count from the meter in force.
+  - **`conform` runs the oracle SCRIPT and not plan 09's comparison.** `zig build conform`
+    invokes `conformance/conform.sh`, which checks tempura's readers against libopenmpt and
+    midicsv over the committed fixtures and the fetched OpenMPT wiki cases. The `inspect
+    --csv` ⇄ midicsv row comparison plan 09 describes has no implementation: the verb does
+    not even hand the script the built CLI (`addArtifactArg`), so nothing in the tree could
+    run it. The script's header now says so rather than describing the intent.
+  - **Closed** — "A conducted anchor BY REFERENCE derives length 0", filed above, is fixed.
+    `doc/fromSjon.zig`'s `conductorOf` is one owner for plan 03's rules 2 and 3 over an
+    inline tier and over the anchor's own verified bytes alike, `Doc.conductor_bytes`
+    carries the file with the document so `mapOf` and `time/derive.conduct` cannot answer
+    differently, and a conductor nobody could read is `anchor_unavailable` as an ERROR with
+    `export-score` refusing on it. Pinned by `corpus/tempo-by-reference-conductor/`, whose
+    `(echo …)` header is byte-identical to the three `tempo-three-conductors*` cases'.
+
 ## Status board
 
 | Milestone | Item | Status |

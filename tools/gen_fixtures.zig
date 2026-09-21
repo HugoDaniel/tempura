@@ -77,6 +77,11 @@ const cases = [_]Case{
     .{ .name = "skeleton-smf", .file = "song.mid", .build = skeletonSmf },
     .{ .name = "tempo-three-conductors-it", .file = "song.it", .build = threeConductorsIt },
     .{ .name = "tempo-three-conductors-smf", .file = "song.mid", .build = threeConductorsSmf },
+    // The same bytes again, for the case whose document names them and
+    // carries no inline dump: a by-reference conductor is timed by its
+    // file, and the two spellings have to be reading ONE file for their
+    // echo headers to be comparable at all.
+    .{ .name = "tempo-by-reference-conductor", .file = "song.mid", .build = threeConductorsSmf },
     .{ .name = "walk-axx", .file = "song.it", .build = walkAxx },
     .{ .name = "walk-bxx", .file = "song.it", .build = walkBxx },
     .{ .name = "walk-constant", .file = "song.it", .build = walkConstant },
