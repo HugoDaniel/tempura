@@ -47,6 +47,18 @@
 //! one track instead (plan 05's writer option, decided HERE so the lane
 //! records' addresses describe the file that is written).
 //!
+//! **Onto the track a dump left empty.** A dump of a file this renderer
+//! wrote CONSUMES each restored lane's events (plan 04, rule 2;
+//! `residue/reconcile.zig`, "The consumption") and keeps the track, so
+//! the tier's track numbers hold: what is left is a track holding
+//! nothing but the lane's own `sequence-name`. Such a track is the
+//! lane's, and the lane renders ONTO it rather than beside it — the
+//! first unclaimed one of its name, in file order — so a document built,
+//! dumped and built again has one track per lane and the same track
+//! numbers each time, instead of gaining an empty named track per
+//! rebuild. A base track that holds anything else is the anchor's own
+//! and is never rendered onto.
+//!
 //! **Three things this layer cannot know.**
 //!
 //!   1. A native curve lane's controller number. `:cc` is a BOUND lane's
@@ -195,20 +207,33 @@ const Render = struct {
         b.division = .{ .ppq = self.ppq };
 
         // Which lanes get a track of their own, decided before any track
-        // exists: the format 0 promotion depends on the answer.
+        // exists: the format 0 promotion depends on the answer. A lane
+        // whose track a dump left empty for it (the header, "Onto the
+        // track a dump left empty") is not a new track.
         var renderable: std.ArrayList(usize) = .empty;
         defer renderable.deinit(self.gpa);
+        var ghosts: std.ArrayList(?u32) = .empty;
+        defer ghosts.deinit(self.gpa);
         for (self.doc.lanes, 0..) |*lane, i| {
-            if (try self.renders(lane)) try renderable.append(self.gpa, i);
+            if (!try self.renders(lane)) continue;
+            try renderable.append(self.gpa, i);
+            try ghosts.append(self.gpa, self.ghostTrack(lane.name, ghosts.items));
+        }
+        var new_tracks: usize = 0;
+        for (ghosts.items) |g| {
+            if (g == null) new_tracks += 1;
         }
 
-        b.format = try self.formatFor(renderable.items.len);
+        b.format = try self.formatFor(new_tracks);
 
         // Track 0 — the conductor track, and in a format 0 file the only
         // one. A base's tracks come across verbatim; the events this
         // function adds to track 0 go BEFORE them, which is where a
         // stable sort by tick leaves them and where the residue's own
-        // payloads will sit (plan 04, "The SMF carrier").
+        // payloads will sit (plan 04, "The SMF carrier"). A track a lane
+        // is about to render onto loses its `end-of-track` on the way:
+        // the writer places one after the last event, and the one the
+        // dump left would sit in the middle (`end_of_track_early`).
         const track0 = try b.addTrack();
         try self.conductorTrack(&b, track0);
         if (self.base) |src| {
@@ -218,16 +243,20 @@ const Render = struct {
             var ti: usize = 1;
             while (ti < src.tracks.len) : (ti += 1) {
                 const track = try b.addTrack();
-                for (src.tracks[ti].events) |e| try copyEvent(&b, src, e, track);
+                const claimed = std.mem.indexOfScalar(?u32, ghosts.items, track) != null;
+                for (src.tracks[ti].events) |e| {
+                    if (claimed and e.kind == .end_of_track) continue;
+                    try copyEvent(&b, src, e, track);
+                }
             }
             for (src.foreign) |chunk| {
                 try b.addForeign(chunk.tag, try b.addBytes(src.bytesOf(chunk.bytes)));
             }
         }
 
-        for (renderable.items) |i| {
+        for (renderable.items, ghosts.items) |i, ghost| {
             const lane = &self.doc.lanes[i];
-            const track: u32 = if (self.opts.format0) track0 else blk: {
+            const track: u32 = if (self.opts.format0) track0 else ghost orelse blk: {
                 const t = try b.addTrack();
                 try b.addEvent(t, 0, .sequence_name, .{ .bytes = try b.addBytes(lane.name) });
                 break :blk t;
@@ -240,6 +269,34 @@ const Render = struct {
         }
 
         return b.finish();
+    }
+
+    /// The base track a dump left empty for `name` — one whose every
+    /// event is either the one `sequence-name` spelling `name` or an
+    /// `end-of-track` — as the BUILDER will number it (a base's track
+    /// `ti` becomes track `ti`, because track 0 is merged and the rest
+    /// are added in order). The first such track in file order that no
+    /// earlier lane has claimed, or null.
+    fn ghostTrack(self: *Render, name: []const u8, claimed: []const ?u32) ?u32 {
+        const src = self.base orelse return null;
+        var ti: usize = 1;
+        while (ti < src.tracks.len) : (ti += 1) {
+            const t: u32 = @intCast(ti);
+            if (std.mem.indexOfScalar(?u32, claimed, t) != null) continue;
+            var named = false;
+            var other = false;
+            for (src.tracks[ti].events) |e| switch (e.kind) {
+                .sequence_name => {
+                    if (named or !std.mem.eql(u8, src.bytesOf(e.payload.bytes), name)) {
+                        other = true;
+                    } else named = true;
+                },
+                .end_of_track => {},
+                else => other = true,
+            };
+            if (named and !other) return t;
+        }
+        return null;
     }
 
     /// Whether this lane becomes native events, and the diagnostic for
@@ -977,4 +1034,65 @@ test "renderSmf: a bound lane is the anchor's own content and is not rendered ag
     try testing.expect(out.conductor == null);
     // And the conductor track was not written a second time.
     try testing.expectEqual(@as(usize, 2), countKind(&out.seq, 0, .set_tempo));
+}
+
+test "renderSmf: a lane renders onto the base track a dump left empty for it" {
+    // A dump of a file this renderer wrote keeps each consumed lane's
+    // track with nothing but its name in it (`residue/reconcile.zig`,
+    // "The consumption"). Rendering into such a base: the snare takes
+    // its own empty track back, the base's kick track is NOT empty (a
+    // DAW put a note there) and is the anchor's own, so the kick gets a
+    // fresh track after it — and the numbers stay put.
+    const gpa = testing.allocator;
+    var fx = try load(gpa,
+        \\(timeline :title "ghost" :length 1bar)
+        \\(tempo-point :at 0bar :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name kick :kind notes
+        \\  (note :at 0bar :dur 1q :key 36))
+        \\(lane :name snare :kind notes
+        \\  (note :at 1q :dur 1q :key 38))
+    );
+    defer fx.deinit();
+
+    var b: Sequence.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.format = 1;
+    b.division = .{ .ppq = 960 };
+    const t0 = try b.addTrack();
+    try b.addEvent(t0, 0, .end_of_track, .empty);
+    const t1 = try b.addTrack();
+    try b.addEvent(t1, 0, .sequence_name, .{ .bytes = try b.addBytes("snare") });
+    try b.addEvent(t1, 1920, .end_of_track, .empty);
+    const t2 = try b.addTrack();
+    try b.addEvent(t2, 0, .sequence_name, .{ .bytes = try b.addBytes("kick") });
+    try b.addEvent(t2, 0, .note_on, .{ .note = .{ .ch = 0, .key = 60, .vel = 100 } });
+    try b.addEvent(t2, 960, .note_off, .{ .note = .{ .ch = 0, .key = 60, .vel = 64 } });
+    try b.addEvent(t2, 960, .end_of_track, .empty);
+    var base = try b.finish();
+    defer base.deinit();
+
+    var out = try renderSmf(gpa, &fx.doc, &fx.derived, &base, .{});
+    defer out.deinit();
+
+    // Conductor, the snare's own track, the DAW's kick track, the new
+    // kick track.
+    try testing.expectEqual(@as(usize, 4), out.seq.tracks.len);
+    try testing.expectEqual(@as(usize, 2), out.lanes.len);
+    try testing.expectEqualStrings("kick", out.lanes[0].lane);
+    try testing.expectEqual(@as(u16, 4), out.lanes[0].address.smf.track);
+    try testing.expectEqualStrings("snare", out.lanes[1].lane);
+    try testing.expectEqual(@as(u16, 2), out.lanes[1].address.smf.track);
+
+    // The snare's track: its name, its note pair, and the dump's
+    // `end-of-track` gone (the writer places one after the last event).
+    try testing.expectEqual(@as(usize, 1), countKind(&out.seq, 1, .sequence_name));
+    try testing.expectEqual(@as(usize, 1), countKind(&out.seq, 1, .note_on));
+    try testing.expectEqual(@as(usize, 0), countKind(&out.seq, 1, .end_of_track));
+    // The DAW's kick track, untouched; the new one named.
+    try testing.expectEqual(@as(usize, 4), out.seq.tracks[2].events.len);
+    try testing.expectEqual(@as(usize, 1), countKind(&out.seq, 3, .sequence_name));
+    try testing.expectEqual(@as(usize, 1), countKind(&out.seq, 3, .note_on));
+    // No track was new to the base's format, so nothing was promoted.
+    try testing.expectEqual(@as(usize, 0), out.diags.count(.render_format_promoted));
 }

@@ -584,8 +584,12 @@ pub fn hashSmfLane(seq: *const Sequence.Sequence, track: u32, ch: u4, ppq: u15) 
     return h.final();
 }
 
-/// The channel an event carries, or null when it carries none.
-fn channelOf(e: Sequence.Event) ?u4 {
+/// The channel an event carries, or null when it carries none. Public
+/// because a lane hash's scope — "the channel events at this address" —
+/// is also what a dump CONSUMES once the hash has matched
+/// (`reconcile.consumeSmf`), and the two must agree on which events
+/// those are.
+pub fn channelOf(e: Sequence.Event) ?u4 {
     return switch (e.kind.payloadField()) {
         .note => @intCast(e.payload.note.ch & 0x0F),
         .poly => @intCast(e.payload.poly.ch & 0x0F),

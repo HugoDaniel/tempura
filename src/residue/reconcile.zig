@@ -271,6 +271,11 @@ pub const Result = struct {
     verdicts: []const LaneVerdict,
     conductor: ?ConductorVerdict,
     rule: Rule,
+    /// The IT patterns the walk played, ascending — the scope every
+    /// lane hash was taken over (`playedPatterns`), kept so that
+    /// `consumeIt` clears exactly the cells the record vouched for.
+    /// Empty for a `.mid`.
+    played: []const u16,
     diags: Diag.List,
     arena: std.heap.ArenaAllocator,
 
@@ -323,12 +328,17 @@ pub fn reconcile(
         .payloads => |p| try run.fromPayloads(p),
     }
 
+    // Into the result's arena, because the hasher that walked them goes
+    // with the run.
+    const played = try playedPatterns(arena.allocator(), try run.rowmap());
+
     return .{
         .doc_text = run.text,
         .tier_at = run.tier_at,
         .verdicts = run.verdicts.items,
         .conductor = run.conductor,
         .rule = run.rule,
+        .played = played,
         .diags = diags,
         .arena = arena,
     };
@@ -1124,6 +1134,176 @@ pub fn addressProse(a: Allocator, address: Doc.Address) Error![]const u8 {
         },
     }
     return out.items;
+}
+
+// ---------------------------------------------------------------------
+// The consumption
+// ---------------------------------------------------------------------
+
+/// What a dump takes OUT of the file's tier once rule 2 has run.
+///
+/// Plan 04, "One home": a native lane's rendered events are a VIEW and
+/// the essence is the truth, and rule 2 says that when a lane record's
+/// hash matches, "the lane is restored as native from the essence, and
+/// its address is consumed", and that when the conductor record matches,
+/// "the file's tempo events are marked consumed". Until now "consumed"
+/// meant only "not imported as a bound lane": the events stayed in the
+/// `midi/` or `it/` tier, and a `build` of the dumped document rendered
+/// the lane INTO a base that still held its previous rendering — every
+/// note twice, and again on the next rebuild. So the two functions below
+/// take the view out of the tier value the pipeline is about to print,
+/// leaving the document with one home for everything: the anchor's own
+/// content in the tier, the native lanes in the timeline, and nothing in
+/// both. A rebuild then renders each lane once, into the track or the
+/// channel a dump left empty for it (`export/render_smf.zig`, "Into an
+/// anchor"; `export/render_it.zig`, the channel above the highest used).
+///
+/// The scope is exactly the hash's: a lane's address is its channel's
+/// events on its track (`records.hashSmfLane`) or its channel's cells in
+/// the played patterns (`records.hashItLane`); the conductor's is what
+/// `render_smf`'s `conductorTrack` writes — `set-tempo`, `time-signature`
+/// and `marker` — and, in a module, the `Txx` cells `render_it`'s
+/// `conductorCells` placed. A `cue-point` stays: tempura never writes one
+/// and a rebuild would not put it back. A track that loses its events
+/// keeps its `sequence-name`, so the tier's track numbers — which every
+/// stale lane's `:track` names — do not move; the renderer reads that
+/// empty named track as the lane's own and renders onto it.
+///
+/// Nothing is taken under any other rule: a skeleton's lanes are bound
+/// and READ the tier, and a tail restores no content to duplicate.
+pub const Consumed = struct {
+    /// SMF channel events removed at restored lanes' addresses.
+    events: usize = 0,
+    /// IT cells cleared on restored lanes' channels.
+    cells: usize = 0,
+    /// Conductor events removed (`.mid`) or `Txx` effects cleared (`.it`).
+    conductor: usize = 0,
+    /// The IT patterns a cell changed in, ascending — what a
+    /// `--patterns=bin` dump has to print as rows after all, because a
+    /// `(bin :at :len)` region of the file cannot lose a cell.
+    patterns: []const u16 = &.{},
+
+    pub fn any(self: Consumed) bool {
+        return self.events + self.cells + self.conductor > 0;
+    }
+};
+
+/// Rule 2's consumption over a `.mid`, in place: `seq` is the sequence
+/// the tier will be printed from, with the residue already detached.
+pub fn consumeSmf(seq: *Sequence.Sequence, result: *const Result) Consumed {
+    var out: Consumed = .{};
+    if (result.rule != .restored) return out;
+
+    for (result.verdicts) |v| {
+        if (v.action != .restored_native) continue;
+        const s = switch (v.address) {
+            .smf => |x| x,
+            .it => continue,
+        };
+        const ti: usize = if (s.track == 0) 0 else s.track - 1;
+        if (ti >= seq.tracks.len) continue;
+        out.events += dropChannel(&seq.tracks[ti], s.ch);
+    }
+
+    if (result.conductor) |c| {
+        if (c.hash_ok) for (seq.tracks) |*t| {
+            out.conductor += dropConductor(t);
+        };
+    }
+    return out;
+}
+
+/// Every event on `ch`, out of the track — the lane hash's own scope.
+fn dropChannel(track: *Sequence.Track, ch: u4) usize {
+    var n: usize = 0;
+    for (track.events) |e| {
+        if (records.channelOf(e) == ch) continue;
+        track.events[n] = e;
+        n += 1;
+    }
+    const dropped = track.events.len - n;
+    track.events = track.events[0..n];
+    return dropped;
+}
+
+/// The events `render_smf`'s conductor track writes, out of the track.
+fn dropConductor(track: *Sequence.Track) usize {
+    var n: usize = 0;
+    for (track.events) |e| {
+        switch (e.kind) {
+            .set_tempo, .time_signature, .marker => continue,
+            else => {},
+        }
+        track.events[n] = e;
+        n += 1;
+    }
+    const dropped = track.events.len - n;
+    track.events = track.events[0..n];
+    return dropped;
+}
+
+/// ITTECH's `Txx`, the one conductor effect `render_it` writes.
+const fx_t: u8 = 'T' - '@';
+
+/// Rule 2's consumption over a `.it`, in place: `module` is the one the
+/// tier will be printed from. `a` owns the returned pattern list.
+pub fn consumeIt(a: Allocator, module: *itf.Module, result: *const Result) Error!Consumed {
+    var out: Consumed = .{};
+    if (result.rule != .restored) return out;
+    var touched: std.ArrayList(u16) = .empty;
+
+    for (result.verdicts) |v| {
+        if (v.action != .restored_native) continue;
+        const s = switch (v.address) {
+            .it => |x| x,
+            .smf => continue,
+        };
+        for (result.played) |pi| {
+            if (pi >= module.patterns.len) continue;
+            const p = module.patterns[pi];
+            if (p.cells.len < @as(usize, p.rows) * itf.model.channels) continue;
+            var cleared: usize = 0;
+            var row: usize = 0;
+            while (row < p.rows) : (row += 1) {
+                const cell = &p.cells[row * itf.model.channels + s.channel];
+                if (cell.isEmpty()) continue;
+                cell.* = .empty;
+                cleared += 1;
+            }
+            if (cleared > 0) {
+                out.cells += cleared;
+                try touch(a, &touched, pi);
+            }
+        }
+    }
+
+    if (result.conductor) |c| {
+        if (c.hash_ok) for (module.patterns, 0..) |p, pi| {
+            if (p.cells.len < @as(usize, p.rows) * itf.model.channels) continue;
+            var cleared: usize = 0;
+            for (p.cells) |*cell| {
+                if (cell.fx != fx_t) continue;
+                cell.fx = 0;
+                cell.param = 0;
+                cleared += 1;
+            }
+            if (cleared > 0) {
+                out.conductor += cleared;
+                try touch(a, &touched, @intCast(pi));
+            }
+        };
+    }
+
+    out.patterns = touched.items;
+    return out;
+}
+
+/// `pi` into the ascending, deduplicated list.
+fn touch(a: Allocator, list: *std.ArrayList(u16), pi: u16) Error!void {
+    var i: usize = 0;
+    while (i < list.items.len and list.items[i] < pi) : (i += 1) {}
+    if (i < list.items.len and list.items[i] == pi) return;
+    try list.insert(a, i, pi);
 }
 
 /// The four hashes over one file, as it reads NOW.
@@ -2691,5 +2871,125 @@ test "reconcile: the binding keys it writes are the ones the printer writes back
         defer gpa.free(printed);
         // The printer's own spelling of the very same binding.
         try testing.expect(std.mem.indexOf(u8, printed, keys.items) != null);
+    }
+}
+
+test "reconcile: consumption takes the restored lanes' events and the conductor's out of the tier, and nothing else" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    // Every hash matches: the kick's four note events on channel 1, the
+    // cutoff's nine steps on channel 2, and the three conductor events
+    // tempura writes all go; the `cue-point` and both tracks stay.
+    {
+        var case = try smfCase(gpa, .{});
+        defer case.deinit();
+        var got = try reconcile(gpa, &schema, case.input(), case.found(), .{});
+        defer got.deinit();
+        const c = consumeSmf(&case.detached.sequence, &got);
+        try testing.expectEqual(@as(usize, 13), c.events);
+        try testing.expectEqual(@as(usize, 3), c.conductor);
+        try testing.expect(c.any());
+        const seq = &case.detached.sequence;
+        try testing.expectEqual(@as(usize, 2), seq.tracks.len);
+        try testing.expectEqual(@as(usize, 2), seq.tracks[0].events.len);
+        try testing.expectEqual(Sequence.Kind.cue_point, seq.tracks[0].events[0].kind);
+        try testing.expectEqual(Sequence.Kind.end_of_track, seq.tracks[0].events[1].kind);
+        try testing.expectEqual(@as(usize, 1), seq.tracks[1].events.len);
+        try testing.expectEqual(Sequence.Kind.end_of_track, seq.tracks[1].events[0].kind);
+    }
+
+    // The kick is stale and BOUND: its events are what the lane reads
+    // now, and stay; the cutoff's still go, and so does the conductor's.
+    {
+        var case = try smfCase(gpa, .{ .read_as = .{ .vel = 99 } });
+        defer case.deinit();
+        var got = try reconcile(gpa, &schema, case.input(), case.found(), .{});
+        defer got.deinit();
+        const c = consumeSmf(&case.detached.sequence, &got);
+        try testing.expectEqual(@as(usize, 9), c.events);
+        try testing.expectEqual(@as(usize, 3), c.conductor);
+        // Four note events and the end of track.
+        try testing.expectEqual(@as(usize, 5), case.detached.sequence.tracks[1].events.len);
+    }
+
+    // The file conducts (a tempo edit): the document's points were
+    // dropped, and the file's own conductor events are what it reads.
+    {
+        var case = try smfCase(gpa, .{ .read_as = .{ .tempo = 400_000 } });
+        defer case.deinit();
+        var got = try reconcile(gpa, &schema, case.input(), case.found(), .{});
+        defer got.deinit();
+        try testing.expect(got.conductor.?.file_conducts);
+        const c = consumeSmf(&case.detached.sequence, &got);
+        try testing.expectEqual(@as(usize, 0), c.conductor);
+        try testing.expectEqual(@as(usize, 13), c.events);
+    }
+
+    // Rule 1 restores nothing, so it consumes nothing.
+    {
+        var case = try smfCase(gpa, .{ .essence = false, .conductor = false, .lanes = false });
+        defer case.deinit();
+        var got = try reconcile(gpa, &schema, case.input(), case.found(), .{});
+        defer got.deinit();
+        try testing.expectEqual(Rule.derived, got.rule);
+        const c = consumeSmf(&case.detached.sequence, &got);
+        try testing.expect(!c.any());
+    }
+}
+
+test "reconcile: consumption clears a restored lane's cells in the played patterns and the conductor's Txx" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var case = try itCase(gpa, &schema, .{});
+    defer case.deinit();
+    var got = try reconcile(gpa, &schema, case.input(), case.found(), .{});
+    defer got.deinit();
+    try testing.expectEqual(Rule.restored, got.rule);
+    try testing.expect(got.played.len > 0);
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const module = &case.file.module;
+    var before: usize = 0;
+    for (module.patterns) |p| {
+        for (p.cells) |cell| {
+            if (!cell.isEmpty()) before += 1;
+        }
+    }
+    const c = try consumeIt(arena.allocator(), module, &got);
+    try testing.expect(c.cells > 0);
+    var after: usize = 0;
+    for (module.patterns) |p| {
+        for (p.cells) |cell| {
+            if (!cell.isEmpty()) after += 1;
+        }
+    }
+    // A lane's cell goes whole; a `Txx` clear empties a cell only when
+    // the effect was all it held.
+    try testing.expect(before - after >= c.cells);
+    try testing.expect(before - after <= c.cells + c.conductor);
+    // Every restored lane's channel is empty in every played pattern…
+    for (got.verdicts) |v| {
+        if (v.action != .restored_native) continue;
+        for (got.played) |pi| {
+            const p = module.patterns[pi];
+            var row: usize = 0;
+            while (row < p.rows) : (row += 1) {
+                try testing.expect(p.at(row, v.address.it.channel).isEmpty());
+            }
+        }
+    }
+    // …no `Txx` is left anywhere, and the touched patterns are listed
+    // ascending for the bin-mode printer.
+    for (module.patterns) |p| {
+        for (p.cells) |cell| try testing.expect(cell.fx != fx_t);
+    }
+    var last: i32 = -1;
+    for (c.patterns) |pi| {
+        try testing.expect(@as(i32, pi) > last);
+        last = pi;
     }
 }

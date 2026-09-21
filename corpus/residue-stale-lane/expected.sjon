@@ -8,7 +8,8 @@
   (lane :name kick :kind notes :onsets 2 :first 0 :last 92252160)
   (diag :code 56 :severity warning :start 0 :end 0 :message "lane kick at track 2 ch 1: the file's events are not the ones this residue recorded, so the file wins and the lane is bound there; dropped 2 notes"))
 (reconciled :rule restored :conductor-hash-ok true :file-conducts false
-  (verdict :lane kick :hash-ok false :action became_bound))
+  (verdict :lane kick :hash-ok false :action became_bound)
+  (consumed :events 0 :cells 0 :conductor 2))
 (dump :bytes 297 :sha256 "4a28c04a1c45cb13a65c09e8e1f2240bce30a5a12d54b416cba115db61d4267e")
 ;| (timeline :title "residue" :length 1bar)
 ;|

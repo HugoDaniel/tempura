@@ -204,6 +204,25 @@ pub fn packFor(
     return .{ .bytes = try gpa.dupe(u8, bytes.data), .diags = diags };
 }
 
+/// The Binary IR wire version of a body this substrate does not decode,
+/// read from the header alone — or null when the body is one it does
+/// decode, or is too short to say (which `unpack` reports as corrupt).
+///
+/// A dump asks this BEFORE anything is decoded, because the answer
+/// decides what happens to the payload rather than to the document: a
+/// body of another version stays in the file, unparsed (plan 04, rule 3),
+/// which for a `.mid` means the carrier events stay in the tier and for
+/// a build means no residue of its own is written over it. The
+/// comparison is the decoder's own — it "accepts exactly `wire_version`"
+/// (`SJON/src/BinaryFormat.zig`) — so an older body is "newer" here too:
+/// a version this tree cannot read is a version this tree must not
+/// re-print.
+pub fn newerWire(bytes: []const u8) ?u8 {
+    if (bytes.len < 5) return null;
+    if (!std.mem.eql(u8, bytes[0..4], "SJ1\n")) return null;
+    return if (bytes[4] != sjon.Binary.wire_version) bytes[4] else null;
+}
+
 /// A body back into SJON text.
 ///
 /// Total on arbitrary bytes: every malformed input is `.corrupt`, every
@@ -593,4 +612,28 @@ test "essence: a tier past SJON's limits is residue_unencodable, never a silent 
     try testing.expectEqual(@as(usize, 0), packed_essence.bytes.len);
     try testing.expectEqual(@as(usize, 1), packed_essence.diags.count(.residue_unencodable));
     try testing.expect(packed_essence.diags.hasErrors());
+}
+
+test "essence: newerWire reads the header alone and agrees with unpack" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const source = try readExample(gpa);
+    defer gpa.free(source);
+    var loaded = try fromSjon.fromSource(gpa, &schema, source, null);
+    defer loaded.deinit();
+    var packed_tier = try pack(gpa, &loaded.doc, source);
+    defer packed_tier.deinit(gpa);
+
+    try testing.expectEqual(@as(?u8, null), newerWire(packed_tier.bytes));
+    try testing.expectEqual(@as(?u8, null), newerWire("SJ1"));
+    try testing.expectEqual(@as(?u8, null), newerWire("not a body at all"));
+
+    const bumped = try gpa.dupe(u8, packed_tier.bytes);
+    defer gpa.free(bumped);
+    bumped[4] = 0xFE;
+    try testing.expectEqual(@as(?u8, 0xFE), newerWire(bumped));
+    var got = try unpack(gpa, bumped);
+    defer got.deinit(gpa);
+    try testing.expectEqual(@as(u8, 0xFE), got.version);
 }

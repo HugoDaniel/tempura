@@ -450,12 +450,34 @@ What a reader does after the format core has read the file and built the `midi/`
      with `residue_stale`, which names the lane, the address and what it cost
      (values beyond 7 bits, clip structure, transposition).
 
+   **Consumed means taken out.** What a match consumes leaves the dumped document's
+   file tier: a restored lane's channel events on its track (a `.mid`) or its
+   channel's cells in the played patterns (a `.it`) — the hash's own scope — and,
+   when the document conducts, the `set-tempo`, `time-signature` and `marker`
+   events (a `.mid`) or the `Txx` cells (a `.it`) a build wrote for it. A track
+   that loses its events keeps its `sequence-name`, so no `:track` a stale lane
+   names moves, and a rebuild renders the lane back onto that empty named track;
+   a module's lane returns to the channel it emptied. The dumped document then
+   holds each thing once — the file's own content in the tier, the native lanes in
+   the timeline, nothing in both — and `build → dump → build` is a fixed point: the
+   second file is the first, byte for byte. A `--patterns=bin` dump spells out any
+   pattern a cell was taken from, because a `(bin :at :len)` region of the file
+   cannot lose a cell. (Until 2026-09-21 the events stayed in the tier and every
+   rebuild rendered them again beside their previous rendering.)
+
 3. **A version newer than the reader.** The payloads stay where they are, unparsed:
    plain `sequencer-specific` events in a `.mid`, the opaque `TMPU` region in a
    `.it`. The skeleton is derived with `residue_version`, and a later build keeps
    them and writes no residue of its own unless forced (`residue_newer_kept`) — so
    an older tempura never shadows a newer one's essence with a stale copy. Both the
-   envelope's `ver` and the essence's own Binary IR wire version take this branch.
+   envelope's `ver` and the essence's own Binary IR wire version take this branch,
+   and "where they are" is literal for both: in a `.mid` the carrier events are
+   printed into the `midi/` tier as plain `sequencer-specific` hex — the wire
+   version is read off the essence's header before the tier is printed, so the
+   detach that a readable residue gets is skipped — and a build reads them back
+   out of that tier; in a `.it` the chunk stays under its 4CC and the writer
+   re-emits it. `check-residue` names which of the two versions it is leaving
+   alone. With a tail beside it, a chunk of either unknown version is rule 5's.
 
 4. **Corrupt or truncated.** Bad Binary IR, a split body with a part missing, a hash
    field of the wrong length, a chunk whose framing does not hold: the skeleton is

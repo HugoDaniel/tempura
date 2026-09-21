@@ -309,3 +309,34 @@ truncated. The code's `it.choose` also prefers a readable message tail over a
 `TMPU` chunk written by a NEWER envelope version, which rule 5 does not name.
 `corpus/residue-newer-version/` pins the behaviour. Either the rule gains that
 case or `choose` loses it; recorded here rather than decided.
+
+**Decided the same day, by `docs/residue.md`'s wording** ("absent, corrupt, empty
+or of a version the reader does not know"): the rule gains the case, and the
+essence's own Binary IR wire version is one more version the reader does not know.
+`choose` now peeks that header (`essence.newerWire`) and treats an undecodable
+essence exactly as a newer envelope — the tail is read, the chunk stays in the
+file, `residue_version` says so.
+
+### 2026-09-21 — "consumed" made literal; the wire-version seam (the final review's D1 and D4)
+
+Two defects the final review reproduced, both in this plan's rule 2 and rule 3.
+
+- **Rule 2's "consumed" was a verdict and not an edit.** A restored lane's rendered
+  events stayed in the dumped `midi/` or `it/` tier, and `build` of the dump
+  rendered the lane again INTO that tier: every note twice, and once more per
+  rebuild; the same for the conductor's own events. `reconcile.consumeSmf` and
+  `consumeIt` now take the view out of the tier value before it is printed — the
+  hash's own scope for a lane, and what `render_smf`'s conductor track and
+  `render_it`'s conductor cells write for the conductor — with the tracks kept so
+  no `:track` moves, and `render_smf` renders a lane back onto the empty track of
+  its own name. `build → dump → build` is a fixed point, byte for byte, in both
+  kinds; `docs/residue.md` states the rule. The corpus verdict table carries a
+  `(consumed …)` line whenever anything went.
+- **A newer WIRE version was detached before it was recognised.** `dumpSmf` took
+  every payload of its own envelope version out of the tier and only then let
+  `reconcile` discover that the essence would not decode; the document said "left
+  in the file" over a tier that no longer held it, and a rebuild wrote its own
+  residue over the newer one with no `--force-residue`. The wire version is now
+  read off the essence's header (`essence.newerWire`) before the tier is printed,
+  `newerSmf` / `newerIt` answer envelope OR wire, `wantsResidue` refuses either,
+  and `check-residue` names which.

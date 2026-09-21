@@ -8,7 +8,8 @@
   (lane :name kick :kind notes :onsets 2 :first 0 :last 92252160)
   (diag :code 56 :severity warning :start 0 :end 0 :message "the file's tempo, meter or markers were edited after this residue was written, so the file conducts: dropped tempo-point :qpm 120, meter-point :sig [4 4]"))
 (reconciled :rule restored :conductor-hash-ok false :file-conducts true
-  (verdict :lane kick :hash-ok true :action restored_native))
+  (verdict :lane kick :hash-ok true :action restored_native)
+  (consumed :events 4 :cells 0 :conductor 0))
 (dump :bytes 294 :sha256 "865475fdb6ba2389e624fbc93958f39ae3c6d16961fa6e8eee9c2eb8c0ca33fc")
 ;| (timeline :title "residue" :length 1bar :conductor song)
 ;|

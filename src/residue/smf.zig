@@ -187,7 +187,18 @@ pub fn attach(
         }
 
         if (ti < seq.tracks.len) {
-            for (seq.tracks[ti].events) |e| try copyEvent(&b, seq, e, track);
+            for (seq.tracks[ti].events) |e| {
+                // A payload of this build's OWN envelope version already
+                // in the sequence is the residue this one replaces — a
+                // `--force-residue` over an essence of a wire version
+                // this substrate does not decode, or a build of a tier
+                // that was inlined with its carrier events still in it.
+                // Two essences under one version would only ever read
+                // back as a torn one (`reassemble`). Any other version's
+                // payloads are a newer tempura's and stay (rule 3).
+                if (e.kind == .tempura_residue and e.payload.residue.ver == records.version) continue;
+                try copyEvent(&b, seq, e, track);
+            }
         }
     }
 
@@ -701,4 +712,62 @@ test "smf: pack → attach → write → read → detach, the whole carrier roun
     // is where that is pinned.
     try testing.expect(sameEvents(&seq, &back.sequence));
     try testing.expectEqual(@as(usize, 0), back.sequence.foreign.len);
+}
+
+test "smf: attach replaces the payloads of its own version and keeps a newer envelope's" {
+    // The final review's D4, second half: a `--force-residue` over an
+    // essence this substrate does not decode is a REPLACEMENT, and a
+    // sequence that still carries its own version's events — because the
+    // dump left them in the tier — must not come out with two essences.
+    const gpa = testing.allocator;
+    var seq = try fixture(gpa);
+    defer seq.deinit();
+
+    var first = try attach(gpa, &seq, .{ .essence = "OLD ESSENCE" }, .{});
+    defer first.deinit();
+    // A newer tempura's payload beside it, which rule 3 keeps.
+    var b: Sequence.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.format = first.sequence.format;
+    b.division = first.sequence.division;
+    for (first.sequence.tracks, 0..) |t, ti| {
+        const track = try b.addTrack();
+        if (ti == 0) try b.addEvent(track, 0, .tempura_residue, .{ .residue = .{
+            .ver = records.version + 1,
+            .kind = @intFromEnum(records.Kind.essence),
+            .seq = 0,
+            .total = 1,
+            .body = try b.addBytes("NEWER"),
+        } });
+        for (t.events) |e| try copyEvent(&b, &first.sequence, e, track);
+    }
+    var carrying = try b.finish();
+    defer carrying.deinit();
+
+    var second = try attach(gpa, &carrying, .{ .essence = "NEW ESSENCE" }, .{});
+    defer second.deinit();
+
+    var own: usize = 0;
+    var newer: usize = 0;
+    for (second.sequence.tracks) |t| {
+        for (t.events) |e| {
+            if (e.kind != .tempura_residue) continue;
+            const r = e.payload.residue;
+            if (r.ver == records.version) {
+                own += 1;
+                try testing.expectEqualStrings("NEW ESSENCE", second.sequence.bytesOf(r.body));
+            } else {
+                newer += 1;
+                try testing.expectEqualStrings("NEWER", second.sequence.bytesOf(r.body));
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), own);
+    try testing.expectEqual(@as(usize, 1), newer);
+
+    // And a detach of the result reads one essence, whole.
+    var back = try detach(gpa, &second.sequence);
+    defer back.deinit();
+    try testing.expectEqualStrings("NEW ESSENCE", back.payloads.essence.?);
+    try testing.expectEqual(@as(usize, 0), back.diags.count(.residue_corrupt));
 }

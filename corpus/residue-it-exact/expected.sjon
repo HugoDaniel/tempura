@@ -7,7 +7,8 @@
   (length :tick 184504320 :end hold :loop-secs "4000000000000000")
   (lane :name kick :kind notes :onsets 2 :first 0 :last 92252160))
 (reconciled :rule restored :conductor-hash-ok true :file-conducts false
-  (verdict :lane kick :hash-ok true :action restored_native))
+  (verdict :lane kick :hash-ok true :action restored_native)
+  (consumed :events 0 :cells 4 :conductor 0))
 (read
   (it :title "residue" :speed 6 :tempo 120 :orders 2 :patterns 1 :instruments 0 :samples 0 :message-len 82 :tmpu true))
 (dump :bytes 343 :sha256 "ff1d73e3a91c93b63a336eebc27437a2545f0138cbffa8919c57bd408808cf49")

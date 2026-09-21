@@ -1618,6 +1618,15 @@ fn renderReconciled(w: *Io.Writer, loaded: *const Loaded) Error!bool {
         try p(w, "\n  (verdict :lane {s} :hash-ok {} :action {t})", .{ v.lane, v.hash_ok, v.action });
         for (v.hints) |h| try p(w, "\n    (hint :from {d} :to {d} :ease {s})", .{ h.from, h.to, h.ease });
     }
+    // Rule 2's consumption, when it took anything: the restored lanes'
+    // view and the conductor's, out of the file tier (plan 04, "One
+    // home"). Pinned here because the fact it makes true — a rebuild of
+    // the dump renders each lane once — is a property of the DUMP.
+    if (d.consumed.any()) try p(w, "\n  (consumed :events {d} :cells {d} :conductor {d})", .{
+        d.consumed.events,
+        d.consumed.cells,
+        d.consumed.conductor,
+    });
     try pw(w, ")\n");
     return true;
 }
@@ -2155,9 +2164,9 @@ test "corpus harness: the embedded manifest preloads clean and declares every di
     try t_.expectEqual(@as(usize, 1), hs.preloaded.plugins.len);
     try t_.expectEqualStrings("tempura-corpus", hs.preloaded.plugins[0].name);
     for ([_][]const u8{
-        "read", "roundtrip", "walk",  "write", "at",
-        "snap", "plan",      "build", "export-score",
-        "dump", "times",
+        "read",  "roundtrip", "walk",  "write",        "at",
+        "snap",  "plan",      "build", "export-score", "dump",
+        "times",
     }) |head| {
         try t_.expect(hs.preloaded.schema.lookupForm(head, null) == .found);
     }
@@ -3074,4 +3083,3 @@ test "corpus render: a byte directive on a document case names what it needed" {
         try t_.expect(std.mem.indexOf(u8, said, "needs a song.mid or song.it fixture") != null);
     }
 }
-

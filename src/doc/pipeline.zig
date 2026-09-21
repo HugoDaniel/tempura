@@ -12,9 +12,26 @@
 //!   → residue.smf.detach / residue.it.choose         what the carrier held
 //!   → bridge_smf.sequenceToForms / bridge_it.moduleToForms   the file tier
 //!   → reconcile.reconcile                           the timeline tier
+//!   → reconcile.consumeSmf / consumeIt              the restored lanes' view
+//!       (and the tier printed again without it)      out of the file tier
 //!   → splice the two                                one document source
 //!   → doc.fromSource                                every host check runs
 //! ```
+//!
+//! # One home, literally
+//!
+//! Rule 2's "consumed" is enforced HERE, on the tier value, between the
+//! reconciliation and the print: a lane the essence restored native has
+//! its rendered events taken out of the `midi/` or `it/` tier, and a
+//! document that conducts has the file's tempo, meter and marker events
+//! taken out with them (`residue/reconcile.zig`, "The consumption").
+//! The dumped document then holds each thing once, and `build` renders
+//! every native lane into a tier that no longer carries its previous
+//! rendering — which is what makes `build → dump → build` a fixed point
+//! rather than a file that gains a copy of every note per rebuild. The
+//! tier is printed twice when something was consumed (the reconciliation
+//! needs the full tier for the skeleton rules, which consume nothing),
+//! and `Dumped.consumed` says what went.
 //!
 //! # Why it lives in `doc/`
 //!
@@ -135,6 +152,9 @@ pub const Dumped = struct {
     conductor: ?reconcile.ConductorVerdict,
     /// Which of plan 04's five rules produced the timeline tier.
     rule: reconcile.Rule,
+    /// What rule 2 took out of the file tier (nothing under any other
+    /// rule).
+    consumed: reconcile.Consumed,
 
     gpa: Allocator,
     /// `reconcile`'s arena — it owns `verdicts` and every string in
@@ -207,7 +227,20 @@ fn dumpSmf(
     defer detached.deinit();
     try copyDiags(diags, &detached.diags);
 
-    const tier = try bridge_smf.sequenceToForms(gpa, &detached.sequence, null, .{
+    // Rule 3's "the payloads stay where they are" is literal in a
+    // `.mid`: they stay in the TIER, as the plain `sequencer-specific`
+    // events RP-001 tells every reader to skip. `detach` leaves a newer
+    // ENVELOPE's events in place by itself; a newer WIRE version is only
+    // known once the essence has been reassembled, which is why the
+    // tier is then printed from the sequence as it was read, with every
+    // carrier event still in it — the essence `reconcile` will refuse to
+    // decode is exactly what a later build has to carry through.
+    const tier_seq: *smf.Sequence = if (newer != null and newer.? == .wire)
+        &read.sequence
+    else
+        &detached.sequence;
+
+    var tier = try bridge_smf.sequenceToForms(gpa, tier_seq, null, .{
         .qualify = opts.qualify,
     });
     defer gpa.free(tier);
@@ -216,20 +249,36 @@ fn dumpSmf(
     // split essence with a part missing comes back as no essence at all,
     // and handing that on as `.payloads` would head the document "no
     // residue found" while `detach` has already said `residue_corrupt`.
-    // The carrier names the loss; this only routes it.
-    const found: reconcile.Found = if (newer) |v|
-        .{ .newer = v }
+    // The carrier names the loss; this only routes it. A newer wire
+    // version rides through as `.payloads`: `reconcile` is the one that
+    // asks the decoder, and it names the version when the decoder
+    // refuses.
+    const found: reconcile.Found = if (newer != null and newer.? == .envelope)
+        .{ .newer = newer.?.version() }
     else if (detached.diags.count(.residue_corrupt) > 0)
         .corrupt
     else
         .{ .payloads = detached.payloads };
 
-    return assemble(gpa, schema, bytes, name, opts, diags, .{
-        .tier = .{ .smf = &detached.sequence },
+    var rec = try reconcile.reconcile(gpa, schema, .{
+        .tier = .{ .smf = tier_seq },
         .text = tier,
         .bytes = bytes,
         .name = name,
-    }, found);
+    }, found, .{ .cues = opts.cues, .anchor_id = opts.anchor_id });
+    errdefer rec.deinit();
+
+    // The restored lanes' view, out of the tier — and the tier printed
+    // again without it (the header, "One home, literally").
+    const consumed = reconcile.consumeSmf(tier_seq, &rec);
+    if (consumed.any()) {
+        gpa.free(tier);
+        tier = try bridge_smf.sequenceToForms(gpa, tier_seq, null, .{
+            .qualify = opts.qualify,
+        });
+    }
+
+    return assemble(gpa, schema, bytes, name, diags, &rec, tier, consumed);
 }
 
 fn dumpIt(
@@ -265,7 +314,7 @@ fn dumpIt(
     };
     defer if (tail_src) |t| gpa.free(t);
 
-    const tier = try bridge_it.moduleToForms(gpa, &read.module, .{
+    var tier = try bridge_it.moduleToForms(gpa, &read.module, .{
         .qualify = opts.qualify,
         .patterns_bin = opts.patterns_bin,
         .preserve_foreign = opts.preserve_foreign,
@@ -291,46 +340,64 @@ fn dumpIt(
         // the file carried a residue, and saying "no residue found" over
         // a `residue_corrupt` would be two surfaces disagreeing.
         .none => if (newer) |v|
-            .{ .newer = v }
+            .{ .newer = v.version() }
         else if (carrier.count(.residue_corrupt) > 0)
             .corrupt
         else
             .none,
     };
 
-    return assemble(gpa, schema, bytes, name, opts, diags, .{
+    var rec = try reconcile.reconcile(gpa, schema, .{
         .tier = .{ .it = &read.module },
         .text = tier,
         .bytes = bytes,
         .name = name,
-    }, found);
+    }, found, .{ .cues = opts.cues, .anchor_id = opts.anchor_id });
+    errdefer rec.deinit();
+
+    // The restored lanes' cells and the conductor's `Txx`, out of the
+    // module — and the tier printed again without them. A pattern that
+    // lost a cell is printed as rows even under `--patterns=bin`, since
+    // the file's own bytes no longer describe it. The printer's own
+    // diagnostics were collected on the first print and are not asked
+    // for again: fewer cells cannot add one.
+    const consumed = try reconcile.consumeIt(rec.arena.allocator(), &read.module, &rec);
+    if (consumed.any()) {
+        gpa.free(tier);
+        tier = try bridge_it.moduleToForms(gpa, &read.module, .{
+            .qualify = opts.qualify,
+            .patterns_bin = opts.patterns_bin,
+            .preserve_foreign = opts.preserve_foreign,
+            .preserve_history = opts.preserve_history,
+            .source_map = &read.source_map,
+            .rows_for = consumed.patterns,
+        });
+    }
+
+    return assemble(gpa, schema, bytes, name, diags, &rec, tier, consumed);
 }
 
-/// Reconcile, splice, load — the half both kinds share.
+/// Splice and load — the half both kinds share once the tier is final.
+///
+/// `rec` is TAKEN: its arena is handed on to the `Dumped` and its
+/// diagnostics are merged, so the caller's `errdefer rec.deinit()` is the
+/// only release it gets.
 fn assemble(
     gpa: Allocator,
     schema: *const Schema,
     bytes: []const u8,
     name: []const u8,
-    opts: Options,
     diags: *Diag.List,
-    file: reconcile.File,
-    found: reconcile.Found,
+    rec: *reconcile.Result,
+    tier_text: []const u8,
+    consumed: reconcile.Consumed,
 ) Error!Dumped {
-    var rec = try reconcile.reconcile(gpa, schema, file, found, .{
-        .cues = opts.cues,
-        .anchor_id = opts.anchor_id,
-    });
-    // The arena is handed on and the diagnostics are merged, so neither
-    // is released by `rec.deinit()` — which is why this is not a
-    // `defer`.
-    errdefer rec.deinit();
     try copyDiags(diags, &rec.diags);
 
     const at = @min(rec.tier_at, rec.doc_text.len);
     const text = try std.mem.concatWithSentinel(gpa, u8, &.{
         rec.doc_text[0..at],
-        file.text,
+        tier_text,
         rec.doc_text[at..],
     }, 0);
     errdefer gpa.free(text);
@@ -353,6 +420,7 @@ fn assemble(
         .verdicts = rec.verdicts,
         .conductor = rec.conductor,
         .rule = rec.rule,
+        .consumed = consumed,
         .gpa = gpa,
         .arena = rec.arena,
     };
@@ -363,13 +431,37 @@ fn copyDiags(into: *Diag.List, from: *const Diag.List) Error!void {
     for (from.items()) |d| try into.add(d.code, d.severity, d.span, "{s}", .{d.message});
 }
 
-/// The envelope version of the first residue payload this build does not
-/// read, or null when every payload is its own.
-fn newerSmf(seq: *const smf.Sequence) ?u8 {
+/// A residue this build must leave where it is (plan 04, rule 3): one
+/// whose ENVELOPE version it does not read, or one whose essence is
+/// Binary IR of a WIRE version it does not decode. The two are found at
+/// different depths — the envelope is the carrier's eight bytes, the wire
+/// version is the fifth byte of the essence body — and answered by the
+/// same word, because a build treats them the same way: it writes no
+/// residue of its own over either, and a dump leaves the payloads in
+/// the tier.
+const Newer = union(enum) {
+    envelope: u8,
+    wire: u8,
+
+    fn version(self: Newer) u8 {
+        return switch (self) {
+            .envelope, .wire => |v| v,
+        };
+    }
+};
+
+/// What a sequence carries that this build must not re-print, or null
+/// when every payload is its own. The essence's header rides in the
+/// part numbered 0, which is where the wire version is read.
+fn newerSmf(seq: *const smf.Sequence) ?Newer {
     for (seq.tracks) |t| {
         for (t.events) |e| {
             if (e.kind != .tempura_residue) continue;
-            if (e.payload.residue.ver != records.version) return e.payload.residue.ver;
+            const r = e.payload.residue;
+            if (r.ver != records.version) return .{ .envelope = r.ver };
+            if (r.kind == @intFromEnum(records.Kind.essence) and r.seq == 0) {
+                if (residue_essence.newerWire(seq.bytesOf(r.body))) |v| return .{ .wire = v };
+            }
         }
     }
     return null;
@@ -399,13 +491,31 @@ fn anchorTmpu(gpa: Allocator, bytes: ?[]const u8) Error!?[]const u8 {
     return region.slice(source);
 }
 
-/// The same question of a `TMPU` chunk, asked of its first record's
-/// head alone: a chunk this build cannot read is one it will not step
-/// through.
-fn newerIt(chunk_bytes: ?[]const u8) ?u8 {
+/// The same question of a `TMPU` chunk, walked record by record the way
+/// `residue/it.zig`'s `parseChunk` walks it — by each record's own
+/// length — and answered by the first record that is not this build's:
+/// an envelope of another version, or the essence's part 0 whose body
+/// is Binary IR of another wire version. A chunk whose framing does not
+/// hold is nobody's newer residue and answers null; `parseChunk` is
+/// where that becomes `residue_corrupt`.
+fn newerIt(chunk_bytes: ?[]const u8) ?Newer {
     const bytes = chunk_bytes orelse return null;
-    const head = records.readHead(bytes) orelse return null;
-    return if (head.ver != records.version) head.ver else null;
+    var at: usize = 0;
+    while (at < bytes.len) {
+        const head = records.readHead(bytes[at..]) orelse return null;
+        at += records.head_len;
+        if (bytes.len - at < 4) return null;
+        const len = std.mem.readInt(u32, bytes[at..][0..4], .little);
+        at += 4;
+        if (bytes.len - at < len) return null;
+        const body = bytes[at..][0..len];
+        at += len;
+        if (head.ver != records.version) return .{ .envelope = head.ver };
+        if (head.kind == @intFromEnum(records.Kind.essence) and head.seq == 0) {
+            if (residue_essence.newerWire(body)) |v| return .{ .wire = v };
+        }
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------
@@ -444,8 +554,8 @@ pub fn checkResidue(gpa: Allocator, bytes: []const u8, kind: Doc.AnchorKind) Err
             defer read.deinit();
             try copyDiags(&diags, &read.diags);
 
-            if (newerSmf(&read.sequence)) |v| {
-                try out.print(gpa, "residue: envelope version {d}, which this build does not read\n", .{v});
+            if (newerSmf(&read.sequence)) |n| {
+                try newerLine(gpa, &out, n);
                 return .{ .text = try out.toOwnedSlice(gpa), .diags = diags, .gpa = gpa };
             }
 
@@ -461,8 +571,8 @@ pub fn checkResidue(gpa: Allocator, bytes: []const u8, kind: Doc.AnchorKind) Err
             try copyDiags(&diags, &read.diags);
 
             const chunk_bytes = if (read.module.tmpu) |r| r.slice(bytes) else null;
-            if (newerIt(chunk_bytes)) |v| {
-                try out.print(gpa, "residue: envelope version {d}, which this build does not read\n", .{v});
+            if (newerIt(chunk_bytes)) |n| {
+                try newerLine(gpa, &out, n);
                 return .{ .text = try out.toOwnedSlice(gpa), .diags = diags, .gpa = gpa };
             }
 
@@ -492,6 +602,14 @@ pub fn checkResidue(gpa: Allocator, bytes: []const u8, kind: Doc.AnchorKind) Err
     }
 
     return .{ .text = try out.toOwnedSlice(gpa), .diags = diags, .gpa = gpa };
+}
+
+/// `check-residue`'s one line for a residue this build leaves alone.
+fn newerLine(gpa: Allocator, out: *std.ArrayList(u8), n: Newer) Error!void {
+    switch (n) {
+        .envelope => |v| try out.print(gpa, "residue: envelope version {d}, which this build does not read\n", .{v}),
+        .wire => |v| try out.print(gpa, "residue: essence of Binary IR wire version {d}, which this substrate does not decode\n", .{v}),
+    }
 }
 
 /// The essence line, the conductor line and one line per lane record.
@@ -737,17 +855,26 @@ fn refuseCrossKind(diags: *Diag.List, doc: *const Doc.Doc, kind: Doc.AnchorKind)
 /// Whether this build writes a residue of its own. A newer tempura's
 /// payloads are kept where they are unless the caller insists (plan 04,
 /// rule 3).
-fn wantsResidue(diags: *Diag.List, opts: BuildOptions, newer: ?u8) Error!bool {
+fn wantsResidue(diags: *Diag.List, opts: BuildOptions, newer: ?Newer) Error!bool {
     if (opts.no_residue) return false;
-    const v = newer orelse return true;
+    const n = newer orelse return true;
     if (opts.force_residue) return true;
-    try diags.add(
-        .residue_newer_kept,
-        .warning,
-        .{ .start = 0, .end = 0 },
-        "this anchor carries a residue of envelope version {d}, which this build does not read; it was kept and no residue of this build's own was written (--force-residue overrides)",
-        .{v},
-    );
+    switch (n) {
+        .envelope => |v| try diags.add(
+            .residue_newer_kept,
+            .warning,
+            .{ .start = 0, .end = 0 },
+            "this anchor carries a residue of envelope version {d}, which this build does not read; it was kept and no residue of this build's own was written (--force-residue overrides)",
+            .{v},
+        ),
+        .wire => |v| try diags.add(
+            .residue_newer_kept,
+            .warning,
+            .{ .start = 0, .end = 0 },
+            "this anchor carries an essence of SJON Binary IR wire version {d}, which this substrate does not decode; it was kept and no residue of this build's own was written (--force-residue overrides)",
+            .{v},
+        ),
+    }
     return false;
 }
 
@@ -1092,6 +1219,13 @@ fn smfSequence(gpa: Allocator, vel: u7) !smf.Sequence {
 /// re-stamps the envelope, which is the only way to make a file a newer
 /// tempura's without a newer tempura.
 fn smfBytes(gpa: Allocator, ver: u8, residue: bool) ![]u8 {
+    return smfBytesWith(gpa, ver, residue, false);
+}
+
+/// The same, with the ESSENCE's Binary IR header re-stamped instead —
+/// what a newer SJON substrate's residue looks like under this build's
+/// own envelope.
+fn smfBytesWith(gpa: Allocator, ver: u8, residue: bool, bump_wire: bool) ![]u8 {
     var seq = try smfSequence(gpa, 100);
     defer seq.deinit();
 
@@ -1111,6 +1245,7 @@ fn smfBytes(gpa: Allocator, ver: u8, residue: bool) ![]u8 {
 
     var packed_tier = try residue_essence.packFor(gpa, smf_doc, "song");
     defer packed_tier.deinit(gpa);
+    if (bump_wire) packed_tier.bytes[4] = 0xFE;
 
     var carried = try residue_smf.attach(gpa, &seq, .{
         .essence = packed_tier.bytes,
@@ -1676,6 +1811,9 @@ fn dropOneEssencePart(seq: *smf.Sequence) void {
 const ItCarrier = struct {
     /// The envelope version stamped on every record in the chunk.
     ver: u8 = records.version,
+    /// Re-stamp the essence's own Binary IR header instead — a newer
+    /// SJON substrate's body under this build's envelope.
+    bump_wire: bool = false,
     /// Break the first record's length field, so the framing does not
     /// hold and `parseChunk` refuses the chunk whole.
     corrupt: bool = false,
@@ -1689,6 +1827,7 @@ fn itCarrierBytes(gpa: Allocator, schema: *const Schema, carry: ItCarrier) ![]u8
 
     var packed_tier = try residue_essence.packFor(gpa, it_doc, "song");
     defer packed_tier.deinit(gpa);
+    if (carry.bump_wire) packed_tier.bytes[4] = 0xFE;
     const payload = try residue_it.chunk(gpa, .{ .essence = packed_tier.bytes });
     defer gpa.free(payload);
 
@@ -1824,4 +1963,330 @@ test "pipeline: an IT chunk of a newer envelope leaves it in the file and derive
     defer rep.deinit();
     try testing.expect(std.mem.indexOf(u8, rep.text, "envelope version 2") != null);
     try testing.expect(std.mem.indexOf(u8, rep.text, "does not read") != null);
+}
+
+// ---- rule 2's consumption, and the fixed point it makes true ----
+
+/// The `midi/…` or `it/…` half of a dumped text, from its first root on.
+/// The anchor line above it names the bytes dumped and moves with every
+/// rebuild; the tier is the claim.
+fn tierText(text: []const u8, kind: Doc.AnchorKind) []const u8 {
+    const head: []const u8 = switch (kind) {
+        .smf => "(midi/smf",
+        .it => "(it/module",
+    };
+    const at = std.mem.indexOf(u8, text, head) orelse return "";
+    return text[at..];
+}
+
+/// Everything before the `(anchor …)` line — the timeline tier as the
+/// essence gave it back.
+fn beforeAnchor(text: []const u8) []const u8 {
+    const at = std.mem.indexOf(u8, text, "(anchor ") orelse return text;
+    return text[0..at];
+}
+
+fn countIn(text: []const u8, needle: []const u8) usize {
+    return std.mem.count(u8, text, needle);
+}
+
+/// `text` with its `(it/message …)` line taken out. The message is the
+/// tail carrier, and the tail is the DOCUMENT's shape — which gains an
+/// anchor the moment the document has been dumped once — so it is the
+/// one line of an `it/` tier a rebuild is allowed to move.
+fn withoutMessage(a: Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "(it/message")) continue;
+        try out.appendSlice(a, line);
+        try out.append(a, '\n');
+    }
+    return out.toOwnedSlice(a);
+}
+
+/// How many `note-on`s of `key` a sequence holds, over every track.
+fn noteOns(seq: *const smf.Sequence, key: u8) usize {
+    var n: usize = 0;
+    for (seq.tracks) |t| {
+        for (t.events) |e| {
+            if (e.kind == .note_on and e.payload.note.key == key and e.payload.note.vel > 0) n += 1;
+        }
+    }
+    return n;
+}
+
+test "pipeline: rule 2 consumes the restored lanes' view and the conductor's out of the tier" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    // The `.mid`: the lane's note pair and the conductor's two events
+    // go; the track stays, so no `:track` in the document moves.
+    const mid = try smfBytes(gpa, records.version, true);
+    defer gpa.free(mid);
+    var d = try dump(gpa, &schema, mid, .smf, .{});
+    defer d.deinit();
+    try testing.expectEqual(reconcile.Rule.restored, d.rule);
+    try testing.expectEqual(@as(usize, 2), d.consumed.events);
+    try testing.expectEqual(@as(usize, 2), d.consumed.conductor);
+    try testing.expectEqual(@as(usize, 2), countIn(d.text, "(midi/mtrk"));
+    try testing.expectEqual(@as(usize, 0), countIn(d.text, "note-on"));
+    try testing.expectEqual(@as(usize, 0), countIn(d.text, "set-tempo"));
+    // …and the document still holds the note — once, natively.
+    try testing.expectEqual(@as(usize, 1), countIn(d.text, "(note :at 0bar :dur 1q :key 36)"));
+    try testing.expect(d.doc.lanes[0].binding == null);
+
+    // The `.it`: the lane's two cells go, and the module had no `Txx`.
+    const it = try itBytes(gpa, &schema, true);
+    defer gpa.free(it);
+    var e = try dump(gpa, &schema, it, .it, .{});
+    defer e.deinit();
+    try testing.expectEqual(reconcile.Rule.restored, e.rule);
+    try testing.expectEqual(@as(usize, 2), e.consumed.cells);
+    try testing.expectEqual(@as(usize, 0), e.consumed.conductor);
+    try testing.expectEqual(@as(usize, 0), countIn(e.text, "(ev "));
+
+    // A file with no residue is rule 1, and a skeleton READS the tier:
+    // nothing is taken.
+    const plain = try smfBytes(gpa, records.version, false);
+    defer gpa.free(plain);
+    var s = try dump(gpa, &schema, plain, .smf, .{});
+    defer s.deinit();
+    try testing.expect(!s.consumed.any());
+    try testing.expectEqual(@as(usize, 1), countIn(s.text, "note-on"));
+}
+
+test "pipeline.build: build → dump → build → dump is a fixed point for a .mid" {
+    // The final review's first defect: a rebuild of a dumped document
+    // rendered every native lane into a base that still held its
+    // previous rendering, so the file gained a copy of each note per
+    // round. The claim now: the second dump's tier is the first's, byte
+    // for byte, and every lane record names the same track.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var fx = try ready(gpa, &schema, native_doc);
+    defer fx.deinit();
+
+    var b1 = try build(gpa, &schema, native_doc, &fx.res.doc, &fx.derived, .smf, .{ .cc = 74 });
+    defer b1.deinit();
+    var d1 = try dump(gpa, &schema, b1.bytes, .smf, .{});
+    defer d1.deinit();
+    try testing.expect(!d1.diags.hasErrors());
+    try testing.expect(d1.consumed.any());
+
+    var derived1 = try time_derive.derive(gpa, &d1.doc);
+    defer derived1.deinit();
+    var b2 = try build(gpa, &schema, d1.text, &d1.doc, &derived1, .smf, .{ .cc = 74 });
+    defer b2.deinit();
+    try testing.expect(!b2.diags.hasErrors());
+    var d2 = try dump(gpa, &schema, b2.bytes, .smf, .{});
+    defer d2.deinit();
+    try testing.expect(!d2.diags.hasErrors());
+
+    try testing.expectEqualStrings(beforeAnchor(d1.text), beforeAnchor(d2.text));
+    try testing.expectEqualStrings(tierText(d1.text, .smf), tierText(d2.text, .smf));
+    try testing.expectEqual(b1.lanes.len, b2.lanes.len);
+    for (b1.lanes, b2.lanes) |x, y| {
+        try testing.expectEqualStrings(x.lane, y.lane);
+        try testing.expectEqual(x.address.smf.track, y.address.smf.track);
+        try testing.expectEqual(x.address.smf.ch, y.address.smf.ch);
+    }
+
+    // The music in the two files is the same music: one track per lane,
+    // each note once.
+    var r1 = try smf.read(gpa, b1.bytes);
+    defer r1.deinit();
+    var r2 = try smf.read(gpa, b2.bytes);
+    defer r2.deinit();
+    try testing.expectEqual(r1.sequence.tracks.len, r2.sequence.tracks.len);
+    try testing.expectEqual(@as(usize, 1), noteOns(&r2.sequence, 36));
+    try testing.expectEqual(@as(usize, 1), noteOns(&r2.sequence, 38));
+
+    try testing.expectEqual(reconcile.Rule.restored, d2.rule);
+    for (d2.verdicts) |v| try testing.expectEqual(reconcile.Action.restored_native, v.action);
+    var tier_free = d2.doc;
+    tier_free.anchors = &.{};
+    tier_free.midi = &.{};
+    tier_free.it = &.{};
+    try testing.expect(tier_free.eql(&fx.res.doc));
+}
+
+test "pipeline.build: the same round is a fixed point for a .it" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var fx = try ready(gpa, &schema, native_doc);
+    defer fx.deinit();
+
+    var b1 = try build(gpa, &schema, native_doc, &fx.res.doc, &fx.derived, .it, .{});
+    defer b1.deinit();
+    var d1 = try dump(gpa, &schema, b1.bytes, .it, .{});
+    defer d1.deinit();
+    try testing.expect(!d1.diags.hasErrors());
+    try testing.expect(d1.consumed.cells > 0);
+
+    var derived1 = try time_derive.derive(gpa, &d1.doc);
+    defer derived1.deinit();
+    var b2 = try build(gpa, &schema, d1.text, &d1.doc, &derived1, .it, .{});
+    defer b2.deinit();
+    try testing.expect(!b2.diags.hasErrors());
+    var d2 = try dump(gpa, &schema, b2.bytes, .it, .{});
+    defer d2.deinit();
+    try testing.expect(!d2.diags.hasErrors());
+
+    try testing.expectEqualStrings(beforeAnchor(d1.text), beforeAnchor(d2.text));
+    const t1 = try withoutMessage(gpa, tierText(d1.text, .it));
+    defer gpa.free(t1);
+    const t2 = try withoutMessage(gpa, tierText(d2.text, .it));
+    defer gpa.free(t2);
+    try testing.expectEqualStrings(t1, t2);
+    // The message's tail is the one thing that moved: the second
+    // document has an anchor, and the tail says so.
+    try testing.expectEqual(@as(usize, 0), countIn(tierText(d1.text, .it), "(anchor :id song :kind it :file"));
+    try testing.expectEqual(@as(usize, 1), countIn(tierText(d2.text, .it), "(anchor :id song :kind it :file"));
+    // The lanes land on the channels the dump emptied, not above them.
+    try testing.expectEqual(b1.lanes.len, b2.lanes.len);
+    for (b1.lanes, b2.lanes) |x, y| {
+        try testing.expectEqualStrings(x.lane, y.lane);
+        try testing.expectEqual(x.address.it.channel, y.address.it.channel);
+    }
+    try testing.expectEqual(reconcile.Rule.restored, d2.rule);
+    for (d2.verdicts) |v| try testing.expectEqual(reconcile.Action.restored_native, v.action);
+}
+
+test "pipeline.build: a note edited after restoration renders once, onto the track the dump left" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var fx = try ready(gpa, &schema, native_doc);
+    defer fx.deinit();
+
+    var b1 = try build(gpa, &schema, native_doc, &fx.res.doc, &fx.derived, .smf, .{ .cc = 74 });
+    defer b1.deinit();
+    var d1 = try dump(gpa, &schema, b1.bytes, .smf, .{});
+    defer d1.deinit();
+
+    // The author moves the kick's first note up a fourth in the dumped
+    // document, and builds again.
+    const edited = try std.mem.replaceOwned(u8, gpa, d1.text, ":key 36", ":key 41");
+    defer gpa.free(edited);
+    const edited_z = try gpa.dupeZ(u8, edited);
+    defer gpa.free(edited_z);
+    var fx2 = try ready(gpa, &schema, edited_z);
+    defer fx2.deinit();
+    var b2 = try build(gpa, &schema, edited_z, &fx2.res.doc, &fx2.derived, .smf, .{ .cc = 74 });
+    defer b2.deinit();
+    try testing.expect(!b2.diags.hasErrors());
+
+    var r2 = try smf.read(gpa, b2.bytes);
+    defer r2.deinit();
+    try testing.expectEqual(@as(usize, 1), noteOns(&r2.sequence, 41));
+    try testing.expectEqual(@as(usize, 0), noteOns(&r2.sequence, 36));
+    try testing.expectEqual(@as(usize, 1), noteOns(&r2.sequence, 38));
+    try testing.expectEqual(b1.lanes[0].address.smf.track, b2.lanes[0].address.smf.track);
+
+    var d2 = try dump(gpa, &schema, b2.bytes, .smf, .{});
+    defer d2.deinit();
+    try testing.expectEqual(reconcile.Rule.restored, d2.rule);
+    try testing.expectEqual(@as(usize, 1), countIn(d2.text, ":key 41"));
+    try testing.expectEqual(@as(usize, 0), countIn(d2.text, ":key 36"));
+}
+
+test "pipeline: a newer Binary IR wire version keeps its payloads in the tier, and a build keeps them" {
+    // The final review's fourth defect: a residue under this build's
+    // own envelope whose ESSENCE is a wire version this substrate does
+    // not decode was detached from the tier before anyone looked inside
+    // it, so the dump said "left in the file" over a tier that no longer
+    // held it, and a rebuild wrote its own residue over the newer one
+    // without `--force-residue`.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const bytes = try smfBytesWith(gpa, records.version, true, true);
+    defer gpa.free(bytes);
+
+    var got = try dump(gpa, &schema, bytes, .smf, .{});
+    defer got.deinit();
+    try testing.expectEqual(reconcile.Rule.version, got.rule);
+    try testing.expect(got.diags.count(.residue_version) > 0);
+    try testing.expect(!got.diags.hasErrors());
+    try testing.expect(std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue is a newer version"));
+    // The carrier events are in the tier — all three of them.
+    try testing.expectEqual(@as(usize, 3), countIn(got.text, "sequencer-specific"));
+    try testing.expect(!got.consumed.any());
+
+    // A build of that document carries them through and writes none of
+    // its own…
+    var derived = try time_derive.derive(gpa, &got.doc);
+    defer derived.deinit();
+    var kept = try build(gpa, &schema, got.text, &got.doc, &derived, .smf, .{});
+    defer kept.deinit();
+    try testing.expect(!kept.diags.hasErrors());
+    try testing.expectEqual(@as(usize, 1), kept.diags.count(.residue_newer_kept));
+    try testing.expectEqual(@as(usize, 0), kept.essence_bytes);
+    var back = try smf.read(gpa, kept.bytes);
+    defer back.deinit();
+    try testing.expectEqual(Newer{ .wire = 0xFE }, newerSmf(&back.sequence).?);
+
+    // …unless told to.
+    var forced = try build(gpa, &schema, got.text, &got.doc, &derived, .smf, .{ .force_residue = true });
+    defer forced.deinit();
+    try testing.expect(forced.essence_bytes > 0);
+    var again = try smf.read(gpa, forced.bytes);
+    defer again.deinit();
+    try testing.expectEqual(@as(?Newer, null), newerSmf(&again.sequence));
+
+    // `check-residue` says which version it is leaving alone.
+    var report = try checkResidue(gpa, bytes, .smf);
+    defer report.deinit();
+    try testing.expect(std.mem.indexOf(u8, report.text, "wire version 254") != null);
+}
+
+test "pipeline: an IT chunk whose essence is a newer wire version is rule 5, or rule 3 with no tail" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    // With the tail beside it, the tail is read (rule 5) and the chunk
+    // stays in the file.
+    {
+        const bytes = try itCarrierBytes(gpa, &schema, .{ .bump_wire = true });
+        defer gpa.free(bytes);
+        var got = try dump(gpa, &schema, bytes, .it, .{});
+        defer got.deinit();
+        try testing.expectEqual(reconcile.Rule.partial, got.rule);
+        try testing.expect(got.diags.count(.residue_version) > 0);
+        try testing.expect(got.diags.count(.residue_partial) > 0);
+        try testing.expect(!got.diags.hasErrors());
+
+        var report = try checkResidue(gpa, bytes, .it);
+        defer report.deinit();
+        try testing.expect(std.mem.indexOf(u8, report.text, "wire version 254") != null);
+
+        // A build over the anchor's bytes keeps the chunk.
+        var derived = try time_derive.derive(gpa, &got.doc);
+        defer derived.deinit();
+        var kept = try build(gpa, &schema, got.text, &got.doc, &derived, .it, .{ .anchor_bytes = bytes });
+        defer kept.deinit();
+        try testing.expectEqual(@as(usize, 1), kept.diags.count(.residue_newer_kept));
+        try testing.expectEqual(@as(usize, 0), kept.essence_bytes);
+        var back = try itf.read.read(gpa, kept.bytes);
+        defer back.deinit();
+        const region = back.module.tmpu.?;
+        try testing.expectEqual(Newer{ .wire = 0xFE }, newerIt(region.slice(kept.bytes)).?);
+    }
+
+    // With no tail, the skeleton is derived under rule 3's header.
+    {
+        const bytes = try itCarrierBytes(gpa, &schema, .{ .bump_wire = true, .tail = false });
+        defer gpa.free(bytes);
+        var got = try dump(gpa, &schema, bytes, .it, .{});
+        defer got.deinit();
+        try testing.expectEqual(reconcile.Rule.version, got.rule);
+        try testing.expect(std.mem.startsWith(u8, got.text, "; skeleton: derived, the residue is a newer version"));
+        try testing.expect(!got.diags.hasErrors());
+    }
 }

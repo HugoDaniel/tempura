@@ -17,7 +17,8 @@
 (reconciled :rule restored :conductor-hash-ok true :file-conducts false
   (verdict :lane kick :hash-ok true :action restored_native)
   (verdict :lane lead :hash-ok true :action restored_native)
-  (verdict :lane haze :hash-ok true :action restored_native))
+  (verdict :lane haze :hash-ok true :action restored_native)
+  (consumed :events 154 :cells 0 :conductor 5))
 (read
   (smf :format 1 :division 960 :smpte none :tracks 4 :events 171 :running-status 129 :foreign 0))
 (roundtrip

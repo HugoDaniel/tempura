@@ -63,6 +63,12 @@ pub const Options = struct {
     preserve_history: bool = false,
     /// Where the reader recorded each region, for `patterns_bin`.
     source_map: ?*const itf.read.SourceMap = null,
+    /// Patterns printed as rows even under `patterns_bin`, ascending.
+    /// A dump that CONSUMED a cell (plan 04, rule 2:
+    /// `residue/reconcile.zig`'s `consumeIt`) has a pattern the file's
+    /// own bytes no longer describe, and a `(bin :at :len)` region
+    /// cannot lose a cell; those patterns are spelled out.
+    rows_for: []const u16 = &.{},
     /// Where the printer reports what it could not spell — a volume
     /// column byte outside IT's own table. Optional because a caller
     /// that only wants the text need not collect one.
@@ -402,8 +408,11 @@ const Printer = struct {
         try self.int(pat.rows);
 
         // it 03's skeleton view: the packed stream by reference, which
-        // only the reader's map knows where to find.
-        if (self.opts.patterns_bin) {
+        // only the reader's map knows where to find — unless a dump
+        // changed this pattern's cells, in which case the file's bytes
+        // are not this pattern any more.
+        const forced = std.mem.indexOfScalar(u16, self.opts.rows_for, @intCast(@min(index, std.math.maxInt(u16)))) != null;
+        if (self.opts.patterns_bin and !forced) {
             if (self.opts.source_map) |map| {
                 if (map.find(.pattern, @intCast(index))) |region| {
                     try self.raw(" ");
@@ -1593,6 +1602,17 @@ test "bridge_it: --patterns=bin, --preserve-foreign and --preserve-history" {
     const refs = try moduleToForms(gpa, &module, .{ .patterns_bin = true, .source_map = &map });
     defer gpa.free(refs);
     try testing.expect(std.mem.indexOf(u8, refs, "(it/pattern 0 :rows 64 (bin :at 0x2000 :len 0x40))") != null);
+
+    // A pattern a dump changed (plan 04, rule 2's consumption) is rows
+    // even under `--patterns=bin`: the file's bytes are not it any more.
+    const forced = try moduleToForms(gpa, &module, .{
+        .patterns_bin = true,
+        .source_map = &map,
+        .rows_for = &.{0},
+    });
+    defer gpa.free(forced);
+    try testing.expect(std.mem.indexOf(u8, forced, "(row 0 (ev 1 \"C-5\" :ins 1))") != null);
+    try testing.expect(std.mem.indexOf(u8, forced, "(bin :at 0x2000") == null);
 }
 
 /// A module whose one pattern exercises the bound-lane rules: a note

@@ -704,8 +704,22 @@ pub fn choose(
                 const empty = p.payloads.essence == null and
                     p.payloads.conductor == null and
                     p.payloads.lanes.len == 0;
-                if (!empty) return .{ .chunk = p };
+                // Rule 5 gives the tail every chunk "of a version the
+                // reader does not know", and the essence's own Binary IR
+                // wire version is one of those: a body this substrate
+                // will not decode is a chunk it cannot use, whatever its
+                // envelope says (`essence.newerWire`). It stays in the
+                // file, as the envelope case does.
+                const wire = if (p.payloads.essence) |body| essence.newerWire(body) else null;
+                if (!empty and wire == null) return .{ .chunk = p };
                 parsed.deinit();
+                if (wire) |v| try diags.add(
+                    .residue_version,
+                    .warning,
+                    .{ .start = 0, .end = 0 },
+                    "the TMPU chunk's essence is SJON Binary IR of wire version {d}, which this substrate does not decode; it stays in the file and the message tail is read instead",
+                    .{v},
+                );
             },
             .version => |v| try diags.add(
                 .residue_version,

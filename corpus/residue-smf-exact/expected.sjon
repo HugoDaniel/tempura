@@ -7,7 +7,8 @@
   (length :tick 184504320 :end hold :loop-secs "4000000000000000")
   (lane :name kick :kind notes :onsets 2 :first 0 :last 92252160))
 (reconciled :rule restored :conductor-hash-ok true :file-conducts false
-  (verdict :lane kick :hash-ok true :action restored_native))
+  (verdict :lane kick :hash-ok true :action restored_native)
+  (consumed :events 4 :cells 0 :conductor 2))
 (read
   (smf :format 1 :division 960 :smpte none :tracks 2 :events 12 :running-status 0 :foreign 0))
 (dump :bytes 345 :sha256 "5aa9413ab72b371d383933c2cab6c61bab4e0678afb447c42198cdc825e9c648")
