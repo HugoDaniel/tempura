@@ -8,7 +8,10 @@
 //! configuration, the edit history, foreign trailing chunks, and
 //! tempura's own `TMPU` residue chunk (plan 06, "The binary model").
 //! Nothing opaque is decoded, here or anywhere: the writer copies the
-//! bytes back.
+//! bytes back. The MIDI configuration is the one region whose BYTES the
+//! module also carries (`midi_config_bytes`): the document spells it as
+//! `(it/midi …)` rather than referencing it, so a module built from a
+//! document has the block and no file to point into.
 //!
 //! Every region is meaningful only against the exact file it was read
 //! from (it 03, "The anchor") — a `Module` plus the wrong bytes is
@@ -384,6 +387,13 @@ pub const Module = struct {
     /// Present only when the file's block is not IT's default table
     /// (see `regions.midiConfig`).
     midi_config: ?Region = null,
+    /// The block's 4896 bytes, OWNED by the arena — the one opaque
+    /// region the module carries as bytes as well as by reference. The
+    /// reader fills it beside `midi_config` (the document bridge spells
+    /// the slots and has no file to point into), `Builder.setMidiConfig`
+    /// and the bridge fill it alone, and the writer emits it ahead of
+    /// the region. Always `midi_config_size` long when present.
+    midi_config_bytes: ?[]const u8 = null,
     edit_history: ?Region = null,
     foreign: []Foreign = &.{},
     /// tempura's own residue chunk's PAYLOAD (plan 04, "The IT
@@ -463,6 +473,13 @@ pub const Builder = struct {
     /// Copies the CP437 message into the module's arena.
     pub fn setMessage(self: *Builder, cp437: []const u8) Error!void {
         self.module.message = try self.module.allocator().dupe(u8, cp437);
+    }
+
+    /// Copies a whole MIDI configuration block into the module's arena.
+    /// The size is the type's, so a block of any other length is a
+    /// compile error rather than a short write.
+    pub fn setMidiConfig(self: *Builder, block: *const [midi_config_size]u8) Error!void {
+        self.module.midi_config_bytes = try self.module.allocator().dupe(u8, block);
     }
 
     pub fn setTitle(self: *Builder, title: []const u8) void {
@@ -660,6 +677,24 @@ test "Module.Builder: a fresh module carries tempura's Cwt/v and IT's defaults" 
     try testing.expectEqual(@as(usize, 64 * 64), m.patterns[0].cells.len);
     try testing.expectEqual(@as(u8, 60), m.patterns[0].at(3, 5).note);
     try testing.expect(m.patterns[0].at(0, 0).isEmpty());
+}
+
+test "Module.Builder: a MIDI configuration is copied whole into the arena" {
+    var b: Builder = .init(testing.allocator);
+    defer b.deinit();
+
+    var block: [midi_config_size]u8 = @splat(0);
+    @memcpy(block[0..2], "FA");
+    try b.setMidiConfig(&block);
+    // The builder copied, so the caller's block is not what the module
+    // points at.
+    block[0] = 'X';
+
+    var m = b.finish();
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, midi_config_size), m.midi_config_bytes.?.len);
+    try testing.expectEqualStrings("FA", m.midi_config_bytes.?[0..2]);
+    try testing.expectEqual(@as(?Region, null), m.midi_config);
 }
 
 test "Module.Header: the loader defaults live in accessors, not in the fields" {

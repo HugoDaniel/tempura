@@ -69,6 +69,7 @@ const cases = [_]Case{
     .{ .name = "it-minimal", .file = "song.it", .build = itMinimal },
     .{ .name = "it-passthrough", .file = "song.it", .build = itPassthrough },
     .{ .name = "it-patterns-masks", .file = "song.it", .build = itPatternsMasks },
+    .{ .name = "it-midi-macros", .file = "song.it", .build = itMidiMacros },
     .{ .name = "smf-format0", .file = "song.mid", .build = smfFormat0 },
     .{ .name = "smf-running-status", .file = "song.mid", .build = smfRunningStatus },
     .{ .name = "smf-smpte", .file = "song.mid", .build = smfSmpte },
@@ -477,6 +478,32 @@ fn itPatternsMasks(gpa: Allocator) ![]u8 {
     for (0..5) |i| {
         p.at(10 + i, 2 + i).* = .{ .fx = @intCast(27 + i), .param = @intCast(0x11 + i) };
     }
+    return finishIt(gpa, &b, null, .{});
+}
+
+/// `it-midi-macros` — an embedded MIDI configuration that is not IT's
+/// default table: a macro in each of the block's families (two globals,
+/// a parametric `SFx`, the first and last `Zxx`), one slot full to its
+/// 32nd byte with no terminator. The block is the one opaque region a
+/// dump SPELLS (`(it/midi …)`) rather than references, so this case is
+/// where `dump → build` has to give the file's own 4896 bytes back.
+fn itMidiMacros(gpa: Allocator) ![]u8 {
+    var block: [itf.model.midi_config_size]u8 = @splat(0);
+    @memcpy(block[0..2], "FA"); // start
+    @memcpy(block[3 * 32 ..][0..6], "9c n v"); // note-on
+    @memcpy(block[9 * 32 ..][0..7], "F0F000z"); // sf0
+    @memcpy(block[(9 + 15) * 32 ..][0..32], "0123456789ABCDEF0123456789ABCDEF"); // sff, full
+    @memcpy(block[25 * 32 ..][0..8], "F0F00000"); // z80
+    @memcpy(block[(25 + 127) * 32 ..][0..8], "F0F0007F"); // zff
+
+    var b: itf.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.setTitle("macros");
+    try b.addOrder(0);
+    const p = try b.addPattern(64);
+    p.at(0, 0).* = .{ .note = 60, .ins = 1, .vol = 64 };
+    p.at(8, 0).* = .{ .fx = 'Z' - '@', .param = 0x80 };
+    try b.setMidiConfig(&block);
     return finishIt(gpa, &b, null, .{});
 }
 

@@ -404,11 +404,11 @@
     :union (union-shape :alternatives [macro-name macro-string]))
 
   (value-kind :name macro-name
-    :description "A MIDI macro's slot name, e.g. sf0 or z80."
+    :description "A MIDI macro's slot name, one of the block's 153 slots in ITTECH's order: the nine globals start, stop, tick, note-on, note-off, volume, pan, bank and program (MIDI start, MIDI stop, MIDI tick, note on, note off, change volume, change pan, bank select, program change), then the sixteen parametric macros sf0..sff, then the 128 fixed macros z80..zff. Hex digits are lower-case as written and either case as read. A name outside the set is it_midi_macro_invalid at build."
     :underlying symbol)
 
   (value-kind :name macro-string
-    :description "A MIDI macro body: up to 32 ASCII characters in MIDI.TXT's macro language."
+    :description "A MIDI macro body: up to 32 printable ASCII characters (0x20..0x7E) in MIDI.TXT's macro language, the slot's bytes up to their NUL. A dump leaves out a slot holding any other byte and names it (it_midi_macro_invalid), and that slot rebuilds empty; a build cuts a longer body to 32 and refuses one with a byte outside the range, each with the same code."
     :underlying string)
 
   ; =====================================================================
@@ -637,10 +637,10 @@
     :positional string)
 
   (form :name midi
-    :description "The MIDI macro configuration. Omitted, the module uses IT's own default macros (the filter pair F0F000z and F0F001z)."
+    :description "The MIDI macro configuration: one (macro …) per non-empty slot of the 4896-byte embedded block, in slot order. Omitted, the module uses IT's own default macros (the filter pair F0F000z and F0F001z); a dump writes the form whenever the file embeds a block that is not that default, and a build embeds one from it, every unlisted slot empty."
     :positional midi-section
     (form :name macro
-      :description "One macro slot: its name, then its body."
+      :description "One macro slot: its name, then its body. A slot spelled twice keeps the later body (it_midi_macro_invalid)."
       :positional macro-field))
 
   (form :name instrument

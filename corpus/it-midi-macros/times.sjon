@@ -1,0 +1,21 @@
+; it-midi-macros — an embedded MIDI configuration, spelled and rebuilt.
+;
+; The fixture embeds a 4896-byte macro block that is not IT's default
+; table: a macro in each family (the globals `start` and `note-on`, the
+; parametric `sf0` and `sff` — the latter full to its 32nd byte with no
+; terminator — and the fixed `z80` and `zff`). The block is the one
+; opaque region a dump SPELLS, as `(it/midi (macro …) …)`, rather than
+; references with a `(bin …)`, so the file tier a build reads back has
+; no anchor to copy it from and has to carry the bytes itself.
+;
+; Rung 2 compares the block against its own anchor byte for byte. The
+; `(build :kind it)` below goes the other way: the dumped tier read
+; back through the bridge and written by the canonical writer, and its
+; hash has to be the FIXTURE's — a build that zero-filled the block
+; would hash differently here while still passing rung 1 over its own
+; output. The `(dump)` is the skeleton the timeline tier derives; the
+; `it/` tier itself is what the `(fixture …)` line already pins.
+(read)
+(roundtrip)
+(dump)
+(build :kind it)

@@ -163,6 +163,72 @@ const option_flags = [_]struct { []const u8, u16 }{
     .{ "embedded-midi", model.flag.embed_midi },
 };
 
+/// The embedded MIDI configuration's slots (`model.midi_config_size` =
+/// 153 × 32): the nine globals in ITTECH's block order — OpenMPT's
+/// `MIDIMacroConfig::szMidiGlb`: MIDI start, MIDI stop, MIDI tick, note
+/// on, note off, change volume, change pan, bank select, program change
+/// — then the sixteen parametric `SFx` macros and the 128 fixed `Zxx`
+/// ones. `(it/midi …)` spells each non-empty slot as `(macro <name>
+/// "<body>")`; `schema/it.sjon`'s `macro-name` states the set.
+const global_macro_names = [_][]const u8{
+    "start", "stop", "tick", "note-on", "note-off", "volume", "pan", "bank", "program",
+};
+const sfx_macros: usize = 16;
+const zxx_macros: usize = 128;
+const macro_slots: usize = global_macro_names.len + sfx_macros + zxx_macros;
+/// One slot: 32 bytes, NUL-padded, and a full slot has no terminator.
+const macro_len: usize = 32;
+
+comptime {
+    std.debug.assert(macro_slots * macro_len == model.midi_config_size);
+}
+
+/// The name of slot `slot`, spelled into `buf` for the two hex families
+/// (`sf0`..`sff`, `z80`..`zff`, lower-case as written).
+fn macroName(slot: usize, buf: *[3]u8) []const u8 {
+    if (slot < global_macro_names.len) return global_macro_names[slot];
+    const hex = "0123456789abcdef";
+    if (slot < global_macro_names.len + sfx_macros) {
+        buf.* = .{ 's', 'f', hex[slot - global_macro_names.len] };
+        return buf;
+    }
+    const z = 0x80 + (slot - global_macro_names.len - sfx_macros);
+    buf.* = .{ 'z', hex[z >> 4], hex[z & 15] };
+    return buf;
+}
+
+/// The slot `name` spells, or null. Hex digits read in either case.
+fn macroSlot(name: []const u8) ?usize {
+    for (global_macro_names, 0..) |n, i| {
+        if (std.mem.eql(u8, name, n)) return i;
+    }
+    if (name.len != 3) return null;
+    const lead = std.ascii.toLower(name[0]);
+    if (lead == 's' and std.ascii.toLower(name[1]) == 'f') {
+        const d = std.fmt.charToDigit(name[2], 16) catch return null;
+        return global_macro_names.len + d;
+    }
+    if (lead == 'z') {
+        const hi = std.fmt.charToDigit(name[1], 16) catch return null;
+        const lo = std.fmt.charToDigit(name[2], 16) catch return null;
+        const z = @as(usize, hi) * 16 + lo;
+        if (z < 0x80) return null;
+        return global_macro_names.len + sfx_macros + (z - 0x80);
+    }
+    return null;
+}
+
+/// Whether every byte is printable ASCII — the only text a macro slot
+/// carries between the block and the document (`schema/it.sjon`,
+/// `macro-string`). SJON strings carry bytes ≥ 0x80 raw and have no
+/// escape for a control byte, so anything else has no lossless spelling.
+fn printableAscii(text: []const u8) bool {
+    for (text) |c| {
+        if (c < 0x20 or c > 0x7E) return false;
+    }
+    return true;
+}
+
 const Printer = struct {
     gpa: Allocator,
     out: *std.ArrayList(u8),
@@ -183,6 +249,7 @@ const Printer = struct {
         try self.channels();
         try self.orders();
         try self.message();
+        try self.midi();
         for (self.m.instruments, 0..) |ins, i| try self.instrument(ins, i);
         for (self.m.samples, 0..) |smp, i| try self.sample(smp, i);
         for (self.m.patterns, 0..) |pat, i| try self.pattern(pat, i);
@@ -357,6 +424,56 @@ const Printer = struct {
         try self.child("message");
         try self.raw(" ");
         try self.string(normalised.items);
+        try self.raw(")");
+    }
+
+    /// `(it/midi (macro <name> "<body>") …)`: one child per NON-EMPTY
+    /// slot of the block the module carries, in slot order, each body
+    /// the slot's bytes up to their NUL. A module read from a file has
+    /// the block only when it is not IT's default table
+    /// (`regions.midiConfig`), so the form appears exactly when the
+    /// file embedded something worth keeping.
+    ///
+    /// A slot whose text is not printable ASCII has no spelling the
+    /// document can carry back byte for byte (`printableAscii`), so it
+    /// is left out and NAMED, and the build writes it empty — the loss
+    /// the old dump made silently, now said. A block with nothing to
+    /// spell prints no form at all; `:embedded-midi true` in the options
+    /// still makes the writer embed IT's default table.
+    fn midi(self: *Printer) Error!void {
+        const block = self.m.midi_config_bytes orelse return;
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(self.gpa);
+        var inner: Printer = .{ .gpa = self.gpa, .out = &body, .m = self.m, .opts = self.opts };
+
+        for (0..macro_slots) |slot| {
+            const at = slot * macro_len;
+            // Total over a block of any length: what is there is spelled.
+            if (at + macro_len > block.len) break;
+            const text = model.nameText(block[at..][0..macro_len]);
+            if (text.len == 0) continue;
+            var buf: [3]u8 = undefined;
+            const slot_name = macroName(slot, &buf);
+            if (!printableAscii(text)) {
+                if (self.opts.diags) |diags| try diags.add(
+                    .it_midi_macro_invalid,
+                    .warning,
+                    .{ .start = 0, .end = 0 },
+                    "MIDI macro {s} holds a byte outside printable ASCII; the slot is not spelled and rebuilds empty",
+                    .{slot_name},
+                );
+                continue;
+            }
+            try inner.raw("\n    (macro ");
+            try inner.raw(slot_name);
+            try inner.raw(" ");
+            try inner.string(text);
+            try inner.raw(")");
+        }
+
+        if (body.items.len == 0) return;
+        try self.child("midi");
+        try self.raw(body.items);
         try self.raw(")");
     }
 
@@ -697,6 +814,8 @@ const Reader = struct {
                 try self.orders(child);
             } else if (std.mem.eql(u8, head, "message")) {
                 try self.message(child);
+            } else if (std.mem.eql(u8, head, "midi")) {
+                try self.midi(child);
             } else if (std.mem.eql(u8, head, "instrument")) {
                 try self.instrument(child);
             } else if (std.mem.eql(u8, head, "sample")) {
@@ -825,6 +944,95 @@ const Reader = struct {
             self.b.module.header.special |= model.special.message;
             return;
         }
+    }
+
+    /// `(it/midi …)` → the 4896-byte block, every slot the form does not
+    /// spell empty, owned by the module (`Module.midi_config_bytes`: a
+    /// built module has no anchor for a region to point into). Both
+    /// header bits go on, as the writer would set them anyway (it 05's
+    /// header policy), so the VALUE says what the file will.
+    fn midi(self: *Reader, form: NodeIndex) Error!void {
+        const tree = self.tree;
+        const block = try self.b.module.allocator().alloc(u8, model.midi_config_size);
+        @memset(block, 0);
+        var seen: [macro_slots]bool = @splat(false);
+
+        for (tree.formHeader(form).children) |child| {
+            if (tree.tagOf(child) != .form) continue;
+            if (!std.mem.eql(u8, tree.formHeader(child).head, "macro")) continue;
+            try self.macro(child, block, &seen);
+        }
+
+        self.b.module.midi_config_bytes = block;
+        self.b.module.header.flags |= model.flag.embed_midi;
+        self.b.module.header.special |= model.special.midi_config;
+    }
+
+    /// One `(macro <name> "<body>")` into its slot. Every refusal is
+    /// `it_midi_macro_invalid` at the node that caused it (the volume
+    /// column's `it_command_unknown` shape): a name that is no slot
+    /// seats nothing; a body past 32 characters is cut; a body with a
+    /// byte outside printable ASCII leaves the slot empty, since the
+    /// printer could not have written it; a slot spelled twice keeps
+    /// the later body.
+    fn macro(self: *Reader, form: NodeIndex, block: []u8, seen: *[macro_slots]bool) Error!void {
+        const tree = self.tree;
+        var name_node: ?NodeIndex = null;
+        var body_node: ?NodeIndex = null;
+        for (tree.formHeader(form).children) |c| switch (tree.tagOf(c)) {
+            .symbol => if (name_node == null) {
+                name_node = c;
+            },
+            .string => if (body_node == null) {
+                body_node = c;
+            },
+            else => {},
+        };
+        // The manifest already refused a macro with no name; an
+        // unvalidated tree's is skipped.
+        const name = tree.symbolText(name_node orelse return);
+        const slot = macroSlot(name) orelse {
+            try self.diags.add(
+                .it_midi_macro_invalid,
+                .err,
+                spanOf(tree, name_node.?),
+                "no MIDI macro slot is called {s}: the globals are start, stop, tick, note-on, note-off, volume, pan, bank and program, then sf0..sff and z80..zff",
+                .{name},
+            );
+            return;
+        };
+        if (seen[slot]) try self.diags.add(
+            .it_midi_macro_invalid,
+            .warning,
+            spanOf(tree, form),
+            "MIDI macro {s} is spelled twice; this later body stands",
+            .{name},
+        );
+        seen[slot] = true;
+
+        const dst = block[slot * macro_len ..][0..macro_len];
+        @memset(dst, 0);
+        const body_idx = body_node orelse return;
+        const body = tree.stringText(body_idx);
+        if (!printableAscii(body)) {
+            try self.diags.add(
+                .it_midi_macro_invalid,
+                .err,
+                spanOf(tree, body_idx),
+                "MIDI macro {s}'s body holds a byte outside printable ASCII; the slot is left empty",
+                .{name},
+            );
+            return;
+        }
+        if (body.len > macro_len) try self.diags.add(
+            .it_midi_macro_invalid,
+            .warning,
+            spanOf(tree, body_idx),
+            "MIDI macro {s}'s body is {d} characters; the slot holds {d}, so it was cut",
+            .{ name, body.len, macro_len },
+        );
+        const n = @min(body.len, macro_len);
+        @memcpy(dst[0..n], body[0..n]);
     }
 
     fn instrument(self: *Reader, form: NodeIndex) Error!void {
@@ -1559,6 +1767,212 @@ test "bridge_it: the message's newlines, CR and LF alike" {
     var read = try formsToModule(gpa, &p.tree, p.roots, null);
     defer read.deinit();
     try testing.expectEqualStrings("one\rtwo", read.module.message);
+}
+
+/// A block with a macro in each family — two globals, a parametric
+/// `SFx`, the first and last `Zxx` — one slot full to its 32nd byte with
+/// no terminator, and one whose bytes run on PAST a NUL (nobody reads
+/// them, so the spelling ends there).
+fn macroBlock() [model.midi_config_size]u8 {
+    var block: [model.midi_config_size]u8 = @splat(0);
+    @memcpy(block[0..2], "FA"); // start
+    @memcpy(block[3 * 32 ..][0..6], "9c n v"); // note-on
+    @memcpy(block[9 * 32 ..][0..7], "F0F000z"); // sf0
+    @memcpy(block[(9 + 15) * 32 ..][0..32], "0123456789ABCDEF0123456789ABCDEF"); // sff, full
+    @memcpy(block[25 * 32 ..][0..8], "F0F00000"); // z80
+    @memcpy(block[(25 + 127) * 32 ..][0..12], "F0F0007F\x00xyz"); // zff, then noise
+    return block;
+}
+
+/// `macroBlock` as a dump → build gives it back: the noise after `zff`'s
+/// NUL is not text the document spells, so it rebuilds as zeros.
+fn cleanMacroBlock() [model.midi_config_size]u8 {
+    var block = macroBlock();
+    @memset(block[(25 + 127) * 32 + 8 ..][0..4], 0);
+    return block;
+}
+
+/// `macroBlock` as the printer spells it: slot order, one child per
+/// non-empty slot, the noise after `zff`'s NUL gone.
+const midi_example =
+    \\(it/module :title "macros"
+    \\  (it/timing :speed 6 :tempo 125 :highlight [4 16])
+    \\  (it/options :instruments false :embedded-midi true)
+    \\  (it/midi
+    \\    (macro start "FA")
+    \\    (macro note-on "9c n v")
+    \\    (macro sf0 "F0F000z")
+    \\    (macro sff "0123456789ABCDEF0123456789ABCDEF")
+    \\    (macro z80 "F0F00000")
+    \\    (macro zff "F0F0007F")))
+    \\
+;
+
+test "bridge_it: the MIDI macros print per non-empty slot, in slot order, and read back byte for byte" {
+    const gpa = testing.allocator;
+
+    var module = module: {
+        var b: itf.Builder = .init(gpa);
+        errdefer b.deinit();
+        b.setTitle("macros");
+        try b.setMidiConfig(&macroBlock());
+        // As a file's header would have it (it 05: both bits on).
+        b.module.header.flags |= model.flag.embed_midi;
+        b.module.header.special |= model.special.midi_config;
+        break :module b.finish();
+    };
+    defer module.deinit();
+
+    var diags: Diag.List = .init(gpa);
+    defer diags.deinit();
+    const text = try moduleToForms(gpa, &module, .{ .diags = &diags });
+    defer gpa.free(text);
+    try testing.expectEqualStrings(midi_example, text);
+    try testing.expectEqual(@as(usize, 0), diags.items().len);
+    try expectValidates(midi_example);
+
+    // Read back: the block is the module's own, every unspelled slot
+    // empty — which is what the noise after `zff`'s NUL becomes.
+    var p = try parse(gpa, midi_example);
+    defer p.deinit();
+    var read = try formsToModule(gpa, &p.tree, p.roots, null);
+    defer read.deinit();
+    try testing.expectEqual(@as(usize, 0), read.diags.items().len);
+    try testing.expectEqualSlices(u8, &cleanMacroBlock(), read.module.midi_config_bytes.?);
+    try testing.expect(read.module.header.flags & model.flag.embed_midi != 0);
+    try testing.expect(read.module.header.special & model.special.midi_config != 0);
+
+    // …and the fixed point holds.
+    const again = try roundTrip(gpa, midi_example);
+    defer gpa.free(again);
+    try testing.expectEqualStrings(midi_example, again);
+}
+
+test "bridge_it: a MIDI macro slot that is not printable ASCII is left out and named" {
+    const gpa = testing.allocator;
+
+    var block: [model.midi_config_size]u8 = @splat(0);
+    @memcpy(block[9 * 32 ..][0..4], "F0\x80z"); // sf0, a high byte
+    @memcpy(block[10 * 32 ..][0..2], "ok"); // sf1
+    @memcpy(block[25 * 32 ..][0..3], "a\tb"); // z80, a control byte
+
+    var module = module: {
+        var b: itf.Builder = .init(gpa);
+        errdefer b.deinit();
+        try b.setMidiConfig(&block);
+        break :module b.finish();
+    };
+    defer module.deinit();
+
+    var diags: Diag.List = .init(gpa);
+    defer diags.deinit();
+    const text = try moduleToForms(gpa, &module, .{ .diags = &diags });
+    defer gpa.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "(it/midi\n    (macro sf1 \"ok\"))") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "sf0") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "z80") == null);
+    try testing.expectEqual(@as(usize, 2), diags.count(.it_midi_macro_invalid));
+
+    // Nothing spellable at all: no form, and the block's presence is
+    // still in the options for the writer to embed IT's default table.
+    @memset(block[10 * 32 ..][0..2], 0);
+    var bare = module: {
+        var b: itf.Builder = .init(gpa);
+        errdefer b.deinit();
+        try b.setMidiConfig(&block);
+        b.module.header.flags |= model.flag.embed_midi;
+        break :module b.finish();
+    };
+    defer bare.deinit();
+    const none = try moduleToForms(gpa, &bare, .{});
+    defer gpa.free(none);
+    try testing.expect(std.mem.indexOf(u8, none, "it/midi") == null);
+    try testing.expect(std.mem.indexOf(u8, none, ":embedded-midi true") != null);
+}
+
+test "bridge_it: a (macro …) the block cannot hold is it_midi_macro_invalid at its own node" {
+    const gpa = testing.allocator;
+    const source =
+        "(it/module (it/midi\n" ++
+        "  (macro sf0 \"F0F000z\")\n" ++
+        "  (macro nope \"x\")\n" ++
+        "  (macro SF0 \"F0F001z\")\n" ++
+        "  (macro z80 \"0123456789ABCDEF0123456789ABCDEF0\")\n" ++
+        "  (macro z81 \"a\\tb\")\n" ++
+        "  (macro Z7F \"y\")))";
+    var p = try parse(gpa, source);
+    defer p.deinit();
+
+    var read = try formsToModule(gpa, &p.tree, p.roots, null);
+    defer read.deinit();
+    const block = read.module.midi_config_bytes.?;
+
+    // The unknown name, the repeat, the cut and the control byte — and
+    // `Z7F`, which is below the `Zxx` range — five, each at its cause.
+    try testing.expectEqual(@as(usize, 5), read.diags.count(.it_midi_macro_invalid));
+    const items = read.diags.items();
+    try testing.expectEqualStrings("nope", source[items[0].span.start..items[0].span.end]);
+    try testing.expectEqual(Diag.Severity.err, items[0].severity);
+    try testing.expectEqual(Diag.Severity.warning, items[1].severity); // SF0 again
+    try testing.expectEqualStrings("\"0123456789ABCDEF0123456789ABCDEF0\"", source[items[2].span.start..items[2].span.end]);
+    try testing.expectEqualStrings("\"a\\tb\"", source[items[3].span.start..items[3].span.end]);
+    try testing.expectEqualStrings("Z7F", source[items[4].span.start..items[4].span.end]);
+
+    // The later spelling stands, hex names read in either case, the
+    // long body is cut at 32, and the refused one is empty.
+    try testing.expectEqualStrings("F0F001z", model.nameText(block[9 * 32 ..][0..32]));
+    try testing.expectEqualStrings("0123456789ABCDEF0123456789ABCDEF", block[25 * 32 ..][0..32]);
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 32), block[26 * 32 ..][0..32]);
+}
+
+test "bridge_it: dump → build keeps the MIDI configuration byte for byte" {
+    // The defect this closes: a dump that never spelled the block, and a
+    // build that wrote 4896 zero bytes in its place. The whole path here
+    // is the bridge's two halves around the core's writer and reader.
+    const gpa = testing.allocator;
+
+    var original = module: {
+        var b: itf.Builder = .init(gpa);
+        errdefer b.deinit();
+        try b.addOrder(0);
+        const p = try b.addPattern(64);
+        p.at(0, 0).* = .{ .note = 60, .ins = 1 };
+        // Terminator-clean: bytes past a slot's NUL are nobody's, and the
+        // text path drops them (the test above pins that); byte identity
+        // is the claim for everything a tracker reads.
+        try b.setMidiConfig(&cleanMacroBlock());
+        break :module b.finish();
+    };
+    defer original.deinit();
+    var file = try itf.write.write(gpa, &original, null, .{});
+    defer file.deinit();
+
+    // dump: the file read, then printed.
+    var read = try itf.read.read(gpa, file.bytes);
+    defer read.deinit();
+    const text = try moduleToForms(gpa, &read.module, .{ .source_map = &read.source_map });
+    defer gpa.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "(it/midi") != null);
+
+    // build: the text read, then written — with the file as its anchor,
+    // as `pipeline.build` hands it over, and without, as a document
+    // whose anchor is gone.
+    const sentinel = try gpa.dupeZ(u8, text);
+    defer gpa.free(sentinel);
+    var p = try parse(gpa, sentinel);
+    defer p.deinit();
+    var back = try formsToModule(gpa, &p.tree, p.roots, file.bytes);
+    defer back.deinit();
+    try testing.expectEqual(@as(usize, 0), back.diags.items().len);
+
+    for ([_]?[]const u8{ file.bytes, null }) |anchor| {
+        var built = try itf.write.write(gpa, &back.module, anchor, .{});
+        defer built.deinit();
+        try testing.expectEqualSlices(u8, file.bytes, built.bytes);
+        var again = try itf.read.read(gpa, built.bytes);
+        defer again.deinit();
+        try testing.expectEqualSlices(u8, &cleanMacroBlock(), again.module.midi_config_bytes.?);
+    }
 }
 
 test "bridge_it: --patterns=bin, --preserve-foreign and --preserve-history" {

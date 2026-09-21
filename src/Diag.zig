@@ -190,6 +190,18 @@ pub const Code = enum(u16) {
     /// and beat lanes run on the transport's one tempo (plan 08,
     /// "Transport and tempo"; the it set's 09 fallback).
     export_tempo_budget,
+
+    /// `(it/midi …)`: a macro that cannot cross between the module's
+    /// 4896-byte block and the document. On dump, a slot whose text is
+    /// not printable ASCII (0x20..0x7E up to its NUL) has no spelling
+    /// the document can carry losslessly, so it is left out and named,
+    /// and reads back empty. On build, a `(macro …)` whose name is none
+    /// of the 153 slots, whose body is past 32 characters (cut to 32)
+    /// or holds a byte outside that range (left empty), or that spells
+    /// a slot a second time (the later body stands). The volume column's
+    /// `it_command_unknown` is the same shape for a pattern cell (plan
+    /// 06, "The binary model").
+    it_midi_macro_invalid,
 };
 
 /// How much a diagnostic costs its caller. Orthogonal to `Code` — the
@@ -393,6 +405,7 @@ const code_order = [_]Code{
     .export_onset_budget,
     .export_key_budget,
     .export_tempo_budget,
+    .it_midi_macro_invalid,
 };
 
 test "Diag.Code: ordinals are dense and unique — the wire contract" {

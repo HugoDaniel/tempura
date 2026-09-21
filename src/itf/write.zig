@@ -202,7 +202,8 @@ const Writer = struct {
         // Special b1 is set only when a block is really written — never
         // flag-without-block, the bug the reader guards against (it 05).
         const history: ?Region = if (self.opts.preserve_history) m.edit_history else null;
-        const embed_midi = m.midi_config != null or
+        const embed_midi = m.midi_config_bytes != null or
+            m.midi_config != null or
             m.header.flags & model.flag.embed_midi != 0 or
             m.header.special & model.special.midi_config != 0;
 
@@ -236,7 +237,12 @@ const Writer = struct {
             try self.copyRegion(region, region.len, .it_truncated, "the edit-history block");
         }
         if (embed_midi) {
-            if (m.midi_config) |region| {
+            if (m.midi_config_bytes) |bytes| {
+                // The block the module OWNS — a document's `(it/midi …)`
+                // lowered, or a read module's copy — ahead of the region,
+                // which needs an anchor a built module does not have.
+                try self.copyBytes(bytes, model.midi_config_size, "the MIDI configuration");
+            } else if (m.midi_config) |region| {
                 try self.copyRegion(region, model.midi_config_size, .it_truncated, "the MIDI configuration");
             } else {
                 // The flags demand a block and the module has none: IT's
@@ -449,6 +455,19 @@ const Writer = struct {
         if (region.isEmpty()) return null;
         const source = self.source orelse return null;
         return region.slice(source);
+    }
+
+    /// Copies bytes the module owns, padded or truncated to `size` — the
+    /// fixed-size records have to be their size whatever a producer
+    /// handed over, and a short one says so.
+    fn copyBytes(self: *Writer, bytes: []const u8, size: u32, comptime what: []const u8) Error!void {
+        const at = self.here();
+        const take = @min(bytes.len, size);
+        try self.blob(bytes[0..take]);
+        if (take < size) {
+            try self.note(.it_truncated, .warning, at, at + size, what ++ " is {d} bytes of the {d} it must be; zero-padded to size", .{ take, size });
+            try self.zeros(size - take);
+        }
     }
 
     /// Copies an opaque region, padded or truncated to `size`. A region
@@ -1016,6 +1035,55 @@ test "write: a MIDI configuration the flags demand is written back" {
     defer nw.deinit();
     try testing.expectEqual(@as(u16, 0), word(nw.bytes, hdr.flags) & model.flag.embed_midi);
     try testing.expectEqual(@as(u16, 0), word(nw.bytes, hdr.special) & model.special.midi_config);
+}
+
+test "write: an owned MIDI configuration is written whole, and read back as bytes and as a region" {
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    defer b.deinit();
+    try b.addOrder(0);
+    var block: [model.midi_config_size]u8 = @splat(0);
+    @memcpy(block[0..2], "FA"); // MIDI start
+    @memcpy(block[9 * 32 ..][0..7], "F0F000z"); // SF0
+    @memcpy(block[(9 + 16 + 127) * 32 ..][0..32], "0123456789ABCDEF0123456789ABCDEF"); // ZFF, full
+    try b.setMidiConfig(&block);
+    var m = b.finish();
+    defer m.deinit();
+
+    // No anchor: a built module has none, and the bytes need none.
+    var w = try write(gpa, &m, null, .{});
+    defer w.deinit();
+    try testing.expectEqual(@as(usize, 0), w.diags.items().len);
+    try testing.expect(word(w.bytes, hdr.special) & model.special.midi_config != 0);
+    try testing.expect(word(w.bytes, hdr.flags) & model.flag.embed_midi != 0);
+    // The block sits right after the parapointers (one order, no
+    // records, no history): 192 + 2 orders.
+    try testing.expectEqualSlices(u8, &block, w.bytes[0xC2..][0..model.midi_config_size]);
+
+    // Read back, the module carries the block both ways — the region
+    // for rung 2 and the source map, the bytes for the bridge.
+    var r = try read_it.read(gpa, w.bytes);
+    defer r.deinit();
+    try testing.expectEqual(Region{ .off = 0xC2, .len = model.midi_config_size }, r.module.midi_config.?);
+    try testing.expectEqualSlices(u8, &block, r.module.midi_config_bytes.?);
+
+    // …and written again WITHOUT its source, the bytes still carry it.
+    var again = try write(gpa, &r.module, null, .{});
+    defer again.deinit();
+    try testing.expectEqualSlices(u8, w.bytes, again.bytes);
+
+    // A short block is padded and said so, never a short record.
+    var short: Builder = .init(gpa);
+    defer short.deinit();
+    try short.addOrder(0);
+    var sm = short.finish();
+    defer sm.deinit();
+    sm.midi_config_bytes = "FA";
+    var sw = try write(gpa, &sm, null, .{});
+    defer sw.deinit();
+    try testing.expectEqual(@as(usize, 1), sw.diags.count(.it_truncated));
+    try testing.expectEqualStrings("FA", sw.bytes[0xC2..][0..2]);
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 30), sw.bytes[0xC4..][0..30]);
 }
 
 test "write: a module with no bytes behind its regions is written with diagnostics" {

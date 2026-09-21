@@ -359,6 +359,11 @@ const Reader = struct {
             ),
             .present => |region| {
                 self.module.midi_config = region;
+                // The bytes too: the document bridge spells the block's
+                // slots and has no anchor to slice, so a read module
+                // carries what a built one would (`Module.midi_config_bytes`).
+                // `regions.midiConfig` already proved the region fits.
+                self.module.midi_config_bytes = try self.arena.dupe(u8, self.src[region.off..][0..region.len]);
                 try self.mark(.midi_config, 0, region);
             },
         }
