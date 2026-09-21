@@ -90,7 +90,7 @@ pub fn anchorByReference(
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     var hex: [64]u8 = undefined;
     for (digest, 0..) |b, i| {
-        _ = std.fmt.bufPrint(hex[i * 2 ..][0..2], "{x:0>2}", .{b}) catch unreachable;
+        _ = try std.fmt.bufPrint(hex[i * 2 ..][0..2], "{x:0>2}", .{b});
     }
     return std.fmt.allocPrint(
         gpa,

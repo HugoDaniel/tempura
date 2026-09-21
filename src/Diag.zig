@@ -323,7 +323,8 @@ pub const List = struct {
 /// came from: every span runs forward (`start <= end`, asserted at the
 /// write side in `add` too), and every code's ordinal is one `code_order`
 /// pins, so what goes on the wire as a `u16` is a code a decoder with this
-/// enum can name. Compiles out of `ReleaseSmall`, so the wasm pays nothing.
+/// enum can name. Free in `ReleaseSmall`, where a violated assertion is
+/// undefined behaviour rather than a trap: no producer may hand one in.
 ///
 /// The span clause holds because the readers clamp: the IT reader spans a
 /// truncation from a DECLARED offset, which may lie past the file's end,

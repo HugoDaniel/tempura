@@ -438,22 +438,27 @@ pub const Doc = struct {
     /// these anyway (plan 12, "The invariants, value by value"). Called
     /// at the WRITE side — the end of `fromSjon.fromSource` — and at the
     /// READ side, the entry of each consumer that takes the whole value;
-    /// never per query. `std.debug.assert` compiles out of
-    /// `ReleaseSmall`, so the wasm pays nothing.
+    /// never per query. The check costs nothing in `ReleaseSmall`, where
+    /// a violated assertion is undefined behaviour rather than a trap —
+    /// which is why every clause must be one no input can break, and why
+    /// `tools/zt fuzz` drives arbitrary text through every reader of a
+    /// `Doc`.
     ///
-    /// Three of plan 12's clauses are NOT here, because the loader does
-    /// not establish them. `:repeat 0` is the schema's complaint and the
-    /// clip is kept with its zero; two anchors of one `:id` are both
-    /// kept. Both are diagnostics on the document, not defects of the
-    /// value. And a duration is not yet `≥ 0`: `TimeMap.durationTicks`'
-    /// `s` arm floors a wall-clock tick that can land one tick short of
-    /// its own anchor, so `:dur 0s` resolves to `-1` at some anchors —
-    /// `time/`'s to clamp, after which `dur ≥ 0` belongs here.
+    /// Every duration is `≥ 0`: notes' and sections' alike resolve
+    /// through `TimeMap.durationTicks`, which never answers a distance
+    /// backwards. Two of plan 12's first clauses are NOT here, because
+    /// the loader does not establish them: `:repeat 0` is the schema's
+    /// complaint and the clip is kept with its zero, and two anchors of
+    /// one `:id` are both kept. Both are diagnostics on the document, not
+    /// defects of the value.
     pub fn invariants(self: *const Doc) void {
         for (self.anchors) |a| spanOk(a.span);
         for (self.tempo) |t| spanOk(t.span);
         for (self.meter) |m| spanOk(m.span);
-        for (self.sections) |s| spanOk(s.span);
+        for (self.sections) |s| {
+            spanOk(s.span);
+            std.debug.assert(s.dur >= 0);
+        }
         for (self.cues) |c| spanOk(c.span);
         for (self.passthrough) |p| spanOk(p.span);
         for (self.lanes) |*l| laneInvariants(l, false);
@@ -637,7 +642,10 @@ fn laneInvariants(l: *const Lane, in_phrase: bool) void {
         .smf => |s| std.debug.assert(!s.ch.isEmpty()),
         .it => {},
     };
-    for (l.notes) |n| spanOk(n.span);
+    for (l.notes) |n| {
+        spanOk(n.span);
+        std.debug.assert(n.dur >= 0);
+    }
     for (l.keyframes) |k| {
         spanOk(k.span);
         // `ncomp` counts the components in use: one to four.
