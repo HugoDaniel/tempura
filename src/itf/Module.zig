@@ -510,12 +510,21 @@ pub const Builder = struct {
         m.instruments = self.instruments.items;
         m.samples = self.samples.items;
         m.foreign = self.foreign.items;
-        m.header.ord_num = @intCast(self.orders.items.len);
-        m.header.ins_num = @intCast(self.instruments.items.len);
-        m.header.smp_num = @intCast(self.samples.items.len);
-        m.header.pat_num = @intCast(self.patterns.items.len);
+        m.header.ord_num = headerCount(self.orders.items.len);
+        m.header.ins_num = headerCount(self.instruments.items.len);
+        m.header.smp_num = headerCount(self.samples.items.len);
+        m.header.pat_num = headerCount(self.patterns.items.len);
         self.finished = true;
         return m;
+    }
+
+    /// A count as the header's u16 field holds it, saturated rather than
+    /// narrowed: a document may hand the bridge more records than the
+    /// field can say, and the writer — which re-derives every count from
+    /// the slices and diagnoses what IT cannot hold — is where that is
+    /// reported.
+    fn headerCount(n: usize) u16 {
+        return std.math.cast(u16, n) orelse std.math.maxInt(u16);
     }
 };
 
@@ -734,6 +743,21 @@ test "Module.invariants: a built module holds, pattern by pattern" {
     m.invariants();
     try testing.expectEqual(@as(usize, 0), m.patterns[0].cells.len);
     try testing.expectEqual(@as(usize, 200 * channels), m.patterns[1].cells.len);
+}
+
+test "Module.Builder: a count past a u16 saturates the header field, never wraps it" {
+    // 65 536 `(it/orders …)` entries are a document a host can load, and
+    // the header's `OrdNum` is a u16: `finish` answers the ceiling, and
+    // the writer — which re-derives the count from `orders.len` — is the
+    // one that says the list is past IT's 256.
+    var b: Builder = .init(testing.allocator);
+    defer b.deinit();
+    for (0..std.math.maxInt(u16) + 1) |_| try b.addOrder(0);
+    var m = b.finish();
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, std.math.maxInt(u16) + 1), m.orders.len);
+    try testing.expectEqual(@as(u16, std.math.maxInt(u16)), m.header.ord_num);
+    try testing.expectEqual(@as(u16, 0), m.header.pat_num);
 }
 
 test "Module.Builder: a MIDI configuration is copied whole into the arena" {
