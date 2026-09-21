@@ -83,13 +83,12 @@ pub const ItTier = value.ItTier;
 
 // ---- where an anchor's bytes come from ----
 
-/// One function, `read(path) ?[]const u8`, and the two stores that
-/// implement it.
+/// One function, `read(path) ?[]const u8`, and the in-memory store that
+/// implements it. The filesystem store is a border's, not this part's:
+/// `src/FsStore.zig` (`tempura.FsStore`), because the core reaches no IO.
 pub const Resolver = resolver_file.Resolver;
 pub const Memory = resolver_file.Memory;
-pub const Fs = resolver_file.Fs;
 pub const memory = resolver_file.memory;
-pub const fs = resolver_file.fs;
 pub const verify = resolver_file.verify;
 
 // ---- tree → value ----

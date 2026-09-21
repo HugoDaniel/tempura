@@ -275,7 +275,7 @@ pub const Ctx = struct {
         loaded.schema = try tempura.Schema.load(self.gpa);
         errdefer loaded.schema.deinit();
 
-        loaded.store = tempura.doc.fs(self.gpa, self.io, self.inputDir());
+        loaded.store = .init(self.gpa, self.io, self.inputDir());
         errdefer loaded.store.deinit();
 
         loaded.result = try tempura.doc.fromSource(
@@ -311,7 +311,7 @@ pub const Loaded = struct {
     source: [:0]u8,
     index: Diags.LineIndex,
     schema: tempura.Schema,
-    store: tempura.doc.Fs,
+    store: tempura.FsStore,
     result: tempura.doc.Result,
 
     /// Inside-out, the order they were built in.

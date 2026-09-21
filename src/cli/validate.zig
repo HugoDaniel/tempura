@@ -11,8 +11,8 @@
 //! returns them all as one list of spans. A CLI that re-stated any of
 //! them would be a second spelling of a rule that already has one.
 //!
-//! The anchors ARE resolved: `Resolver.fs` is pointed at the document's
-//! own directory, because plan 02 resolves an `:file` "relative to the
+//! The anchors ARE resolved: a `tempura.FsStore` is pointed at the
+//! document's own directory, because plan 02 resolves an `:file` "relative to the
 //! document" and because an anchor that cannot be read, or whose bytes
 //! disagree with its `:size` / `:sha256`, is exactly what a CI gate is
 //! for. That is the one thing this verb does that a pure parse would not.

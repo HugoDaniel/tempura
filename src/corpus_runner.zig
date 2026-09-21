@@ -182,6 +182,7 @@ const Schema = @import("Schema.zig");
 const smf = @import("smf/smf.zig");
 const itf = @import("itf/itf.zig");
 const doc = @import("doc/doc.zig");
+const FsStore = @import("FsStore.zig");
 const edit_engine = @import("edit/edit.zig");
 const exporter = @import("export/export.zig");
 const time = @import("time/time.zig");
@@ -1765,7 +1766,7 @@ const Env = struct {
 /// names them.
 const Loaded = struct {
     /// The anchor resolver's store, rooted at the case's directory.
-    store: doc.Fs,
+    store: FsStore,
     /// A `doc.sjon` case: the document as the author wrote it.
     result: ?doc.Result,
     /// A `song.mid` / `song.it` case: the file DUMPED, through the very
@@ -1839,7 +1840,7 @@ fn loadDocument(
     fixture: Fixture,
 ) Error!?Loaded {
     const case_dir = try std.fs.path.join(arena, &.{ env.root, env.name });
-    var store = doc.fs(gpa, env.io, case_dir);
+    var store: FsStore = .init(gpa, env.io, case_dir);
     errdefer store.deinit();
 
     var result: ?doc.Result = null;
@@ -3220,7 +3221,7 @@ const LoadedCase = struct {
     /// conducted anchor's bytes ARE its time (plan 03). It outlives the
     /// document: an inline IT tier's opaque regions are offsets into the
     /// bytes it cached.
-    store: doc.Fs,
+    store: FsStore,
     result: doc.Result,
     derived: time.derive.Derived,
 
@@ -3278,7 +3279,7 @@ fn loadCaseDoc(
         case,
     });
     defer gpa.free(case_dir);
-    var store = doc.fs(gpa, t_.io, case_dir);
+    var store: FsStore = .init(gpa, t_.io, case_dir);
     errdefer store.deinit();
 
     var result = try doc.fromSource(gpa, schema, source, store.resolver());

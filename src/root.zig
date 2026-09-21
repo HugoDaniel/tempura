@@ -49,6 +49,11 @@ pub const time = @import("time/time.zig");
 /// midi and it bridges and the skeleton.
 pub const doc = @import("doc/doc.zig");
 
+/// A filesystem-backed anchor store — `doc.Resolver` over a directory, for
+/// a native host. A BORDER, not a part of the core: the core reaches no
+/// filesystem (plan 12), and `tempura.wasm` never references this.
+pub const FsStore = @import("FsStore.zig");
+
 /// The residue (P104): the essence, the records and the two carriers.
 pub const residue = @import("residue/residue.zig");
 
@@ -74,6 +79,7 @@ test {
     _ = itf;
     _ = time;
     _ = doc;
+    _ = FsStore;
     _ = residue;
     _ = edit;
     _ = exporter;
