@@ -43,6 +43,7 @@ const std = @import("std");
 const Diag = @import("../Diag.zig");
 const Doc = @import("../doc/Value.zig");
 const Grid = @import("../time/Grid.zig");
+const TimeMap = @import("../time/TimeMap.zig");
 const derive = @import("../time/derive.zig");
 const itf = @import("../itf/itf.zig");
 const records = @import("../residue/records.zig");
@@ -335,7 +336,11 @@ const Render = struct {
         }
         if (self.doc.meter.len > 0) {
             const m = self.doc.meter[0];
-            if (m.d != 0 and m.n != 0) {
+            // The document keeps a `:sig` the map refused, and a host may
+            // build a document that loaded with errors, so the raw point
+            // is asked the map's own question before `beatTicks` divides
+            // by it: `[4 17]` has no beat on the grid.
+            if (TimeMap.meterOk(m)) {
                 const beat = Grid.beatTicks(m.d);
                 const bar = Grid.barTicks(m.n, m.d);
                 if (@rem(beat, self.row_ticks) == 0 and @rem(bar, self.row_ticks) == 0) {
@@ -872,6 +877,35 @@ test "renderIt: a sub-row position uses SDx, and one that cannot rounds" {
     try testing.expectEqual(@as(usize, 1), rounded.diags.count(.render_inexact));
     try testing.expectEqual(@as(u8, 60), cellOf(&rounded.module, 0, 0, 0).note);
     try testing.expectEqual(@as(u8, 0), cellOf(&rounded.module, 0, 0, 0).fx);
+}
+
+test "renderIt: a meter the map refused leaves the highlight alone, and never traps" {
+    // A `:sig` that is not a meter still goes into the document — the map
+    // is the one place that says `meter_map_invalid` — and a host may
+    // build a document that loaded with errors: `tpr_build` does not ask.
+    // `[4 17]` has no beat on the grid, so `Grid.beatTicks(17)` is a
+    // failed `@divExact`: a trap in Debug and undefined behaviour in the
+    // ReleaseSmall wasm. The header reads a meter only when the map would.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var loaded = try fromSjon.fromSource(gpa, &schema,
+        \\(timeline :length 1bar)
+        \\(meter-point :at 0q :sig [4 17])
+        \\(lane :name kick :kind notes (note :at 0q :dur 1q :key 60 :vel 127))
+    , null);
+    defer loaded.deinit();
+    try testing.expect(loaded.diags.count(.meter_map_invalid) > 0);
+
+    var derived = try derive.derive(gpa, &loaded.doc);
+    defer derived.deinit();
+    var out = try renderIt(gpa, &loaded.doc, &derived, null, .{});
+    defer out.deinit();
+    // The builder's own `[4 4]` highlight, untouched by the refused meter.
+    try testing.expectEqual(@as(u8, 4), out.module.header.highlight_minor);
+    try testing.expectEqual(@as(u8, 16), out.module.header.highlight_major);
+    try testing.expectEqual(@as(u8, 60), cellOf(&out.module, 0, 0, 0).note);
 }
 
 test "renderIt: a fractional tempo is tempo_inexact and the residue keeps it" {

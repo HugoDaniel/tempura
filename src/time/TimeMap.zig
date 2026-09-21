@@ -983,7 +983,13 @@ fn refuseMeter(diags: *Diag.List, p: MeterPoint, why: MeterRefusal) error{OutOfM
 /// SMF's `dd` is a power of two, and a `d` that is not one has no source
 /// and no exact bar length here). `Grid.beatTicks` carries this as a
 /// PRECONDITION, so every point is checked before it is converted.
-fn meterOk(p: MeterPoint) bool {
+/// Whether a meter point is one the map honours: `n` in 1..64 and `d` in
+/// the power-of-two set pacer's lattice and the grid both divide. The one
+/// definition — a consumer reading a document's RAW meter points (the
+/// renderers do, for a header) asks this rather than re-deriving a weaker
+/// check, because a `:sig` that is not a meter still goes into the
+/// document and only this map says `meter_map_invalid` about it.
+pub fn meterOk(p: MeterPoint) bool {
     if (p.n < 1 or p.n > 64) return false;
     return switch (p.d) {
         1, 2, 4, 8, 16, 32 => true,
