@@ -249,7 +249,6 @@ fn copyTrack(
 pub fn detach(gpa: Allocator, seq: *const Sequence.Sequence) Error!Detached {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
-    const a = arena.allocator();
 
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
@@ -263,7 +262,7 @@ pub fn detach(gpa: Allocator, seq: *const Sequence.Sequence) Error!Detached {
     for (seq.tracks) |t| {
         const track = try b.addTrack();
         for (t.events) |e| {
-            if (e.kind == .tempura_residue and try takeEvent(&taken, a, seq, e, &diags)) continue;
+            if (e.kind == .tempura_residue and try takeEvent(&taken, arena.allocator(), seq, e, &diags)) continue;
             try copyEvent(&b, seq, e, track);
         }
     }
@@ -284,7 +283,7 @@ pub fn detach(gpa: Allocator, seq: *const Sequence.Sequence) Error!Detached {
     // is kilobytes and needs a second buffer; the 21-byte one here did
     // not), and `it.zig`'s `parseChunk` has always hoisted it for the
     // same reason.
-    const essence_body = try records.reassemble(a, taken.parts.items, &diags);
+    const essence_body = try records.reassemble(arena.allocator(), taken.parts.items, &diags);
     const sequence = try b.finish();
 
     return .{

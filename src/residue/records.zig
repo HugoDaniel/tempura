@@ -280,7 +280,7 @@ pub const Gathered = struct {
 /// missing part, a disagreeing `total` or a repeated `seq` is
 /// `residue_corrupt` and the caller takes the skeleton path (plan 04,
 /// rule 4).
-pub fn reassemble(a: Allocator, parts: []const Part, diags: *Diag.List) Error!?[]const u8 {
+pub fn reassemble(gpa: Allocator, parts: []const Part, diags: *Diag.List) Error!?[]const u8 {
     if (parts.len == 0) return null;
 
     const total = parts[0].total;
@@ -308,7 +308,7 @@ pub fn reassemble(a: Allocator, parts: []const Part, diags: *Diag.List) Error!?[
         return null;
     }
 
-    const out = try a.alloc(u8, size);
+    const out = try gpa.alloc(u8, size);
     var at: usize = 0;
     var want: u8 = 0;
     while (want < total) : (want += 1) {
@@ -1122,7 +1122,7 @@ test "records: the parts of a split essence, in order, once each, or not at all"
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const a = arena.allocator();
+    const scratch = arena.allocator();
 
     // In order.
     const whole = [_]Part{
@@ -1130,18 +1130,18 @@ test "records: the parts of a split essence, in order, once each, or not at all"
         .{ .seq = 1, .total = 3, .body = "two" },
         .{ .seq = 2, .total = 3, .body = "three" },
     };
-    try testing.expectEqualStrings("onetwothree", (try reassemble(a, &whole, &diags)).?);
+    try testing.expectEqualStrings("onetwothree", (try reassemble(scratch, &whole, &diags)).?);
 
     // OUT of order: the carrier may hand them back in any order, and
     // `seq` — not arrival — is what says where a part belongs.
     const shuffled = [_]Part{ whole[2], whole[0], whole[1] };
-    try testing.expectEqualStrings("onetwothree", (try reassemble(a, &shuffled, &diags)).?);
+    try testing.expectEqualStrings("onetwothree", (try reassemble(scratch, &shuffled, &diags)).?);
     try testing.expectEqual(@as(usize, 0), diags.items().len);
 
     // A DUPLICATE `seq`: three parts, `total` 3, but part 1 is missing
     // and part 0 is there twice. Counting alone would accept it.
     const duplicated = [_]Part{ whole[0], whole[0], whole[2] };
-    try testing.expect((try reassemble(a, &duplicated, &diags)) == null);
+    try testing.expect((try reassemble(scratch, &duplicated, &diags)) == null);
     try testing.expectEqual(@as(usize, 1), diags.count(.residue_corrupt));
 
     // A `total` two parts disagree on, a `seq` past `total`, a `total`
@@ -1153,12 +1153,12 @@ test "records: the parts of a split essence, in order, once each, or not at all"
         &.{ whole[0], whole[1] },
     };
     for (cases) |parts| {
-        try testing.expect((try reassemble(a, parts, &diags)) == null);
+        try testing.expect((try reassemble(scratch, parts, &diags)) == null);
     }
     try testing.expectEqual(@as(usize, 5), diags.count(.residue_corrupt));
 
     // No parts at all is no essence, and no complaint.
-    try testing.expect((try reassemble(a, &.{}, &diags)) == null);
+    try testing.expect((try reassemble(scratch, &.{}, &diags)) == null);
     try testing.expectEqual(@as(usize, 5), diags.count(.residue_corrupt));
 }
 

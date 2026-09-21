@@ -321,7 +321,7 @@ pub fn reconcile(
 
     var run: Run = .{
         .gpa = gpa,
-        .a = arena.allocator(),
+        .arena = arena.allocator(),
         .schema = schema,
         .file = file,
         .opts = opts,
@@ -358,12 +358,13 @@ pub fn reconcile(
 // The run
 // ---------------------------------------------------------------------
 
-/// One reconciliation, with the two allocators it uses kept apart: `a`
-/// is the result's arena and owns everything that comes out, `gpa` is
-/// for the scratch the intermediate loads and walks need.
+/// One reconciliation, with the two allocators it uses kept apart:
+/// `arena` is the result's and owns everything that comes out — nothing
+/// allocated from it is ever freed on its own — and `gpa` is for the
+/// scratch the intermediate loads and walks need, freed as it goes.
 const Run = struct {
     gpa: Allocator,
-    a: Allocator,
+    arena: Allocator,
     schema: *const Schema,
     file: File,
     opts: Options,
@@ -498,16 +499,16 @@ const Run = struct {
         defer self.gpa.free(head);
 
         var out: std.ArrayList(u8) = .empty;
-        try out.appendSlice(self.a, headerFor(rule));
-        try out.append(self.a, '\n');
-        try out.appendSlice(self.a, head);
+        try out.appendSlice(self.arena, headerFor(rule));
+        try out.append(self.arena, '\n');
+        try out.appendSlice(self.arena, head);
         self.text = out.items;
         self.tier_at = anchorLineEnd(self.text) orelse self.text.len;
 
         for (sk.lanes) |l| {
             const b = l.binding orelse continue;
-            try self.verdicts.append(self.a, .{
-                .lane = try self.a.dupe(u8, l.name),
+            try self.verdicts.append(self.arena, .{
+                .lane = try self.arena.dupe(u8, l.name),
                 .address = b.address,
                 .hash_ok = false,
                 .action = .skeleton,
@@ -520,13 +521,13 @@ const Run = struct {
     /// bridge's dump after it.
     fn wrapper(self: *Run) Error![:0]const u8 {
         var out: std.ArrayList(u8) = .empty;
-        try out.appendSlice(self.a, "(timeline :conductor ");
-        try out.appendSlice(self.a, self.opts.anchor_id);
-        try out.appendSlice(self.a, ")\n\n");
+        try out.appendSlice(self.arena, "(timeline :conductor ");
+        try out.appendSlice(self.arena, self.opts.anchor_id);
+        try out.appendSlice(self.arena, ")\n\n");
         try self.anchorForm(&out, self.opts.anchor_id, @tagName(self.file.tier.kind()));
-        try out.append(self.a, '\n');
-        try out.appendSlice(self.a, self.file.text);
-        return out.toOwnedSliceSentinel(self.a, 0);
+        try out.append(self.arena, '\n');
+        try out.appendSlice(self.arena, self.file.text);
+        return out.toOwnedSliceSentinel(self.arena, 0);
     }
 
     /// `(anchor :id X :kind K :file "…" :size N :sha256 "…")` over the
@@ -537,27 +538,27 @@ const Run = struct {
         id: []const u8,
         kind_name: []const u8,
     ) Error!void {
-        try out.appendSlice(self.a, "(anchor :id ");
-        try out.appendSlice(self.a, id);
-        try out.appendSlice(self.a, " :kind ");
-        try out.appendSlice(self.a, kind_name);
-        try out.appendSlice(self.a, " :file ");
+        try out.appendSlice(self.arena, "(anchor :id ");
+        try out.appendSlice(self.arena, id);
+        try out.appendSlice(self.arena, " :kind ");
+        try out.appendSlice(self.arena, kind_name);
+        try out.appendSlice(self.arena, " :file ");
         try self.string(out, self.file.name);
-        try out.print(self.a, " :size {d} :sha256 \"", .{self.file.bytes.len});
-        try out.appendSlice(self.a, &hexDigest(self.file.bytes));
-        try out.appendSlice(self.a, "\")");
+        try out.print(self.arena, " :size {d} :sha256 \"", .{self.file.bytes.len});
+        try out.appendSlice(self.arena, &hexDigest(self.file.bytes));
+        try out.appendSlice(self.arena, "\")");
     }
 
     fn string(self: *Run, out: *std.ArrayList(u8), text: []const u8) Error!void {
-        try out.append(self.a, '"');
+        try out.append(self.arena, '"');
         for (text) |c| {
             switch (c) {
-                '"', '\\' => try out.append(self.a, '\\'),
+                '"', '\\' => try out.append(self.arena, '\\'),
                 else => {},
             }
-            try out.append(self.a, c);
+            try out.append(self.arena, c);
         }
-        try out.append(self.a, '"');
+        try out.append(self.arena, '"');
     }
 
     // ---- rule 2: the essence restored ----
@@ -571,7 +572,7 @@ const Run = struct {
         var recs: std.ArrayList(Record) = .empty;
         for (p.lanes) |body| {
             const rec = (try self.laneRecord(body)) orelse return self.derive(.corrupt);
-            try recs.append(self.a, rec);
+            try recs.append(self.arena, rec);
         }
         const conductor_rec: ?records.ConductorRecord = if (p.conductor) |body|
             (try self.conductorRecord(body)) orelse return self.derive(.corrupt)
@@ -612,13 +613,13 @@ const Run = struct {
         defer decoded.deinit(self.gpa);
         switch (decoded) {
             .ok => |r| {
-                const segments = try self.a.alloc(records.Segment, r.steps_only.len);
+                const segments = try self.arena.alloc(records.Segment, r.steps_only.len);
                 for (r.steps_only, segments) |src, *dst| dst.* = .{
                     .at = src.at,
-                    .ease = try self.a.dupe(u8, src.ease),
+                    .ease = try self.arena.dupe(u8, src.ease),
                 };
                 return .{
-                    .lane = try self.a.dupe(u8, r.lane),
+                    .lane = try self.arena.dupe(u8, r.lane),
                     .address = r.address,
                     .hash = r.hash,
                     .hash_ok = false,
@@ -680,7 +681,7 @@ const Run = struct {
     fn partial(self: *Run, text: []const u8) Error!void {
         self.rule = .partial;
 
-        const src = try self.a.dupeZ(u8, text);
+        const src = try self.arena.dupeZ(u8, text);
         var tree = try sjon.parse(self.gpa, src);
         defer tree.deinit();
         if (tree.hasErrors()) return self.corruptEssence();
@@ -700,8 +701,8 @@ const Run = struct {
             if (keyValue(&tree, idx, "from") == null) continue;
             const name = atomText(&tree, keyValue(&tree, idx, "name") orelse continue) orelse continue;
             const address = addressOf(&tree, idx, self.file.tier.kind()) orelse continue;
-            try self.verdicts.append(self.a, .{
-                .lane = try self.a.dupe(u8, name),
+            try self.verdicts.append(self.arena, .{
+                .lane = try self.arena.dupe(u8, name),
                 .address = address,
                 .hash_ok = false,
                 .action = .became_bound,
@@ -724,16 +725,16 @@ const Run = struct {
     ) Error!void {
         var out: std.ArrayList(u8) = .empty;
         if (self.rule == .partial) {
-            try out.appendSlice(self.a, header_partial);
-            try out.append(self.a, '\n');
+            try out.appendSlice(self.arena, header_partial);
+            try out.append(self.arena, '\n');
         }
 
         // The carrying anchor's own spelling, for the marker rewrite and
         // for the `:conductor` and `:from` a stale lane needs.
         const marker = markerOf(tree);
-        const anchor_id = if (marker.id) |t| try self.a.dupe(u8, t) else self.opts.anchor_id;
+        const anchor_id = if (marker.id) |t| try self.arena.dupe(u8, t) else self.opts.anchor_id;
         const anchor_kind = if (marker.kind) |t|
-            try self.a.dupe(u8, t)
+            try self.arena.dupe(u8, t)
         else
             @tagName(self.file.tier.kind());
 
@@ -748,31 +749,31 @@ const Run = struct {
                 // The marker, made real — and the place the file's own
                 // tier goes back into, straight after it.
                 .marker => {
-                    try out.appendSlice(self.a, root.lead);
+                    try out.appendSlice(self.arena, root.lead);
                     try self.anchorForm(&out, anchor_id, anchor_kind);
-                    try out.append(self.a, '\n');
+                    try out.append(self.arena, '\n');
                     self.tier_at = out.items.len;
                     placed = true;
                     cursor.eat_newline = true;
                 },
                 // Dropped whole, its lead with it, and named as a loss.
-                .drop => |what| try dropped.append(self.a, try self.dropLabel(tree, source, idx, what)),
+                .drop => |what| try dropped.append(self.arena, try self.dropLabel(tree, source, idx, what)),
                 .conduct => {
-                    try out.appendSlice(self.a, root.lead);
+                    try out.appendSlice(self.arena, root.lead);
                     try self.conductorKey(&out, source, span, anchor_id);
                 },
                 .bind => |name| {
-                    try out.appendSlice(self.a, root.lead);
+                    try out.appendSlice(self.arena, root.lead);
                     try self.bindLane(&out, tree, source, idx, recs, name, anchor_id);
                 },
                 .keep => {
-                    try out.appendSlice(self.a, root.lead);
-                    try out.appendSlice(self.a, root.body);
+                    try out.appendSlice(self.arena, root.lead);
+                    try out.appendSlice(self.arena, root.body);
                 },
             }
         }
 
-        try out.appendSlice(self.a, cursor.rest());
+        try out.appendSlice(self.arena, cursor.rest());
         if (!placed) try self.appendAnchor(&out, anchor_id, anchor_kind);
         self.text = out.items;
 
@@ -918,10 +919,10 @@ const Run = struct {
             span.end - 1
         else
             span.end;
-        try out.appendSlice(self.a, source[span.start..close]);
-        try out.appendSlice(self.a, " :conductor ");
-        try out.appendSlice(self.a, anchor_id);
-        try out.appendSlice(self.a, source[close..span.end]);
+        try out.appendSlice(self.arena, source[span.start..close]);
+        try out.appendSlice(self.arena, " :conductor ");
+        try out.appendSlice(self.arena, anchor_id);
+        try out.appendSlice(self.arena, source[close..span.end]);
     }
 
     /// A document whose essence carried no anchor at all still has to
@@ -934,10 +935,10 @@ const Run = struct {
         anchor_kind: []const u8,
     ) Error!void {
         if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') {
-            try out.append(self.a, '\n');
+            try out.append(self.arena, '\n');
         }
         try self.anchorForm(out, anchor_id, anchor_kind);
-        try out.append(self.a, '\n');
+        try out.append(self.arena, '\n');
         self.tier_at = out.items.len;
     }
 
@@ -955,7 +956,7 @@ const Run = struct {
             .{if (dropped.len == 0)
                 "nothing — the document had no points or cues of its own, and now takes its time from the file"
             else
-                try std.mem.join(self.a, ", ", dropped)},
+                try std.mem.join(self.arena, ", ", dropped)},
         );
     }
 
@@ -991,7 +992,7 @@ const Run = struct {
             const bound = laneIsStale(recs, rec.lane);
             var hints: []const Hint = &.{};
             if (bound) hints = try self.verifiedHints(rec);
-            try self.verdicts.append(self.a, .{
+            try self.verdicts.append(self.arena, .{
                 .lane = rec.lane,
                 .address = rec.address,
                 .hash_ok = rec.hash_ok,
@@ -1006,10 +1007,10 @@ const Run = struct {
         // `:us 500000` are the same tempo and not the same document.
         for ([_][]const u8{ "qpm", "us" }) |key| {
             if (keyLiteral(tree, source, idx, key)) |lit| {
-                return std.fmt.allocPrint(self.a, "tempo-point :{s} {s}", .{ key, lit });
+                return std.fmt.allocPrint(self.arena, "tempo-point :{s} {s}", .{ key, lit });
             }
         }
-        return self.a.dupe(u8, "tempo-point");
+        return self.arena.dupe(u8, "tempo-point");
     }
 
     fn label(
@@ -1020,8 +1021,8 @@ const Run = struct {
         head: []const u8,
         key: []const u8,
     ) Error![]const u8 {
-        const lit = keyLiteral(tree, source, idx, key) orelse return self.a.dupe(u8, head);
-        return std.fmt.allocPrint(self.a, "{s} :{s} {s}", .{ head, key, lit });
+        const lit = keyLiteral(tree, source, idx, key) orelse return self.arena.dupe(u8, head);
+        return std.fmt.allocPrint(self.arena, "{s} :{s} {s}", .{ head, key, lit });
     }
 
     /// A native lane, rewritten as a BOUND one at its records' address:
@@ -1072,24 +1073,24 @@ const Run = struct {
             const v = keyValue(tree, idx, "kind") orelse break :blk "notes";
             break :blk atomText(tree, v) orelse "notes";
         };
-        try out.appendSlice(self.a, "(lane :name ");
-        try out.appendSlice(self.a, name);
-        try out.appendSlice(self.a, " :kind ");
-        try out.appendSlice(self.a, kind_text);
+        try out.appendSlice(self.arena, "(lane :name ");
+        try out.appendSlice(self.arena, name);
+        try out.appendSlice(self.arena, " :kind ");
+        try out.appendSlice(self.arena, kind_text);
         if (keyLiteral(tree, source, idx, "target")) |t| {
-            try out.appendSlice(self.a, " :target ");
-            try out.appendSlice(self.a, t);
+            try out.appendSlice(self.arena, " :target ");
+            try out.appendSlice(self.arena, t);
         }
-        try out.appendSlice(self.a, " :from ");
-        try out.appendSlice(self.a, anchor_id);
+        try out.appendSlice(self.arena, " :from ");
+        try out.appendSlice(self.arena, anchor_id);
         try self.addressKeys(out, address);
         if (std.mem.eql(u8, kind_text, "curve")) {
             if (keyLiteral(tree, source, idx, "range")) |r| {
-                try out.appendSlice(self.a, " :range ");
-                try out.appendSlice(self.a, r);
+                try out.appendSlice(self.arena, " :range ");
+                try out.appendSlice(self.arena, r);
             }
         }
-        try out.append(self.a, ')');
+        try out.append(self.arena, ')');
     }
 
     /// What the lane at `idx` holds that a bound one cannot: its notes,
@@ -1116,33 +1117,33 @@ const Run = struct {
     fn lossProse(self: *Run, loss: Loss) Error![]const u8 {
         var parts: std.ArrayList([]const u8) = .empty;
         if (loss.notes > 0) {
-            try parts.append(self.a, try std.fmt.allocPrint(self.a, "{d} notes", .{loss.notes}));
+            try parts.append(self.arena, try std.fmt.allocPrint(self.arena, "{d} notes", .{loss.notes}));
         }
-        if (loss.keyframes > 0) try parts.append(self.a, try std.fmt.allocPrint(
-            self.a,
+        if (loss.keyframes > 0) try parts.append(self.arena, try std.fmt.allocPrint(
+            self.arena,
             "{d} keyframes and their exact values",
             .{loss.keyframes},
         ));
-        if (loss.clips > 0) try parts.append(self.a, try std.fmt.allocPrint(
-            self.a,
+        if (loss.clips > 0) try parts.append(self.arena, try std.fmt.allocPrint(
+            self.arena,
             "{d} clips and their structure",
             .{loss.clips},
         ));
-        if (loss.transposed > 0) try parts.append(self.a, try std.fmt.allocPrint(
-            self.a,
+        if (loss.transposed > 0) try parts.append(self.arena, try std.fmt.allocPrint(
+            self.arena,
             "{d} :transpose",
             .{loss.transposed},
         ));
         if (parts.items.len == 0) return "nothing but the lane's own nativeness";
-        return std.mem.join(self.a, ", ", parts.items);
+        return std.mem.join(self.arena, ", ", parts.items);
     }
 
     fn addressKeys(self: *Run, out: *std.ArrayList(u8), address: Doc.Address) Error!void {
-        return addressKeysInto(self.a, out, address);
+        return addressKeysInto(self.arena, out, address);
     }
 
     fn addressText(self: *Run, address: Doc.Address) Error![]const u8 {
-        return addressProse(self.a, address);
+        return addressProse(self.arena, address);
     }
 
     fn conductorHash(self: *Run) [32]u8 {
@@ -1173,7 +1174,7 @@ const Run = struct {
             const ease = rec.segments[i].ease;
             if (to <= from) continue;
             if (verifySegment(steps, from, to, ease, self.opts.eps)) {
-                try kept.append(self.a, .{ .from = from, .to = to, .ease = ease });
+                try kept.append(self.arena, .{ .from = from, .to = to, .ease = ease });
             } else {
                 try self.diags.add(
                     .ease_hint_mismatch,
@@ -1235,27 +1236,27 @@ const Run = struct {
 /// non-idempotent — dump, print, dump again and the text moves. A test
 /// at the bottom of this file loads what this produces and compares the
 /// printer's own output with it, address shape by address shape.
-pub fn addressKeysInto(a: Allocator, out: *std.ArrayList(u8), address: Doc.Address) Error!void {
+pub fn addressKeysInto(gpa: Allocator, out: *std.ArrayList(u8), address: Doc.Address) Error!void {
     switch (address) {
         .smf => |s| {
-            try out.print(a, " :track {d} :ch ", .{s.track});
-            try channelsInto(a, out, s.ch, "[", " ", "]");
-            if (s.key) |k| try out.print(a, " :key {d}", .{k});
+            try out.print(gpa, " :track {d} :ch ", .{s.track});
+            try channelsInto(gpa, out, s.ch, "[", " ", "]");
+            if (s.key) |k| try out.print(gpa, " :key {d}", .{k});
             if (s.curve) |c| switch (c) {
-                .cc => |n| try out.print(a, " :cc {d}", .{n}),
-                .cc14 => |pair| try out.print(a, " :cc [{d} {d}]", .{ pair[0], pair[1] }),
-                .bend => try out.appendSlice(a, " :bend true"),
-                .pressure => try out.appendSlice(a, " :pressure true"),
-                .velocity => try out.appendSlice(a, " :velocity true"),
+                .cc => |n| try out.print(gpa, " :cc {d}", .{n}),
+                .cc14 => |pair| try out.print(gpa, " :cc [{d} {d}]", .{ pair[0], pair[1] }),
+                .bend => try out.appendSlice(gpa, " :bend true"),
+                .pressure => try out.appendSlice(gpa, " :pressure true"),
+                .velocity => try out.appendSlice(gpa, " :velocity true"),
             };
         },
         .it => |s| {
-            try out.print(a, " :channel {d}", .{@as(u8, s.channel) + 1});
+            try out.print(gpa, " :channel {d}", .{@as(u8, s.channel) + 1});
             if (s.column) |col| {
-                try out.appendSlice(a, " :column ");
-                try out.appendSlice(a, @tagName(col));
+                try out.appendSlice(gpa, " :column ");
+                try out.appendSlice(gpa, @tagName(col));
             }
-            if (s.fx) |letter| try out.print(a, " :fx \"{c}\"", .{letter});
+            if (s.fx) |letter| try out.print(gpa, " :fx \"{c}\"", .{letter});
         },
     }
 }
@@ -1265,31 +1266,31 @@ pub fn addressKeysInto(a: Allocator, out: *std.ArrayList(u8), address: Doc.Addre
 /// person and `:track 2 :ch 1` in the middle of a sentence is not.
 /// `check-residue`'s table reads it too.
 ///
-/// The slice is `a`'s and is never freed on its own: pass an ARENA (the
-/// result's, or a scratch one the caller drops whole). It is an
-/// `ArrayList`'s `items`, so `a.free` on it is wrong whenever the list
+/// The slice is `arena`'s and is never freed on its own: pass an ARENA
+/// (the result's, or a scratch one the caller drops whole). It is an
+/// `ArrayList`'s `items`, so `free` on it is wrong whenever the list
 /// over-allocated.
-pub fn addressProse(a: Allocator, address: Doc.Address) Error![]const u8 {
+pub fn addressProse(arena: Allocator, address: Doc.Address) Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     switch (address) {
         .smf => |s| {
             // A set reads `ch 1,2` — the channels, and nothing that could
             // be taken for arithmetic between them.
-            try out.print(a, "track {d} ch ", .{s.track});
-            try channelsInto(a, &out, s.ch, "", ",", "");
-            if (s.key) |k| try out.print(a, " key {d}", .{k});
+            try out.print(arena, "track {d} ch ", .{s.track});
+            try channelsInto(arena, &out, s.ch, "", ",", "");
+            if (s.key) |k| try out.print(arena, " key {d}", .{k});
             if (s.curve) |c| switch (c) {
-                .cc => |n| try out.print(a, " cc {d}", .{n}),
-                .cc14 => |pair| try out.print(a, " cc {d}+{d}", .{ pair[0], pair[1] }),
-                .bend => try out.appendSlice(a, " bend"),
-                .pressure => try out.appendSlice(a, " pressure"),
-                .velocity => try out.appendSlice(a, " velocity"),
+                .cc => |n| try out.print(arena, " cc {d}", .{n}),
+                .cc14 => |pair| try out.print(arena, " cc {d}+{d}", .{ pair[0], pair[1] }),
+                .bend => try out.appendSlice(arena, " bend"),
+                .pressure => try out.appendSlice(arena, " pressure"),
+                .velocity => try out.appendSlice(arena, " velocity"),
             };
         },
         .it => |s| {
-            try out.print(a, "channel {d}", .{@as(u8, s.channel) + 1});
-            if (s.column) |col| try out.print(a, " column {s}", .{@tagName(col)});
-            if (s.fx) |letter| try out.print(a, " fx {c}", .{letter});
+            try out.print(arena, "channel {d}", .{@as(u8, s.channel) + 1});
+            if (s.column) |col| try out.print(arena, " column {s}", .{@tagName(col)});
+            if (s.fx) |letter| try out.print(arena, " fx {c}", .{letter});
         },
     }
     return out.items;
@@ -1299,23 +1300,23 @@ pub fn addressProse(a: Allocator, address: Doc.Address) Error![]const u8 {
 /// or `open`, the channels ascending with `sep` between them, and
 /// `close` for several — `[1 2]` as a document key, `1,2` in prose.
 fn channelsInto(
-    a: Allocator,
+    gpa: Allocator,
     out: *std.ArrayList(u8),
     chs: Doc.Channels,
     open: []const u8,
     sep: []const u8,
     close: []const u8,
 ) Error!void {
-    if (chs.count() == 1) return out.print(a, "{d}", .{@as(u8, chs.first()) + 1});
-    try out.appendSlice(a, open);
+    if (chs.count() == 1) return out.print(gpa, "{d}", .{@as(u8, chs.first()) + 1});
+    try out.appendSlice(gpa, open);
     var it = chs.iterator();
     var first = true;
     while (it.next()) |c| {
-        if (!first) try out.appendSlice(a, sep);
+        if (!first) try out.appendSlice(gpa, sep);
         first = false;
-        try out.print(a, "{d}", .{@as(u8, c) + 1});
+        try out.print(gpa, "{d}", .{@as(u8, c) + 1});
     }
-    try out.appendSlice(a, close);
+    try out.appendSlice(gpa, close);
 }
 
 // ---------------------------------------------------------------------
@@ -1435,8 +1436,9 @@ fn dropConductor(track: *Sequence.Track) usize {
 const fx_t: u8 = 'T' - '@';
 
 /// Rule 2's consumption over a `.it`, in place: `module` is the one the
-/// tier will be printed from. `a` owns the returned pattern list.
-pub fn consumeIt(a: Allocator, module: *itf.Module, result: *const Result) Error!Consumed {
+/// tier will be printed from. `arena` owns the returned pattern list,
+/// an `ArrayList`'s `items` that is never freed on its own.
+pub fn consumeIt(arena: Allocator, module: *itf.Module, result: *const Result) Error!Consumed {
     var out: Consumed = .{};
     if (result.rule != .restored) return out;
     var touched: std.ArrayList(u16) = .empty;
@@ -1461,7 +1463,7 @@ pub fn consumeIt(a: Allocator, module: *itf.Module, result: *const Result) Error
             }
             if (cleared > 0) {
                 out.cells += cleared;
-                try touch(a, &touched, pi);
+                try touch(arena, &touched, pi);
             }
         }
     }
@@ -1478,7 +1480,7 @@ pub fn consumeIt(a: Allocator, module: *itf.Module, result: *const Result) Error
             }
             if (cleared > 0) {
                 out.conductor += cleared;
-                try touch(a, &touched, @intCast(pi));
+                try touch(arena, &touched, @intCast(pi));
             }
         };
     }
@@ -1487,12 +1489,12 @@ pub fn consumeIt(a: Allocator, module: *itf.Module, result: *const Result) Error
     return out;
 }
 
-/// `pi` into the ascending, deduplicated list.
-fn touch(a: Allocator, list: *std.ArrayList(u16), pi: u16) Error!void {
+/// `pi` into the ascending, deduplicated list. `gpa` is the list's own.
+fn touch(gpa: Allocator, list: *std.ArrayList(u16), pi: u16) Error!void {
     var i: usize = 0;
     while (i < list.items.len and list.items[i] < pi) : (i += 1) {}
     if (i < list.items.len and list.items[i] == pi) return;
-    try list.insert(a, i, pi);
+    try list.insert(gpa, i, pi);
 }
 
 /// The four hashes over one file, as it reads NOW.
@@ -1767,14 +1769,14 @@ fn laneAddress(recs: []const Record, name: []const u8) ?Doc.Address {
 /// "Hash scope for IT rendered lanes", answered here and restated in
 /// `docs/residue.md` at E3).
 ///
-/// The slice is `a`'s and is never freed on its own: pass an ARENA. It
-/// is an `ArrayList`'s `items` and its capacity may exceed its length,
-/// so `a.free` on it is wrong.
-pub fn playedPatterns(a: Allocator, rows: *const walk.RowMap) Error![]u16 {
+/// The slice is `arena`'s and is never freed on its own: pass an ARENA.
+/// It is an `ArrayList`'s `items` and its capacity may exceed its
+/// length, so `free` on it is wrong.
+pub fn playedPatterns(arena: Allocator, rows: *const walk.RowMap) Error![]u16 {
     var seen: std.ArrayList(u16) = .empty;
     for (rows.rows) |row| {
         if (std.mem.indexOfScalar(u16, seen.items, row.pattern) != null) continue;
-        try seen.append(a, row.pattern);
+        try seen.append(arena, row.pattern);
     }
     std.mem.sort(u16, seen.items, {}, std.sort.asc(u16));
     return seen.items;
@@ -2862,13 +2864,13 @@ const ItCarry = struct {
 fn itCase(gpa: Allocator, schema: *const Schema, carry: ItCarry) !ItCase {
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
-    const a = scratch.allocator();
+    const arena = scratch.allocator();
 
     var written = try itFile(gpa, carry.written);
     defer written.deinit();
     var wrows = try walk.derive(gpa, &written, .{});
     defer wrows.deinit();
-    const pats = try playedPatterns(a, &wrows);
+    const pats = try playedPatterns(arena, &wrows);
 
     const kick = try records.encodeLane(gpa, .{
         .lane = "kick",
@@ -3265,17 +3267,16 @@ test "reconcile: the binding keys it writes are the ones the printer writes back
     for (cases) |c| {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        const a = arena.allocator();
 
         var keys: std.ArrayList(u8) = .empty;
-        try addressKeysInto(a, &keys, c.address);
+        try addressKeysInto(arena.allocator(), &keys, c.address);
 
         const kind_name = switch (c.address) {
             .smf => "smf",
             .it => "it",
         };
         const source = try std.fmt.allocPrintSentinel(
-            a,
+            arena.allocator(),
             "(timeline :title \"t\")\n" ++
                 "(anchor :id song :kind {s} :file \"x\" :size 1 :sha256 \"9f2a\")\n" ++
                 "(tempo-point :at 0bar :qpm 120)\n" ++

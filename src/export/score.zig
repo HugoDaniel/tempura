@@ -172,10 +172,9 @@ pub fn exportScore(
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
-    const a = arena.allocator();
 
     var e: Emitter = .{
-        .a = a,
+        .arena = arena.allocator(),
         .doc = d,
         .derived = derived,
         .map = &derived.map,
@@ -190,7 +189,7 @@ pub fn exportScore(
     // The BODY is rendered first, because the header comment counts what
     // rendering it found (the roundings, the aggregations, the keys) and
     // the warning comments are the diagnostics it raised.
-    var body: Io.Writer.Allocating = .init(a);
+    var body: Io.Writer.Allocating = .init(arena.allocator());
     try e.transport(&body.writer);
     try e.tempoForms(&body.writer);
     try e.cues(&body.writer);
@@ -201,7 +200,7 @@ pub fn exportScore(
     // Both sinks allocate from the RESULT's arena and neither is
     // `deinit`ed: the arena moves into the `Result`, so the text it hands
     // back outlives this frame and one `Result.deinit()` frees the lot.
-    var out: Io.Writer.Allocating = .init(a);
+    var out: Io.Writer.Allocating = .init(arena.allocator());
     try e.header(&out.writer);
     out.writer.writeAll(body.written()) catch return error.OutOfMemory;
 
@@ -212,7 +211,7 @@ pub fn exportScore(
         .aggregated = e.aggregated,
         .meter = .{ e.n, e.d },
         .seconds_mode = e.seconds_mode,
-        .landings = try e.landings.toOwnedSlice(a),
+        .landings = try e.landings.toOwnedSlice(arena.allocator()),
         .arena = arena,
     };
 }
@@ -223,7 +222,8 @@ pub fn exportScore(
 const TempoForm = struct { tick: i64, bpm: f64 };
 
 const Emitter = struct {
-    a: Allocator,
+    /// The result's arena: the text, the landings, every scratch table.
+    arena: Allocator,
     doc: *const doc.Doc,
     derived: *const derive.Derived,
     map: *const TimeMap.TimeMap,
@@ -296,11 +296,11 @@ const Emitter = struct {
         var kept = try self.coalesce(segments, 0);
         // Still past the cap: coalesce anything within `--tempo-eps`.
         if (kept.len + 1 > MAX_TEMPO_SEGMENTS) {
-            self.a.free(kept);
+            self.arena.free(kept);
             kept = try self.coalesce(segments, self.opts.tempo_eps);
         }
         if (kept.len + 1 > MAX_TEMPO_SEGMENTS) {
-            self.a.free(kept);
+            self.arena.free(kept);
             self.tempo = &.{};
             self.seconds_mode = true;
             // pacer reads an `s` literal against `ticks_per_second`,
@@ -332,15 +332,15 @@ const Emitter = struct {
     /// than `eps`. `eps == 0` is the always-on adjacent-equal collapse.
     fn coalesce(self: *Emitter, segments: []const TimeMap.Segment, eps: f64) Error![]TempoForm {
         var out: std.ArrayList(TempoForm) = .empty;
-        errdefer out.deinit(self.a);
+        errdefer out.deinit(self.arena);
         var last = self.bpm;
         for (segments[1..]) |seg| {
             const bpm = self.pacerBpm(seg.us);
             if (@abs(bpm - last) <= eps) continue;
-            try out.append(self.a, .{ .tick = seg.tick, .bpm = bpm });
+            try out.append(self.arena, .{ .tick = seg.tick, .bpm = bpm });
             last = bpm;
         }
-        return out.toOwnedSlice(self.a);
+        return out.toOwnedSlice(self.arena);
     }
 
     fn pacerBpm(self: *const Emitter, us: f64) f64 {
@@ -457,17 +457,17 @@ const Emitter = struct {
     }
 
     fn triggerForm(self: *Emitter, w: *Io.Writer, lane: *const doc.Lane, index: *const derive.LaneIndex) Error!void {
-        var t = try lanes.triggers(self.a, index.onsets, &self.mapper);
-        defer t.deinit(self.a);
+        var t = try lanes.triggers(self.arena, index.onsets, &self.mapper);
+        defer t.deinit(self.arena);
         // pacer refuses an empty `:at` list (`trigger_invalid`), so a
         // lane with nothing on it is a lane with no form.
         if (t.ticks.len == 0) return;
         self.aggregated +|= t.aggregated;
         // The proof's half of the emission: what the node suite reads
         // back through the real driver.
-        try self.landings.append(self.a, .{
+        try self.landings.append(self.arena, .{
             .target = lane.target,
-            .ticks = try self.a.dupe(i64, t.ticks),
+            .ticks = try self.arena.dupe(i64, t.ticks),
         });
 
         if (t.ticks.len > MAX_ONSETS) try self.diags.add(
@@ -496,12 +496,12 @@ const Emitter = struct {
     }
 
     fn trackForm(self: *Emitter, w: *Io.Writer, lane: *const doc.Lane, index: *const derive.LaneIndex) Error!void {
-        var c = try lanes.curve(self.a, lane, index, self.hints, &self.mapper, .{
+        var c = try lanes.curve(self.arena, lane, index, self.hints, &self.mapper, .{
             .eps = self.opts.eps,
             .ease_linear = self.opts.ease_linear,
             .no_hints = self.opts.no_hints,
         }, self.diags);
-        defer c.deinit(self.a);
+        defer c.deinit(self.arena);
         if (c.keys.len == 0) return;
 
         if (index.bound) {
@@ -970,12 +970,12 @@ test "score.exportScore: scene_duplicate and passthrough_conducts are the door's
     var fx = try synthetic(gpa, &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }}, &.{.{ .tick = 0, .n = 4, .d = 4 }}, bar);
     defer fx.deinit();
 
-    const a = fx.doc.arena.allocator();
-    const sections = try a.alloc(doc.Section, 1);
+    const arena = fx.doc.arena.allocator();
+    const sections = try arena.alloc(doc.Section, 1);
     sections[0] = .{ .name = "intro", .at = 0, .dur = bar, .span = .{ .start = 0, .end = 1 } };
     fx.doc.sections = sections;
 
-    const through = try a.alloc(doc.Passthrough, 3);
+    const through = try arena.alloc(doc.Passthrough, 3);
     through[0] = .{ .head = "scene", .text = "(scene :name intro :at 0b :dur 4b)", .comments = &.{}, .span = .{ .start = 0, .end = 1 } };
     through[1] = .{ .head = "transport", .text = "(transport :bpm 90 :meter [4 4])", .comments = &.{}, .span = .{ .start = 0, .end = 1 } };
     through[2] = .{ .head = "target", .text = "(target :name hit :arity 4)", .comments = &.{}, .span = .{ .start = 0, .end = 1 } };
@@ -1000,11 +1000,11 @@ test "score.exportScore: a pass-through root keeps its comments, above it, in or
     var fx = try synthetic(gpa, &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }}, &.{.{ .tick = 0, .n = 4, .d = 4 }}, bar);
     defer fx.deinit();
 
-    const a = fx.doc.arena.allocator();
-    const comments = try a.alloc([]const u8, 2);
+    const arena = fx.doc.arena.allocator();
+    const comments = try arena.alloc([]const u8, 2);
     comments[0] = "; the knob the piece is played with";
     comments[1] = "; pinned, so it is text";
-    const through = try a.alloc(doc.Passthrough, 1);
+    const through = try arena.alloc(doc.Passthrough, 1);
     through[0] = .{
         .head = "control",
         .text = "(control :id amt :type slider :min 0 :max 1 :value 0.5)",
@@ -1056,13 +1056,13 @@ fn synthetic(
 ) !support.Fixture {
     var d: doc.Doc = .empty(gpa);
     errdefer d.deinit();
-    const a = d.arena.allocator();
+    const arena = d.arena.allocator();
 
-    d.tempo = try a.dupe(TimeMap.TempoPoint, tempo);
-    d.meter = try a.dupe(TimeMap.MeterPoint, meter);
+    d.tempo = try arena.dupe(TimeMap.TempoPoint, tempo);
+    d.meter = try arena.dupe(TimeMap.MeterPoint, meter);
     d.length = length;
 
-    const notes = try a.alloc(doc.Note, 4);
+    const notes = try arena.alloc(doc.Note, 4);
     for (notes, 0..) |*n, i| n.* = .{
         .at = @as(i64, @intCast(i)) * q,
         .dur = @divExact(q, 2),
@@ -1072,7 +1072,7 @@ fn synthetic(
         .off_vel = null,
         .span = .{ .start = 0, .end = 1 },
     };
-    const lane_list = try a.alloc(doc.Lane, 1);
+    const lane_list = try arena.alloc(doc.Lane, 1);
     lane_list[0] = .{
         .name = "hit",
         .kind = .notes,
@@ -1139,8 +1139,8 @@ fn ramped(gpa: std.mem.Allocator, count: usize, step: f64) !support.Fixture {
 /// Replace the fixture's lane with `n` onsets, one per 32nd, and
 /// re-derive.
 fn addNotes(fx: *support.Fixture, n: usize) !void {
-    const a = fx.doc.arena.allocator();
-    const notes = try a.alloc(doc.Note, n);
+    const arena = fx.doc.arena.allocator();
+    const notes = try arena.alloc(doc.Note, n);
     for (notes, 0..) |*note, i| note.* = .{
         .at = @as(i64, @intCast(i)) * @divExact(q, 4),
         .dur = @divExact(q, 8),
@@ -1156,8 +1156,8 @@ fn addNotes(fx: *support.Fixture, n: usize) !void {
 
 /// Replace the fixture's lane with a native curve of `n` keyframes.
 fn addKeyframes(fx: *support.Fixture, n: usize) !void {
-    const a = fx.doc.arena.allocator();
-    const keys = try a.alloc(doc.Keyframe, n);
+    const arena = fx.doc.arena.allocator();
+    const keys = try arena.alloc(doc.Keyframe, n);
     for (keys, 0..) |*key, i| key.* = .{
         .at = @as(i64, @intCast(i)) * @divExact(q, 4),
         .value = .{ @as(f32, @floatFromInt(i % 97)) / 97.0, 0, 0, 0 },

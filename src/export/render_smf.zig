@@ -156,7 +156,7 @@ pub fn renderSmf(
 
     var r: Render = .{
         .gpa = gpa,
-        .a = arena.allocator(),
+        .arena = arena.allocator(),
         .doc = doc,
         .derived = derived,
         .base = base,
@@ -196,7 +196,7 @@ pub fn renderSmf(
 const Render = struct {
     gpa: Allocator,
     /// The result's arena: every record's name and segments.
-    a: Allocator,
+    arena: Allocator,
     doc: *const Doc.Doc,
     derived: *const derive.Derived,
     base: ?*const Sequence.Sequence,
@@ -471,8 +471,8 @@ const Render = struct {
     }
 
     fn noteRecord(self: *Render, lane: *const Doc.Lane, track: u32, ch: u4) Error!void {
-        try self.lanes.append(self.a, .{
-            .lane = try self.a.dupe(u8, lane.name),
+        try self.lanes.append(self.arena, .{
+            .lane = try self.arena.dupe(u8, lane.name),
             .address = .{ .smf = .{
                 .track = @intCast(track + 1),
                 .ch = .single(ch),
@@ -520,9 +520,9 @@ const Render = struct {
                 if (std.mem.eql(u8, step.ease_src, "linear")) {
                     try self.ramp(b, track, num, range, prev, step, rate, &off_grid);
                 } else if (!std.mem.eql(u8, step.ease_src, "hold")) {
-                    try steps_only.append(self.a, .{
+                    try steps_only.append(self.arena, .{
                         .at = step.tick,
-                        .ease = try self.a.dupe(u8, step.ease_src),
+                        .ease = try self.arena.dupe(u8, step.ease_src),
                     });
                 }
             }
@@ -532,8 +532,8 @@ const Render = struct {
         }
         if (off_grid > 0) try self.rounded(lane.name, off_grid);
 
-        try self.lanes.append(self.a, .{
-            .lane = try self.a.dupe(u8, lane.name),
+        try self.lanes.append(self.arena, .{
+            .lane = try self.arena.dupe(u8, lane.name),
             .address = .{ .smf = .{
                 .track = @intCast(track + 1),
                 .ch = .single(0),

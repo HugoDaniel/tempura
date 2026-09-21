@@ -169,7 +169,6 @@ pub fn parseChunk(gpa: Allocator, bytes: []const u8) Error!ParsedChunk {
     // every way out but the one that hands the arena on.
     var kept = false;
     defer if (!kept) arena.deinit();
-    const a = arena.allocator();
 
     var taken: records.Gathered = .{};
     var newer: ?u8 = null;
@@ -187,7 +186,7 @@ pub fn parseChunk(gpa: Allocator, bytes: []const u8) Error!ParsedChunk {
         // `04` is midivia's; anything else is nobody's this build
         // knows. The chunk is re-emitted whole by the IT writer, so
         // stepping over them here loses nothing.
-        _ = try taken.take(a, rec.payload);
+        _ = try taken.take(arena.allocator(), rec.payload);
     }
 
     // The framing held but nothing in it is this version's: the whole
@@ -202,7 +201,7 @@ pub fn parseChunk(gpa: Allocator, bytes: []const u8) Error!ParsedChunk {
     // business, and `choose` is where a corrupt chunk becomes one.
     var quiet: Diag.List = .init(gpa);
     defer quiet.deinit();
-    const essence_body = try records.reassemble(a, taken.parts.items, &quiet);
+    const essence_body = try records.reassemble(arena.allocator(), taken.parts.items, &quiet);
     if (quiet.count(.residue_corrupt) > 0) return .{ .corrupt = .residue_corrupt };
 
     kept = true;
@@ -470,11 +469,11 @@ const Tailer = struct {
     /// that the residue itself changes.
     fn anchor(self: *Tailer) Error!void {
         const id = essence.carrierOf(self.doc) orelse return;
-        const a = self.doc.anchorById(id) orelse return;
+        const carrier = self.doc.anchorById(id) orelse return;
         try self.raw("(anchor :id ");
-        try self.symbol(a.id);
+        try self.symbol(carrier.id);
         try self.raw(" :kind ");
-        try self.raw(@tagName(a.kind));
+        try self.raw(@tagName(carrier.kind));
         try self.raw(" :file ");
         try self.string(essence.self_file);
         try self.raw(")");

@@ -115,7 +115,7 @@ pub fn renderIt(
 
     var r: Render = .{
         .gpa = gpa,
-        .a = arena.allocator(),
+        .arena = arena.allocator(),
         .doc = doc,
         .derived = derived,
         .base = base,
@@ -171,7 +171,8 @@ const Slot = struct {
 
 const Render = struct {
     gpa: Allocator,
-    a: Allocator,
+    /// The result's arena: every record's name and segments.
+    arena: Allocator,
     doc: *const Doc.Doc,
     derived: *const derive.Derived,
     base: ?*const itf.Module,
@@ -468,8 +469,8 @@ const Render = struct {
         }
 
         var ch: u8 = 0;
-        while (ch < voices) : (ch += 1) try self.lanes.append(self.a, .{
-            .lane = try self.a.dupe(u8, lane.name),
+        while (ch < voices) : (ch += 1) try self.lanes.append(self.arena, .{
+            .lane = try self.arena.dupe(u8, lane.name),
             .address = .{ .it = .{ .channel = @intCast(first + ch), .column = null, .fx = null } },
             .hash = @splat(0),
         });
@@ -568,17 +569,17 @@ const Render = struct {
                         self.placeCurve(at, channel, v, range);
                     }
                 } else if (!std.mem.eql(u8, step.ease_src, "hold")) {
-                    try steps_only.append(self.a, .{
+                    try steps_only.append(self.arena, .{
                         .at = step.tick,
-                        .ease = try self.a.dupe(u8, step.ease_src),
+                        .ease = try self.arena.dupe(u8, step.ease_src),
                     });
                 }
             }
             self.placeCurve(step.tick, channel, step.value[0], range);
         }
 
-        try self.lanes.append(self.a, .{
-            .lane = try self.a.dupe(u8, lane.name),
+        try self.lanes.append(self.arena, .{
+            .lane = try self.arena.dupe(u8, lane.name),
             .address = .{ .it = .{
                 .channel = @intCast(channel),
                 .column = if (self.opts.fx == null) .vol else .fx,
