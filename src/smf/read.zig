@@ -373,7 +373,10 @@ const Walk = struct {
             return;
         }
 
-        self.builder.format = @truncate(std.mem.readInt(u16, self.bytes[body..][0..2], .big));
+        // A u16 on the wire and a u8 on the value: checked as READ, then
+        // saturated, so 256 is neither a wrap to format 0 nor unnamed.
+        const format = std.mem.readInt(u16, self.bytes[body..][0..2], .big);
+        self.builder.format = std.math.cast(u8, format) orelse std.math.maxInt(u8);
         self.ntrks = std.mem.readInt(u16, self.bytes[body + 2 ..][0..2], .big);
 
         const raw = std.mem.readInt(u16, self.bytes[body + 4 ..][0..2], .big);
@@ -400,13 +403,13 @@ const Walk = struct {
             );
         }
 
-        if (self.builder.format > 2) try self.diag(
+        if (format > 2) try self.diag(
             .smf_bad_header,
             .warning,
             body,
             body + 2,
             "format {d} is none of 0, 1 or 2",
-            .{self.builder.format},
+            .{format},
         );
     }
 
@@ -1186,6 +1189,27 @@ test "read: ntrks that disagrees with the MTrk count is a diagnostic and the wal
     try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_ntrks_mismatch));
     const d = result.diags.items()[0];
     try testing.expectEqual(Diag.Span{ .start = 8, .end = 14 }, d.span);
+}
+
+test "read: a format past a byte is diagnosed as read, and saturates rather than wrapping" {
+    // `format` is a u16 on the wire and a u8 on the value. 256 truncated
+    // to 0 would read as a valid format 0 and skip the warning; it is
+    // named as the file spelled it, and kept as 255 — still no format.
+    const gpa = testing.allocator;
+
+    var t = support.ByteWriter.init(gpa);
+    defer t.deinit();
+    try t.vlq(0);
+    try t.raw(&[_]u8{ 0xFF, 0x2F, 0x00 });
+
+    const bytes = try support.buildFile(gpa, .{ .format = 256 }, &.{t.buf.items});
+    defer gpa.free(bytes);
+
+    var result = try read(gpa, bytes);
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 1), result.diags.count(.smf_bad_header));
+    try testing.expect(std.mem.indexOf(u8, result.diags.items()[0].message, "256") != null);
+    try testing.expectEqual(@as(u8, 255), result.sequence.format);
 }
 
 test "read: a header longer than six bytes keeps its extra bytes out of the walk" {
