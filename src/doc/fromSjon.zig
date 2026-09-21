@@ -311,6 +311,75 @@ const Dump = struct {
     len: u32,
 };
 
+/// The roots of one document sorted by what each is, in document order
+/// — the walk's scratch. These lists come from the gpa and die with the
+/// walk rather than with the document: the document's arena frees
+/// nothing until the document itself does, and a walk's bookkeeping has
+/// no business outliving the walk.
+const Partition = struct {
+    timelines: std.ArrayList(NodeIndex) = .empty,
+    anchors: std.ArrayList(NodeIndex) = .empty,
+    tempo: std.ArrayList(NodeIndex) = .empty,
+    meter: std.ArrayList(NodeIndex) = .empty,
+    sections: std.ArrayList(NodeIndex) = .empty,
+    cues: std.ArrayList(NodeIndex) = .empty,
+    lanes: std.ArrayList(NodeIndex) = .empty,
+    phrases: std.ArrayList(NodeIndex) = .empty,
+    passthrough: std.ArrayList(NodeIndex) = .empty,
+    /// How many inline dumps paired with each anchor, by position.
+    dumps_per_anchor: std.ArrayList(u32) = .empty,
+    /// The inline dumps themselves: one entry per dump, each naming the
+    /// anchor it follows and its own roots inside `dump_roots`.
+    dumps: std.ArrayList(Dump) = .empty,
+    dump_roots: std.ArrayList(NodeIndex) = .empty,
+
+    fn deinit(self: *Partition, gpa: Allocator) void {
+        self.timelines.deinit(gpa);
+        self.anchors.deinit(gpa);
+        self.tempo.deinit(gpa);
+        self.meter.deinit(gpa);
+        self.sections.deinit(gpa);
+        self.cues.deinit(gpa);
+        self.lanes.deinit(gpa);
+        self.phrases.deinit(gpa);
+        self.passthrough.deinit(gpa);
+        self.dumps_per_anchor.deinit(gpa);
+        self.dumps.deinit(gpa);
+        self.dump_roots.deinit(gpa);
+    }
+
+    /// Open a dump after the last anchor — the positional pairing of
+    /// plan 02, "(anchor …)": a dump belongs to the anchor it FOLLOWS,
+    /// one per anchor. Answers how many dumps that anchor now has, so
+    /// the caller can say `anchor_dump_duplicate` on a second, and null
+    /// when no anchor precedes the dump at all.
+    fn openDump(self: *Partition, gpa: Allocator, idx: NodeIndex, kind: Doc.AnchorKind) Error!?u32 {
+        if (self.dumps_per_anchor.items.len == 0) return null;
+        const last = &self.dumps_per_anchor.items[self.dumps_per_anchor.items.len - 1];
+        last.* += 1;
+        try self.dumps.append(gpa, .{
+            .anchor = @intCast(self.dumps_per_anchor.items.len - 1),
+            .kind = kind,
+            .start = @intCast(self.dump_roots.items.len),
+            .len = 1,
+        });
+        try self.dump_roots.append(gpa, idx);
+        return last.*;
+    }
+
+    /// Add a `(midi/mtrk …)` to the SMF dump still open ahead of it —
+    /// the header before it, with no other root in between — or answer
+    /// false when no such dump is open.
+    fn addTrack(self: *Partition, gpa: Allocator, idx: NodeIndex) Error!bool {
+        if (self.dumps.items.len == 0) return false;
+        const last = &self.dumps.items[self.dumps.items.len - 1];
+        if (last.kind != .smf or last.start + last.len != self.dump_roots.items.len) return false;
+        last.len += 1;
+        try self.dump_roots.append(gpa, idx);
+        return true;
+    }
+};
+
 /// Head text to `Root`, for the eight heads plan 02 declares. Everything
 /// else at the top level is pacer's and passes through.
 const root_heads = [_]struct { []const u8, Root }{
@@ -406,153 +475,141 @@ const Ctx = struct {
         return .passthrough;
     }
 
-    fn walk(self: *Ctx, forest: []const NodeIndex) Error!Doc.Doc {
-        var doc: Doc.Doc = .{ .arena = undefined };
-
-        // ---- the roots, partitioned in document order ----
-        //
-        // These ten are SCRATCH — node indices the walk sorts itself by,
-        // thrown away before it returns. They come from the gpa and are
-        // freed here rather than from the document's arena, which frees
-        // nothing until the document itself dies: a walk's bookkeeping
-        // has no business outliving the walk.
-        var timelines: std.ArrayList(NodeIndex) = .empty;
-        defer timelines.deinit(self.gpa);
-        var anchor_forms: std.ArrayList(NodeIndex) = .empty;
-        defer anchor_forms.deinit(self.gpa);
-        var tempo_forms: std.ArrayList(NodeIndex) = .empty;
-        defer tempo_forms.deinit(self.gpa);
-        var meter_forms: std.ArrayList(NodeIndex) = .empty;
-        defer meter_forms.deinit(self.gpa);
-        var section_forms: std.ArrayList(NodeIndex) = .empty;
-        defer section_forms.deinit(self.gpa);
-        var cue_forms: std.ArrayList(NodeIndex) = .empty;
-        defer cue_forms.deinit(self.gpa);
-        var lane_forms: std.ArrayList(NodeIndex) = .empty;
-        defer lane_forms.deinit(self.gpa);
-        var phrase_forms: std.ArrayList(NodeIndex) = .empty;
-        defer phrase_forms.deinit(self.gpa);
-        var passthrough_forms: std.ArrayList(NodeIndex) = .empty;
-        defer passthrough_forms.deinit(self.gpa);
-        // How many inline dumps paired with each anchor, by position.
-        var dumps_per_anchor: std.ArrayList(u32) = .empty;
-        defer dumps_per_anchor.deinit(self.gpa);
-        // The inline dumps themselves: one entry per dump, each naming
-        // the anchor it follows and its own roots inside `dump_roots`.
-        var dumps: std.ArrayList(Dump) = .empty;
-        defer dumps.deinit(self.gpa);
-        var dump_roots: std.ArrayList(NodeIndex) = .empty;
-        defer dump_roots.deinit(self.gpa);
-
+    /// Sort the forest's roots by what each is, and pair every inline
+    /// dump with the anchor before it. The complaints a root can earn
+    /// here — a dump or a track with nothing to belong to, a second dump
+    /// on one anchor — are said as they are met, in document order.
+    fn partition(self: *Ctx, forest: []const NodeIndex) Error!Partition {
+        var p: Partition = .{};
+        errdefer p.deinit(self.gpa);
         for (forest) |idx| {
             const what = self.classify(idx) orelse continue;
             switch (what) {
-                .timeline => try timelines.append(self.gpa, idx),
+                .timeline => try p.timelines.append(self.gpa, idx),
                 .anchor => {
-                    try anchor_forms.append(self.gpa, idx);
-                    try dumps_per_anchor.append(self.gpa, 0);
+                    try p.anchors.append(self.gpa, idx);
+                    try p.dumps_per_anchor.append(self.gpa, 0);
                 },
-                .tempo_point => try tempo_forms.append(self.gpa, idx),
-                .meter_point => try meter_forms.append(self.gpa, idx),
-                .section => try section_forms.append(self.gpa, idx),
-                .cue => try cue_forms.append(self.gpa, idx),
-                .lane => try lane_forms.append(self.gpa, idx),
-                .phrase => try phrase_forms.append(self.gpa, idx),
-                .passthrough => try passthrough_forms.append(self.gpa, idx),
+                .tempo_point => try p.tempo.append(self.gpa, idx),
+                .meter_point => try p.meter.append(self.gpa, idx),
+                .section => try p.sections.append(self.gpa, idx),
+                .cue => try p.cues.append(self.gpa, idx),
+                .lane => try p.lanes.append(self.gpa, idx),
+                .phrase => try p.phrases.append(self.gpa, idx),
+                .passthrough => try p.passthrough.append(self.gpa, idx),
                 .smf_dump, .it_dump => {
-                    // Positional pairing (plan 02, "(anchor …)"): a dump
-                    // belongs to the anchor it FOLLOWS, one per anchor.
-                    if (dumps_per_anchor.items.len == 0) {
+                    const kind: Doc.AnchorKind = if (what == .smf_dump) .smf else .it;
+                    const count = (try p.openDump(self.gpa, idx, kind)) orelse {
                         try self.emit(
                             .anchor_missing,
                             self.tree.spanOf(idx),
                             "an inline dump with no (anchor …) before it belongs to nothing",
                             .{},
                         );
-                    } else {
-                        const last = &dumps_per_anchor.items[dumps_per_anchor.items.len - 1];
-                        last.* += 1;
-                        if (last.* > 1) try self.emit(
-                            .anchor_dump_duplicate,
-                            self.tree.spanOf(idx),
-                            "the anchor this dump follows already has one; the pairing is positional and one dump per anchor",
-                            .{},
-                        );
-                        try dumps.append(self.gpa, .{
-                            .anchor = @intCast(dumps_per_anchor.items.len - 1),
-                            .kind = if (what == .smf_dump) .smf else .it,
-                            .start = @intCast(dump_roots.items.len),
-                            .len = 1,
-                        });
-                        try dump_roots.append(self.gpa, idx);
-                    }
-                },
-                .smf_track => {
-                    // A track belongs to the header before it. One with
-                    // no header belongs to nothing, which is the same
-                    // complaint an orphan dump gets.
-                    const open: ?*Dump = if (dumps.items.len == 0) null else blk: {
-                        const last = &dumps.items[dumps.items.len - 1];
-                        break :blk if (last.kind == .smf and
-                            last.start + last.len == dump_roots.items.len) last else null;
+                        continue;
                     };
-                    if (open) |dump| {
-                        dump.len += 1;
-                        try dump_roots.append(self.gpa, idx);
-                    } else try self.emit(
-                        .anchor_missing,
+                    if (count > 1) try self.emit(
+                        .anchor_dump_duplicate,
                         self.tree.spanOf(idx),
-                        "a (midi/mtrk …) with no (midi/smf …) before it belongs to no dump",
+                        "the anchor this dump follows already has one; " ++
+                            "the pairing is positional and one dump per anchor",
                         .{},
                     );
                 },
+                // A track belongs to the header before it. One with no
+                // header belongs to nothing, which is the same complaint
+                // an orphan dump gets.
+                .smf_track => if (!try p.addTrack(self.gpa, idx)) try self.emit(
+                    .anchor_missing,
+                    self.tree.spanOf(idx),
+                    "a (midi/mtrk …) with no (midi/smf …) before it belongs to no dump",
+                    .{},
+                ),
             }
         }
+        return p;
+    }
 
-        // ---- the header: one (timeline …), and the document's first ----
-        if (timelines.items.len == 0) {
+    /// The header: one `(timeline …)`, and the document's first root.
+    /// Every complaint is said and the first one is read regardless —
+    /// the walk is total.
+    fn readTimeline(
+        self: *Ctx,
+        doc: *Doc.Doc,
+        forest: []const NodeIndex,
+        timelines: []const NodeIndex,
+    ) Error!void {
+        if (timelines.len == 0) {
             try self.emit(
                 .timeline_missing,
                 .{ .start = 0, .end = 0 },
                 "the document has no (timeline …) root",
                 .{},
             );
-        } else {
-            for (timelines.items[1..]) |extra| {
-                try self.emit(
-                    .timeline_duplicate,
-                    self.tree.spanOf(extra),
-                    "a second (timeline …) root; there is one per document",
-                    .{},
-                );
-            }
-            if (!(forest.len > 0 and forest[0] == timelines.items[0])) {
-                try self.emit(
-                    .timeline_missing,
-                    self.tree.spanOf(timelines.items[0]),
-                    "(timeline …) is not the document's first root",
-                    .{},
-                );
-            }
-            try self.readHeader(&doc, timelines.items[0]);
+            return;
         }
+        for (timelines[1..]) |extra| {
+            try self.emit(
+                .timeline_duplicate,
+                self.tree.spanOf(extra),
+                "a second (timeline …) root; there is one per document",
+                .{},
+            );
+        }
+        if (!(forest.len > 0 and forest[0] == timelines[0])) {
+            try self.emit(
+                .timeline_missing,
+                self.tree.spanOf(timelines[0]),
+                "(timeline …) is not the document's first root",
+                .{},
+            );
+        }
+        try self.readHeader(doc, timelines[0]);
+    }
+
+    /// A conducted document has one owner of time: every tempo or meter
+    /// point of its own is `conductor_conflict`.
+    fn conductorConflicts(
+        self: *Ctx,
+        tempo: []const NodeIndex,
+        meter: []const NodeIndex,
+    ) Error!void {
+        for ([_][]const NodeIndex{ tempo, meter }) |set| {
+            for (set) |idx| try self.emit(
+                .conductor_conflict,
+                self.tree.spanOf(idx),
+                "this document names a :conductor, and a conducted document has one owner of time",
+                .{},
+            );
+        }
+    }
+
+    /// `:length`, resolved where the walk always resolved it — after the
+    /// lanes, so its complaint (if any) follows theirs.
+    fn readLength(self: *Ctx, doc: *Doc.Doc, timeline: NodeIndex) Error!void {
+        const children = self.tree.formHeader(timeline).children;
+        const node = kvNode(self.tree, children, "length") orelse return;
+        doc.length_lit = literalOf(self.tree, node);
+        doc.length = try self.resolve(node);
+    }
+
+    fn walk(self: *Ctx, forest: []const NodeIndex) Error!Doc.Doc {
+        var doc: Doc.Doc = .{ .arena = undefined };
+        var roots = try self.partition(forest);
+        defer roots.deinit(self.gpa);
+
+        // ---- the header: one (timeline …), and the document's first ----
+        try self.readTimeline(&doc, forest, roots.timelines.items);
         self.conductor = doc.conductor;
         self.end = doc.end;
 
         // ---- the two maps ----
-        try self.readMeterPoints(meter_forms.items);
-        try self.readTempoPoints(tempo_forms.items);
+        try self.readMeterPoints(roots.meter.items);
+        try self.readTempoPoints(roots.tempo.items);
         doc.tempo = self.tempo;
         doc.meter = self.meter;
         if (self.conductor != null) {
-            for ([_][]const NodeIndex{ tempo_forms.items, meter_forms.items }) |set| {
-                for (set) |idx| try self.emit(
-                    .conductor_conflict,
-                    self.tree.spanOf(idx),
-                    "this document names a :conductor, and a conducted document has one owner of time",
-                    .{},
-                );
-            }
+            try self.conductorConflicts(roots.tempo.items, roots.meter.items);
         }
 
         // ---- the anchors and the dumps they pair with ----
@@ -562,8 +619,8 @@ const Ctx = struct {
         // file's own tick, never the document's grid. The map, on the
         // other hand, may need THEM — a conducted document's tempo and
         // meter come out of the tier (plan 03, "Three conductors").
-        doc.anchors = try self.readAnchors(anchor_forms.items, dumps_per_anchor.items);
-        try self.readTiers(&doc, dumps.items, dump_roots.items, anchor_forms.items);
+        doc.anchors = try self.readAnchors(roots.anchors.items, roots.dumps_per_anchor.items);
+        try self.readTiers(&doc, roots.dumps.items, roots.dump_roots.items, roots.anchors.items);
         try self.conductorTables(&doc);
 
         // ---- the provisional map, and everything that resolves on it ----
@@ -571,19 +628,12 @@ const Ctx = struct {
         self.setMap(provisional.intoMap());
         defer self.dropMap();
 
-        doc.sections = try self.readSections(section_forms.items);
-        doc.cues = try self.readCues(cue_forms.items);
-        doc.phrases = try self.readPhrases(phrase_forms.items);
-        doc.lanes = try self.readLanes(lane_forms.items, &doc);
-        doc.passthrough = try self.readPassthrough(passthrough_forms.items);
-
-        if (timelines.items.len > 0) {
-            const children = self.tree.formHeader(timelines.items[0]).children;
-            if (kvNode(self.tree, children, "length")) |node| {
-                doc.length_lit = literalOf(self.tree, node);
-                doc.length = try self.resolve(node);
-            }
-        }
+        doc.sections = try self.readSections(roots.sections.items);
+        doc.cues = try self.readCues(roots.cues.items);
+        doc.phrases = try self.readPhrases(roots.phrases.items);
+        doc.lanes = try self.readLanes(roots.lanes.items, &doc);
+        doc.passthrough = try self.readPassthrough(roots.passthrough.items);
+        if (roots.timelines.items.len > 0) try self.readLength(&doc, roots.timelines.items[0]);
 
         // ---- the relations that need the whole document ----
         // A clip's window is the other half of the `:length` default
@@ -1145,17 +1195,8 @@ const Ctx = struct {
             .expr_src = null,
             .span = .{ .start = span.start, .end = span.end },
         };
-
         switch (kind) {
-            .curve => if (kvNode(tree, children, "range")) |node| {
-                if (tree.tagOf(node) == .vector) {
-                    const elems = tree.vectorElements(node);
-                    if (elems.len == 2) lane.range = .{
-                        @floatCast(readNumber(tree, elems[0]) orelse 0),
-                        @floatCast(readNumber(tree, elems[1]) orelse 0),
-                    };
-                }
-            },
+            .curve => lane.range = rangeOf(tree, children),
             .query => if (kvNode(tree, children, "query")) |node| {
                 lane.query_src = try self.slice(node);
             },
@@ -1167,41 +1208,7 @@ const Ctx = struct {
 
         // ---- the binding ----
         const from = kvNode(tree, children, "from");
-        if (from) |node| {
-            if (doc) |d| {
-                if (kind == .query or kind == .formula) {
-                    try self.emit(
-                        .bound_kind_invalid,
-                        span,
-                        "a {t} lane computes its content and cannot read it from an anchor",
-                        .{kind},
-                    );
-                } else {
-                    lane.binding = try self.readBinding(form, node, kind, d);
-                }
-            } else {
-                try self.emit(
-                    .phrase_lane_bound,
-                    span,
-                    "a phrase's lanes carry content only; :from belongs on the lane that places the phrase",
-                    .{},
-                );
-            }
-        } else if (kvNode(tree, children, "ch")) |node| {
-            // A NATIVE lane's `:ch` is the one channel its notes default
-            // to (the manifest's own description of `note`'s `:ch`), and
-            // a set is not a default: a note sounds on one channel. The
-            // vector spelling belongs to a bound lane alone — it is what
-            // a dump writes for a lane that was rendered on several
-            // channels — and the manifest, which types the key once for
-            // both shapes of lane, cannot say so.
-            if (tree.tagOf(node) == .vector) try self.emit(
-                .address_invalid,
-                span,
-                "a native lane's :ch is one channel, the default its notes take; :ch {s} names a set, which only a lane bound with :from reads",
-                .{try self.slice(node)},
-            );
-        }
+        lane.binding = try self.laneBinding(form, from, kind, doc);
 
         // ---- a native curve lane's own controller ----
         // `:cc` without `:from` is the controller a `.mid` build renders
@@ -1210,14 +1217,100 @@ const Ctx = struct {
         if (kind == .curve and from == null) lane.cc = ccAddress(tree, children);
 
         // ---- the children ----
+        const content = try self.laneContent(children, in_phrase);
+        if (content.forms > 0 and from != null and !in_phrase) {
+            try self.emit(
+                .bound_lane_has_content,
+                span,
+                "this lane reads its content from an anchor, and content has one home",
+                .{},
+            );
+        }
+        lane.notes = content.notes;
+        lane.keyframes = content.keyframes;
+        lane.clips = content.clips;
+
+        try checks.noteOverlap(self.diags, &lane);
+        return lane;
+    }
+
+    /// A lane's `:from` as its binding, or null with the reason said: a
+    /// phrase's lane cannot bind (`phrase_lane_bound`), a computed lane
+    /// cannot (`bound_kind_invalid`), and an address the anchor's kind
+    /// does not admit is `readBinding`'s `address_invalid`. With no
+    /// `:from`, the one address key a NATIVE lane may carry is checked
+    /// instead: its `:ch` is one channel, never a set. `doc` is null
+    /// inside a phrase, as `readLane` has it.
+    fn laneBinding(
+        self: *Ctx,
+        form: NodeIndex,
+        from: ?NodeIndex,
+        kind: Doc.LaneKind,
+        doc: ?*const Doc.Doc,
+    ) Error!?Doc.Binding {
+        const tree = self.tree;
+        const children = tree.formHeader(form).children;
+        const span = tree.spanOf(form);
+        if (from) |node| {
+            const d = doc orelse {
+                try self.emit(
+                    .phrase_lane_bound,
+                    span,
+                    "a phrase's lanes carry content only; " ++
+                        ":from belongs on the lane that places the phrase",
+                    .{},
+                );
+                return null;
+            };
+            if (kind == .query or kind == .formula) {
+                try self.emit(
+                    .bound_kind_invalid,
+                    span,
+                    "a {t} lane computes its content and cannot read it from an anchor",
+                    .{kind},
+                );
+                return null;
+            }
+            return self.readBinding(form, node, kind, d);
+        }
+        // A NATIVE lane's `:ch` is the one channel its notes default to
+        // (the manifest's own description of `note`'s `:ch`), and a set
+        // is not a default: a note sounds on one channel. The vector
+        // spelling belongs to a bound lane alone — it is what a dump
+        // writes for a lane that was rendered on several channels — and
+        // the manifest, which types the key once for both shapes of
+        // lane, cannot say so.
+        const ch = kvNode(tree, children, "ch") orelse return null;
+        if (tree.tagOf(ch) == .vector) try self.emit(
+            .address_invalid,
+            span,
+            "a native lane's :ch is one channel, the default its notes take; " ++
+                ":ch {s} names a set, which only a lane bound with :from reads",
+            .{try self.slice(ch)},
+        );
+        return null;
+    }
+
+    /// What a lane's child forms hold. `forms` counts every child FORM,
+    /// read or not, because that count — not what survived reading — is
+    /// what `bound_lane_has_content` is about.
+    const LaneContent = struct {
+        notes: []Doc.Note,
+        keyframes: []Doc.Keyframe,
+        clips: []Doc.Clip,
+        forms: usize,
+    };
+
+    fn laneContent(self: *Ctx, children: []const NodeIndex, in_phrase: bool) Error!LaneContent {
+        const tree = self.tree;
         var notes: std.ArrayList(Doc.Note) = .empty;
         var keyframes: std.ArrayList(Doc.Keyframe) = .empty;
         var clips: std.ArrayList(Doc.Clip) = .empty;
-        var content: usize = 0;
+        var forms: usize = 0;
         for (children) |child| {
             if (tree.tagOf(child) != .form) continue;
             const head = tree.formHeader(child).head;
-            content += 1;
+            forms += 1;
             if (std.mem.eql(u8, head, "note")) {
                 if (try self.readNote(child)) |n| try notes.append(self.arena, n);
             } else if (std.mem.eql(u8, head, "keyframe")) {
@@ -1227,7 +1320,8 @@ const Ctx = struct {
                     try self.emit(
                         .clip_nested,
                         tree.spanOf(child),
-                        "a phrase's lane places nothing: a clip inside one would nest a phrase in a phrase",
+                        "a phrase's lane places nothing: " ++
+                            "a clip inside one would nest a phrase in a phrase",
                         .{},
                     );
                 } else if (try self.readClip(child)) |c| {
@@ -1235,20 +1329,12 @@ const Ctx = struct {
                 }
             }
         }
-        if (content > 0 and from != null and !in_phrase) {
-            try self.emit(
-                .bound_lane_has_content,
-                span,
-                "this lane reads its content from an anchor, and content has one home",
-                .{},
-            );
-        }
-        lane.notes = try notes.toOwnedSlice(self.arena);
-        lane.keyframes = try keyframes.toOwnedSlice(self.arena);
-        lane.clips = try clips.toOwnedSlice(self.arena);
-
-        try checks.noteOverlap(self.diags, &lane);
-        return lane;
+        return .{
+            .notes = try notes.toOwnedSlice(self.arena),
+            .keyframes = try keyframes.toOwnedSlice(self.arena),
+            .clips = try clips.toOwnedSlice(self.arena),
+            .forms = forms,
+        };
     }
 
     /// The address keys against the anchor's KIND (plan 02,
@@ -1262,123 +1348,141 @@ const Ctx = struct {
         lane_kind: Doc.LaneKind,
         doc: *const Doc.Doc,
     ) Error!?Doc.Binding {
+        const id = try self.symbol(from);
+        const anchor = doc.anchorById(id) orelse return null;
+        return switch (anchor.kind) {
+            .smf => self.smfBinding(form, anchor, lane_kind),
+            .it => self.itBinding(form, anchor, lane_kind),
+        };
+    }
+
+    /// A binding to a Standard MIDI File: `:track` and `:ch`, a `:key`
+    /// for a drum lane, and for a curve lane exactly one of the four
+    /// surfaces.
+    fn smfBinding(
+        self: *Ctx,
+        form: NodeIndex,
+        anchor: *const Doc.Anchor,
+        lane_kind: Doc.LaneKind,
+    ) Error!?Doc.Binding {
         const tree = self.tree;
         const children = tree.formHeader(form).children;
         const span = tree.spanOf(form);
-        const id = try self.symbol(from);
-        const anchor = doc.anchorById(id) orelse return null;
-
-        switch (anchor.kind) {
-            .smf => {
-                for ([_][]const u8{ "channel", "column", "fx" }) |wrong| {
-                    if (kvNode(tree, children, wrong) != null) {
-                        try self.emit(
-                            .address_invalid,
-                            span,
-                            ":{s} addresses an Impulse Tracker module, and \"{s}\" is a Standard MIDI File",
-                            .{ wrong, id },
-                        );
-                        return null;
-                    }
-                }
-                const track_node = kvNode(tree, children, "track");
-                const ch_node = kvNode(tree, children, "ch");
-                if (track_node == null or ch_node == null) {
-                    try self.emit(
-                        .address_invalid,
-                        span,
-                        "a lane bound to the SMF anchor \"{s}\" names :track and :ch",
-                        .{id},
-                    );
-                    return null;
-                }
-                var curve: ?Doc.SmfCurve = ccAddress(tree, children);
-                if (curve == null) {
-                    if (boolAt(tree, children, "bend")) {
-                        curve = .bend;
-                    } else if (boolAt(tree, children, "pressure")) {
-                        curve = .pressure;
-                    } else if (boolAt(tree, children, "velocity")) {
-                        curve = .velocity;
-                    }
-                }
-                // The manifest's exclusive group is AT-MOST-ONE by
-                // design, because a native curve lane carries keyframes
-                // and addresses nothing. The at-least-one half only
-                // holds once the lane is bound and the anchor's kind is
-                // known, which is two forms and therefore host-side: a
-                // bound SMF curve lane reads exactly one of the four
-                // surfaces on its channel, and a lane that names none
-                // has no content to read.
-                if (lane_kind == .curve and curve == null) {
-                    try self.emit(
-                        .address_invalid,
-                        span,
-                        "a curve lane bound to the SMF anchor \"{s}\" reads one of :cc, :bend, :pressure or :velocity",
-                        .{id},
-                    );
-                    return null;
-                }
-                const chs = (try self.channelSet(ch_node.?, span, id)) orelse return null;
-                return .{ .anchor = anchor.id, .address = .{ .smf = .{
-                    .track = castU16(readNumber(tree, track_node.?)),
-                    .ch = chs,
-                    .key = if (kvNode(tree, children, "key")) |n| try self.noteKey(n) else null,
-                    .curve = curve,
-                } } };
-            },
-            .it => {
-                for ([_][]const u8{ "track", "ch", "cc", "bend", "pressure", "velocity", "key" }) |wrong| {
-                    if (kvNode(tree, children, wrong) != null) {
-                        try self.emit(
-                            .address_invalid,
-                            span,
-                            ":{s} addresses a Standard MIDI File, and \"{s}\" is an Impulse Tracker module",
-                            .{ wrong, id },
-                        );
-                        return null;
-                    }
-                }
-                const channel_node = kvNode(tree, children, "channel") orelse {
-                    try self.emit(
-                        .address_invalid,
-                        span,
-                        "a lane bound to the IT anchor \"{s}\" names :channel",
-                        .{id},
-                    );
-                    return null;
-                };
-                const column: ?Doc.ItColumn = if (kvNode(tree, children, "column")) |n|
-                    if (tree.tagOf(n) == .symbol) std.meta.stringToEnum(Doc.ItColumn, tree.symbolText(n)) else null
-                else
-                    null;
-                const fx: ?u8 = if (kvNode(tree, children, "fx")) |n| blk: {
-                    if (tree.tagOf(n) != .string) break :blk null;
-                    const t = tree.stringText(n);
-                    break :blk if (t.len == 1) t[0] else null;
-                } else null;
-                // The mirror of the SMF surface check: a bound IT curve
-                // lane "reads one column" (plan 02, "(lane …)"), and the
-                // manifest cannot say so because `:column` is legal on a
-                // NATIVE curve lane's sibling keys and the anchor's kind
-                // is a second form away.
-                if (lane_kind == .curve and column == null) {
-                    try self.emit(
-                        .address_invalid,
-                        span,
-                        "a curve lane bound to the IT anchor \"{s}\" reads one :column — vol, pan or fx",
-                        .{id},
-                    );
-                    return null;
-                }
-
-                return .{ .anchor = anchor.id, .address = .{ .it = .{
-                    .channel = wireChannel(u6, readNumber(tree, channel_node)),
-                    .column = column,
-                    .fx = fx,
-                } } };
-            },
+        const id = anchor.id;
+        if (try self.foreignKeys(
+            children,
+            span,
+            id,
+            &.{ "channel", "column", "fx" },
+            ":{s} addresses an Impulse Tracker module, and \"{s}\" is a Standard MIDI File",
+        )) return null;
+        const track_node = kvNode(tree, children, "track");
+        const ch_node = kvNode(tree, children, "ch");
+        if (track_node == null or ch_node == null) {
+            try self.emit(
+                .address_invalid,
+                span,
+                "a lane bound to the SMF anchor \"{s}\" names :track and :ch",
+                .{id},
+            );
+            return null;
         }
+        const curve = smfSurface(tree, children);
+        // The manifest's exclusive group is AT-MOST-ONE by design,
+        // because a native curve lane carries keyframes and addresses
+        // nothing. The at-least-one half only holds once the lane is
+        // bound and the anchor's kind is known, which is two forms and
+        // therefore host-side: a bound SMF curve lane reads exactly one
+        // of the four surfaces on its channel, and a lane that names
+        // none has no content to read.
+        if (lane_kind == .curve and curve == null) {
+            try self.emit(
+                .address_invalid,
+                span,
+                "a curve lane bound to the SMF anchor \"{s}\" reads one of " ++
+                    ":cc, :bend, :pressure or :velocity",
+                .{id},
+            );
+            return null;
+        }
+        const chs = (try self.channelSet(ch_node.?, span, id)) orelse return null;
+        return .{ .anchor = anchor.id, .address = .{ .smf = .{
+            .track = castU16(readNumber(tree, track_node.?)),
+            .ch = chs,
+            .key = if (kvNode(tree, children, "key")) |n| try self.noteKey(n) else null,
+            .curve = curve,
+        } } };
+    }
+
+    /// A binding to an Impulse Tracker module: `:channel`, and for a
+    /// curve lane one `:column`, with its `:fx` letter when the column
+    /// is `fx`.
+    fn itBinding(
+        self: *Ctx,
+        form: NodeIndex,
+        anchor: *const Doc.Anchor,
+        lane_kind: Doc.LaneKind,
+    ) Error!?Doc.Binding {
+        const tree = self.tree;
+        const children = tree.formHeader(form).children;
+        const span = tree.spanOf(form);
+        const id = anchor.id;
+        if (try self.foreignKeys(
+            children,
+            span,
+            id,
+            &.{ "track", "ch", "cc", "bend", "pressure", "velocity", "key" },
+            ":{s} addresses a Standard MIDI File, and \"{s}\" is an Impulse Tracker module",
+        )) return null;
+        const channel_node = kvNode(tree, children, "channel") orelse {
+            try self.emit(
+                .address_invalid,
+                span,
+                "a lane bound to the IT anchor \"{s}\" names :channel",
+                .{id},
+            );
+            return null;
+        };
+        const column = itColumn(tree, children);
+        // The mirror of the SMF surface check: a bound IT curve lane
+        // "reads one column" (plan 02, "(lane …)"), and the manifest
+        // cannot say so because `:column` is legal on a NATIVE curve
+        // lane's sibling keys and the anchor's kind is a second form
+        // away.
+        if (lane_kind == .curve and column == null) {
+            try self.emit(
+                .address_invalid,
+                span,
+                "a curve lane bound to the IT anchor \"{s}\" reads one :column — vol, pan or fx",
+                .{id},
+            );
+            return null;
+        }
+        return .{ .anchor = anchor.id, .address = .{ .it = .{
+            .channel = wireChannel(u6, readNumber(tree, channel_node)),
+            .column = column,
+            .fx = itFx(tree, children),
+        } } };
+    }
+
+    /// The first of `keys` present on the lane, said as `address_invalid`
+    /// with `fmt` over the key and the anchor's id. These are the OTHER
+    /// format's keys, which the schema cannot refuse because it sees the
+    /// lane and the anchor one at a time. True when one was found.
+    fn foreignKeys(
+        self: *Ctx,
+        children: []const NodeIndex,
+        span: Ast.Span,
+        id: []const u8,
+        keys: []const []const u8,
+        comptime fmt: []const u8,
+    ) Error!bool {
+        for (keys) |wrong| {
+            if (kvNode(self.tree, children, wrong) == null) continue;
+            try self.emit(.address_invalid, span, fmt, .{ wrong, id });
+            return true;
+        }
+        return false;
     }
 
     /// A bound SMF lane's `:ch`: one channel (`:ch 2`) or a vector of
@@ -1873,7 +1977,8 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
         .smf_format2,
         .err,
         span,
-        "a format 2 file's tracks are independent sequences, not simultaneous ones, so it conducts nothing",
+        "a format 2 file's tracks are independent sequences, not simultaneous ones, " ++
+            "so it conducts nothing",
         .{},
     );
 
@@ -1883,29 +1988,70 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
         .division_inexact,
         .warning,
         span,
-        "division {d} does not divide the grid, so every tick of this file lands on its nearest one",
+        "division {d} does not divide the grid, " ++
+            "so every tick of this file lands on its nearest one",
         .{ppq},
     );
 
-    var tempo: std.ArrayList(Doc.TempoPoint) = .empty;
-    var meter: std.ArrayList(Doc.MeterPoint) = .empty;
-    var ignored: usize = 0;
-    var end: i64 = 0;
+    var points = try smfPoints(arena, seq, span);
+    if (points.ignored > 0) try diags.add(
+        .smpte_tempo_ignored,
+        .warning,
+        span,
+        "{d} set-tempo event(s) of a SMPTE file are kept in the dump and not believed: " ++
+            "SMPTE ticks are wall-clock",
+        .{points.ignored},
+    );
+    // The tempo the converted grid was derived for — 120 quarter notes
+    // per minute, an integer, so the one SMPTE segment keeps plan 03's
+    // integer path — and the number the writer and the bridge put on
+    // every `set-tempo` of that grid (`Division.tempoOnGrid`): one owner.
+    if (smpte) try points.tempo.append(arena, .{
+        .tick = 0,
+        .tempo = .{ .us = smf.Division.smpte_tempo_us },
+        .span = span,
+    });
 
+    const tempo = try mergeByTick(arena, Doc.TempoPoint, points.tempo.items);
+    const meter = try mergeByTick(arena, Doc.MeterPoint, points.meter.items);
+    return .{
+        .tempo = try seedTempo(arena, tempo, span),
+        .meter = try seedMeter(arena, meter, span),
+        .diags = diags,
+        .arena = arena_state,
+        .end = points.end,
+    };
+}
+
+/// What rule 2 reads out of a sequence's tracks: every tempo and meter
+/// event as a point on the converted grid, in file order; how many tempo
+/// events a SMPTE file had (kept in the dump, not believed); and the
+/// tick its last event lands on.
+const SmfPoints = struct {
+    tempo: std.ArrayList(Doc.TempoPoint) = .empty,
+    meter: std.ArrayList(Doc.MeterPoint) = .empty,
+    ignored: usize = 0,
+    end: i64 = 0,
+};
+
+fn smfPoints(arena: Allocator, seq: *const smf.Sequence, span: Diag.Span) Error!SmfPoints {
+    const ppq = seq.division.pulsesPerQuarter();
+    const smpte = seq.division == .smpte;
+    var out: SmfPoints = .{};
     for (seq.tracks) |track| {
         for (track.events) |e| {
-            end = @max(end, Grid.smfToTicks(e.at, ppq).tick);
+            out.end = @max(out.end, Grid.smfToTicks(e.at, ppq).tick);
         }
         for (track.events) |e| switch (e.kind) {
             .set_tempo => {
                 if (smpte) {
-                    ignored += 1;
+                    out.ignored += 1;
                     continue;
                 }
                 // Zero microseconds a quarter has no meaning and the
                 // reader already said so with its own span.
                 if (e.payload.tempo == 0) continue;
-                try tempo.append(arena, .{
+                try out.tempo.append(arena, .{
                     .tick = Grid.smfToTicks(e.at, ppq).tick,
                     .tempo = .{ .us = e.payload.tempo },
                     .span = span,
@@ -1913,7 +2059,7 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
             },
             .time_signature => {
                 const t = e.payload.time_sig;
-                try meter.append(arena, .{
+                try out.meter.append(arena, .{
                     .tick = Grid.smfToTicks(e.at, ppq).tick,
                     .n = t.nn,
                     // RP-001 writes the denominator as its power of two.
@@ -1928,31 +2074,7 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
             else => {},
         };
     }
-
-    if (ignored > 0) try diags.add(
-        .smpte_tempo_ignored,
-        .warning,
-        span,
-        "{d} set-tempo event(s) of a SMPTE file are kept in the dump and not believed: SMPTE ticks are wall-clock",
-        .{ignored},
-    );
-    // The tempo the converted grid was derived for — 120 quarter notes
-    // per minute, an integer, so the one SMPTE segment keeps plan 03's
-    // integer path — and the number the writer and the bridge put on
-    // every `set-tempo` of that grid (`Division.tempoOnGrid`): one owner.
-    if (smpte) try tempo.append(arena, .{
-        .tick = 0,
-        .tempo = .{ .us = smf.Division.smpte_tempo_us },
-        .span = span,
-    });
-
-    return .{
-        .tempo = try seedTempo(arena, try mergeByTick(arena, Doc.TempoPoint, tempo.items), span),
-        .meter = try seedMeter(arena, try mergeByTick(arena, Doc.MeterPoint, meter.items), span),
-        .diags = diags,
-        .arena = arena_state,
-        .end = end,
-    };
+    return out;
 }
 
 /// Rule 3: the timing walk. One segment per tempo change, in IT ticks
@@ -2123,6 +2245,47 @@ fn ccAddress(tree: *const Ast.Tree, children: []const NodeIndex) ?Doc.SmfCurve {
         } };
     }
     return .{ .cc = castU7(readNumber(tree, node)) };
+}
+
+/// `:range` as a curve lane spells it — `[lo hi]` — or null when the key
+/// is absent or not a pair.
+fn rangeOf(tree: *const Ast.Tree, children: []const NodeIndex) ?[2]f32 {
+    const node = kvNode(tree, children, "range") orelse return null;
+    if (tree.tagOf(node) != .vector) return null;
+    const elems = tree.vectorElements(node);
+    if (elems.len != 2) return null;
+    return .{
+        @floatCast(readNumber(tree, elems[0]) orelse 0),
+        @floatCast(readNumber(tree, elems[1]) orelse 0),
+    };
+}
+
+/// Which of the four SMF surfaces a bound curve lane names — `:cc` (one
+/// number or a 14-bit pair), else the first of `:bend`, `:pressure` and
+/// `:velocity` set true — or null when it names none.
+fn smfSurface(tree: *const Ast.Tree, children: []const NodeIndex) ?Doc.SmfCurve {
+    if (ccAddress(tree, children)) |c| return c;
+    if (boolAt(tree, children, "bend")) return .bend;
+    if (boolAt(tree, children, "pressure")) return .pressure;
+    if (boolAt(tree, children, "velocity")) return .velocity;
+    return null;
+}
+
+/// `:column` as one of the three IT columns, or null when absent or not
+/// one of them.
+fn itColumn(tree: *const Ast.Tree, children: []const NodeIndex) ?Doc.ItColumn {
+    const n = kvNode(tree, children, "column") orelse return null;
+    if (tree.tagOf(n) != .symbol) return null;
+    return std.meta.stringToEnum(Doc.ItColumn, tree.symbolText(n));
+}
+
+/// `:fx` as its one ASCII letter, or null when absent or not exactly one
+/// character.
+fn itFx(tree: *const Ast.Tree, children: []const NodeIndex) ?u8 {
+    const n = kvNode(tree, children, "fx") orelse return null;
+    if (tree.tagOf(n) != .string) return null;
+    const t = tree.stringText(n);
+    return if (t.len == 1) t[0] else null;
 }
 
 fn castU7(v: ?f64) u7 {
