@@ -225,43 +225,20 @@ pub fn main(init: std.process.Init) !u8 {
     defer out.flush() catch {};
 
     const args = try init.minimal.args.toSlice(arena);
-    var corpus_path: ?[]const u8 = null;
-    var update = false;
-    for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--update")) {
-            update = true;
-        } else if (corpus_path == null) {
-            corpus_path = arg;
-        } else {
-            try out.print("usage: corpus-runner <corpus-dir> [--update]\n", .{});
-            return 2;
-        }
-    }
-    const root = corpus_path orelse {
+    const cmd = parseArgs(args[1..]) orelse {
         try out.print("usage: corpus-runner <corpus-dir> [--update]\n", .{});
         return 2;
     };
+    const root = cmd.root;
+    const update = cmd.update;
 
-    // Collect case directories, sorted — filesystem iteration order is
-    // unspecified and the report has to be stable.
     var dir = Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch |err| {
         try out.print("corpus: cannot open `{s}`: {s}\n", .{ root, @errorName(err) });
         return 1;
     };
     defer dir.close(io);
-    var names: std.ArrayList([]const u8) = .empty;
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .directory) continue;
-        if (entry.name.len == 0 or entry.name[0] == '.') continue;
-        try names.append(arena, try arena.dupe(u8, entry.name));
-    }
-    std.mem.sort([]const u8, names.items, {}, struct {
-        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.lessThan);
-    if (names.items.len == 0) {
+    const names = try caseNames(arena, io, dir);
+    if (names.len == 0) {
         // The corpus IS the gate: an empty one means the checkout is
         // broken, not that there is nothing to disagree about.
         try out.print("corpus: no cases under `{s}`\n", .{root});
@@ -287,7 +264,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     var failed: usize = 0;
     var updated: usize = 0;
-    for (names.items) |name| {
+    for (names) |name| {
         switch (try runCase(gpa, &harness_schema, &doc_schema, io, out, root, name, update)) {
             .ok => {},
             .updated => updated += 1,
@@ -296,11 +273,52 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (update) {
-        try out.print("corpus: {d} case(s), {d} regenerated, {d} failed\n", .{ names.items.len, updated, failed });
+        try out.print(
+            "corpus: {d} case(s), {d} regenerated, {d} failed\n",
+            .{ names.len, updated, failed },
+        );
     } else {
-        try out.print("corpus: {d} case(s), {d} failed\n", .{ names.items.len, failed });
+        try out.print("corpus: {d} case(s), {d} failed\n", .{ names.len, failed });
     }
     return if (failed == 0) 0 else 1;
+}
+
+/// What the command line asked for. `parseArgs` answers null for a usage
+/// error: no directory, or a second one.
+const Command = struct { root: []const u8, update: bool };
+
+fn parseArgs(args: []const [:0]const u8) ?Command {
+    var root: ?[]const u8 = null;
+    var update = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--update")) {
+            update = true;
+        } else if (root == null) {
+            root = arg;
+        } else {
+            return null;
+        }
+    }
+    return .{ .root = root orelse return null, .update = update };
+}
+
+/// The case directories in `dir`, sorted — filesystem iteration order is
+/// unspecified and the report has to be stable. A hidden directory is not
+/// a case. The names live in `arena`.
+fn caseNames(arena: Allocator, io: Io, dir: Io.Dir) ![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        if (entry.name.len == 0 or entry.name[0] == '.') continue;
+        try names.append(arena, try arena.dupe(u8, entry.name));
+    }
+    std.mem.sort([]const u8, names.items, {}, nameBefore);
+    return names.items;
+}
+
+fn nameBefore(_: void, x: []const u8, y: []const u8) bool {
+    return std.mem.lessThan(u8, x, y);
 }
 
 const Outcome = enum { ok, updated, failed };
@@ -1924,25 +1942,7 @@ fn renderDocDirective(
 ) Error!bool {
     std.debug.assert(d.needsDocument());
     switch (d) {
-        .times => |seconds| {
-            for (seconds) |secs| {
-                // `Playhead.at` takes seconds from OUTSIDE, so the two
-                // host guards ride out with it: a case may ask about an
-                // infinity, and the golden says which guard answered.
-                var pos = Playhead.at(gpa, &loaded.derived, secs) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => {
-                        try p(w, "(at :seconds \"{X:0>16}\" :refused {s})\n", .{
-                            @as(u64, @bitCast(secs)),
-                            refusalName(err),
-                        });
-                        continue;
-                    },
-                };
-                defer pos.deinit(gpa);
-                try renderPosition(w, pos, secs);
-            }
-        },
+        .times => |seconds| try renderTimes(gpa, w, seconds, loaded),
         .at => |tick| {
             var pos = try Playhead.atTick(gpa, &loaded.derived, tick);
             defer pos.deinit(gpa);
@@ -1953,39 +1953,7 @@ fn renderDocDirective(
                 Playhead.snap(&loaded.derived, ask.tick, ask.grid, ask.swing),
             });
         },
-        .dump => {
-            // The TIMELINE tier alone — the roots that are not `midi/`
-            // or `it/` forms. A file tier is the file dumped whole, and
-            // a golden that carried it would be a second copy of bytes
-            // the `(fixture …)` line already pins; what this verb is for
-            // is the timeline a read-write round trip produces.
-            //
-            // A shallow copy with the two tiers emptied, printed by the
-            // real printer, rather than a line filter over its output:
-            // the grouping (which blank line separates what) is the
-            // printer's rule and stays its own. The copy is never
-            // deinitialised — the arena it names is still the original's.
-            var tier_free = loaded.doc_().*;
-            tier_free.midi = &.{};
-            tier_free.it = &.{};
-            const text = try doc.print(gpa, &tier_free, loaded.map(), .{});
-            defer gpa.free(text);
-            try p(w, "(dump :bytes {d} :sha256 \"", .{text.len});
-            try writeDigest(w, text);
-            try pw(w, "\")\n");
-            // The tier itself, one line per line behind a `;| ` marker:
-            // the text is what a reviewer reads, and a comment prefix is
-            // what keeps a golden one SJON document rather than two.
-            var lines = std.mem.splitScalar(u8, text, '\n');
-            while (lines.next()) |line| {
-                if (line.len == 0 and lines.peek() == null) break;
-                if (line.len == 0) {
-                    try pw(w, ";|\n");
-                    continue;
-                }
-                if (!try renderRawLine(w, line, rep)) return false;
-            }
-        },
+        .dump => if (!try renderTierDump(gpa, w, loaded, rep)) return false,
         .build => |ask| {
             if (!try renderBuild(gpa, w, ask, loaded, rep)) return false;
         },
@@ -1999,6 +1967,60 @@ fn renderDocDirective(
         // above is what makes this arm unreachable rather than a silent
         // no-op.
         .read, .roundtrip, .walk, .write, .unrun => unreachable,
+    }
+    return true;
+}
+
+/// `times`: where each second falls. `Playhead.at` takes seconds from
+/// OUTSIDE, so the two host guards ride out with it: a case may ask about
+/// an infinity, and the golden says which guard answered.
+fn renderTimes(gpa: Allocator, w: *Io.Writer, seconds: []const f64, loaded: *Loaded) Error!void {
+    for (seconds) |secs| {
+        var pos = Playhead.at(gpa, &loaded.derived, secs) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                try p(w, "(at :seconds \"{X:0>16}\" :refused {s})\n", .{
+                    @as(u64, @bitCast(secs)),
+                    refusalName(err),
+                });
+                continue;
+            },
+        };
+        defer pos.deinit(gpa);
+        try renderPosition(w, pos, secs);
+    }
+}
+
+/// `dump`: the TIMELINE tier alone — the roots that are not `midi/` or
+/// `it/` forms. A file tier is the file dumped whole, and a golden that
+/// carried it would be a second copy of bytes the `(fixture …)` line
+/// already pins; what this verb is for is the timeline a read-write
+/// round trip produces. False = a defect that voids the golden.
+fn renderTierDump(gpa: Allocator, w: *Io.Writer, loaded: *Loaded, rep: Report) Error!bool {
+    // A shallow copy with the two tiers emptied, printed by the real
+    // printer, rather than a line filter over its output: the grouping
+    // (which blank line separates what) is the printer's rule and stays
+    // its own. The copy is never deinitialised — the arena it names is
+    // still the original's.
+    var tier_free = loaded.doc_().*;
+    tier_free.midi = &.{};
+    tier_free.it = &.{};
+    const text = try doc.print(gpa, &tier_free, loaded.map(), .{});
+    defer gpa.free(text);
+    try p(w, "(dump :bytes {d} :sha256 \"", .{text.len});
+    try writeDigest(w, text);
+    try pw(w, "\")\n");
+    // The tier itself, one line per line behind a `;| ` marker: the text
+    // is what a reviewer reads, and a comment prefix is what keeps a
+    // golden one SJON document rather than two.
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 and lines.peek() == null) break;
+        if (line.len == 0) {
+            try pw(w, ";|\n");
+            continue;
+        }
+        if (!try renderRawLine(w, line, rep)) return false;
     }
     return true;
 }

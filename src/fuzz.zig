@@ -604,8 +604,16 @@ fn checkRecords(input: []const u8) !Seen {
     var seen: Seen = .{};
     const gpa = testing.allocator;
 
-    // The envelope: null, or tempura's four magic bytes and nothing
-    // invented — the head is a view on the input, never a parse.
+    try checkHead(input);
+    try checkConductor(input);
+    if (try checkLane(gpa, input)) seen.hits = 1;
+    try checkReassembly(gpa, input, &seen);
+    return seen;
+}
+
+/// The envelope: null, or tempura's four magic bytes and nothing invented
+/// — the head is a view on the input, never a parse.
+fn checkHead(input: []const u8) !void {
     if (records.readHead(input)) |head| {
         try testing.expect(input.len >= records.head_len);
         try testing.expectEqualSlices(u8, &records.magic, input[0..4]);
@@ -617,24 +625,30 @@ fn checkRecords(input: []const u8) !Seen {
         try testing.expect(input.len < records.head_len or
             !std.mem.eql(u8, input[0..4], &records.magic));
     }
+}
 
-    // A conductor body is 32 bytes or it is nothing.
+/// A conductor body is 32 bytes or it is nothing.
+fn checkConductor(input: []const u8) !void {
     if (records.decodeConductor(input)) |cond| {
         try testing.expectEqual(@as(usize, 32), input.len);
         try testing.expectEqualSlices(u8, input, &cond.hash);
     } else {
         try testing.expect(input.len != 32);
     }
+}
 
-    // A lane body either fails or borrows only from itself — and a
-    // re-encode of what came out decodes to the same bytes again, which
-    // is the stability the carriers rest on.
+/// A lane body either fails or borrows only from itself — and a re-encode
+/// of what came out decodes to the same bytes again, which is the
+/// stability the carriers rest on. True when the body decoded.
+fn checkLane(gpa: std.mem.Allocator, input: []const u8) !bool {
     var decoded = try records.decodeLane(gpa, input);
     defer decoded.deinit(gpa);
     switch (decoded) {
-        .corrupt => |code| try testing.expectEqual(Diag.Code.residue_corrupt, code),
+        .corrupt => |code| {
+            try testing.expectEqual(Diag.Code.residue_corrupt, code);
+            return false;
+        },
         .ok => |rec| {
-            seen.hits = 1;
             try expectSubslice(rec.lane, input);
             for (rec.steps_only) |seg| try expectSubslice(seg.ease, input);
 
@@ -646,14 +660,17 @@ fn checkRecords(input: []const u8) !Seen {
             const third = try records.encodeLane(gpa, twice.ok);
             defer gpa.free(third);
             try testing.expectEqualSlices(u8, again, third);
+            return true;
         },
     }
+}
 
-    // Reassembly: nothing at all, or exactly the parts' bytes in `seq`
-    // order. `partsOf` cuts the input into a contiguous split and tears
-    // it one of three ways depending on the last byte, so both branches
-    // are reached — a whole split must come back byte for byte, and a
-    // torn one must come back as nothing, with `residue_corrupt`.
+/// Reassembly: nothing at all, or exactly the parts' bytes in `seq`
+/// order. `partsOf` cuts the input into a contiguous split and tears it
+/// one of three ways depending on the last byte, so both branches are
+/// reached — a whole split must come back byte for byte, and a torn one
+/// must come back as nothing, with `residue_corrupt`.
+fn checkReassembly(gpa: std.mem.Allocator, input: []const u8, seen: *Seen) !void {
     var diags: Diag.List = .init(gpa);
     defer diags.deinit();
     var parts: [4]records.Part = undefined;
@@ -670,8 +687,6 @@ fn checkRecords(input: []const u8) !Seen {
         try testing.expect(diags.count(.residue_corrupt) > 0);
     }
     try seen.note(&diags);
-
-    return seen;
 }
 
 /// Cut `input` into up to four parts, numbered as a split essence is —
