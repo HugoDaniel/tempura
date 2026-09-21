@@ -530,16 +530,16 @@ const Ctx = struct {
             .phrase => |p| {
                 try f.symbol("name", p.name);
                 try f.duration("length", self.map, p.length, 0);
+                // Each inner lane's text is copied into the plan's arena,
+                // which frees it with the plan: a copy made with `gpa` was
+                // lost whenever the append after it ran out of memory.
                 var kids: std.ArrayList([]const u8) = .empty;
-                defer {
-                    for (kids.items) |k| self.gpa.free(k);
-                    kids.deinit(self.gpa);
-                }
+                defer kids.deinit(self.gpa);
                 for (p.lanes) |name| {
                     var inner = try value.Form.init(self.gpa, "lane");
                     defer inner.deinit();
                     try inner.symbol("name", name);
-                    try kids.append(self.gpa, try self.gpa.dupe(u8, try inner.done()));
+                    try kids.append(self.gpa, try self.arena.dupe(u8, try inner.done()));
                 }
                 if (kids.items.len > 0) try f.children(kids.items);
             },
