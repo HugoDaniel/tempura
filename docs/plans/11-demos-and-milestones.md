@@ -168,15 +168,210 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
   claim in midi 00, and the conformance gates in midi 08; recorded the change in midi 10.
   This closes creation decision (11)'s deferred application. Changes remain uncommitted.
 
+- 2026-09-20/21 — **Implementation rulings (E0–E3).** Every ruling the execution ledger
+  holds, copied here as the decision log of record, in the order they were made. The two
+  USER lines are the user's own instructions and are copied verbatim. Each ruling names what
+  it would cost if it turns out wrong, which is the form the ledger keeps.
+
+  1. Work happens on branch `impl/e0-e3` in the repo directory, not a worktree — the build
+     depends on `../SJON` as a sibling path and a worktree elsewhere would break it; the repo
+     was empty apart from docs — costs nothing if wrong (branch is local, reversible).
+  2. **pstudio is not a host** (memory `pstudio-not-a-target`, user 2026-09-20). Dropped:
+     `timingData`/`timing` verb/`tpr_timing`, the studio provider (10 touch point 1), the
+     timeline pane and transport display (touch points 2–3), E4's studio demo. Hosts that
+     count: CLI, npm/tempura + tempura.wasm, expansible-player `TMPU` payload (registry row
+     only; X1 not here), animader piece format. — cost if wrong: TimingData is ~1 session to
+     add.
+  3. E0's measured items (DAW/tracker residue survival, the impulsos measure) cannot run
+     here: no openmpt123/midicsv/DAW, no `2026_impulse` piece, no wild fixtures. They are
+     recorded as unmeasured with the procedure kept (`demos/e0-carriers/README.md`). All
+     conformance oracles beyond self-consistency are hand-built fixtures; `zig build conform`
+     skips with a reason. — cost if wrong: none to code; the survival claim stays unmeasured.
+  4. Parallel implementers are allowed for parts with disjoint directories and no shared
+     file edits (the plan's layering makes P100/P101/P103.1/P99 leaves). Parallel
+     implementers DO NOT commit; the controller commits per part after each returns. Only one
+     agent per wave may edit build.zig/src/root.zig (named in its brief). `src/Diag.zig` is
+     append-only; an agent re-reads before appending. — cost if wrong: a clobbered edit shows
+     up in review.
+  5. One shared diagnostic enum `src/Diag.zig` (`Code = enum(u16)`, append-only, seeded in
+     Task 1 with every code the plans name) rather than per-part enums, so the `'TPDG'` blob
+     and the audit script have one source. — cost if wrong: renumbering before E3.
+  6. Each part directory has an aggregator `src/<part>/<part>.zig` re-exporting its files and
+     a `test {}` block; `src/root.zig` imports one file per part; `zig build test
+     -Dtest-root=<file>` runs a subtree without editing root.zig. — cost: none.
+  7. **The 0.1.0 tag is left to the user** (a release signal); the code reaches E3 with the
+     freezes documented.
+  8. Layering inside P103/P102 — `time/Pos`, `time/Grid`, `time/TimeMap` depend only on Diag
+     and are imported by `doc/` (the printer needs the bar table to spell `Nbar`);
+     `time/derive` and `time/Playhead` import `doc/`. The plan's "P103 ← P102" holds for the
+     derive/Playhead half. — cost if wrong: an import cycle, caught at compile.
+  9. Task 8 (P102) is split: 8a native documents (Doc, fromSjon, toSjon/print, resolver), 8b
+     the two bridges + the skeleton derivation, sequential in one directory.
+  10. The printer's `q` spelling is the EXACT terminating decimal of `k/TPQ` (the brief's
+      reading of plan 03's "shortest decimal that round-trips … at most 10 fractional
+      digits"), not the shortest decimal that merely rounds to `k`. Frozen at E1 with the rest
+      of the rule. — cost if wrong: dumps print a few more digits than strictly needed; never
+      a wrong tick.
+  11. System common/real-time bytes inside a track are tolerated (skipped by their known data
+      lengths with one `smf_status_invalid` warning each; the track continues); only a data
+      byte with no running status aborts. Plan 05 says those bytes "do not update running
+      status" and the reader keeps what it parsed. — cost if wrong: a foreign file with stray
+      clock bytes yields a few more events than a strict reader would.
+  12. Plan drift ([09](09-conformance.md) and [01](01-part-map.md) say the corpus manifest
+      collides on `target`; it is `timing`) is corrected by a dated note at Task 19, not
+      then. `:range` lives in the `curve` variant only (accepted deviation from plan 02's
+      prose). — cost if wrong: one key on notes lanes. *(Both corrections are appended in
+      those two documents, dated 2026-09-21.)*
+  13. A bar line past the bar table is still a bar line — `isBarLine` extrapolates the last
+      meter like `tickFromLiteral(.bar)` does, so `spell` and `parse` agree past `:length`.
+      — cost if wrong: none (positions past length are transient while a default length is
+      computed).
+  14. Task 10 split into 10a (runner + fixture generator + format/walk cases; runs now, in
+      parallel with 8a) and 10b (document/time cases after Task 9).
+  15. A `Cxx`/`Bxx`+`Cxx` row past the target pattern's end lands on row 0 of the TARGET
+      pattern (IT/OpenMPT behaviour), not the next order — fixed in walk.zig by Task 10a and
+      pinned by `walk-cxx-past-end`. — cost if wrong: one row map differs on malformed break
+      rows.
+  16. Task 8b starts in parallel with 8a's review; it builds bridges/skeleton in NEW files
+      first and touches fromSjon/toSjon only for the anchored hooks, re-reading before each
+      edit.
+  17. Task 9 (derive + Playhead) starts against 8a's Doc, in parallel with 8b; bound-lane
+      onsets go through 8b's bridges when their files exist, else a marked hook with a test to
+      fill when the controller says 8b landed. — cost if wrong: one rebase of derive.zig onto
+      8b's API.
+  18. `length_lit` is informational, excluded from `Doc.eql`; the canonical printer
+      normalises `:length` (plan 03: only the printer is constrained). — cost if wrong: an
+      authored `512q` prints as `128bar`, never a wrong tick.
+  19. A `(rung1 :ok false)` line in a golden on a fixture whose harness explains why is a
+      pinned fact, not a failed gate; the corpus verdict is byte-equality with the golden.
+  20. Task 14 (edit engine, native) starts in parallel (src/edit/ only), Select over Doc
+      directly, hooks into Playhead/8b optional and last. — cost if wrong: one rebase onto
+      8a's fix.
+  21. The document layer owns the conductor rules and the default-length rule; `derive` calls
+      fromSjon's `smfConductor`/`itConductor`/`contentEnd` and an agreement test pins
+      `fromSource`'s map == `derive`'s map for the same document. Where they differed,
+      fromSjon's reading stands except the overflow guard (added to fromSjon). — cost if
+      wrong: one function to move later.
+  22. Task 15 split into 15a (reconcile + dump pipeline + check-residue) and 15b (renderers +
+      build pipeline; after Task 12 lands in src/export).
+  23. The document layer owns the map for edits too — `fromSjon.mapOf(gpa, doc)` (single
+      owner, conductor branch included) feeds `plan`; `planWith(…, map, …)` for callers
+      holding the map. `plan`'s signature unchanged (Task 16 in flight). — cost if wrong: one
+      helper to move.
+  24. **USER (2026-09-20)**: reduce parallelism — at most 4 subagents at once (reviewers
+      count). In-flight agents finish; no new dispatch until ≤ 4 are running. Priority order
+      for the queue: fix rounds and re-reviews first (they close tasks), then reviews, then
+      new implementers on the critical path (15b → 17 → 18 → 19).
+  25. **USER (2026-09-20)**: "zig test just eats all my memory". Cause: parallel Debug test
+      builds. Actions: stopped Task 16 (at scaffolding) and Task 15a (mid reconcile.zig) to
+      reach the cap of 4 — their partial files stay uncommitted for the re-dispatch, which
+      must read them first; added `tools/zt` (mkdir lock + `-j4`) and told the four running
+      agents to use it; the global constraints now require it.
+  26. `examples/native.sjon` must compile through pacer (Task 12 concern 4: `glow` arity 1
+      against a 3-component keyframe — the plan's example is inconsistent); Task 17 fixes the
+      example (arity 3 or scalar keyframes) and adds the compile check to the node test. —
+      cost if wrong: an example edit.
+  27. Any edit to a cell in a pattern played more than once is `edit_pattern_shared` unless
+      `:allow-shared` (plan 07's diagnostics table); with it, every occurrence changes. —
+      cost if wrong: an extra flag on tracker edits.
+  28. Task 19 split — 19a (the `src/fuzz.zig` harnesses, `docs/residue.md`,
+      `THIRD_PARTY_NOTICES` per-item entries, `conformance/{CHECKLIST,PINS}.md` and the
+      conform script without the build.zig verb) then 19b (demos, examples as corpus cases,
+      README, CLAUDE.md, the `conform` verb, these dated plan notes, final verify).
+  29. **USER (2026-09-21)**: increase parallelism again, but zig tests with parsimony. Cap
+      lifted (judged per wave); `tools/zt` stays mandatory (one build at a time, `-j4`);
+      briefs now say: subtree tests while iterating, whole tree plus `verify` once before
+      reporting.
+
+- 2026-09-21 — **Filed and routed at the E3 close.** Findings the implementation raised that
+  are not rulings: each is a real divergence between this plan set and the code, recorded
+  here rather than fixed under a closing task.
+
+  - **`:cc` on a native curve lane** is accepted by `schema/tempura.sjon` and DROPPED by the
+    loader. `build --cc N` plus `render_cc_missing` is the faithful reading today: a curve
+    lane with no controller rides in the residue alone. Either the key becomes load-bearing
+    per lane or the manifest loses it.
+  - **Five it-manifest asks** from the bridge work: the reserved header fields, the MIDI
+    macro binary blob, the ADPCM sample encoding, an unused-channel marker, and a channel
+    prefix above 15. None is implemented; `schema/it.sjon` is the owner when batida decides
+    one.
+  - **`it.choose` prefers a readable message tail over a NEWER-version `TMPU` chunk.** Plan
+    04's rule 5 lists only absent, corrupt and truncated. Pinned by
+    `corpus/residue-newer-version/` and recorded in [04](04-residue.md)'s progress log.
+  - **The phrases→patterns structured branch is not implemented.** A clip is always
+    flattened into rows when a `.it` is rendered; the essence keeps the phrase and the clip,
+    so a dump restores the structure. What is missing is the `.it` holding a phrase AS a
+    reused pattern.
+  - **A conducted anchor BY REFERENCE derives length 0.** When the document names a
+    conductor it cannot read, the derived length is zero rather than a diagnostic. The
+    by-reference path is what `tempura inline` exists to avoid, and a browser host meets it
+    on every anchor, so the missing diagnostic is worth having.
+  - **The two renderers' tie rules differ** — where the SMF renderer and the IT renderer
+    break a tie between two events at one position is not the same rule. Neither is wrong;
+    they are not stated as one.
+  - **A newer IT `TMPU` payload is kept out of `foreign` by the reader**, so a later `build`
+    cannot re-emit it. Routed and pinned by a CLI test rather than the corpus.
+  - **`export-schema` does not compose the project on SJON 1.4.2**, so
+    `docs/timeline-language.md` is rendered by concatenating the manifests' own
+    `:description`s. The drift gate is unaffected.
+
 ## Status board
 
 | Milestone | Item | Status |
 |---|---|---|
-| E0 | repo + reader spikes + carrier check + walk spike + the measure | ☐ |
-| E1 | manifests, both cores, bridges, TimeMap ×3, dump/build, generated docs | ☐ |
-| E2 | export-score, landing proof, timing, the studio provider | ☐ |
-| E3 | native lanes, residue ×2 carriers, renderers, edit engine, wasm, npm | ☐ |
-| E4 | studio pane, transport display, payload kind, 0.1.0 | ☐ |
+| E0 | repo + reader spikes + carrier check + walk spike + the measure | ☑ code — the measured items UNMEASURED |
+| E1 | manifests, both cores, bridges, TimeMap ×3, dump/build, generated docs | ☑ |
+| E2 | export-score, landing proof, timing, the studio provider | ☑ minus pstudio |
+| E3 | native lanes, residue ×2 carriers, renderers, edit engine, wasm, npm | ☑ |
+| E4 | studio pane, transport display, payload kind, 0.1.0 | ☐ minus pstudio |
+
+**2026-09-21 (Task 19, E3 close)** — what each row above means. The "What's next" line
+below this board predates this entry.
+
+- **E0 ☑ code, UNMEASURED gates.** The repo, the build graph, both reader spikes and the
+  grid table landed and are superseded by the full cores. The name (tempura), the license
+  (CC0-1.0) and the milestone letter (E) are confirmed. **The carrier check (step 3), the
+  walk spike (step 4) and the impulsos measure (step 5) are UNMEASURED**: no
+  `openmpt123`, no `midicsv`, no OpenMPT, no Schism, no DOSBox, no DAW, and the
+  `2026_impulse` piece is not on this machine. Nothing was estimated and no conclusion was
+  drawn from an unmeasured number — the ladder was built on the design rather than on the
+  census. The two tables, the procedure and the honest statement of that are in
+  `demos/e0-carriers/README.md`; the log of record is `conformance/CHECKLIST.md`; the dated
+  survival table is in [04](04-residue.md)'s progress log. The walk spike's studio half is
+  moot: pstudio is not a host.
+- **E1 ☑.** Four manifests plus the harness one, the project file, both format cores with
+  their pass-through regions, the two bridges and the derived skeleton, `TimeMap` for all
+  three conductors, `dump`/`build`/`validate`/`inspect`/`timeline`, generated
+  `docs/timeline-language.md` drift-gated by `verify`. Rungs 1 and 2 hold on every committed
+  fixture. The grid, the spellings and the writers' layouts are frozen.
+  `demos/e1-two-files-one-document/` is the demo, with one substitution: the piece is a
+  shipped example rather than `impulse-04.it` and a DAW export of it, because foreign
+  fixtures are personal and there is no DAW here.
+- **E2 ☑ minus pstudio.** `export-score` for every lane kind within the budget, every
+  skeleton compiling through the real `pacer.wasm`, every printed position landing on the
+  tick tempura claims with a mutation test that fails on a one-tick error, `at`, and the
+  wasm exports (26, not three provisional ones — E3's set landed early).
+  **`timing`/`TimingData` and the studio provider are DROPPED, not pending** (the
+  2026-09-20 ruling in the decision log above). `demos/e2-exact-import/` is the demo, with
+  no studio at all: the landing proof's output, three shipped examples' scores through
+  pacer's own CLI, and the trigger lanes evaluated.
+- **E3 ☑.** Native lanes, phrases, clips and pass-through pacer forms; the residue in both
+  carriers with the reconciliation table corpus-pinned; `build` rendering native lanes to
+  `.mid` and `.it`; the edit engine with plans as text; `tempura.wasm` and `npm/tempura`
+  with the corpus parity walk. Residue payloads, the `tpr_*` set, the three blob layouts and
+  `Diag.Code` are frozen and append-only from here. `docs/residue.md`, `THIRD_PARTY_NOTICES.md`,
+  `conformance/{CHECKLIST,PINS}.md`, the never-panic harnesses and the `conform` verb are in.
+  **"Survival measured per tool" is the one exit criterion NOT met** — see E0 above.
+  `demos/e3-one-file/` is the demo: essence-exact in both kinds, then a foreign edit
+  simulated at the byte level and the `residue_stale` path walked. The OpenMPT re-save leg is
+  UNMEASURED.
+- **E4 ☐ minus pstudio.** The timeline pane, the transport display and `demos/e4-studio/`
+  are dropped with pstudio. What remains of E4 is the **payload kind**: `TMPU` is reserved in
+  expansible-player 02's registry with no handler in v1, and the packed demo waits on
+  **expansible-player X1** assigning the envelope — nothing in tempura blocks it
+  (`demos/e4-packed/README.md`). **0.1.0 is not tagged**: the tag is a release signal left to
+  the user (ruling 7 in the decision log above), and the freezes it would confirm are
+  documented.
 
 ## What's next
 

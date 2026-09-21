@@ -1,0 +1,31 @@
+; examples-tracker harness, the READ half. `song.it` is a SYMLINK to
+; `examples/tracker/piece.it` — the committed artifact, not a fixture
+; `zig build fixtures` generates. Its bytes come from one command, which
+; `examples/tracker/README.md` names and `examples-tracker`'s golden
+; re-runs; the `(fixture …)` line below pins them by hash, so an artifact
+; regenerated from a changed document, or never regenerated at all, fails
+; here.
+;
+; `(read)` and `(roundtrip)` are the format core's two rungs over a file
+; tempura wrote: the header, the orders, the patterns and the
+; pass-through regions, then `write(read(bytes)) == bytes` and a field-
+; for-field re-read. The `TMPU` chunk is a trailing region and the
+; message tail is the message, so both carriers ride through the rungs as
+; the file's own bytes.
+;
+; `(walk)` is the tracker's own state machine over this module: one row
+; per row played, the tempo segments the `Txx` at row 32 makes, and the
+; loop point `:end loop` asked for.
+;
+; The `(echo …)` block every case opens with is the same walk seen as a
+; TimeMap. (The `(timing)` directive the harness manifest declares is
+; UNRUN in this build: the `timing` verb and `tpr_timing` went with the
+; studio provider, and the echo says what they would have.)
+;
+; `(dump)` is the other end of the round trip `examples-tracker` asserts:
+; the timeline tier reconciled out of these bytes alone, printed in full.
+; A reviewer reads it against `examples/tracker/piece.sjon`.
+(read)
+(roundtrip)
+(walk)
+(dump)

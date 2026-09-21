@@ -224,3 +224,88 @@ reports `residue_partial` for the rest.
   order list; the hash covers the cells at the lane's channel in the patterns the clip
   structure touched and the order entries in that range, stated precisely in `docs/residue.md`
   at E3 so a second implementation could compute it.
+
+## Progress log
+
+Appended at Task 19 (E3 close). Dated entries only; nothing above this line is
+rewritten.
+
+### 2026-09-21 — survival: UNMEASURED, per tool
+
+"Survival is measured, never promised" (above) is unsatisfied. No run has been
+recorded, and none was estimated or assumed. The authoring machine has no
+`openmpt123`, no `midicsv`, no OpenMPT, no Schism Tracker and no DOSBox, and no
+DAW (`conformance/PINS.md` records what is absent and at which version it would be
+pinned).
+
+| Tool | Kind | Essence | Lane records | Conductor record | `TMPU` chunk | Message tail | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| OpenMPT | .it | — | — | — | — | — | UNMEASURED |
+| Schism Tracker | .it | — | — | — | — | — | UNMEASURED |
+| Impulse Tracker 2.14 (DOSBox) | .it | — | — | — | — | — | UNMEASURED |
+| libopenmpt (`openmpt123`) | .it | n/a | n/a | n/a | — | — | UNMEASURED |
+| *(DAW 1)* | .mid | — | — | — | n/a | n/a | UNMEASURED |
+| *(DAW 2)* | .mid | — | — | — | n/a | n/a | UNMEASURED |
+
+**The procedure is `conformance/CHECKLIST.md` section C** — load a file tempura
+wrote, re-save or re-export without editing, re-read, and count the payloads that
+came back, one row per tool and version. Sections A (a built `.it` loads and plays
+in three players), B (a built `.mid` opens in each DAW) and D (invisibility: the
+same file with and without residue reports the same duration, tempo and names) are
+the gates around it, and all four are UNMEASURED on the same date.
+`demos/e0-carriers/README.md` carries the summary in E0's own shape, with the two
+tables plan 11 step 3 asks for. The E0 impulsos measure (step 5) is UNMEASURED
+too: the piece is not on this machine.
+
+What IS measured with no tools installed: both carriers are written and read back
+by tempura itself across the golden corpus (seven `residue-*` cases plus every
+`examples-*` and `render-*` case), the never-panic harnesses run both residue
+unpackers over arbitrary bytes, and `zig build conform` runs and prints a reason
+per oracle it could not use.
+
+The design is total either way, which is why this stays a log and not a blocker: a
+file whose residue is gone takes rule 1 and dumps as a derived skeleton
+(`demos/e1-two-files-one-document/` shows that working on purpose, with
+`--no-residue`). What a "dropped" verdict would narrow is the promise — from "one
+file holds everything" to "one file tempura wrote holds everything".
+
+### 2026-09-21 — amendment to the "Hash scope for IT rendered lanes" risk
+
+That risk (above) deferred the precise statement to `docs/residue.md` at E3. The
+statement is there, and **it names a different scope from the risk's own
+sentence**. The code's scope stands; this entry records the divergence rather than
+editing the sentence.
+
+The risk says the hash covers the cells at the lane's channel "in the patterns the
+clip structure touched and the order entries in that range". The code hashes, for
+a lane record whose address names one IT channel:
+
+* `channels` = that one channel, and
+* `patterns` = **every pattern the timing walk played**, ascending and
+  deduplicated — not the patterns the clip structure happened to touch;
+* and **no order entries at all**.
+
+Two reasons, stated in full in `docs/residue.md` ("The scope, stated precisely"):
+
+1. **The clip structure is not an input.** A hash is recomputed from the module
+   and the record's address and from nothing else, because `tempura check-residue`
+   answers the same question over a file alone, with no schema loaded and the
+   essence never restored. A scope depending on a document's clips could not be
+   recomputed there, and a hash one of its two readers cannot compute is not a
+   hash.
+2. **The order entries belong to the conductor.** They are hashed in the conductor
+   record. Hashing them in a lane too would make every lane stale on a reorder
+   that moved none of its cells, and the point of per-lane records is that a
+   foreign edit is detected per lane.
+
+`docs/residue.md` also states the byte layout and one thing the risk does not
+mention: the five cell bytes fed to the hash are tempura's remapped values, not
+ITTECH's on-disk bytes, so a second implementation must remap before hashing.
+
+### 2026-09-21 — rule 5 and a newer chunk: a divergence to close later
+
+Rule 5 (the carrier a dump reads) lists the tail-wins cases as absent, corrupt or
+truncated. The code's `it.choose` also prefers a readable message tail over a
+`TMPU` chunk written by a NEWER envelope version, which rule 5 does not name.
+`corpus/residue-newer-version/` pins the behaviour. Either the rule gains that
+case or `choose` loses it; recorded here rather than decided.

@@ -1,0 +1,30 @@
+; exported from native.sjon (conductor: none, 6 lanes, 2 sections) by tempura 0.1.0
+; positions: 0 rounded (max 0b), durations: 0 rounded (max 0b); onsets: 0 aggregated
+(transport :bpm 125 :meter [4 4] :dur 128bar :end loop)
+; cue "bar 41" — bar 40
+(scene :name intro :at 0bar :dur 16bar)
+(scene :name drop  :at 16bar :dur 32bar)
+(trigger :target flash :at [0bar 1b 8bar 32.5b 9bar 36.5b])
+(track :target glow
+  (key :at 0bar :value [0.2 0.2 0.2] :ease hold)
+  (key :at 1bar :value [0.9 0.9 0.9] :ease in-cubic)
+  (key :at 2bar :value [0.1 0.2 0.3] :ease (spring :damping 0.5)))
+(track :target hats :pattern (euclid 3 8 1))
+(track :target pulse :expr (sin (* beat 6.2832)))
+(control :id glow-amt :type slider :min 0 :max 1 :value 0.5 :target glow-amt)
+; pacer's form, pass-through
+; pacer's compose-mode declarations, one per target this document drives —
+; a score is COMPOSE-CLEAN when it declares every one of them, and then it
+; loads through `pacer.wasm` with no host registry at all. A notes lane
+; drives a `(trigger …)`, which writes four components; a curve, a query
+; and a formula lane write one each — except `glow`, whose keyframes are
+; three-component vectors, so its target is arity 3. A value with more
+; components than its target is a pacer error (`value has 3 component(s);
+; target expects 1`), which is exactly what this example used to be.
+(target :name kick :arity 4)
+(target :name flash :arity 4)
+(target :name bass-vol :arity 1)
+(target :name glow :arity 3)
+(target :name hats :arity 1)
+(target :name pulse :arity 1)
+(target :name glow-amt :arity 1)

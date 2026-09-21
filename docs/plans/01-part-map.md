@@ -132,6 +132,10 @@ only carry-forward. `docs/timeline-language.md` is generated from the manifest's
   here share no head by construction (02's collision table), and a test loads them through
   `sjon.loadProject` and asserts it. The corpus harness manifest declares a `target` form like
   pacer's and stays out of the project file for the same reason.
+  **Correction, 2026-09-21 (Task 19):** the harness manifest declares no `target` form; the
+  collision is on `timing`, declared both by the it tier's header section and by the harness
+  verb that echoes an IT conductor's walk. It stays out of the project file for that reason,
+  which is the same reason with a different head.
 - **Two sibling repos, one owner per file.** `itf/` restates a subset of batida's P34 and
   P36, `smf/` restates midivia's P70, and `schema/midi.sjon` and `schema/it.sjon` are the
   sibling sets' manifests: all four are designs from sets whose repos do not exist,

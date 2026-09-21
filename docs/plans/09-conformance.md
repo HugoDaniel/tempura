@@ -47,6 +47,13 @@ answers, pacer's rule verbatim (`pacer/CLAUDE.md`, "The golden corpus"). `zig bu
 SJON's, sequence is the runner's, and the manifest stays out of the LSP project file because
 it declares a `target` form ([01](01-part-map.md)).
 
+**Correction, 2026-09-21 (Task 19):** the collision is on `timing`, not `target`. Both
+manifests declare a `timing` form — the it tier's header section in `schema/it.sjon`, which
+`schema/tempura.sjon` hosts, and the harness verb that echoes an IT conductor's walk — so a
+shared schema would make every unqualified `(timing …)` `ambiguous_form` in timeline
+documents and in harness files alike. The harness manifest declares no `target` form at all.
+The reason the manifest stays out of the project file is unchanged; only the head's name is.
+
 Cases planned, each landing with its feature: `grid-table`, `positions-units`, `printer-rule`,
 `tempo-three-conductors`, `tempo-us-vs-qpm`, `meter-change`, `loop-wrap-seconds`, `walk-*`
 (one per timing corner), `smf-vlq-edges`, `smf-running-status`, `smf-smpte`, `smf-format0`,

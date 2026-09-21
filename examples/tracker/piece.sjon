@@ -1,0 +1,59 @@
+; A tracker piece — the native document `piece.it` is built from.
+;
+; Everything here is NATIVE: the content lives in this document and no
+; file is read to load it. `tempura build … --kind it` renders it into
+; `piece.it`, attaching both IT carriers; `tempura dump piece.it` gives
+; `piece.dump.sjon`, a document that anchors those bytes INLINE and whose
+; timeline tier is this one form for form. The two commands and the round
+; trip are in `README.md` beside this file.
+;
+; Read it as the module the renderer has to produce. Speed 6 and 24 IT
+; ticks to the quarter make a row a sixteenth, so a 64-row pattern is
+; four bars of [4 4] and this whole piece is one pattern. A cell holds
+; one note, so the three-note chord takes three channels. The tempo step
+; at bar 2 is a `Txx` at its row. The curve lane writes the volume
+; column, and the query lane is something a `.it` cannot hold at all.
+;
+; The meter stays [4 4] on purpose: a meter whose bar does not divide 64
+; rows is a known gap in the renderer's pattern sizing, recorded in the
+; plan set's progress notes rather than papered over here.
+
+(timeline :title "impulse-lab" :length 4bar :end loop)
+
+(tempo-point :at 0bar :qpm 125)                 ; the document conducts itself
+(tempo-point :at 2bar :qpm 140)                 ; a Txx at row 32
+(meter-point :at 0bar :sig [4 4])
+
+(section :name a :at 0bar :dur 2bar)            ; → an order comment in the residue
+(section :name b :at 2bar :dur 2bar)
+(cue :name "fill" :at 3bar)
+
+(lane :name bass :kind notes :target bass
+  (note :at 0bar :dur 1q :key 36 :vel 127)
+  (note :at 1b :dur 0.5q :key 36 :vel 96)
+  (note :at 2b :dur 1q :key 38 :vel 112)
+  (note :at 2bar :dur 1q :key 36 :vel 127)
+  (clip :at 3bar :phrase fill :repeat 1))       ; the phrase below, once
+(lane :name chord :kind notes :target chord
+  (note :at 0bar :dur 2q :key 60 :vel 100)      ; three cells, three channels
+  (note :at 0bar :dur 2q :key 64 :vel 88)
+  (note :at 0bar :dur 2q :key 67 :vel 76))
+(lane :name sweep :kind curve :target sweep :range [0 1]
+  (keyframe :at 0bar :value 0)
+  (keyframe :at 2bar :value 1 :ease linear)      ; sampled into the volume column
+  (keyframe :at 4bar :value 0 :ease out-quad))   ; steps there, restored from the essence
+(lane :name hats :kind query :target hats :query (euclid 5 8 1))
+                                                 ; a .it holds no query: residue only
+
+(phrase :name fill :length 1bar
+  (lane :name bass
+    (note :at 0q :dur 0.25q :key 38 :vel 100)
+    (note :at 0.5q :dur 0.25q :key 38 :vel 80)
+    (note :at 1q :dur 0.25q :key 40 :vel 90)))
+
+; pacer's compose-mode declarations, one per target this document drives,
+; so `tempura export-score piece.sjon` is compose-clean on its own.
+(target :name bass :arity 4)
+(target :name chord :arity 4)
+(target :name sweep :arity 1)
+(target :name hats :arity 1)

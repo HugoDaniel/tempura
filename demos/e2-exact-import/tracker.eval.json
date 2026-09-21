@@ -1,0 +1,35 @@
+{
+  "pacer":{"version":"0.2.0","format":1},
+  "command":"eval",
+  "source":{"path":"demos/e2-exact-import/tracker.score.sjon","bytes":882},
+  "ok":true,
+  "counts":{"errors":0,"warnings":0},
+  "diagnostics":[],
+  "targets":[
+    {"id":0,"name":"bass","ncomp":4,"registry":0,"origin":"declared"},
+    {"id":1,"name":"chord","ncomp":4,"registry":0,"origin":"declared"},
+    {"id":2,"name":"sweep","ncomp":1,"registry":0,"origin":"declared"},
+    {"id":3,"name":"hats","ncomp":1,"registry":0,"origin":"declared"}
+  ],
+  "overrides":[],
+  "frames":[
+    {"t":0,"tick":0,"out_of_range":false,"writes":[
+      {"target_id":2,"target":"sweep","registry":0,"ncomp":1,"value":[0]},
+      {"target_id":3,"target":"hats","registry":0,"ncomp":1,"value":[1]},
+      {"target_id":0,"target":"bass","registry":0,"ncomp":4,"value":[0,0,1,0]},
+      {"target_id":1,"target":"chord","registry":0,"ncomp":4,"value":[1,0,1,0]}
+    ]},
+    {"t":0.48,"tick":180180,"out_of_range":false,"writes":[
+      {"target_id":2,"target":"sweep","registry":0,"ncomp":1,"value":[0.125]},
+      {"target_id":3,"target":"hats","registry":0,"ncomp":1,"value":[1]},
+      {"target_id":0,"target":"bass","registry":0,"ncomp":4,"value":[0,1,1,0]},
+      {"target_id":1,"target":"chord","registry":0,"ncomp":4,"value":[1,0,0,1]}
+    ]},
+    {"t":0.96,"tick":360360,"out_of_range":false,"writes":[
+      {"target_id":2,"target":"sweep","registry":0,"ncomp":1,"value":[0.25]},
+      {"target_id":0,"target":"bass","registry":0,"ncomp":4,"value":[0,2,1,0]},
+      {"target_id":1,"target":"chord","registry":0,"ncomp":4,"value":[1,0,0,2]}
+    ]}
+  ],
+  "expr_failures":0
+}

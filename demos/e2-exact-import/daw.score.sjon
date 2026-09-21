@@ -1,0 +1,21 @@
+; exported from piece.sjon (conductor: none, 4 lanes, 2 sections) by tempura 0.1.0
+; positions: 0 rounded (max 0b), durations: 0 rounded (max 0b); onsets: 0 aggregated
+; warning: meter changes to [3 4] at bar 6; pacer keeps [4 4]; positions stay exact, bar/phase lanes drift from there
+(transport :bpm 96 :meter [4 4] :dur 30b :end hold)
+(tempo :at 4bar :bpm 120)
+; cue "door" — bar 4
+(scene :name approach :at 0bar :dur 4bar)
+(scene :name room     :at 4bar :dur 14b)
+(trigger :target kick :at [0bar 1b 2b 3b 4bar 16.5b 5bar 20.5b])
+(trigger :target lead :at [0bar 2b 3b 4bar])
+(track :target haze
+  (key :at 0bar :value 0 :ease linear)
+  (key :at 4bar :value 1 :ease linear)
+  (key :at 30b :value 0 :ease in-cubic))
+(track :target spark :pattern (euclid 3 8 1))
+; pacer's compose-mode declarations, one per target this document drives,
+; so `tempura export-score piece.sjon` is compose-clean on its own.
+(target :name kick :arity 4)
+(target :name lead :arity 4)
+(target :name haze :arity 1)
+(target :name spark :arity 1)

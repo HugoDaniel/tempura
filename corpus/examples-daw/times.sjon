@@ -1,0 +1,27 @@
+; examples-daw harness, the BUILD half. `doc.sjon` is a SYMLINK to
+; `examples/daw/piece.sjon` — the native document the shipped `.mid` is
+; built from, so the gate compiles the shipped example itself (plan 09:
+; "`examples-*` (every shipped example is a symlinked corpus case)";
+; pacer 12 D1).
+;
+; `(export-score)` pins that the document is compose-clean: one
+; `(target …)` per target it drives, every lane kind in pacer's
+; vocabulary.
+;
+; `(build :kind mid :cc 1)` is the example's whole claim in one line. The
+; `:cc 1` is the `--cc 1` the README's command passes — a native curve
+; lane has no controller of its own, so without it `haze` would be
+; `render_cc_missing` and ride in the residue alone. The golden carries:
+;
+;   * the built bytes' length and sha256 — the SAME sha256 the
+;     `examples-daw-mid` case's `(fixture …)` line pins over the
+;     COMMITTED `examples/daw/piece.mid`, which is how a stale committed
+;     artifact shows up as a two-line diff;
+;   * `(rung1 :ok true)` — the bytes re-read and re-write identically;
+;   * `(rung3 :ok true)` — `dump(build(doc))` is this document again,
+;     form for form at the timeline tier. That flag IS the round trip the
+;     README claims, asserted rather than described;
+;   * one `residue_only` warning, for the query lane a `.mid` cannot
+;     hold.
+(export-score)
+(build :kind mid :cc 1)

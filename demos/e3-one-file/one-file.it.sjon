@@ -1,0 +1,95 @@
+; E3's document: one file holds everything.
+;
+; A native timeline with two sections and a cue, a notes lane, a curve
+; lane whose middle keyframe eases with a SPRING, and a query lane. Three
+; of those four things a `.mid` and a `.it` cannot say, and all three ride
+; in the file's own metadata slots. `README.md` beside this file walks the
+; whole round trip and then breaks it on purpose.
+(timeline :title "one-file" :length 4bar :end loop)
+(tempo-point :at 0bar :qpm 110)
+(meter-point :at 0bar :sig [4 4])
+(section :name rise :at 0bar :dur 2bar)
+(section :name fall :at 2bar :dur 2bar)
+(cue :name "turn" :at 2bar)
+(lane
+  :name snare
+  :kind notes
+  :target snare
+  (note :at 1b :dur 0.5q :key 38 :vel 100)
+  (note :at 3b :dur 0.5q :key 38 :vel 84)
+  (note :at 5b :dur 0.5q :key 38 :vel 100)
+  (note :at 7b :dur 0.5q :key 38 :vel 84)
+  (note :at 9b :dur 0.5q :key 38 :vel 100)
+  (note :at 11b :dur 0.5q :key 38 :vel 84)
+  (note :at 13b :dur 0.5q :key 38 :vel 100)
+  (note :at 15b :dur 0.5q :key 38 :vel 120))
+(lane
+  :name bloom
+  :kind curve
+  :target bloom
+  :range [0 1]
+  (keyframe :at 0bar :value 0)
+  (keyframe :at 1bar :value 1 :ease (spring :damping 0.35))
+  (keyframe :at 3bar :value 0.2 :ease linear)
+  (keyframe :at 4bar :value 0 :ease hold))
+(lane
+  :name grit
+  :kind query
+  :target grit
+  :query (euclid 7 16 2))
+; pacer's compose-mode declarations, so the exported score is
+; compose-clean on its own.
+(target :name snare :arity 4)
+(target :name bloom :arity 1)
+(target :name grit :arity 1)
+(anchor :id song :kind it :file "one-file.it" :size 4577 :sha256 "b4bcadd08c97475f77f086b8dae4959f021ae251d106634072da409769c5d513")
+(it/module :title "one-file"
+  (it/timing :speed 6 :tempo 110 :highlight [4 16])
+  (it/options :instruments false)
+  (it/orders 0 1 end)
+  (it/message ";; tempura\n(timeline :title \"one-file\" :length 4bar :end loop)\n(section :name rise :at 0bar :dur 2bar)\n(section :name fall :at 2bar :dur 2bar)\n(cue :name \"turn\" :at 2bar)\n(lane :name snare :kind notes)\n(lane :name bloom :kind curve :range [0 1])\n(lane :name grit :kind query :query (euclid 7 16 2))\n")
+  (it/pattern 0 :rows 64
+    (row 0 (ev 2 :vol 0))
+    (row 4 (ev 1 "D-3" :ins 1 :vol 50))
+    (row 6 (ev 1 cut))
+    (row 12 (ev 1 "D-3" :ins 1 :vol 42))
+    (row 14 (ev 1 cut))
+    (row 16 (ev 2 :vol 64))
+    (row 17 (ev 2 :vol 62))
+    (row 18 (ev 2 :vol 61))
+    (row 19 (ev 2 :vol 59))
+    (row 20 (ev 1 "D-3" :ins 1 :vol 50) (ev 2 :vol 58))
+    (row 21 (ev 2 :vol 56))
+    (row 22 (ev 1 cut) (ev 2 :vol 54))
+    (row 23 (ev 2 :vol 53))
+    (row 24 (ev 2 :vol 51))
+    (row 25 (ev 2 :vol 50))
+    (row 26 (ev 2 :vol 48))
+    (row 27 (ev 2 :vol 46))
+    (row 28 (ev 1 "D-3" :ins 1 :vol 42) (ev 2 :vol 45))
+    (row 29 (ev 2 :vol 43))
+    (row 30 (ev 1 cut) (ev 2 :vol 42))
+    (row 31 (ev 2 :vol 40))
+    (row 32 (ev 2 :vol 38))
+    (row 33 (ev 2 :vol 37))
+    (row 34 (ev 2 :vol 35))
+    (row 35 (ev 2 :vol 34))
+    (row 36 (ev 1 "D-3" :ins 1 :vol 50) (ev 2 :vol 32))
+    (row 37 (ev 2 :vol 30))
+    (row 38 (ev 1 cut) (ev 2 :vol 29))
+    (row 39 (ev 2 :vol 27))
+    (row 40 (ev 2 :vol 26))
+    (row 41 (ev 2 :vol 24))
+    (row 42 (ev 2 :vol 22))
+    (row 43 (ev 2 :vol 21))
+    (row 44 (ev 1 "D-3" :ins 1 :vol 42) (ev 2 :vol 19))
+    (row 45 (ev 2 :vol 18))
+    (row 46 (ev 1 cut) (ev 2 :vol 16))
+    (row 47 (ev 2 :vol 14))
+    (row 48 (ev 2 :vol 13))
+    (row 52 (ev 1 "D-3" :ins 1 :vol 50))
+    (row 54 (ev 1 cut))
+    (row 60 (ev 1 "D-3" :ins 1 :vol 60))
+    (row 62 (ev 1 cut)))
+  (it/pattern 1 :rows 64
+    (row 0 (ev 2 :vol 0))))

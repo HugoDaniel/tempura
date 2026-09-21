@@ -389,6 +389,23 @@ pub fn build(b: *std.Build) void {
     const fuzz_step = b.step("fuzz", "Run never-panic fuzz harnesses");
     fuzz_step.dependOn(&run_fuzz.step);
 
+    // `zig build conform` — the oracle matrix: tempura's readers against
+    // libopenmpt and midicsv over every committed fixture, plus the
+    // fetched OpenMPT wiki cases.
+    //
+    // NOT joined to `verify`, deliberately (plan 09, "CI shape": brew
+    // deps and pinned downloads, "a nightly job, not per commit"). The
+    // script installs nothing and vendors nothing: an absent oracle
+    // prints `skipped: <tool> not installed` and the run still exits 0,
+    // so a machine without the brew packages is not a failing machine.
+    // `-- --quiet` drops the per-fixture rows.
+    const conform = b.addSystemCommand(&.{"conformance/conform.sh"});
+    conform.setCwd(b.path("."));
+    if (b.args) |args| conform.addArgs(args);
+    conform.has_side_effects = true;
+    const conform_step = b.step("conform", "Run the oracle matrix (libopenmpt, midicsv, the wiki cases); skips with a reason when a tool is absent");
+    conform_step.dependOn(&conform.step);
+
     // `schema/pacer.sjon` is a VERBATIM copy of the sibling's manifest.
     // The script diffs it against `../pacer` when that checkout exists and
     // passes with a note when it does not (the copy is then trusted, and

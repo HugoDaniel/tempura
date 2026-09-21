@@ -1,0 +1,20 @@
+; exported from piece.sjon (conductor: none, 4 lanes, 2 sections) by tempura 0.1.0
+; positions: 0 rounded (max 0b), durations: 0 rounded (max 0b); onsets: 2 aggregated
+(transport :bpm 125 :meter [4 4] :dur 4bar :end loop)
+(tempo :at 2bar :bpm 140)
+; cue "fill" — bar 3
+(scene :name a :at 0bar :dur 2bar)
+(scene :name b :at 2bar :dur 2bar)
+(trigger :target bass :at [0bar 1b 2b 2bar 3bar 12.5b 13b])
+(trigger :target chord :at [0bar])
+(track :target sweep
+  (key :at 0bar :value 0 :ease linear)
+  (key :at 2bar :value 1 :ease linear)
+  (key :at 4bar :value 0 :ease out-quad))
+(track :target hats :pattern (euclid 5 8 1))
+; pacer's compose-mode declarations, one per target this document drives,
+; so `tempura export-score piece.sjon` is compose-clean on its own.
+(target :name bass :arity 4)
+(target :name chord :arity 4)
+(target :name sweep :arity 1)
+(target :name hats :arity 1)

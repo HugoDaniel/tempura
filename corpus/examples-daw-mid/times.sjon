@@ -1,0 +1,26 @@
+; examples-daw harness, the READ half. `song.mid` is a SYMLINK to
+; `examples/daw/piece.mid` — the committed artifact, not a fixture
+; `zig build fixtures` generates. Its bytes come from one command, which
+; `examples/daw/README.md` names and `examples-daw`'s golden re-runs; the
+; `(fixture …)` line below pins them by hash, so an artifact regenerated
+; from a changed document, or never regenerated at all, fails here.
+;
+; `(read)` and `(roundtrip)` are the format core's two rungs over a file
+; tempura wrote: the header, the tracks and the event counts, then
+; `write(read(bytes)) == bytes` and `read(write(read(bytes)))` event for
+; event. The residue events are ordinary sequencer-specific events to the
+; reader, so they ride through both rungs like any others.
+;
+; The `(echo …)` block every case opens with is the conductor the file
+; itself carries — the tempo step at bar 4 and the meter change at bar 6
+; as SMF events rather than as document forms. (The `(timing)` directive
+; the harness manifest declares is UNRUN in this build: the `timing`
+; verb and `tpr_timing` went with the studio provider, and the echo says
+; what they would have.)
+;
+; `(dump)` is the other end of the round trip `examples-daw` asserts:
+; the timeline tier reconciled out of these bytes alone, printed in full.
+; A reviewer reads it against `examples/daw/piece.sjon`.
+(read)
+(roundtrip)
+(dump)

@@ -1,0 +1,250 @@
+; A DAW piece — the native document `piece.mid` is built from.
+;
+; Everything here is NATIVE: the content lives in this document and no
+; file is read to load it. `tempura build … --kind mid` renders it into
+; `piece.mid`, attaching the residue; `tempura dump piece.mid` gives
+; `piece.dump.sjon`, a document that anchors those bytes INLINE and whose
+; timeline tier is this one form for form. The two commands and the round
+; trip are in `README.md` beside this file.
+;
+; Read it as the .mid the renderer has to produce: a tempo map with a
+; step in it, a meter change, two windows and a point that become SMF
+; markers, two notes lanes on their own MIDI channels, a curve lane that
+; becomes controller 1, a phrase placed twice as a clip, and one lane a
+; `.mid` cannot hold at all.
+(timeline :title "corridor" :length 8bar :end hold)
+(tempo-point :at 0bar :qpm 96)
+; the document conducts itself
+(tempo-point :at 4bar :qpm 120)
+; a step, never a ramp (plan 03)
+(meter-point :at 0bar :sig [4 4])
+(meter-point :at 6bar :sig [3 4])
+; the last two bars are three beats
+(section :name approach :at 0bar :dur 4bar)
+; → an SMF marker at its start
+(section :name room :at 4bar :dur 4bar)
+(cue :name "door" :at 4bar)
+; a point, not a window
+(lane
+  :name kick
+  :kind notes
+  :target kick
+  (note :at 0bar :dur 0.5q :key 36 :vel 112)
+  (note :at 1b :dur 0.5q :key 36 :vel 96)
+  (note :at 2b :dur 0.5q :key 36 :vel 112)
+  (note :at 3b :dur 0.5q :key 36 :vel 96)
+  (clip :at 4bar :phrase roll :repeat 2))
+; the phrase below, twice
+(lane
+  :name lead
+  :kind notes
+  :target lead
+  (note :at 0b :dur 2q :key "C4" :vel 90)
+  (note :at 2b :dur 1q :key "E4" :vel 84)
+  (note :at 3b :dur 1q :key "G4" :vel 78)
+  (note :at 4bar :dur 4q :key "A4" :vel 100))
+(lane
+  :name haze
+  :kind curve
+  :target haze
+  :range [0 1]
+  (keyframe :at 0bar :value 0)
+  (keyframe :at 4bar :value 1 :ease linear)
+  ; sampled onto the controller
+  (keyframe :at 8bar :value 0 :ease in-cubic))
+; a step there, restored from the essence
+(lane
+  :name spark
+  :kind query
+  :target spark
+  :query (euclid 3 8 1))
+; a .mid holds no query: residue only
+(phrase
+  :name roll
+  :length 1bar
+  (lane
+    :name kick
+    (note :at 0q :dur 0.25q :key 38 :vel 100)
+    (note :at 0.5q :dur 0.25q :key 38 :vel 80)))
+; pacer's compose-mode declarations, one per target this document drives,
+; so `tempura export-score piece.sjon` is compose-clean on its own.
+(target :name kick :arity 4)
+(target :name lead :arity 4)
+(target :name haze :arity 1)
+(target :name spark :arity 1)
+(anchor :id song :kind smf :file "piece.mid" :size 6085 :sha256 "f8646dd3c8eece2ff3f1ccf82c31114e7c282bcd46d5d58c18d41153a5acba9b")
+(midi/smf :format 1 :division 960)
+
+(midi/mtrk
+  (time-signature :at 0 :num 4 :denom 4 :clocks 24 :thirty-seconds 8)
+  (set-tempo :at 0 :us 625000)
+  (set-tempo :at 15360 :us 500000)
+  (marker :at 15360 :text "door")
+  (time-signature :at 23040 :num 3 :denom 4 :clocks 24 :thirty-seconds 8)
+  (end-of-track :at 23040))
+
+(midi/mtrk
+  (sequence-name :at 0 :text "kick")
+  (note-on :at 0 :ch 1 :key 36 :vel 112)
+  (note-off :at 480 :ch 1 :key 36 :vel 64)
+  (note-on :at 960 :ch 1 :key 36 :vel 96)
+  (note-off :at 1440 :ch 1 :key 36 :vel 64)
+  (note-on :at 1920 :ch 1 :key 36 :vel 112)
+  (note-off :at 2400 :ch 1 :key 36 :vel 64)
+  (note-on :at 2880 :ch 1 :key 36 :vel 96)
+  (note-off :at 3360 :ch 1 :key 36 :vel 64)
+  (note-on :at 15360 :ch 1 :key 38 :vel 100)
+  (note-off :at 15600 :ch 1 :key 38 :vel 64)
+  (note-on :at 15840 :ch 1 :key 38 :vel 80)
+  (note-off :at 16080 :ch 1 :key 38 :vel 64)
+  (note-on :at 19200 :ch 1 :key 38 :vel 100)
+  (note-off :at 19440 :ch 1 :key 38 :vel 64)
+  (note-on :at 19680 :ch 1 :key 38 :vel 80)
+  (note-off :at 19920 :ch 1 :key 38 :vel 64)
+  (end-of-track :at 19920))
+
+(midi/mtrk
+  (sequence-name :at 0 :text "lead")
+  (note-on :at 0 :ch 1 :key 60 :vel 90)
+  (note-off :at 1920 :ch 1 :key 60 :vel 64)
+  (note-on :at 1920 :ch 1 :key 64 :vel 84)
+  (note-off :at 2880 :ch 1 :key 64 :vel 64)
+  (note-on :at 2880 :ch 1 :key 67 :vel 78)
+  (note-off :at 3840 :ch 1 :key 67 :vel 64)
+  (note-on :at 15360 :ch 1 :key 69 :vel 100)
+  (note-off :at 19200 :ch 1 :key 69 :vel 64)
+  (end-of-track :at 19200))
+
+(midi/mtrk
+  (sequence-name :at 0 :text "haze")
+  (control-change :at 0 :ch 1 :num 1 :val 0)
+  (control-change :at 120 :ch 1 :num 1 :val 1)
+  (control-change :at 240 :ch 1 :num 1 :val 2)
+  (control-change :at 360 :ch 1 :num 1 :val 3)
+  (control-change :at 480 :ch 1 :num 1 :val 4)
+  (control-change :at 600 :ch 1 :num 1 :val 5)
+  (control-change :at 720 :ch 1 :num 1 :val 6)
+  (control-change :at 840 :ch 1 :num 1 :val 7)
+  (control-change :at 960 :ch 1 :num 1 :val 8)
+  (control-change :at 1080 :ch 1 :num 1 :val 9)
+  (control-change :at 1200 :ch 1 :num 1 :val 10)
+  (control-change :at 1320 :ch 1 :num 1 :val 11)
+  (control-change :at 1440 :ch 1 :num 1 :val 12)
+  (control-change :at 1560 :ch 1 :num 1 :val 13)
+  (control-change :at 1680 :ch 1 :num 1 :val 14)
+  (control-change :at 1800 :ch 1 :num 1 :val 15)
+  (control-change :at 1920 :ch 1 :num 1 :val 16)
+  (control-change :at 2040 :ch 1 :num 1 :val 17)
+  (control-change :at 2160 :ch 1 :num 1 :val 18)
+  (control-change :at 2280 :ch 1 :num 1 :val 19)
+  (control-change :at 2400 :ch 1 :num 1 :val 20)
+  (control-change :at 2520 :ch 1 :num 1 :val 21)
+  (control-change :at 2640 :ch 1 :num 1 :val 22)
+  (control-change :at 2760 :ch 1 :num 1 :val 23)
+  (control-change :at 2880 :ch 1 :num 1 :val 24)
+  (control-change :at 3000 :ch 1 :num 1 :val 25)
+  (control-change :at 3120 :ch 1 :num 1 :val 26)
+  (control-change :at 3240 :ch 1 :num 1 :val 27)
+  (control-change :at 3360 :ch 1 :num 1 :val 28)
+  (control-change :at 3480 :ch 1 :num 1 :val 29)
+  (control-change :at 3600 :ch 1 :num 1 :val 30)
+  (control-change :at 3720 :ch 1 :num 1 :val 31)
+  (control-change :at 3840 :ch 1 :num 1 :val 32)
+  (control-change :at 3960 :ch 1 :num 1 :val 33)
+  (control-change :at 4080 :ch 1 :num 1 :val 34)
+  (control-change :at 4200 :ch 1 :num 1 :val 35)
+  (control-change :at 4320 :ch 1 :num 1 :val 36)
+  (control-change :at 4440 :ch 1 :num 1 :val 37)
+  (control-change :at 4560 :ch 1 :num 1 :val 38)
+  (control-change :at 4680 :ch 1 :num 1 :val 39)
+  (control-change :at 4800 :ch 1 :num 1 :val 40)
+  (control-change :at 4920 :ch 1 :num 1 :val 41)
+  (control-change :at 5040 :ch 1 :num 1 :val 42)
+  (control-change :at 5160 :ch 1 :num 1 :val 43)
+  (control-change :at 5280 :ch 1 :num 1 :val 44)
+  (control-change :at 5400 :ch 1 :num 1 :val 45)
+  (control-change :at 5520 :ch 1 :num 1 :val 46)
+  (control-change :at 5640 :ch 1 :num 1 :val 47)
+  (control-change :at 5760 :ch 1 :num 1 :val 48)
+  (control-change :at 5880 :ch 1 :num 1 :val 49)
+  (control-change :at 6000 :ch 1 :num 1 :val 50)
+  (control-change :at 6120 :ch 1 :num 1 :val 51)
+  (control-change :at 6240 :ch 1 :num 1 :val 52)
+  (control-change :at 6360 :ch 1 :num 1 :val 53)
+  (control-change :at 6480 :ch 1 :num 1 :val 54)
+  (control-change :at 6600 :ch 1 :num 1 :val 55)
+  (control-change :at 6720 :ch 1 :num 1 :val 56)
+  (control-change :at 6840 :ch 1 :num 1 :val 57)
+  (control-change :at 6960 :ch 1 :num 1 :val 58)
+  (control-change :at 7080 :ch 1 :num 1 :val 59)
+  (control-change :at 7200 :ch 1 :num 1 :val 60)
+  (control-change :at 7320 :ch 1 :num 1 :val 61)
+  (control-change :at 7440 :ch 1 :num 1 :val 62)
+  (control-change :at 7560 :ch 1 :num 1 :val 63)
+  (control-change :at 7680 :ch 1 :num 1 :val 64)
+  (control-change :at 7800 :ch 1 :num 1 :val 64)
+  (control-change :at 7920 :ch 1 :num 1 :val 65)
+  (control-change :at 8040 :ch 1 :num 1 :val 66)
+  (control-change :at 8160 :ch 1 :num 1 :val 67)
+  (control-change :at 8280 :ch 1 :num 1 :val 68)
+  (control-change :at 8400 :ch 1 :num 1 :val 69)
+  (control-change :at 8520 :ch 1 :num 1 :val 70)
+  (control-change :at 8640 :ch 1 :num 1 :val 71)
+  (control-change :at 8760 :ch 1 :num 1 :val 72)
+  (control-change :at 8880 :ch 1 :num 1 :val 73)
+  (control-change :at 9000 :ch 1 :num 1 :val 74)
+  (control-change :at 9120 :ch 1 :num 1 :val 75)
+  (control-change :at 9240 :ch 1 :num 1 :val 76)
+  (control-change :at 9360 :ch 1 :num 1 :val 77)
+  (control-change :at 9480 :ch 1 :num 1 :val 78)
+  (control-change :at 9600 :ch 1 :num 1 :val 79)
+  (control-change :at 9720 :ch 1 :num 1 :val 80)
+  (control-change :at 9840 :ch 1 :num 1 :val 81)
+  (control-change :at 9960 :ch 1 :num 1 :val 82)
+  (control-change :at 10080 :ch 1 :num 1 :val 83)
+  (control-change :at 10200 :ch 1 :num 1 :val 84)
+  (control-change :at 10320 :ch 1 :num 1 :val 85)
+  (control-change :at 10440 :ch 1 :num 1 :val 86)
+  (control-change :at 10560 :ch 1 :num 1 :val 87)
+  (control-change :at 10680 :ch 1 :num 1 :val 88)
+  (control-change :at 10800 :ch 1 :num 1 :val 89)
+  (control-change :at 10920 :ch 1 :num 1 :val 90)
+  (control-change :at 11040 :ch 1 :num 1 :val 91)
+  (control-change :at 11160 :ch 1 :num 1 :val 92)
+  (control-change :at 11280 :ch 1 :num 1 :val 93)
+  (control-change :at 11400 :ch 1 :num 1 :val 94)
+  (control-change :at 11520 :ch 1 :num 1 :val 95)
+  (control-change :at 11640 :ch 1 :num 1 :val 96)
+  (control-change :at 11760 :ch 1 :num 1 :val 97)
+  (control-change :at 11880 :ch 1 :num 1 :val 98)
+  (control-change :at 12000 :ch 1 :num 1 :val 99)
+  (control-change :at 12120 :ch 1 :num 1 :val 100)
+  (control-change :at 12240 :ch 1 :num 1 :val 101)
+  (control-change :at 12360 :ch 1 :num 1 :val 102)
+  (control-change :at 12480 :ch 1 :num 1 :val 103)
+  (control-change :at 12600 :ch 1 :num 1 :val 104)
+  (control-change :at 12720 :ch 1 :num 1 :val 105)
+  (control-change :at 12840 :ch 1 :num 1 :val 106)
+  (control-change :at 12960 :ch 1 :num 1 :val 107)
+  (control-change :at 13080 :ch 1 :num 1 :val 108)
+  (control-change :at 13200 :ch 1 :num 1 :val 109)
+  (control-change :at 13320 :ch 1 :num 1 :val 110)
+  (control-change :at 13440 :ch 1 :num 1 :val 111)
+  (control-change :at 13560 :ch 1 :num 1 :val 112)
+  (control-change :at 13680 :ch 1 :num 1 :val 113)
+  (control-change :at 13800 :ch 1 :num 1 :val 114)
+  (control-change :at 13920 :ch 1 :num 1 :val 115)
+  (control-change :at 14040 :ch 1 :num 1 :val 116)
+  (control-change :at 14160 :ch 1 :num 1 :val 117)
+  (control-change :at 14280 :ch 1 :num 1 :val 118)
+  (control-change :at 14400 :ch 1 :num 1 :val 119)
+  (control-change :at 14520 :ch 1 :num 1 :val 120)
+  (control-change :at 14640 :ch 1 :num 1 :val 121)
+  (control-change :at 14760 :ch 1 :num 1 :val 122)
+  (control-change :at 14880 :ch 1 :num 1 :val 123)
+  (control-change :at 15000 :ch 1 :num 1 :val 124)
+  (control-change :at 15120 :ch 1 :num 1 :val 125)
+  (control-change :at 15240 :ch 1 :num 1 :val 126)
+  (control-change :at 15360 :ch 1 :num 1 :val 127)
+  (control-change :at 28800 :ch 1 :num 1 :val 0)
+  (end-of-track :at 28800))

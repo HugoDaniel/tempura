@@ -1,0 +1,55 @@
+; A DAW piece — the native document `piece.mid` is built from.
+;
+; Everything here is NATIVE: the content lives in this document and no
+; file is read to load it. `tempura build … --kind mid` renders it into
+; `piece.mid`, attaching the residue; `tempura dump piece.mid` gives
+; `piece.dump.sjon`, a document that anchors those bytes INLINE and whose
+; timeline tier is this one form for form. The two commands and the round
+; trip are in `README.md` beside this file.
+;
+; Read it as the .mid the renderer has to produce: a tempo map with a
+; step in it, a meter change, two windows and a point that become SMF
+; markers, two notes lanes on their own MIDI channels, a curve lane that
+; becomes controller 1, a phrase placed twice as a clip, and one lane a
+; `.mid` cannot hold at all.
+
+(timeline :title "corridor" :length 8bar :end hold)
+
+(tempo-point :at 0bar :qpm 96)                  ; the document conducts itself
+(tempo-point :at 4bar :qpm 120)                 ; a step, never a ramp (plan 03)
+(meter-point :at 0bar :sig [4 4])
+(meter-point :at 6bar :sig [3 4])               ; the last two bars are three beats
+
+(section :name approach :at 0bar :dur 4bar)     ; → an SMF marker at its start
+(section :name room :at 4bar :dur 4bar)
+(cue :name "door" :at 4bar)                     ; a point, not a window
+
+(lane :name kick :kind notes :target kick
+  (note :at 0bar :dur 0.5q :key 36 :vel 112)
+  (note :at 1b :dur 0.5q :key 36 :vel 96)
+  (note :at 2b :dur 0.5q :key 36 :vel 112)
+  (note :at 3b :dur 0.5q :key 36 :vel 96)
+  (clip :at 4bar :phrase roll :repeat 2))       ; the phrase below, twice
+(lane :name lead :kind notes :target lead
+  (note :at 0b :dur 2q :key "C4" :vel 90)
+  (note :at 2b :dur 1q :key "E4" :vel 84)
+  (note :at 3b :dur 1q :key "G4" :vel 78)
+  (note :at 4bar :dur 4q :key "A4" :vel 100))
+(lane :name haze :kind curve :target haze :range [0 1]
+  (keyframe :at 0bar :value 0)
+  (keyframe :at 4bar :value 1 :ease linear)      ; sampled onto the controller
+  (keyframe :at 8bar :value 0 :ease in-cubic))   ; a step there, restored from the essence
+(lane :name spark :kind query :target spark :query (euclid 3 8 1))
+                                                 ; a .mid holds no query: residue only
+
+(phrase :name roll :length 1bar
+  (lane :name kick
+    (note :at 0q :dur 0.25q :key 38 :vel 100)
+    (note :at 0.5q :dur 0.25q :key 38 :vel 80)))
+
+; pacer's compose-mode declarations, one per target this document drives,
+; so `tempura export-score piece.sjon` is compose-clean on its own.
+(target :name kick :arity 4)
+(target :name lead :arity 4)
+(target :name haze :arity 1)
+(target :name spark :arity 1)

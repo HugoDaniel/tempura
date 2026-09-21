@@ -1,0 +1,26 @@
+; examples-tracker harness, the BUILD half. `doc.sjon` is a SYMLINK to
+; `examples/tracker/piece.sjon` — the native document the shipped `.it`
+; is built from, so the gate compiles the shipped example itself (plan
+; 09: "`examples-*` (every shipped example is a symlinked corpus case)";
+; pacer 12 D1).
+;
+; `(export-score)` pins that the document is compose-clean: one
+; `(target …)` per target it drives, every lane kind in pacer's
+; vocabulary.
+;
+; `(build :kind it)` is the example's whole claim in one line. No `:cc` —
+; an IT curve lane writes the volume column, so there is no controller to
+; name. The golden carries:
+;
+;   * the built bytes' length and sha256 — the SAME sha256 the
+;     `examples-tracker-it` case's `(fixture …)` line pins over the
+;     COMMITTED `examples/tracker/piece.it`, which is how a stale
+;     committed artifact shows up as a two-line diff;
+;   * `(rung1 :ok true)` — the bytes re-read and re-write identically;
+;   * `(rung3 :ok true)` — `dump(build(doc))` is this document again,
+;     form for form at the timeline tier. That flag IS the round trip the
+;     README claims, asserted rather than described;
+;   * `it_no_instrument`, because the module carries timing and no sound,
+;     and one `residue_only` for the query lane a `.it` cannot hold.
+(export-score)
+(build :kind it)

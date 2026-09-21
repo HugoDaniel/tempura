@@ -1,0 +1,46 @@
+; examples-native harness. `doc.sjon` is a SYMLINK to
+; `examples/native.sjon` — the shipped native example is the document
+; the gate compiles, so the example cannot rot the way an untested one
+; does (pacer 12 D1, `corpus/examples-starter/`; plan 09's corpus list
+; ends with "`examples-*` (every shipped example is a symlinked corpus
+; case)").
+;
+; Three verbs, one per promise the example's own header makes. All three
+; run against a document whose load already carries one error:
+; `impulse-04.it` is NOT shipped beside the example, on purpose, so
+; `anchor_unavailable` is in the echo and the two lanes bound to that
+; anchor resolve to nothing. That is the documented condition a browser
+; host meets too (plan 10: anchors by reference are unresolved in wasm,
+; "so a browser host inlines first") and the reason `tempura inline`
+; exists. The `tempura` CLI, which has a filesystem resolver, refuses the
+; whole build on it and exits 1; the runner has no resolver, so it goes
+; on and shows what a build over an unresolved anchor actually produces.
+;
+; `(export-score)` is the promise that matters most, and it does not need
+; the anchor at all: the score is COMPOSE-CLEAN — one `(target …)` per
+; target the document drives — every lane kind reaches pacer's
+; vocabulary, and the two rounding counts in the header stay at zero.
+; `npm/tempura/test/landing.test.js` loads the score this same file
+; exports through the real `pacer.wasm`; this golden is the text.
+;
+; `(build :kind mid)` is REFUSED, and the refusal is the pinned fact:
+; the document is arranged around an `it` anchor, and v1 builds a
+; document into its own anchor's kind or a native document into either
+; (plan 08). A cross-kind build is `build_kind_mismatch`, not a
+; transcode.
+;
+; `(build :kind it)` writes a FRESH module — the anchor carries no inline
+; dump, so the anchor's own content is not in the file, which the build
+; says in as many words. Rung 1 holds (the bytes re-read and re-write
+; identically). Rung 3 does NOT, and this is the only case in the corpus
+; where it does not, so here is exactly why: `Doc.eql` compares a
+; pass-through pacer form by its SOURCE TEXT, and this document has one —
+; `(control :id glow-amt …)`, written on one line. The essence carries
+; the form, and restoring it re-prints it through SJON's printer, which
+; breaks a seven-keyword form across seven lines. Nothing the document
+; MEANS changed; its layout did. Essence-exactness over documents without
+; a pass-through form is pinned green by `render-it`, `render-smf` and
+; the six `residue-*` cases.
+(export-score)
+(build :kind mid)
+(build :kind it)

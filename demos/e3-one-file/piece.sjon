@@ -1,0 +1,38 @@
+; E3's document: one file holds everything.
+;
+; A native timeline with two sections and a cue, a notes lane, a curve
+; lane whose middle keyframe eases with a SPRING, and a query lane. Three
+; of those four things a `.mid` and a `.it` cannot say, and all three ride
+; in the file's own metadata slots. `README.md` beside this file walks the
+; whole round trip and then breaks it on purpose.
+
+(timeline :title "one-file" :length 4bar :end loop)
+
+(tempo-point :at 0bar :qpm 110)
+(meter-point :at 0bar :sig [4 4])
+
+(section :name rise :at 0bar :dur 2bar)
+(section :name fall :at 2bar :dur 2bar)
+(cue :name "turn" :at 2bar)
+
+(lane :name snare :kind notes :target snare
+  (note :at 1b :dur 0.5q :key 38 :vel 100)
+  (note :at 3b :dur 0.5q :key 38 :vel 84)
+  (note :at 5b :dur 0.5q :key 38 :vel 100)
+  (note :at 7b :dur 0.5q :key 38 :vel 84)
+  (note :at 9b :dur 0.5q :key 38 :vel 100)
+  (note :at 11b :dur 0.5q :key 38 :vel 84)
+  (note :at 13b :dur 0.5q :key 38 :vel 100)
+  (note :at 15b :dur 0.5q :key 38 :vel 120))
+(lane :name bloom :kind curve :target bloom :range [0 1]
+  (keyframe :at 0bar :value 0)
+  (keyframe :at 1bar :value 1 :ease (spring :damping 0.35))
+  (keyframe :at 3bar :value 0.2 :ease linear)
+  (keyframe :at 4bar :value 0 :ease hold))
+(lane :name grit :kind query :target grit :query (euclid 7 16 2))
+
+; pacer's compose-mode declarations, so the exported score is
+; compose-clean on its own.
+(target :name snare :arity 4)
+(target :name bloom :arity 1)
+(target :name grit :arity 1)
