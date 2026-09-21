@@ -2976,3 +2976,26 @@ test "ops: rename a section, and rename a target no pacer form declares" {
         }},
     );
 }
+
+// ---- plan 07's contract, asked of the document an accepted plan leaves ----
+
+test "ops: remove a clip whose window does not fit an i64, and the document reloads" {
+    // The selection used to overflow computing the clip's window before
+    // a single action was planned (`Select.clipWindow`); it is the
+    // derivation's saturating window now, so the remove plans, applies
+    // and reloads like any other.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.wide_clip);
+    defer fx.deinit();
+
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .remove = .{ .sel = .{ .lanes = &.{"flash"}, .kinds = .clips } },
+    });
+    defer p.deinit();
+    try testing.expect(!p.summary.refused);
+    try testing.expectEqual(@as(usize, 1), p.actions.len);
+
+    var re = try test_support.Reloaded.init(gpa, fx.source, &p);
+    defer re.deinit();
+    try testing.expectEqual(@as(usize, 0), re.doc_().lanes[0].clips.len);
+}

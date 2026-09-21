@@ -21,6 +21,7 @@
 const std = @import("std");
 
 const Diag = @import("../Diag.zig");
+const Grid = @import("../time/Grid.zig");
 const doc = @import("../doc/doc.zig");
 
 const testing = std.testing;
@@ -253,10 +254,22 @@ pub fn keyWanted(keys: ?[]const u7, key: u7) bool {
 /// A clip's window: its own `:length`, or the phrase's length times
 /// `:repeat` less `:offset` — the schema's own default, spelled out
 /// because a split needs the number and the document need not carry it.
+///
+/// The default is USER arithmetic, as `time/derive.place` says of the
+/// same product: `:repeat` has no maximum in the manifest and a phrase's
+/// `:length` reaches to the grid ceiling, so `length · repeat` does not
+/// fit an `i64` in general. The window is formed with the derivation's
+/// own saturating operators and then pinned at `Grid.MAX_TICK`: the
+/// derivation places nothing past the ceiling (plan 03), so no clip's
+/// editable window is longer than that, and a target whose `at` and
+/// `dur` are both on the grid keeps every consumer's `at + dur` inside
+/// the domain it was written for.
 fn clipWindow(d: *const doc.Doc, c: doc.Clip) i64 {
     if (c.length) |l| return l;
     const phrase = d.phraseByName(c.phrase) orelse return 0;
-    return @max(0, phrase.length * @as(i64, c.repeat) - c.offset);
+    const repeat: i64 = @max(1, c.repeat);
+    const window = (phrase.length *| repeat) -| c.offset;
+    return std.math.clamp(window, 0, Grid.MAX_TICK);
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +311,7 @@ test "Select: lanes, a half-open range and a key filter each narrow it" {
     var fx = try test_support.Fixture.init(gpa, test_support.native);
     defer fx.deinit();
 
-    const q = @import("../time/Grid.zig").TPQ;
+    const q = Grid.TPQ;
 
     // One lane, the first two quarter notes, notes only.
     {
@@ -358,4 +371,25 @@ test "Select: a lane no document declares selects nothing" {
     defer r.deinit();
     try testing.expectEqual(@as(usize, 0), r.targets.len);
     try testing.expect(r.bound == null);
+}
+
+test "Select: a clip whose repeats do not fit an i64 resolves to a window on the grid, not a panic" {
+    // `:length 9007199254740990t` is two ticks under the ceiling and
+    // `:repeat 2000` is a number the manifest allows, so the product is
+    // user arithmetic no `i64` holds — and `resolve` is what every
+    // selection-taking operation runs first, so the overflow used to
+    // abort a `remove` of the clip before a single action was planned.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.wide_clip);
+    defer fx.deinit();
+
+    var r = try resolve(gpa, fx.doc_(), .{ .lanes = &.{"flash"}, .kinds = .clips });
+    defer r.deinit();
+
+    try testing.expectEqual(@as(usize, 1), r.targets.len);
+    try testing.expectEqual(Kind.clip, r.targets[0].kind);
+    // The derivation's own window, pinned at the ceiling: saturated and
+    // then bounded, never wrapped.
+    try testing.expectEqual(Grid.MAX_TICK, r.targets[0].dur);
+    try testing.expect(r.targets[0].at +| r.targets[0].dur > r.targets[0].at);
 }

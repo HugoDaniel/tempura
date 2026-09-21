@@ -15,6 +15,9 @@ const sjon = @import("sjon");
 const Schema = @import("../Schema.zig");
 const doc = @import("../doc/doc.zig");
 
+const Plan = @import("Plan.zig");
+const apply = @import("apply.zig");
+
 pub const Fixture = struct {
     gpa: std.mem.Allocator,
     source: [:0]const u8,
@@ -88,6 +91,49 @@ pub const Fixture = struct {
 
     pub fn doc_(self: *const Fixture) *const doc.Doc {
         return &self.loaded.doc;
+    }
+};
+
+/// A plan applied to the source it was planned over, and the document
+/// that came out loaded again — plan 07's contract as a test step. A
+/// REFUSED plan is diagnostics and an ACCEPTED plan is applicable, so
+/// the text an accepted plan produces has to load clean; a test that
+/// pinned the actions alone would be asserting the planner's intent
+/// and not the document it leaves behind.
+///
+/// `init` fails the test — printing the diagnostics — when the splice
+/// is refused or the reload reports an error.
+pub const Reloaded = struct {
+    applied: apply.Applied,
+    fixture: Fixture,
+
+    pub fn init(gpa: std.mem.Allocator, source: [:0]const u8, p: *const Plan.Plan) !Reloaded {
+        var applied = try apply.apply(gpa, source, p);
+        errdefer applied.deinit();
+        if (applied.diags.hasErrors()) {
+            for (applied.diags.items()) |d| {
+                std.debug.print("apply: {s}: {s}\n", .{ @tagName(d.code), d.message });
+            }
+            return error.ApplyRefused;
+        }
+        // `Fixture.init` is the clean-document assertion, and the text
+        // it borrows lives in `applied`'s arena for as long as this does.
+        const fixture = try Fixture.init(gpa, applied.text);
+        return .{ .applied = applied, .fixture = fixture };
+    }
+
+    pub fn deinit(self: *Reloaded) void {
+        self.fixture.deinit();
+        self.applied.deinit();
+        self.* = undefined;
+    }
+
+    pub fn doc_(self: *const Reloaded) *const doc.Doc {
+        return self.fixture.doc_();
+    }
+
+    pub fn text(self: *const Reloaded) []const u8 {
+        return self.applied.text;
     }
 };
 
@@ -191,6 +237,23 @@ pub const unsorted: [:0]const u8 =
     \\(lane :name flash
     \\  (note :at 2q :dur 0.6q :key 36)
     \\  (note :at 0.4q :dur 0.6q :key 38))
+    \\
+;
+
+/// A clip whose window does not fit an `i64`: a phrase two ticks under
+/// the grid ceiling, placed with a `:repeat` the manifest puts no
+/// maximum on. The phrase's lane is empty, so the document places
+/// nothing and loads clean — the overflow was in the selection alone.
+pub const wide_clip: [:0]const u8 =
+    \\(timeline :length 1bar)
+    \\(tempo-point :at 0q :qpm 120)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(lane :name flash
+    \\  (clip :at 0q :phrase huge :repeat 2000))
+    \\
+    \\(phrase :name huge :length 9007199254740990t
+    \\  (lane :name flash))
     \\
 ;
 
