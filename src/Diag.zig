@@ -215,6 +215,19 @@ pub const Severity = enum(u8) {
     warning,
     /// Nothing is wrong; the producer is reporting a choice it made.
     info,
+
+    /// The severity as a word: `error`, `warning`, `info`. `err` is
+    /// `error` because the tag dodges a Zig keyword and nobody reading a
+    /// diagnostic line, a JSON envelope or a corpus golden is reading Zig.
+    /// The ONE spelling: every renderer asks here rather than keep a
+    /// switch of its own. Static text.
+    pub fn word(self: Severity) []const u8 {
+        return switch (self) {
+            .err => "error",
+            .warning => "warning",
+            .info => "info",
+        };
+    }
 };
 
 /// A half-open byte range `[start, end)` into whatever the producer
@@ -616,4 +629,12 @@ test "Diag.List: hasErrors reflects severity and count is per code" {
     try testing.expectEqual(@as(usize, 1), list.count(.build_cross_kind));
     try testing.expectEqual(@as(usize, 2), list.count(.render_inexact));
     try testing.expectEqual(@as(usize, 0), list.count(.tick_overflow));
+}
+
+test "Diag.Severity.word: the three words every renderer prints" {
+    // The CLI's lines and JSON and the corpus goldens all spell these, so
+    // a change here moves every one of them at once — deliberately.
+    try testing.expectEqualStrings("error", Severity.err.word());
+    try testing.expectEqualStrings("warning", Severity.warning.word());
+    try testing.expectEqualStrings("info", Severity.info.word());
 }

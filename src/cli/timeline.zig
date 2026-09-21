@@ -172,7 +172,7 @@ fn writeDiagnostics(
         try j.objectField("code_id");
         try j.write(@intFromEnum(x.code));
         try j.objectField("severity");
-        try j.write(Diags.severityWord(x.severity));
+        try j.write(x.severity.word());
         try j.objectField("message");
         try j.write(x.message);
         try j.objectField("span");

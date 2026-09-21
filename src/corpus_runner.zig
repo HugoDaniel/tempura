@@ -985,18 +985,10 @@ fn writeDigest(w: *Io.Writer, bytes: []const u8) Error!void {
     for (digest) |b| try p(w, "{x:0>2}", .{b});
 }
 
-/// The severity a golden spells. `Diag.Severity.err` is `error` in text:
-/// the enum's name is a Zig keyword and the golden is not Zig.
-fn severityName(s: Diag.Severity) []const u8 {
-    return switch (s) {
-        .err => "error",
-        .warning => "warning",
-        .info => "info",
-    };
-}
-
 /// One `(diag …)` child per entry, each on its own line at `indent`.
 /// Nothing at all when the list is empty, so a clean read is one line.
+/// The severity is `Diag.Severity.word`'s, the spelling every renderer
+/// shares.
 ///
 /// False = a message carries a control byte and the golden is void
 /// (a diagnostic can quote a file's own bytes — a chunk tag, a name —
@@ -1011,7 +1003,7 @@ fn renderDiags(
         try p(w, "\n{s}(diag :code {d} :severity {s} :start {d} :end {d} :message \"", .{
             indent,
             @intFromEnum(d.code),
-            severityName(d.severity),
+            d.severity.word(),
             d.span.start,
             d.span.end,
         });

@@ -93,14 +93,6 @@ pub fn count(diags: []const Diag.Diagnostic) Counts {
     return c;
 }
 
-pub fn severityWord(sev: Diag.Severity) []const u8 {
-    return switch (sev) {
-        .err => "error",
-        .warning => "warning",
-        .info => "info",
-    };
-}
-
 /// The exit code a set of diagnostics earns: errors are the document's
 /// problem and set the code; a warning never does.
 pub fn exitCode(diags: []const Diag.Diagnostic) u8 {
@@ -145,7 +137,7 @@ pub fn render(
             .bytes => try w.print("{s}:0x{X:0>8}: ", .{ name, d.span.start }),
         }
         try style.severity(w, d.severity);
-        try w.writeAll(severityWord(d.severity));
+        try w.writeAll(d.severity.word());
         try style.reset(w);
         try w.print(" {s}: {s}\n", .{ @tagName(d.code), d.message });
     }
