@@ -627,9 +627,8 @@ const Reader = struct {
     /// carries.
     fn textBytes(self: *Reader, children: []const NodeIndex) Error!smf.Bytes {
         if (kvNode(self.tree, children, "text")) |node| {
-            if (self.tree.tagOf(
-                node,
-            ) == .string) return self.b.addBytes(self.tree.stringText(node));
+            const text_node = self.tree.tagOf(node) == .string;
+            if (text_node) return self.b.addBytes(self.tree.stringText(node));
         }
         return self.hexBytes(children, "bytes");
     }
@@ -734,11 +733,9 @@ fn sniffSequencerSpecific(raw: []const u8, run: smf.Bytes) struct { smf.Payload,
         .total = raw[7],
         .body = .{ .off = run.off + 8, .len = run.len - 8 },
     } }, .tempura_residue };
-    if (raw.len >= 4 and std.mem.eql(
-        u8,
-        raw[0..4],
-        "\x7Dpau",
-    )) return .{ .{ .bytes = run }, .ease_hint };
+    if (raw.len >= 4 and std.mem.eql(u8, raw[0..4], "\x7Dpau")) {
+        return .{ .{ .bytes = run }, .ease_hint };
+    }
     return .{ .{ .bytes = run }, .sequencer_specific };
 }
 

@@ -754,9 +754,8 @@ fn volumeOf(vel: u7) u8 {
 fn scale(v: f64, range: [2]f32, top: u8) u8 {
     const lo: f64 = range[0];
     const hi: f64 = range[1];
-    if (hi == lo or !std.math.isFinite(
-        lo,
-    ) or !std.math.isFinite(hi) or !std.math.isFinite(v)) return 0;
+    if (hi == lo) return 0;
+    if (!std.math.isFinite(lo) or !std.math.isFinite(hi) or !std.math.isFinite(v)) return 0;
     const scaled = @round((v - lo) / (hi - lo) * @as(f64, @floatFromInt(top)));
     if (!(scaled > 0)) return 0;
     if (scaled >= @as(f64, @floatFromInt(top))) return top;

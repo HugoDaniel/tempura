@@ -2173,11 +2173,8 @@ fn edited(gpa: std.mem.Allocator, regions: []const Region) ![]u8 {
     try out.appendSlice(gpa, test_support.native);
     for (regions) |r| {
         const at = std.mem.indexOf(u8, out.items, r.from) orelse return error.NoSuchRegion;
-        if (std.mem.indexOf(
-            u8,
-            out.items[at + r.from.len ..],
-            r.from,
-        ) != null) return error.AmbiguousRegion;
+        const rest = out.items[at + r.from.len ..];
+        if (std.mem.indexOf(u8, rest, r.from) != null) return error.AmbiguousRegion;
         try out.replaceRange(gpa, at, r.from.len, r.to);
     }
     return out.toOwnedSlice(gpa);

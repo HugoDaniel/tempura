@@ -150,10 +150,8 @@ pub fn tickFromLiteral(lit: Literal) TickResult {
             // nothing, not even its own truncation), so this comparison
             // only has to hold back the ceiling.
             if (lit.value != @trunc(lit.value)) break :blk .{ .err = .position_not_integer };
-            if (lit.value > @as(
-                f64,
-                @floatFromInt(Grid.MAX_TICK),
-            )) break :blk .{ .err = .tick_overflow };
+            const ceiling: f64 = @floatFromInt(Grid.MAX_TICK);
+            if (lit.value > ceiling) break :blk .{ .err = .tick_overflow };
             break :blk .{ .tick = @intFromFloat(lit.value) };
         },
         .bar, .b, .s => .{ .needs_map = lit.unit },

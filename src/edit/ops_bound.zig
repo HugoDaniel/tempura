@@ -765,11 +765,8 @@ const Ctx = struct {
 
     fn numbered(self: *Ctx, parent: NodeIndex, head: []const u8, number: i64) Error!?Numbered {
         for (try self.children(parent)) |c| {
-            if (c.number == number and std.mem.eql(
-                u8,
-                self.tree.formHeader(c.node).head,
-                head,
-            )) return c;
+            const same_head = std.mem.eql(u8, self.tree.formHeader(c.node).head, head);
+            if (c.number == number and same_head) return c;
         }
         return null;
     }
@@ -1803,11 +1800,8 @@ fn edited(gpa: std.mem.Allocator, source: []const u8, regions: []const Region) !
     try out.appendSlice(gpa, source);
     for (regions) |r| {
         const at = std.mem.indexOf(u8, out.items, r.from) orelse return error.NoSuchRegion;
-        if (std.mem.indexOf(
-            u8,
-            out.items[at + r.from.len ..],
-            r.from,
-        ) != null) return error.AmbiguousRegion;
+        const rest = out.items[at + r.from.len ..];
+        if (std.mem.indexOf(u8, rest, r.from) != null) return error.AmbiguousRegion;
         try out.replaceRange(gpa, at, r.from.len, r.to);
     }
     return out.toOwnedSlice(gpa);

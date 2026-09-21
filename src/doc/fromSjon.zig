@@ -3037,11 +3037,8 @@ test "fromSjon: SJON's own complaints ride across as sjon_diagnostic" {
     try testing.expect(res.diags.count(.sjon_diagnostic) > 0);
     var found = false;
     for (res.diags.items()) |d| {
-        if (d.code == .sjon_diagnostic and std.mem.indexOf(
-            u8,
-            d.message,
-            "nowhere",
-        ) != null) found = true;
+        const names_nowhere = std.mem.indexOf(u8, d.message, "nowhere") != null;
+        if (d.code == .sjon_diagnostic and names_nowhere) found = true;
     }
     try testing.expect(found);
 }
