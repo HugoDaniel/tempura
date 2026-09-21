@@ -568,6 +568,7 @@ const Render = struct {
 
         var steps_only: std.ArrayList(records.Segment) = .empty;
         var off_grid: usize = 0;
+        var coarse: usize = 0;
 
         for (index.steps, 0..) |step, i| {
             if (i > 0) {
@@ -578,7 +579,9 @@ const Render = struct {
                 // other easing is the two endpoints and a note in the
                 // record — tempura does not evaluate a named curve.
                 if (std.mem.eql(u8, step.ease_src, "linear")) {
-                    try self.ramp(b, track.index, num, range, prev, step, rate, &off_grid);
+                    const ramp_rate = rampRate(step.tick - prev.tick, rate);
+                    if (ramp_rate > rate) coarse += 1;
+                    try self.ramp(b, track.index, num, range, prev, step, ramp_rate, &off_grid);
                 } else if (!std.mem.eql(u8, step.ease_src, "hold")) {
                     try steps_only.append(self.arena, .{
                         .at = step.tick,
@@ -591,6 +594,14 @@ const Render = struct {
             });
         }
         if (off_grid > 0) try self.rounded(lane.name, off_grid);
+        if (coarse > 0) try self.diags.add(
+            .render_inexact,
+            .warning,
+            lane.span,
+            "{d} linear segment(s) of '{s}' are longer than {d} samples at --cc-rate {d}; each " ++
+                "was sampled {d} times, evenly, instead",
+            .{ coarse, lane.name, max_ramp_samples, rate, max_ramp_samples },
+        );
 
         try self.lanes.append(self.arena, .{
             .lane = try self.arena.dupe(u8, lane.name),
@@ -624,8 +635,12 @@ const Render = struct {
         const v0: f64 = from.value[0];
         const v1: f64 = to.value[0];
 
-        var at = from.tick + rate;
-        while (at < to.tick) : (at += rate) {
+        // Saturating, so a rate near i64's ceiling (`--cc-rate` is the
+        // caller's number) ends the segment instead of wrapping past it.
+        var at = from.tick +| rate;
+        // Bounded by `max_ramp_samples`: `rampRate` chose `rate` so that
+        // the span holds no more samples than that.
+        while (at < to.tick) : (at +|= rate) {
             const u = @as(f64, @floatFromInt(at - from.tick)) / @as(f64, @floatFromInt(span));
             const v = v0 + (v1 - v0) * u;
             try b.addEvent(track, self.pulse(at, off_grid), .control_change, .{
@@ -660,6 +675,23 @@ const Render = struct {
 /// 1-based number a lane record's address spells, which `claimTrack`
 /// has already checked fits.
 const Track = struct { index: u32, number: u16 };
+
+/// The most samples one `linear` segment gets: 65 536, which at the
+/// default `--cc-rate` of a 32nd note is 2048 bars of `[4 4]`. A segment
+/// longer than that is sampled this many times, evenly, and said so —
+/// otherwise a keyframe near the grid's ceiling would ask for a billion
+/// events and the render would allocate without bound.
+const max_ramp_samples: i64 = 1 << 16;
+
+/// How often a `linear` segment of `span` ticks is sampled: every `rate`
+/// ticks (`--cc-rate`, at least 1), or — when that would be more than
+/// `max_ramp_samples` — every `⌈span / max_ramp_samples⌉`.
+fn rampRate(span: i64, rate: i64) i64 {
+    std.debug.assert(rate >= 1);
+    if (span <= 0) return rate;
+    // `span - 1` cannot wrap: `span` is positive.
+    return @max(rate, @divFloor(span - 1, max_ramp_samples) + 1);
+}
 
 /// One end of a rendered note, before the pairs are ordered.
 const NoteEvent = struct { at: i64, off: bool, ch: u4, key: u7, vel: u7, seq: u32 };
@@ -1087,6 +1119,55 @@ test "renderSmf: a linear segment is sampled at the cc rate, hold is its keyfram
     defer held.deinit();
     try testing.expectEqual(@as(usize, 2), countKind(&held.seq, 1, .control_change));
     try testing.expectEqual(@as(usize, 0), held.lanes[0].steps_only.len);
+}
+
+test "renderSmf: a --cc-rate past the segment never overflows the sample clock" {
+    // `at = from + rate` with a rate near i64's ceiling wrapped past it;
+    // the clock saturates, so the segment is its two keyframes.
+    const gpa = testing.allocator;
+    var fx = try load(gpa,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :us 500000)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name glow :kind curve :cc 74
+        \\  (keyframe :at 1q :value 0)
+        \\  (keyframe :at 2q :value 1 :ease linear))
+    );
+    defer fx.deinit();
+
+    var out = try renderSmf(gpa, &fx.doc, &fx.derived, null, .{
+        .cc_rate = std.math.maxInt(i64),
+    });
+    defer out.deinit();
+    try testing.expectEqual(@as(usize, 2), countKind(&out.seq, 1, .control_change));
+}
+
+test "renderSmf: a linear segment 2^52 ticks long is sampled within a budget, and says so" {
+    // At the default rate a segment this long would be a billion events.
+    // It gets `max_ramp_samples` at most, evenly, and `render_inexact`
+    // names the coarser rate; the keyframes themselves are exact.
+    const gpa = testing.allocator;
+    var fx = try load(gpa,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :us 500000)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name glow :kind curve :cc 74
+        \\  (keyframe :at 0q :value 0)
+        \\  (keyframe :at 24000000bar :value 1 :ease linear))
+    );
+    defer fx.deinit();
+
+    var out = try renderSmf(gpa, &fx.doc, &fx.derived, null, .{});
+    defer out.deinit();
+    const events = countKind(&out.seq, 1, .control_change);
+    try testing.expect(events <= max_ramp_samples + 2);
+    try testing.expect(events > max_ramp_samples / 2);
+    var said = false;
+    for (out.diags.items()) |d| {
+        if (d.code == .render_inexact and std.mem.indexOf(u8, d.message, "--cc-rate") != null)
+            said = true;
+    }
+    try testing.expect(said);
 }
 
 test "renderSmf: in-cubic renders as its keyframes only, and the record says so" {

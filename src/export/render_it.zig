@@ -573,21 +573,7 @@ const Render = struct {
             if (i > 0) {
                 const prev = index.steps[i - 1];
                 if (std.mem.eql(u8, step.ease_src, "linear")) {
-                    // One sample a row, which is the finest a tracker can
-                    // say anything at.
-                    var at = prev.tick + self.row_ticks;
-                    while (at < step.tick) : (at += self.row_ticks) {
-                        const span = step.tick - prev.tick;
-                        const u = @as(
-                            f64,
-                            @floatFromInt(at - prev.tick),
-                        ) / @as(f64, @floatFromInt(span));
-                        const v = @as(
-                            f64,
-                            prev.value[0],
-                        ) + (@as(f64, step.value[0]) - @as(f64, prev.value[0])) * u;
-                        self.placeCurve(at, channel, v, range);
-                    }
+                    self.rowSamples(prev, step, channel, range);
                 } else if (!std.mem.eql(u8, step.ease_src, "hold")) {
                     try steps_only.append(self.arena, .{
                         .at = step.tick,
@@ -608,6 +594,41 @@ const Render = struct {
             .hash = @splat(0),
             .steps_only = steps_only.items,
         });
+    }
+
+    /// One `linear` segment, sampled once a row strictly between its
+    /// endpoints — the finest a tracker can say anything at — and never
+    /// past the module's last row: a position there has no row of its
+    /// own (a fresh module drops it, an anchored one piles it onto the
+    /// last cell), so a segment 2^52 ticks long costs the module's rows
+    /// and not its own length.
+    fn rowSamples(
+        self: *Render,
+        from: derive.Step,
+        to: derive.Step,
+        channel: u8,
+        range: [2]f32,
+    ) void {
+        const span = to.tick - from.tick;
+        if (span <= 0) return;
+        const end = @min(to.tick, self.moduleEnd());
+        const v0: f64 = from.value[0];
+        const v1: f64 = to.value[0];
+        var at = from.tick + self.row_ticks;
+        // Bounded by the module's rows: `end` is at most one past its
+        // last, and every turn is one row on.
+        while (at < end) : (at += self.row_ticks) {
+            const u = @as(f64, @floatFromInt(at - from.tick)) / @as(f64, @floatFromInt(span));
+            self.placeCurve(at, channel, v0 + (v1 - v0) * u, range);
+        }
+    }
+
+    /// The tempura tick one past the module's last row: the anchor's own
+    /// walk, or the fresh grid's patterns × rows × ticks.
+    fn moduleEnd(self: *const Render) i64 {
+        if (self.rows) |*map| return map.total_ticks *| Grid.IT_TICK;
+        const rows = @as(i64, @intCast(self.patterns.items.len)) * self.rows_per_pattern;
+        return rows *| self.row_ticks;
     }
 
     fn placeCurve(self: *Render, tick: i64, channel: u8, v: f64, range: [2]f32) void {
@@ -1252,6 +1273,28 @@ test "renderIt: a curve writes the volume column, linear per row, in-cubic as st
     try testing.expectEqual(@as(u8, model.vol_none), cellOf(&steps.module, 0, 1, 0).vol);
     try testing.expectEqual(@as(usize, 1), steps.lanes[0].steps_only.len);
     try testing.expectEqualStrings("in-cubic", steps.lanes[0].steps_only[0].ease);
+}
+
+test "renderIt: a linear segment 2^52 ticks long is sampled over the module's rows, not its length" {
+    // One sample a row would be 600 million rows here; the module has
+    // 240 patterns and the samples stop at its last row.
+    const gpa = testing.allocator;
+    var fx = try load(gpa,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :us 500000)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name glow :kind curve
+        \\  (keyframe :at 0q :value 0)
+        \\  (keyframe :at 24000000bar :value 1 :ease linear))
+    );
+    defer fx.deinit();
+
+    var out = try renderIt(gpa, &fx.doc, &fx.derived, null, .{});
+    defer out.deinit();
+    try testing.expectEqual(@as(usize, 240), out.module.patterns.len);
+    try testing.expectEqual(@as(u8, 0), cellOf(&out.module, 0, 0, 0).vol);
+    // The last row got a sample, and it is the ramp's, near its start.
+    try testing.expect(cellOf(&out.module, 239, 63, 0).vol < 64);
 }
 
 test "renderIt: rendering into an anchor keeps its patterns and takes channels above them" {
