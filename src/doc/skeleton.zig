@@ -72,6 +72,7 @@ pub const Result = struct {
 
 /// Derive the skeleton of `doc`'s inline tiers.
 pub fn derive(gpa: Allocator, doc: *const Doc.Doc, opts: Options) Error!Result {
+    doc.invariants();
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_state.deinit();
     const arena = arena_state.allocator();

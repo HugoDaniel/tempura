@@ -781,6 +781,7 @@ pub fn build(
     kind: Doc.AnchorKind,
     opts: BuildOptions,
 ) Error!Built {
+    doc.invariants();
     // Nothing here validates: the document was handed over BY
     // `fromSource`, which is where every host check runs, and a second
     // reading of the schema would be a second opinion about a document

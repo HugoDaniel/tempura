@@ -77,6 +77,7 @@ pub fn print(
     map: *const TimeMap.TimeMap,
     opts: Options,
 ) Error![]u8 {
+    doc.invariants();
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
 

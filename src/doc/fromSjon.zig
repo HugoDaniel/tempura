@@ -163,6 +163,7 @@ pub fn fromSource(
     var doc = try ctx.walk(validated.data_forest);
     const map = try ctx.finalMap(&doc);
     doc.arena = arena;
+    doc.invariants();
     return .{ .doc = doc, .diags = diags, .map = map };
 }
 
@@ -231,6 +232,7 @@ pub fn contentEnd(doc: *const Doc.Doc) i64 {
 ///
 /// Caller releases with `map.deinit()`.
 pub fn mapOf(gpa: Allocator, doc: *const Doc.Doc) Error!TimeMap.TimeMap {
+    doc.invariants();
     var cond: ?Conductor = null;
     defer if (cond) |*c| c.deinit();
     if (doc.conductor) |id| cond = try conductorOf(gpa, doc, id, doc.conductor_bytes);

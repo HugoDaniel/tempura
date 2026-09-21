@@ -431,6 +431,38 @@ pub const Doc = struct {
         return null;
     }
 
+    /// The properties every `Doc` this part hands out satisfies —
+    /// asserted, never diagnosed, because each is something OUR code
+    /// establishes and no input can break: a reader that meets a bad
+    /// form diagnoses and drops it, and the value it returns satisfies
+    /// these anyway (plan 12, "The invariants, value by value"). Called
+    /// at the WRITE side — the end of `fromSjon.fromSource` — and at the
+    /// READ side, the entry of each consumer that takes the whole value;
+    /// never per query. `std.debug.assert` compiles out of
+    /// `ReleaseSmall`, so the wasm pays nothing.
+    ///
+    /// Three of plan 12's clauses are NOT here, because the loader does
+    /// not establish them. `:repeat 0` is the schema's complaint and the
+    /// clip is kept with its zero; two anchors of one `:id` are both
+    /// kept. Both are diagnostics on the document, not defects of the
+    /// value. And a duration is not yet `≥ 0`: `TimeMap.durationTicks`'
+    /// `s` arm floors a wall-clock tick that can land one tick short of
+    /// its own anchor, so `:dur 0s` resolves to `-1` at some anchors —
+    /// `time/`'s to clamp, after which `dur ≥ 0` belongs here.
+    pub fn invariants(self: *const Doc) void {
+        for (self.anchors) |a| spanOk(a.span);
+        for (self.tempo) |t| spanOk(t.span);
+        for (self.meter) |m| spanOk(m.span);
+        for (self.sections) |s| spanOk(s.span);
+        for (self.cues) |c| spanOk(c.span);
+        for (self.passthrough) |p| spanOk(p.span);
+        for (self.lanes) |*l| laneInvariants(l, false);
+        for (self.phrases) |p| {
+            spanOk(p.span);
+            for (p.lanes) |*l| laneInvariants(l, true);
+        }
+    }
+
     /// Field-for-field equality, SPANS AND `length_lit` EXCLUDED.
     ///
     /// The round-trip property of plan 02 phase 3 compares a document
@@ -583,6 +615,38 @@ const Tokens = struct {
     }
 };
 
+/// A span is a byte range: it never runs backwards.
+fn spanOk(span: Diag.Span) void {
+    std.debug.assert(span.start <= span.end);
+}
+
+/// One lane's clauses. `in_phrase` marks a phrase's lane, which carries
+/// content only (plan 02): `fromSjon` never binds one, and the edit
+/// engine cannot reach one.
+fn laneInvariants(l: *const Lane, in_phrase: bool) void {
+    spanOk(l.span);
+    if (in_phrase) std.debug.assert(l.binding == null);
+    // `:cc` on a NATIVE curve lane and the address inside a binding are
+    // one key read two ways: a lane carries one or the other, never
+    // both — and the native one is a controller, never a surface.
+    if (l.cc != null) std.debug.assert(l.binding == null);
+    if (l.cc) |c| std.debug.assert(c == .cc or c == .cc14);
+    // A bound SMF address names at least one channel: `Channels.none`
+    // is never an address, and `fromSjon` refuses `:ch []`.
+    if (l.binding) |b| switch (b.address) {
+        .smf => |s| std.debug.assert(!s.ch.isEmpty()),
+        .it => {},
+    };
+    for (l.notes) |n| spanOk(n.span);
+    for (l.keyframes) |k| {
+        spanOk(k.span);
+        // `ncomp` counts the components in use: one to four.
+        std.debug.assert(k.ncomp >= 1);
+        std.debug.assert(k.ncomp <= 4);
+    }
+    for (l.clips) |c| spanOk(c.span);
+}
+
 /// Two slices of one length whose elements are pairwise `eqlFn`.
 fn allEql(comptime T: type, a: []const T, b: []const T, comptime eqlFn: fn (T, T) bool) bool {
     if (a.len != b.len) return false;
@@ -721,6 +785,39 @@ test "Doc: an empty document owns an arena and frees it" {
     try testing.expectEqual(TimeMap.End.hold, d.end);
     try testing.expectEqual(@as(usize, 0), d.lanes.len);
     try testing.expect(d.eql(&d));
+}
+
+test "Doc.invariants: an empty document and a hand-built one hold" {
+    var d: Doc = .empty(testing.allocator);
+    defer d.deinit();
+    d.invariants();
+
+    // A native curve lane with its own controller, a keyframe of every
+    // legal width and a phrase whose lane is unbound: the positive space
+    // of each clause.
+    var keys = [_]Keyframe{
+        .{ .at = 0, .value = .{ 0, 0, 0, 0 }, .ncomp = 1, .ease_src = "linear", .span = .{
+            .start = 1,
+            .end = 2,
+        } },
+        .{ .at = 1, .value = .{ 1, 1, 1, 1 }, .ncomp = 4, .ease_src = "hold", .span = .{
+            .start = 3,
+            .end = 3,
+        } },
+    };
+    var lanes = [_]Lane{bareCurve("glow")};
+    lanes[0].cc = .{ .cc14 = .{ 74, 106 } };
+    lanes[0].keyframes = &keys;
+    var inner = [_]Lane{bareCurve("glow")};
+    var phrases = [_]Phrase{.{
+        .name = "fill",
+        .length = 4,
+        .lanes = &inner,
+        .span = .{ .start = 0, .end = 9 },
+    }};
+    d.lanes = &lanes;
+    d.phrases = &phrases;
+    d.invariants();
 }
 
 test "Doc.spellingOf: the union's tag IS the authored spelling" {
