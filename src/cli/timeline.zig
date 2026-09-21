@@ -46,9 +46,9 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     // wrong, then what deriving it found. Two lists would make a reader
     // ask which one to believe.
     var all: std.ArrayList(tempura.Diag.Diagnostic) = .empty;
-    defer all.deinit(ctx.a);
-    try all.appendSlice(ctx.a, loaded.result.diags.items());
-    try all.appendSlice(ctx.a, derived.diags.items());
+    defer all.deinit(ctx.arena);
+    try all.appendSlice(ctx.arena, loaded.result.diags.items());
+    try all.appendSlice(ctx.arena, derived.diags.items());
 
     var art: Writer.Allocating = .init(ctx.gpa);
     defer art.deinit();

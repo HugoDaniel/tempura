@@ -69,7 +69,7 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     // pipe the second read of stdin is EOF — an empty document,
     // `timeline_missing` on stderr, and the placeholder's transport
     // already out on stdout.
-    const bytes = Cli.load(ctx.a, ctx.io, ctx.cmd.path) catch |e|
+    const bytes = Cli.load(ctx.arena, ctx.io, ctx.cmd.path) catch |e|
         return Cli.reportLoadFailure(ctx, e);
 
     // A `.mid` or a `.it` is dumped first; anything else is a document.
@@ -99,9 +99,9 @@ fn fromDocument(ctx: *const Cli.Ctx, source: [:0]u8) Cli.Error!u8 {
     defer derived.deinit();
 
     var all: std.ArrayList(tempura.Diag.Diagnostic) = .empty;
-    defer all.deinit(ctx.a);
-    try all.appendSlice(ctx.a, loaded.result.diags.items());
-    try all.appendSlice(ctx.a, derived.diags.items());
+    defer all.deinit(ctx.arena);
+    try all.appendSlice(ctx.arena, loaded.result.diags.items());
+    try all.appendSlice(ctx.arena, derived.diags.items());
 
     return emit(ctx, &loaded.result.doc, &derived, &.{}, all.items, loaded.space());
 }
@@ -123,9 +123,9 @@ fn fromFile(ctx: *const Cli.Ctx, bytes: []const u8, kind: tempura.doc.AnchorKind
     // verdict already dropped the rest (`ease_hint_mismatch`), so what is
     // left is exactly what the exporter should honour.
     var hints: std.ArrayList(exporter.EaseHint) = .empty;
-    defer hints.deinit(ctx.a);
+    defer hints.deinit(ctx.arena);
     for (dumped.verdicts) |v| {
-        for (v.hints) |h| try hints.append(ctx.a, .{
+        for (v.hints) |h| try hints.append(ctx.arena, .{
             .lane = v.lane,
             .from = h.from,
             .to = h.to,
@@ -134,9 +134,9 @@ fn fromFile(ctx: *const Cli.Ctx, bytes: []const u8, kind: tempura.doc.AnchorKind
     }
 
     var all: std.ArrayList(tempura.Diag.Diagnostic) = .empty;
-    defer all.deinit(ctx.a);
-    try all.appendSlice(ctx.a, dumped.diags.items());
-    try all.appendSlice(ctx.a, derived.diags.items());
+    defer all.deinit(ctx.arena);
+    try all.appendSlice(ctx.arena, dumped.diags.items());
+    try all.appendSlice(ctx.arena, derived.diags.items());
 
     return emit(ctx, &dumped.doc, &derived, hints.items, all.items, .bytes);
 }

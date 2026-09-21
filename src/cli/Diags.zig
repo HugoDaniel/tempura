@@ -189,18 +189,20 @@ pub const LineIndex = struct {
     /// Byte offset of each line's first byte. `[0] == 0`, ascending.
     line_starts: []const u32,
 
-    pub fn build(a: Allocator, source: []const u8) Allocator.Error!LineIndex {
+    /// `line_starts` is owned by the returned index and freed by `deinit`
+    /// with the same `gpa`; `source` is borrowed for the index's life.
+    pub fn build(gpa: Allocator, source: []const u8) Allocator.Error!LineIndex {
         var starts: std.ArrayList(u32) = .empty;
-        errdefer starts.deinit(a);
-        try starts.append(a, 0);
+        errdefer starts.deinit(gpa);
+        try starts.append(gpa, 0);
         for (source, 0..) |b, i| {
-            if (b == '\n') try starts.append(a, @intCast(i + 1));
+            if (b == '\n') try starts.append(gpa, @intCast(i + 1));
         }
-        return .{ .source = source, .line_starts = try starts.toOwnedSlice(a) };
+        return .{ .source = source, .line_starts = try starts.toOwnedSlice(gpa) };
     }
 
-    pub fn deinit(self: *LineIndex, a: Allocator) void {
-        a.free(self.line_starts);
+    pub fn deinit(self: *LineIndex, gpa: Allocator) void {
+        gpa.free(self.line_starts);
         self.* = undefined;
     }
 

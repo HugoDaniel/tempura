@@ -216,7 +216,7 @@ fn place(
 ) Cli.Error!u8 {
     const anchor_path: ?[]const u8 = if (tier_anchor) |id|
         if (doc.anchorById(id)) |a|
-            try std.fs.path.join(ctx.a, &.{ ctx.inputDir(), a.file })
+            try std.fs.path.join(ctx.arena, &.{ ctx.inputDir(), a.file })
         else
             null
     else
@@ -244,8 +244,8 @@ fn place(
     // just as surely.
     if (ctx.cmd.out) |out| {
         for (doc.anchors) |a| {
-            const path = try std.fs.path.join(ctx.a, &.{ ctx.inputDir(), a.file });
-            if (!samePath(ctx.a, out, path)) continue;
+            const path = try std.fs.path.join(ctx.arena, &.{ ctx.inputDir(), a.file });
+            if (!samePath(ctx.arena, out, path)) continue;
             if (tier_anchor != null and std.mem.eql(u8, a.id, tier_anchor.?)) {
                 try ctx.err.print(
                     "tempura: {s} is this document's anchor; building onto it is --in-place only (plan 06)\n",
@@ -268,7 +268,7 @@ fn place(
 /// makes the replacement atomic on every platform tempura targets, so an
 /// interrupted build leaves the anchor whole.
 fn writeThroughTemp(ctx: *const Cli.Ctx, dest: []const u8, bytes: []const u8) Cli.Error!bool {
-    const tmp = try std.fmt.allocPrint(ctx.a, "{s}.tempura-tmp", .{dest});
+    const tmp = try std.fmt.allocPrint(ctx.arena, "{s}.tempura-tmp", .{dest});
     if (!try ctx.writeFile(tmp, bytes)) return false;
     Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), dest, ctx.io) catch |e| {
         Io.Dir.cwd().deleteFile(ctx.io, tmp) catch {};
@@ -283,9 +283,9 @@ fn writeThroughTemp(ctx: *const Cli.Ctx, dest: []const u8, bytes: []const u8) Cl
 /// which is the mistake plan 06's rule is about. A symlink or a hard
 /// link pointing at the anchor under another name is not caught, and
 /// nothing short of opening both files would catch it.
-fn samePath(a: std.mem.Allocator, x: []const u8, y: []const u8) bool {
-    const rx = std.fs.path.resolve(a, &.{x}) catch return false;
-    const ry = std.fs.path.resolve(a, &.{y}) catch return false;
+fn samePath(arena: std.mem.Allocator, x: []const u8, y: []const u8) bool {
+    const rx = std.fs.path.resolve(arena, &.{x}) catch return false;
+    const ry = std.fs.path.resolve(arena, &.{y}) catch return false;
     return std.mem.eql(u8, rx, ry);
 }
 

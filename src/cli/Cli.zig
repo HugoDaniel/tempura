@@ -171,11 +171,13 @@ pub const usage_text =
 ;
 
 /// Everything a verb is given, and nothing it is not: no process state,
-/// no environment lookups, no second allocator policy. `a` is an arena
-/// that lives exactly as long as the invocation.
+/// no environment lookups, no second allocator policy. `arena` lives
+/// exactly as long as the invocation and frees everything at once; `gpa`
+/// is for the values that own their own arenas and are `deinit`ed by the
+/// verb (the memory model in `src/root.zig`'s header).
 pub const Ctx = struct {
     gpa: Allocator,
-    a: Allocator,
+    arena: Allocator,
     io: Io,
     cmd: Args.Command,
     out: *Writer,
@@ -238,7 +240,7 @@ pub const Ctx = struct {
     /// a file you named that is not there is a user error like any other,
     /// and every verb answers it the same way.
     pub fn loadDoc(self: *const Ctx) Error!union(enum) { ok: Loaded, failed: u8 } {
-        const source = Cli.load(self.a, self.io, self.cmd.path) catch |e|
+        const source = Cli.load(self.arena, self.io, self.cmd.path) catch |e|
             return .{ .failed = try reportLoadFailure(self, e) };
         return .{ .ok = try self.loadDocFrom(source) };
     }
@@ -251,19 +253,19 @@ pub const Ctx = struct {
     /// document that then loads has no `(timeline …)`, and the user is
     /// blamed for a document they piped in whole.
     ///
-    /// `source` is `Cli.load`'s: arena-allocated with `self.a` and
+    /// `source` is `Cli.load`'s: arena-allocated with `self.arena` and
     /// NUL-terminated. `Loaded` keeps it for the invocation and never
     /// frees it — the arena does, with everything else.
     pub fn loadDocFrom(self: *const Ctx, source: [:0]u8) Error!Loaded {
         var loaded: Loaded = .{
-            .a = self.a,
+            .arena = self.arena,
             .source = source,
-            .index = try Diags.LineIndex.build(self.a, source),
+            .index = try Diags.LineIndex.build(self.arena, source),
             .schema = undefined,
             .store = undefined,
             .result = undefined,
         };
-        errdefer loaded.index.deinit(self.a);
+        errdefer loaded.index.deinit(self.arena);
 
         loaded.schema = try tempura.Schema.load(self.gpa);
         errdefer loaded.schema.deinit();
@@ -298,7 +300,9 @@ pub const Ctx = struct {
 /// the anchor's bytes after the walk, and the store cached them on the
 /// way through — a second read of the same file never happens.
 pub const Loaded = struct {
-    a: Allocator,
+    /// The invocation's arena — what `source` and `index` were allocated
+    /// from, so `deinit` hands the index back to it.
+    arena: Allocator,
     source: [:0]u8,
     index: Diags.LineIndex,
     schema: tempura.Schema,
@@ -310,7 +314,7 @@ pub const Loaded = struct {
         self.result.deinit();
         self.store.deinit();
         self.schema.deinit();
-        self.index.deinit(self.a);
+        self.index.deinit(self.arena);
     }
 
     /// The document's spans are TEXT coordinates.
@@ -327,13 +331,13 @@ pub const LoadError = error{ ReadFailed, TooLarge, OutOfMemory };
 /// `[:0]const u8`, and a binary reader can still take the slice without
 /// it. `-` is stdin, sniffed nowhere — a path is a name here, not a type
 /// tag; the VERB decides what the bytes are.
-pub fn load(a: Allocator, io: Io, path: []const u8) LoadError![:0]u8 {
+pub fn load(gpa: Allocator, io: Io, path: []const u8) LoadError![:0]u8 {
     if (Diags.isStdin(path)) {
         var file = Io.File.stdin();
         var buf: [4096]u8 = undefined;
         var reader = file.reader(io, &buf);
         return reader.interface.allocRemainingAlignedSentinel(
-            a,
+            gpa,
             .limited(MAX_INPUT_BYTES),
             .of(u8),
             0,
@@ -346,7 +350,7 @@ pub fn load(a: Allocator, io: Io, path: []const u8) LoadError![:0]u8 {
     return Io.Dir.cwd().readFileAllocOptions(
         io,
         path,
-        a,
+        gpa,
         .limited(MAX_INPUT_BYTES),
         .of(u8),
         0,
@@ -402,9 +406,9 @@ pub fn run(
 ) Error!u8 {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
-    const a = arena_state.allocator();
+    const arena = arena_state.allocator();
 
-    switch (Args.parse(a, argv)) {
+    switch (Args.parse(arena, argv)) {
         .help => {
             try err.writeAll(usage_text);
             return Exit.ok;
@@ -421,7 +425,7 @@ pub fn run(
         .command => |cmd| {
             const ctx: Ctx = .{
                 .gpa = gpa,
-                .a = a,
+                .arena = arena,
                 .io = io,
                 .cmd = cmd,
                 .out = out,
@@ -508,9 +512,9 @@ pub fn invokeEnv(argv: []const [:0]const u8, env: Env) !Captured {
 
 /// An absolute path to a repo file. Handed in by `build.zig` rather than
 /// resolved from the cwd, which depends on where `zig build` was invoked.
-pub fn repoPath(a: Allocator, rel: []const u8) ![:0]u8 {
+pub fn repoPath(gpa: Allocator, rel: []const u8) ![:0]u8 {
     const root = @import("build_options").repo_root;
-    return std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ root, rel }, 0);
+    return std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ root, rel }, 0);
 }
 
 test "--help exits ok on stderr; stdout stays free for artifacts" {

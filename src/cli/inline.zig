@@ -226,7 +226,7 @@ const Planned = union(enum) { ok: edit.Plan, failed: u8 };
 /// `edit.fromActionsJson`, which is the engine's own reader for exactly
 /// this — a host that has actions and wants a plan.
 fn planInsert(ctx: *const Cli.Ctx, tier: []const u8, at: u32) Cli.Error!Planned {
-    const text = try ctx.a.dupeZ(u8, tier);
+    const text = try ctx.arena.dupeZ(u8, tier);
     var tree = try sjon.parse(ctx.gpa, text);
     defer tree.deinit();
     if (tree.hasErrors()) {
@@ -259,7 +259,7 @@ fn planInsert(ctx: *const Cli.Ctx, tier: []const u8, at: u32) Cli.Error!Planned 
     // `p.text()` again"). So the JSON goes through the front door: the
     // engine parses each action, decides its kind, its site and its
     // slot, and refuses anything that is not an action list.
-    var list: std.Io.Writer.Allocating = .init(ctx.a);
+    var list: std.Io.Writer.Allocating = .init(ctx.arena);
     const w = &list.writer;
     // `Plan.text` spells an empty plan `[]`, and so does this: a tier
     // with no roots is not a thing this verb produces, and the reader

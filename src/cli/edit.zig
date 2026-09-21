@@ -200,7 +200,7 @@ fn merged(ctx: *const Cli.Ctx) Cli.Error!Merged {
     // keys and a `--select` beside it. So the merge emits TEXT: each of
     // the operation's own pairs, then `"sel"`, into the invocation's
     // arena, with nothing written back into either parse.
-    var out: std.Io.Writer.Allocating = .init(ctx.a);
+    var out: std.Io.Writer.Allocating = .init(ctx.arena);
     const w = &out.writer;
     try w.writeByte('{');
     var it = op.value.object.iterator();

@@ -27,7 +27,7 @@ const Diags = @import("Diags.zig");
 const Writer = std.Io.Writer;
 
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
-    const bytes = Cli.load(ctx.a, ctx.io, ctx.cmd.path) catch |e|
+    const bytes = Cli.load(ctx.arena, ctx.io, ctx.cmd.path) catch |e|
         return Cli.reportLoadFailure(ctx, e);
 
     const kind = try ctx.sniffKind(bytes) orelse return Cli.Exit.usage;

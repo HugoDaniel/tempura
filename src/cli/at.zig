@@ -59,9 +59,9 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     defer derived.deinit();
 
     var all: std.ArrayList(tempura.Diag.Diagnostic) = .empty;
-    defer all.deinit(ctx.a);
-    try all.appendSlice(ctx.a, loaded.result.diags.items());
-    try all.appendSlice(ctx.a, derived.diags.items());
+    defer all.deinit(ctx.arena);
+    try all.appendSlice(ctx.arena, loaded.result.diags.items());
+    try all.appendSlice(ctx.arena, derived.diags.items());
 
     // The question, answered — or refused, which is an answer about the
     // QUESTION and therefore a usage error rather than a verdict on the
