@@ -161,10 +161,22 @@ pub fn fromSource(
     };
 
     var doc = try ctx.walk(validated.data_forest);
+    // The arena's `errdefer` above frees the document's own slices; the
+    // tiers each own an arena of their own, which it does not reach.
+    errdefer releaseTiers(&doc);
     const map = try ctx.finalMap(&doc);
     doc.arena = arena;
     doc.invariants();
     return .{ .doc = doc, .diags = diags, .map = map };
+}
+
+/// Release the arenas the inline tiers own, on a load that failed after
+/// `readTiers` handed them over. A finished document releases them in
+/// `Doc.deinit`; this is the same loop for one that never finished, whose
+/// own arena is `undefined` until `fromSource` sets it.
+fn releaseTiers(doc: *Doc.Doc) void {
+    for (doc.midi) |*t| t.sequence.deinit();
+    for (doc.it) |*t| t.module.deinit();
 }
 
 /// Where a document's content ends — plan 02's `:length` default before
@@ -623,6 +635,10 @@ const Ctx = struct {
         // meter come out of the tier (plan 03, "Three conductors").
         doc.anchors = try self.readAnchors(roots.anchors.items, roots.dumps_per_anchor.items);
         try self.readTiers(&doc, roots.dumps.items, roots.dump_roots.items, roots.anchors.items);
+        // From here the tiers are the document's, and a failure anywhere
+        // below would drop them with it: each owns a gpa-backed arena
+        // the document's arena does not free.
+        errdefer releaseTiers(&doc);
         try self.conductorTables(&doc);
 
         // ---- the provisional map, and everything that resolves on it ----
@@ -732,6 +748,9 @@ const Ctx = struct {
     // ---- the two maps -------------------------------------------------
 
     fn readMeterPoints(self: *Ctx, forms: []const NodeIndex) Error!void {
+        // Every point installs a working map of its own, and a failure
+        // part-way through must not leave the last one behind.
+        defer self.dropMap();
         var out: std.ArrayList(Doc.MeterPoint) = .empty;
         for (forms) |form| {
             // Each point's `:at` counts through the meters BEFORE it:
@@ -765,7 +784,6 @@ const Ctx = struct {
             });
         }
         self.meter = try out.toOwnedSlice(self.arena);
-        self.dropMap();
     }
 
     fn readTempoPoints(self: *Ctx, forms: []const NodeIndex) Error!void {

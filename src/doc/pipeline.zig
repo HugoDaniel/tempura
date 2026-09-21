@@ -255,8 +255,13 @@ fn dumpSmf(
     // again without it (the header, "One home, literally").
     const consumed = reconcile.consumeSmf(tier_seq, &rec);
     if (consumed.any()) {
+        // Printed BEFORE the old text is freed: a print that fails must
+        // leave `tier` naming live memory, or its `defer` frees it twice.
+        const reprinted = try bridge_smf.sequenceToForms(gpa, tier_seq, null, .{
+            .qualify = opts.qualify,
+        });
         gpa.free(tier);
-        tier = try bridge_smf.sequenceToForms(gpa, tier_seq, null, .{ .qualify = opts.qualify });
+        tier = reprinted;
     }
 
     return assemble(gpa, schema, bytes, name, diags, &rec, tier, consumed);
@@ -331,8 +336,10 @@ fn dumpIt(
     // the file's own bytes no longer describe it.
     const consumed = try reconcile.consumeIt(rec.arena.allocator(), &read.module, &rec);
     if (consumed.any()) {
+        // Printed before the old text is freed, as in `dumpSmf`.
+        const reprinted = try itTier(gpa, &read, opts, null, consumed.patterns);
         gpa.free(tier);
-        tier = try itTier(gpa, &read, opts, null, consumed.patterns);
+        tier = reprinted;
     }
 
     return assemble(gpa, schema, bytes, name, diags, &rec, tier, consumed);
@@ -901,7 +908,10 @@ fn encodeLanes(gpa: Allocator, lanes: []const records.LaneRecord) Error![]const 
         for (out.items) |b| gpa.free(b);
         out.deinit(gpa);
     }
-    for (lanes) |rec| try out.append(gpa, try records.encodeLane(gpa, rec));
+    // Room first, so a body once encoded always lands in `out` and the
+    // `errdefer` above is the one that frees it.
+    try out.ensureTotalCapacityPrecise(gpa, lanes.len);
+    for (lanes) |rec| out.appendAssumeCapacity(try records.encodeLane(gpa, rec));
     return out.toOwnedSlice(gpa);
 }
 
