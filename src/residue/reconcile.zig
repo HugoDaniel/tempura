@@ -570,49 +570,13 @@ const Run = struct {
         // half a verdict is worse than an honest skeleton.
         var recs: std.ArrayList(Record) = .empty;
         for (p.lanes) |body| {
-            var decoded = try records.decodeLane(self.gpa, body);
-            defer decoded.deinit(self.gpa);
-            switch (decoded) {
-                .ok => |r| {
-                    const segments = try self.a.alloc(records.Segment, r.steps_only.len);
-                    for (r.steps_only, segments) |src, *dst| dst.* = .{
-                        .at = src.at,
-                        .ease = try self.a.dupe(u8, src.ease),
-                    };
-                    try recs.append(self.a, .{
-                        .lane = try self.a.dupe(u8, r.lane),
-                        .address = r.address,
-                        .hash = r.hash,
-                        .hash_ok = false,
-                        .segments = segments,
-                    });
-                },
-                .corrupt => |code| {
-                    try self.diags.add(
-                        code,
-                        .warning,
-                        .{ .start = 0, .end = 0 },
-                        "a lane record's body ({d} bytes) does not decode; the timeline tier is derived instead",
-                        .{body.len},
-                    );
-                    return self.derive(.corrupt);
-                },
-            }
+            const rec = (try self.laneRecord(body)) orelse return self.derive(.corrupt);
+            try recs.append(self.a, rec);
         }
-
-        var conductor_rec: ?records.ConductorRecord = null;
-        if (p.conductor) |body| {
-            conductor_rec = records.decodeConductor(body) orelse {
-                try self.diags.add(
-                    .residue_corrupt,
-                    .warning,
-                    .{ .start = 0, .end = 0 },
-                    "the conductor record is {d} bytes and a SHA-256 is 32; the timeline tier is derived instead",
-                    .{body.len},
-                );
-                return self.derive(.corrupt);
-            };
-        }
+        const conductor_rec: ?records.ConductorRecord = if (p.conductor) |body|
+            (try self.conductorRecord(body)) orelse return self.derive(.corrupt)
+        else
+            null;
 
         var tree = try sjon.parse(self.gpa, text);
         defer tree.deinit();
@@ -638,6 +602,55 @@ const Run = struct {
         }
 
         try self.emit(&tree, text, recs.items, if (file_conducts) .file_wins else .document);
+    }
+
+    /// One lane record's body, decoded into the result's arena with its
+    /// `hash_ok` still to be asked — or null, `residue_corrupt` raised,
+    /// for a body that does not decode.
+    fn laneRecord(self: *Run, body: []const u8) Error!?Record {
+        var decoded = try records.decodeLane(self.gpa, body);
+        defer decoded.deinit(self.gpa);
+        switch (decoded) {
+            .ok => |r| {
+                const segments = try self.a.alloc(records.Segment, r.steps_only.len);
+                for (r.steps_only, segments) |src, *dst| dst.* = .{
+                    .at = src.at,
+                    .ease = try self.a.dupe(u8, src.ease),
+                };
+                return .{
+                    .lane = try self.a.dupe(u8, r.lane),
+                    .address = r.address,
+                    .hash = r.hash,
+                    .hash_ok = false,
+                    .segments = segments,
+                };
+            },
+            .corrupt => |code| {
+                try self.diags.add(
+                    code,
+                    .warning,
+                    .{ .start = 0, .end = 0 },
+                    "a lane record's body ({d} bytes) does not decode; the timeline tier is derived instead",
+                    .{body.len},
+                );
+                return null;
+            },
+        }
+    }
+
+    /// The conductor record decoded — or null, `residue_corrupt` raised,
+    /// for a body that is not one SHA-256.
+    fn conductorRecord(self: *Run, body: []const u8) Error!?records.ConductorRecord {
+        return records.decodeConductor(body) orelse {
+            try self.diags.add(
+                .residue_corrupt,
+                .warning,
+                .{ .start = 0, .end = 0 },
+                "the conductor record is {d} bytes and a SHA-256 is 32; the timeline tier is derived instead",
+                .{body.len},
+            );
+            return null;
+        };
     }
 
     /// The essence decoded but does not parse — which can only mean the
@@ -709,7 +722,6 @@ const Run = struct {
         recs: []const Record,
         conducting: Conducting,
     ) Error!void {
-        const file_conducts = conducting != .document;
         var out: std.ArrayList(u8) = .empty;
         if (self.rule == .partial) {
             try out.appendSlice(self.a, header_partial);
@@ -718,160 +730,253 @@ const Run = struct {
 
         // The carrying anchor's own spelling, for the marker rewrite and
         // for the `:conductor` and `:from` a stale lane needs.
-        var anchor_id: []const u8 = self.opts.anchor_id;
-        var anchor_kind: []const u8 = @tagName(self.file.tier.kind());
-        var marker: ?NodeIndex = null;
+        const marker = markerOf(tree);
+        const anchor_id = if (marker.id) |t| try self.a.dupe(u8, t) else self.opts.anchor_id;
+        const anchor_kind = if (marker.kind) |t|
+            try self.a.dupe(u8, t)
+        else
+            @tagName(self.file.tier.kind());
+
+        var dropped: std.ArrayList([]const u8) = .empty;
+        var placed = false;
+        var cursor: Cursor = .{ .source = source };
+
+        for (tree.root) |idx| {
+            const span = tree.spanOf(idx);
+            const root = cursor.next(span);
+            switch (rootAction(tree, idx, marker.idx, conducting, recs)) {
+                // The marker, made real — and the place the file's own
+                // tier goes back into, straight after it.
+                .marker => {
+                    try out.appendSlice(self.a, root.lead);
+                    try self.anchorForm(&out, anchor_id, anchor_kind);
+                    try out.append(self.a, '\n');
+                    self.tier_at = out.items.len;
+                    placed = true;
+                    cursor.eat_newline = true;
+                },
+                // Dropped whole, its lead with it, and named as a loss.
+                .drop => |what| try dropped.append(self.a, try self.dropLabel(tree, source, idx, what)),
+                .conduct => {
+                    try out.appendSlice(self.a, root.lead);
+                    try self.conductorKey(&out, source, span, anchor_id);
+                },
+                .bind => |name| {
+                    try out.appendSlice(self.a, root.lead);
+                    try self.bindLane(&out, tree, source, idx, recs, name, anchor_id);
+                },
+                .keep => {
+                    try out.appendSlice(self.a, root.lead);
+                    try out.appendSlice(self.a, root.body);
+                },
+            }
+        }
+
+        try out.appendSlice(self.a, cursor.rest());
+        if (!placed) try self.appendAnchor(&out, anchor_id, anchor_kind);
+        self.text = out.items;
+
+        if (conducting == .file_wins) try self.batonTaken(dropped.items);
+        try self.recordVerdicts(tree, recs);
+    }
+
+    /// `source` handed out root by root: each root's LEAD — the trivia
+    /// since the previous root, its comments and the blank line above
+    /// it — and its BODY, and after the last root whatever remains. The
+    /// newline that ended a rewritten marker's line is eaten from the
+    /// next lead, because the rewrite wrote its own.
+    const Cursor = struct {
+        source: []const u8,
+        cut: usize = 0,
+        eat_newline: bool = false,
+
+        const Root = struct { lead: []const u8, body: []const u8 };
+
+        fn next(self: *Cursor, span: Ast.Span) Root {
+            const src = self.source;
+            var lead = src[self.cut..@min(span.start, src.len)];
+            const body = src[@min(span.start, src.len)..@min(span.end, src.len)];
+            self.cut = @min(span.end, src.len);
+            if (self.eat_newline) {
+                if (std.mem.startsWith(u8, lead, "\n")) lead = lead[1..];
+                self.eat_newline = false;
+            }
+            return .{ .lead = lead, .body = body };
+        }
+
+        fn rest(self: *const Cursor) []const u8 {
+            var tail_text = self.source[@min(self.cut, self.source.len)..];
+            if (self.eat_newline and std.mem.startsWith(u8, tail_text, "\n")) tail_text = tail_text[1..];
+            return tail_text;
+        }
+    };
+
+    /// What `emit` does with one root of the restored text.
+    const RootAction = union(enum) {
+        /// The carrying anchor's marker: rewritten over the bytes dumped.
+        marker,
+        /// The file won the conductor, and this point or cue goes.
+        drop: Dropped,
+        /// The `(timeline …)` head, which gains `:conductor`.
+        conduct,
+        /// A lane any of whose records is stale: rewritten bound.
+        bind: []const u8,
+        /// Verbatim.
+        keep,
+    };
+
+    /// The three forms a file that took the baton drops.
+    const Dropped = enum { tempo_point, meter_point, cue };
+
+    /// Which of the five things `emit` does to the root at `idx`. Pure
+    /// over the tree: the marker's own index, who conducts and the
+    /// records are the whole decision.
+    ///
+    /// `.file_only` sets the `:conductor` and drops nothing — there was
+    /// never anything to drop — and both ways the file conducts say so
+    /// on the header.
+    fn rootAction(
+        tree: *const Ast.Tree,
+        idx: NodeIndex,
+        marker: ?NodeIndex,
+        conducting: Conducting,
+        recs: []const Record,
+    ) RootAction {
+        if (marker != null and idx == marker.?) return .marker;
+        if (conducting == .file_wins) {
+            if (isForm(tree, idx, "tempo-point")) return .{ .drop = .tempo_point };
+            if (isForm(tree, idx, "meter-point")) return .{ .drop = .meter_point };
+            if (isForm(tree, idx, "cue")) return .{ .drop = .cue };
+        }
+        if (conducting != .document) {
+            if (isForm(tree, idx, "timeline") and keyValue(tree, idx, "conductor") == null) {
+                return .conduct;
+            }
+        }
+        if (isForm(tree, idx, "lane")) {
+            if (keyValue(tree, idx, "name")) |v| {
+                if (atomText(tree, v)) |name| {
+                    if (laneIsStale(recs, name)) return .{ .bind = name };
+                }
+            }
+        }
+        return .keep;
+    }
+
+    /// The carrying anchor's marker in `tree` — the root `essence.pack`
+    /// spelled `(anchor … :file "self")` — with the `:id` and `:kind`
+    /// it carries, borrowed from the tree. All null when the essence
+    /// carried no anchor at all.
+    const Marker = struct {
+        idx: ?NodeIndex = null,
+        id: ?[]const u8 = null,
+        kind: ?[]const u8 = null,
+    };
+
+    fn markerOf(tree: *const Ast.Tree) Marker {
         for (tree.root) |idx| {
             if (!isForm(tree, idx, "anchor")) continue;
             const f = keyValue(tree, idx, "file") orelse continue;
             const name = atomText(tree, f) orelse continue;
             if (!std.mem.eql(u8, name, essence.self_file)) continue;
-            marker = idx;
-            if (keyValue(tree, idx, "id")) |v| {
-                if (atomText(tree, v)) |t| anchor_id = try self.a.dupe(u8, t);
-            }
-            if (keyValue(tree, idx, "kind")) |v| {
-                if (atomText(tree, v)) |t| anchor_kind = try self.a.dupe(u8, t);
-            }
-            break;
+            var found: Marker = .{ .idx = idx };
+            if (keyValue(tree, idx, "id")) |v| found.id = atomText(tree, v);
+            if (keyValue(tree, idx, "kind")) |v| found.kind = atomText(tree, v);
+            return found;
         }
+        return .{};
+    }
 
-        var dropped: std.ArrayList([]const u8) = .empty;
-        var placed = false;
-        var cut: usize = 0;
-        var eat_newline = false;
+    /// A dropped root as `residue_stale`'s list names it.
+    fn dropLabel(
+        self: *Run,
+        tree: *const Ast.Tree,
+        source: []const u8,
+        idx: NodeIndex,
+        what: Dropped,
+    ) Error![]const u8 {
+        return switch (what) {
+            .tempo_point => self.labelTempo(tree, source, idx),
+            .meter_point => self.label(tree, source, idx, "meter-point", "sig"),
+            .cue => self.label(tree, source, idx, "cue", "name"),
+        };
+    }
 
-        for (tree.root) |idx| {
-            const span = tree.spanOf(idx);
-            var lead = source[cut..@min(span.start, source.len)];
-            const body = source[@min(span.start, source.len)..@min(span.end, source.len)];
-            cut = @min(span.end, source.len);
-            if (eat_newline) {
-                if (std.mem.startsWith(u8, lead, "\n")) lead = lead[1..];
-                eat_newline = false;
-            }
+    /// The `(timeline …)` head at `span`, re-emitted with `:conductor`
+    /// last, just inside the closing paren: `:conductor` is the
+    /// canonical printer's final key, so a document that gains one here
+    /// reads like one that was printed with it. The head's own span
+    /// would put it first, which is valid and ugly.
+    fn conductorKey(
+        self: *Run,
+        out: *std.ArrayList(u8),
+        source: []const u8,
+        span: Ast.Span,
+        anchor_id: []const u8,
+    ) Error!void {
+        const close = if (span.end > span.start and source[span.end - 1] == ')')
+            span.end - 1
+        else
+            span.end;
+        try out.appendSlice(self.a, source[span.start..close]);
+        try out.appendSlice(self.a, " :conductor ");
+        try out.appendSlice(self.a, anchor_id);
+        try out.appendSlice(self.a, source[close..span.end]);
+    }
 
-            // The marker, made real — and the place the file's own tier
-            // goes back into, straight after it.
-            if (marker != null and idx == marker.?) {
-                try out.appendSlice(self.a, lead);
-                try self.anchorForm(&out, anchor_id, anchor_kind);
-                try out.append(self.a, '\n');
-                self.tier_at = out.items.len;
-                placed = true;
-                eat_newline = true;
-                continue;
-            }
-
-            // The file won the conductor: the document's own points and
-            // cues are not restored, and `:conductor` says who does.
-            // `.file_only` sets the `:conductor` below and drops
-            // nothing — there was never anything to drop.
-            if (conducting == .file_wins) {
-                if (isForm(tree, idx, "tempo-point")) {
-                    try dropped.append(self.a, try self.labelTempo(tree, source, idx));
-                    continue;
-                }
-                if (isForm(tree, idx, "meter-point")) {
-                    try dropped.append(self.a, try self.label(tree, source, idx, "meter-point", "sig"));
-                    continue;
-                }
-                if (isForm(tree, idx, "cue")) {
-                    try dropped.append(self.a, try self.label(tree, source, idx, "cue", "name"));
-                    continue;
-                }
-            }
-
-            // …and BOTH ways the file conducts say so on the header.
-            if (file_conducts) {
-                if (isForm(tree, idx, "timeline") and keyValue(tree, idx, "conductor") == null) {
-                    // Last, just inside the closing paren: `:conductor`
-                    // is the canonical printer's final key, so a
-                    // document that gains one here reads like one that
-                    // was printed with it. The head's own span would put
-                    // it first, which is valid and ugly.
-                    const close = if (span.end > span.start and source[span.end - 1] == ')')
-                        span.end - 1
-                    else
-                        span.end;
-                    try out.appendSlice(self.a, lead);
-                    try out.appendSlice(self.a, source[span.start..close]);
-                    try out.appendSlice(self.a, " :conductor ");
-                    try out.appendSlice(self.a, anchor_id);
-                    try out.appendSlice(self.a, source[close..span.end]);
-                    continue;
-                }
-            }
-
-            // A lane ANY of whose records' hashes no longer matches: the
-            // file's events win, and the lane reads them — at every
-            // address its records name.
-            if (isForm(tree, idx, "lane")) {
-                if (keyValue(tree, idx, "name")) |v| {
-                    if (atomText(tree, v)) |name| {
-                        if (laneIsStale(recs, name)) {
-                            try out.appendSlice(self.a, lead);
-                            try self.bindLane(&out, tree, source, idx, recs, name, anchor_id);
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            try out.appendSlice(self.a, lead);
-            try out.appendSlice(self.a, body);
-        }
-
-        var tail_text = source[@min(cut, source.len)..];
-        if (eat_newline and std.mem.startsWith(u8, tail_text, "\n")) tail_text = tail_text[1..];
-        try out.appendSlice(self.a, tail_text);
-
-        // A document whose essence carried no anchor at all still has to
-        // pair with the file it was dumped from, so one is appended.
-        if (!placed) {
-            if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') {
-                try out.append(self.a, '\n');
-            }
-            try self.anchorForm(&out, anchor_id, anchor_kind);
+    /// A document whose essence carried no anchor at all still has to
+    /// pair with the file it was dumped from, so one is appended, on a
+    /// line of its own, and `tier_at` points after it.
+    fn appendAnchor(
+        self: *Run,
+        out: *std.ArrayList(u8),
+        anchor_id: []const u8,
+        anchor_kind: []const u8,
+    ) Error!void {
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') {
             try out.append(self.a, '\n');
-            self.tier_at = out.items.len;
         }
+        try self.anchorForm(out, anchor_id, anchor_kind);
+        try out.append(self.a, '\n');
+        self.tier_at = out.items.len;
+    }
 
-        self.text = out.items;
-
-        // Raised whenever the file took the baton FROM a document that
-        // had its own time, dropped list or no:
-        // a document that conducted itself and now says `:conductor` is
-        // timed by other numbers than it was, and that is the loss
-        // being reported even when there was no point to drop.
-        if (conducting == .file_wins) try self.diags.add(
+    /// `residue_stale` for a file that took the baton FROM a document
+    /// that had its own time, dropped list or no: a document that
+    /// conducted itself and now says `:conductor` is timed by other
+    /// numbers than it was, and that is the loss being reported even
+    /// when there was no point to drop.
+    fn batonTaken(self: *Run, dropped: []const []const u8) Error!void {
+        try self.diags.add(
             .residue_stale,
             .warning,
             .{ .start = 0, .end = 0 },
             "the file's tempo, meter or markers were edited after this residue was written, so the file conducts: dropped {s}",
-            .{if (dropped.items.len == 0)
+            .{if (dropped.len == 0)
                 "nothing — the document had no points or cues of its own, and now takes its time from the file"
             else
-                try std.mem.join(self.a, ", ", dropped.items)},
+                try std.mem.join(self.a, ", ", dropped)},
         );
+    }
 
-        // The verdicts, in the order the records rode in the file, so the
-        // same bytes always report the same table — one line PER RECORD,
-        // so a lane rendered on two channels shows two.
-        //
-        // A record whose lane the essence does not declare gets NO
-        // verdict: a verdict is a statement about a lane in the document
-        // that came out, and `became_bound` over a lane nobody can find
-        // in the text would be one more contradiction between two
-        // surfaces. The record is still a loss, so it is named.
-        //
-        // The ACTION is the lane's, not the record's: a lane binds when
-        // any of its records is stale, and then every record of it says
-        // `became_bound` — with its own `hash_ok`, which is the fact the
-        // table exists to show. A record that still matched inside a
-        // lane that bound is exactly the untouched channel, and calling
-        // it `restored_native` would have `consumeSmf` take its events
-        // out of the tier the bound lane is about to read.
+    /// The verdicts, in the order the records rode in the file, so the
+    /// same bytes always report the same table — one line PER RECORD,
+    /// so a lane rendered on two channels shows two.
+    ///
+    /// A record whose lane the essence does not declare gets NO
+    /// verdict: a verdict is a statement about a lane in the document
+    /// that came out, and `became_bound` over a lane nobody can find
+    /// in the text would be one more contradiction between two
+    /// surfaces. The record is still a loss, so it is named.
+    ///
+    /// The ACTION is the lane's, not the record's: a lane binds when
+    /// any of its records is stale, and then every record of it says
+    /// `became_bound` — with its own `hash_ok`, which is the fact the
+    /// table exists to show. A record that still matched inside a
+    /// lane that bound is exactly the untouched channel, and calling
+    /// it `restored_native` would have `consumeSmf` take its events
+    /// out of the tier the bound lane is about to read.
+    fn recordVerdicts(self: *Run, tree: *const Ast.Tree, recs: []const Record) Error!void {
         for (recs) |rec| {
             if (!hasLane(tree, rec.lane)) {
                 try self.diags.add(
@@ -937,12 +1042,36 @@ const Run = struct {
         name: []const u8,
         anchor_id: []const u8,
     ) Error!void {
+        const address = laneAddress(recs, name) orelse return;
+        try self.boundForm(out, tree, source, idx, name, address, anchor_id);
+        const loss = lossOf(tree, idx);
+        try self.diags.add(
+            .residue_stale,
+            .warning,
+            .{ .start = 0, .end = 0 },
+            "lane {s} at {s}: the file's events are not the ones this residue recorded, so the file wins and the lane is bound there; dropped {s}",
+            .{ name, try self.addressText(address), try self.lossProse(loss) },
+        );
+    }
+
+    /// The bound declaration itself — `(lane :name N :kind K [:target T]
+    /// :from A <address keys> [:range R])` — onto `out`. The kind, target
+    /// and range are the author's own spellings out of `source`; the
+    /// address keys are the canonical printer's.
+    fn boundForm(
+        self: *Run,
+        out: *std.ArrayList(u8),
+        tree: *const Ast.Tree,
+        source: []const u8,
+        idx: NodeIndex,
+        name: []const u8,
+        address: Doc.Address,
+        anchor_id: []const u8,
+    ) Error!void {
         const kind_text = blk: {
             const v = keyValue(tree, idx, "kind") orelse break :blk "notes";
             break :blk atomText(tree, v) orelse "notes";
         };
-        const address = laneAddress(recs, name) orelse return;
-
         try out.appendSlice(self.a, "(lane :name ");
         try out.appendSlice(self.a, name);
         try out.appendSlice(self.a, " :kind ");
@@ -961,7 +1090,12 @@ const Run = struct {
             }
         }
         try out.append(self.a, ')');
+    }
 
+    /// What the lane at `idx` holds that a bound one cannot: its notes,
+    /// keyframes and clips counted, and the clips that carried a
+    /// `:transpose`. Pure over the tree.
+    fn lossOf(tree: *const Ast.Tree, idx: NodeIndex) Loss {
         var loss: Loss = .{};
         for (tree.formHeader(idx).children) |child| {
             if (tree.tagOf(child) != .form) continue;
@@ -973,7 +1107,13 @@ const Run = struct {
                 if (keyValue(tree, child, "transpose") != null) loss.transposed += 1;
             }
         }
+        return loss;
+    }
 
+    /// `loss` in the words `residue_stale` prints — `3 notes, 2 clips
+    /// and their structure` — or the line for a lane that held nothing.
+    /// Into the result's arena.
+    fn lossProse(self: *Run, loss: Loss) Error![]const u8 {
         var parts: std.ArrayList([]const u8) = .empty;
         if (loss.notes > 0) {
             try parts.append(self.a, try std.fmt.allocPrint(self.a, "{d} notes", .{loss.notes}));
@@ -993,21 +1133,8 @@ const Run = struct {
             "{d} :transpose",
             .{loss.transposed},
         ));
-
-        try self.diags.add(
-            .residue_stale,
-            .warning,
-            .{ .start = 0, .end = 0 },
-            "lane {s} at {s}: the file's events are not the ones this residue recorded, so the file wins and the lane is bound there; dropped {s}",
-            .{
-                name,
-                try self.addressText(address),
-                if (parts.items.len == 0)
-                    "nothing but the lane's own nativeness"
-                else
-                    try std.mem.join(self.a, ", ", parts.items),
-            },
-        );
+        if (parts.items.len == 0) return "nothing but the lane's own nativeness";
+        return std.mem.join(self.a, ", ", parts.items);
     }
 
     fn addressKeys(self: *Run, out: *std.ArrayList(u8), address: Doc.Address) Error!void {
