@@ -626,62 +626,62 @@ const Ctx = struct {
         }
     }
 
-    /// One lane's whole batch.
-    fn moveInLane(self: *Ctx, li: u32, moves: []const Move) Error!void {
-        const kids = (try self.children(li)) orelse return;
-        if (kids.len == 0) return;
-        const arena = self.arena;
+    /// Where every child of a lane lands after a batch, and which move
+    /// put it there: `by_kid[k]` indexes `moves`, or is null for a child
+    /// nothing moved. Null after a refusal. Arena-owned.
+    const LaneLanding = struct { finals: []i64, by_kid: []?usize };
 
-        // Where each child ends up, and which move put it there.
-        const finals = try arena.alloc(i64, kids.len);
-        const by_kid = try arena.alloc(?usize, kids.len);
+    fn laneLanding(self: *Ctx, kids: []const Child, moves: []const Move) Error!?LaneLanding {
+        const finals = try self.arena.alloc(i64, kids.len);
+        const by_kid = try self.arena.alloc(?usize, kids.len);
         for (kids, finals, by_kid) |kid, *f, *m| {
             f.* = kid.at;
             m.* = null;
         }
         for (moves, 0..) |m, mi| {
-            const w = (try self.where(m.t.span)) orelse return;
+            const w = (try self.where(m.t.span)) orelse return null;
             for (kids, 0..) |kid, k| {
                 if (kid.slot != w.slot) continue;
                 finals[k] = m.to;
                 by_kid[k] = mi;
             }
         }
+        return .{ .finals = finals, .by_kid = by_kid };
+    }
 
-        // Who keeps its slot. An UNMOVED child always does — the plan
-        // never reorders a document it did not write (plan 07's risk
-        // note) — and a moved one does when it still sits between the
-        // last child that kept its slot and the next child that will.
-        const keep = try arena.alloc(bool, kids.len);
-        var last: i64 = std.math.minInt(i64);
-        for (0..kids.len) |k| {
-            if (by_kid[k] == null) {
-                keep[k] = true;
-                last = finals[k];
-                continue;
-            }
-            var next: i64 = std.math.maxInt(i64);
-            for (k + 1..kids.len) |n| {
-                if (by_kid[n] != null) continue;
-                next = finals[n];
-                break;
-            }
-            keep[k] = finals[k] >= last and finals[k] <= next;
-            if (keep[k]) last = finals[k];
-        }
+    /// One lane's whole batch: the children that keep their slot
+    /// (`keptSlots`) are re-spelled in place, in slot order, and the
+    /// rest are relocated.
+    fn moveInLane(self: *Ctx, li: u32, moves: []const Move) Error!void {
+        const kids = (try self.children(li)) orelse return;
+        if (kids.len == 0) return;
+        const landed = (try self.laneLanding(kids, moves)) orelse return;
+        const moved = try self.arena.alloc(bool, kids.len);
+        for (landed.by_kid, moved) |m, *flag| flag.* = m != null;
+        const keep = try keptSlots(self.arena, landed.finals, moved);
 
-        // The ones that stay, in slot order.
         for (0..kids.len) |k| {
-            const mi = by_kid[k] orelse continue;
+            const mi = landed.by_kid[k] orelse continue;
             if (!keep[k]) continue;
             const w = (try self.where(moves[mi].t.span)) orelse return;
             for (try self.writesFor(moves[mi])) |write| {
                 try self.b.setKeyword(w.site, write.key, write.json.?);
             }
         }
+        try self.relocateChildren(kids, moves, landed, keep);
+    }
 
-        // The ones that move: every removal, then every insert against
-        // the list the removals leave behind.
+    /// The children that change slot: every removal, then every insert
+    /// against the list the removals leave behind, in ascending
+    /// destination so every index is a slot in the list as it stands
+    /// when that insert is reached.
+    fn relocateChildren(
+        self: *Ctx,
+        kids: []const Child,
+        moves: []const Move,
+        landed: LaneLanding,
+        keep: []const bool,
+    ) Error!void {
         var rest: std.ArrayList(i64) = .empty;
         defer rest.deinit(self.gpa);
         var relocated: std.ArrayList(usize) = .empty;
@@ -689,11 +689,11 @@ const Ctx = struct {
         var parent: ?locate.Site = null;
 
         for (0..kids.len) |k| {
-            if (by_kid[k] == null or keep[k]) {
-                try rest.append(self.gpa, finals[k]);
+            if (landed.by_kid[k] == null or keep[k]) {
+                try rest.append(self.gpa, landed.finals[k]);
                 continue;
             }
-            const m = moves[by_kid[k].?];
+            const m = moves[landed.by_kid[k].?];
             const w = (try self.where(m.t.span)) orelse return;
             parent = w.parent orelse {
                 try self.refuseUnaddressable(m.t.span);
@@ -704,11 +704,9 @@ const Ctx = struct {
         }
         if (relocated.items.len == 0) return;
 
-        // Ascending destination, so every index is a slot in the list as
-        // it stands when that insert is reached.
-        std.sort.insertion(usize, relocated.items, @as([]const i64, finals), byFinal);
+        std.sort.insertion(usize, relocated.items, @as([]const i64, landed.finals), byFinal);
         for (relocated.items) |k| {
-            const m = moves[by_kid[k].?];
+            const m = moves[landed.by_kid[k].?];
             const node = self.nodeOf(m.t.span) orelse {
                 try self.refuseUnaddressable(m.t.span);
                 return;
@@ -716,14 +714,7 @@ const Ctx = struct {
             var out: value.Buf = .empty;
             defer out.deinit(self.gpa);
             try value.form(self.gpa, &out, self.tree, node, try self.writesFor(m));
-
-            var index: u32 = @intCast(rest.items.len);
-            for (rest.items, 0..) |at, n| {
-                if (at > m.to) {
-                    index = @intCast(n);
-                    break;
-                }
-            }
+            const index = slotAmong(rest.items, m.to);
             try rest.insert(self.gpa, index, m.to);
             try self.b.insertPositional(parent.?, index, out.items);
         }
@@ -1156,40 +1147,11 @@ const Ctx = struct {
 
         for (r.targets) |t| {
             const to = @max(0, if (x.delta) |delta| t.at +| delta else (x.to orelse t.at));
-            if (t.kind == .note) {
-                // A copy is a new note, so it overlaps its own original
-                // too — nothing is ignored here.
-                if (self.overlapping(t.lane.?, t.key.?, to, t.dur, null)) |span| {
-                    try self.b.refuse(
-                        .edit_overlap,
-                        span,
-                        "the copy at {d} would sound over a note on key {d}",
-                        .{ to, t.key.? },
-                    );
-                    return;
-                }
-            }
-            const node = self.nodeOf(t.span) orelse {
-                try self.refuseUnaddressable(t.span);
-                return;
-            };
-
-            var overrides: std.ArrayList(value.Override) = .empty;
-            defer overrides.deinit(self.gpa);
-            try overrides.append(self.gpa, .{ .key = "at", .json = try self.positionJson(to) });
-            for (duration_keys) |key| {
-                if (try self.driftJson(t, key, to)) |json| {
-                    try overrides.append(self.gpa, .{ .key = key, .json = json });
-                }
-            }
-            var out: value.Buf = .empty;
-            defer out.deinit(self.gpa);
-            try value.form(self.gpa, &out, self.tree, node, overrides.items);
-
+            const json = (try self.copyJson(t, to)) orelse return;
             const li = t.lane orelse {
                 // A section or a cue is a root, and a copy of one goes
                 // where a new one would.
-                try self.insertRootAfterHead(@tagName(t.kind), out.items);
+                try self.insertRootAfterHead(@tagName(t.kind), json);
                 continue;
             };
             if (lane == null or lane.? != li) {
@@ -1203,17 +1165,45 @@ const Ctx = struct {
                 try self.refuseUnaddressable(t.span);
                 return;
             };
-
-            var index: u32 = @intCast(sim.items.len);
-            for (sim.items, 0..) |at, i| {
-                if (at > to) {
-                    index = @intCast(i);
-                    break;
-                }
-            }
+            const index = slotAmong(sim.items, to);
             try sim.insert(self.gpa, index, to);
-            try self.b.insertPositional(parent, index, out.items);
+            try self.b.insertPositional(parent, index, json);
         }
+    }
+
+    /// The copy of `t` landing at `to`, as JSON: the form as the author
+    /// wrote it, its `:at` re-spelled and every duration whose spelling
+    /// has to follow the new anchor. Null after a refusal — a copy is a
+    /// NEW note, so it overlaps its own original too, and nothing is
+    /// ignored in that check. Arena-owned.
+    fn copyJson(self: *Ctx, t: Select.Target, to: i64) Error!?[]const u8 {
+        if (t.kind == .note) {
+            if (self.overlapping(t.lane.?, t.key.?, to, t.dur, null)) |span| {
+                try self.b.refuse(
+                    .edit_overlap,
+                    span,
+                    "the copy at {d} would sound over a note on key {d}",
+                    .{ to, t.key.? },
+                );
+                return null;
+            }
+        }
+        const node = self.nodeOf(t.span) orelse {
+            try self.refuseUnaddressable(t.span);
+            return null;
+        };
+        var overrides: std.ArrayList(value.Override) = .empty;
+        defer overrides.deinit(self.gpa);
+        try overrides.append(self.gpa, .{ .key = "at", .json = try self.positionJson(to) });
+        for (duration_keys) |key| {
+            if (try self.driftJson(t, key, to)) |json| {
+                try overrides.append(self.gpa, .{ .key = key, .json = json });
+            }
+        }
+        var out: value.Buf = .empty;
+        defer out.deinit(self.gpa);
+        try value.form(self.gpa, &out, self.tree, node, overrides.items);
+        return try self.arena.dupe(u8, out.items);
     }
 
     // ---- the range operations ----
@@ -1233,85 +1223,27 @@ const Ctx = struct {
     /// leaves the integer grid is rounded (half to even, so a scaled
     /// document does not drift one way) and counted in `edit_inexact`.
     fn stretch(self: *Ctx, x: Op.Stretch) Error!void {
-        if (x.p == 0 or x.q == 0 or x.to <= x.from) {
-            try self.b.refuse(
-                .edit_range_empty,
-                .{ .start = 0, .end = 0 },
-                "a stretch wants a non-empty range and a non-zero ratio",
-                .{},
-            );
-            return;
-        }
-        var inexact: u32 = 0;
-        // The range's own growth is not a POSITION: it is how far what
-        // follows moves, and rounding it is one fact about the stretch
-        // rather than one document position that landed off the grid.
-        var growth_rounded: u32 = 0;
-        const span = x.to -| x.from;
-        const grown = scaleTicks(span, x.p, x.q, &growth_rounded);
-        // The ratio and the range are user numbers, and `p/q` over a
-        // range near the ceiling leaves the grid: plan 03 makes that a
-        // diagnostic and never a wrap, so it is refused HERE — before an
-        // action is written — rather than saturating every position onto
-        // one tick.
-        if (grown > Grid.MAX_TICK) {
-            try self.b.refuse(
-                .tick_overflow,
-                .{ .start = 0, .end = 0 },
-                "{d} ticks scaled by {d}/{d} is past the grid ceiling ({d})",
-                .{ span, x.p, x.q, Grid.MAX_TICK },
-            );
-            return;
-        }
-        const growth = grown -| span;
+        const growth = (try self.stretchGrowth(x)) orelse return;
 
         var r = try Select.resolve(self.gpa, self.d, .{});
         defer r.deinit();
         if (r.targets.len == 0) {
-            try self.b.refuse(.edit_range_empty, .{ .start = 0, .end = 0 }, "the document holds nothing to stretch", .{});
+            try self.b.refuse(
+                .edit_range_empty,
+                .{ .start = 0, .end = 0 },
+                "the document holds nothing to stretch",
+                .{},
+            );
             return;
         }
         self.b.summary.targets = @intCast(r.targets.len);
 
+        var inexact: u32 = 0;
         for (r.targets) |t| {
-            const to = stretched(x, growth, t.at, &inexact);
-            // …and the same ceiling per target: a position BEFORE the
-            // range stays, one after it moves by the growth, and the
-            // growth alone can push the tail off the grid even where the
-            // range itself scaled cleanly.
-            if (to > Grid.MAX_TICK or to < 0) {
-                try self.b.refuse(
-                    .tick_overflow,
-                    t.span,
-                    "this stretch would put a position at tick {d}, past the grid ceiling ({d})",
-                    .{ to, Grid.MAX_TICK },
-                );
-                return;
-            }
-            const w = (try self.where(t.span)) orelse return;
-            if (to != t.at) try self.b.setKeyword(w.site, "at", try self.positionJson(to));
-
-            const key: []const u8 = switch (t.kind) {
-                .note, .section => "dur",
-                // A window the document does not spell is the phrase's
-                // length times `:repeat`, and writing it out would fix a
-                // number the document deliberately left to the phrase.
-                .clip => "length",
-                .keyframe, .cue => continue,
-            };
-            if (self.keyText(t.span, key) == null) continue;
-            const dur = stretched(x, growth, t.at +| t.dur, &inexact) - to;
-            if (dur == t.dur) {
-                // Unmoved, but its spelling may still have to follow its
-                // anchor — `1bar` from a bar line is not `1bar` from a
-                // quarter note later.
-                if (try self.driftJson(t, key, to)) |json| try self.b.setKeyword(w.site, key, json);
-                continue;
-            }
-            try self.b.setKeyword(w.site, key, try self.durationJson(@max(0, dur), to));
+            if (!try self.stretchTarget(x, growth.ticks, t, &inexact)) return;
         }
 
-        if (inexact > 0 or growth_rounded > 0) {
+        if (inexact > 0 or growth.rounded) {
             self.b.summary.inexact = inexact;
             try self.b.note(
                 .edit_inexact,
@@ -1322,10 +1254,90 @@ const Ctx = struct {
                     inexact,
                     x.p,
                     x.q,
-                    if (growth_rounded > 0) "; the range's own growth rounded too" else "",
+                    if (growth.rounded) "; the range's own growth rounded too" else "",
                 },
             );
         }
+    }
+
+    /// How far what follows the range moves, and whether that rounded.
+    const Growth = struct { ticks: i64, rounded: bool };
+
+    /// The range's growth under `p/q`, or null after a refusal: an
+    /// empty range or a zero ratio is nothing to do, and a range that
+    /// scales past the grid ceiling is `tick_overflow` HERE — before an
+    /// action is written — rather than every position saturating onto
+    /// one tick (plan 03: a diagnostic, never a wrap). The growth is not
+    /// a POSITION: it is how far what follows moves, and rounding it is
+    /// one fact about the stretch rather than one document position that
+    /// landed off the grid, so it is reported apart from the count.
+    fn stretchGrowth(self: *Ctx, x: Op.Stretch) Error!?Growth {
+        if (x.p == 0 or x.q == 0 or x.to <= x.from) {
+            try self.b.refuse(
+                .edit_range_empty,
+                .{ .start = 0, .end = 0 },
+                "a stretch wants a non-empty range and a non-zero ratio",
+                .{},
+            );
+            return null;
+        }
+        var rounded: u32 = 0;
+        const span = x.to -| x.from;
+        const grown = scaleTicks(span, x.p, x.q, &rounded);
+        if (grown > Grid.MAX_TICK) {
+            try self.b.refuse(
+                .tick_overflow,
+                .{ .start = 0, .end = 0 },
+                "{d} ticks scaled by {d}/{d} is past the grid ceiling ({d})",
+                .{ span, x.p, x.q, Grid.MAX_TICK },
+            );
+            return null;
+        }
+        return .{ .ticks = grown -| span, .rounded = rounded > 0 };
+    }
+
+    /// One target under the stretch: its `:at` through the mapping, and
+    /// its duration as the distance between its two mapped ends, each
+    /// written only when it changes — or re-spelled when only its anchor
+    /// moved (`1bar` from a bar line is not `1bar` from a quarter note
+    /// later). False after a refusal: the growth alone can push the tail
+    /// off the grid even where the range itself scaled cleanly.
+    fn stretchTarget(
+        self: *Ctx,
+        x: Op.Stretch,
+        growth: i64,
+        t: Select.Target,
+        inexact: *u32,
+    ) Error!bool {
+        const to = stretched(x, growth, t.at, inexact);
+        if (to > Grid.MAX_TICK or to < 0) {
+            try self.b.refuse(
+                .tick_overflow,
+                t.span,
+                "this stretch would put a position at tick {d}, past the grid ceiling ({d})",
+                .{ to, Grid.MAX_TICK },
+            );
+            return false;
+        }
+        const w = (try self.where(t.span)) orelse return false;
+        if (to != t.at) try self.b.setKeyword(w.site, "at", try self.positionJson(to));
+
+        const key: []const u8 = switch (t.kind) {
+            .note, .section => "dur",
+            // A window the document does not spell is the phrase's
+            // length times `:repeat`, and writing it out would fix a
+            // number the document deliberately left to the phrase.
+            .clip => "length",
+            .keyframe, .cue => return true,
+        };
+        if (self.keyText(t.span, key) == null) return true;
+        const dur = stretched(x, growth, t.at +| t.dur, inexact) - to;
+        if (dur == t.dur) {
+            if (try self.driftJson(t, key, to)) |json| try self.b.setKeyword(w.site, key, json);
+            return true;
+        }
+        try self.b.setKeyword(w.site, key, try self.durationJson(@max(0, dur), to));
+        return true;
     }
 
     // ---- the map operations ----
@@ -1573,88 +1585,15 @@ const Ctx = struct {
     /// A name, on the form that owns it and on every cross-ref to it.
     fn rename(self: *Ctx, x: Op.Rename) Error!void {
         var writes: std.ArrayList(Write) = .empty;
-        defer writes.deinit(self.gpa);
         const to = try self.symbolJson(x.to);
-
-        switch (x.what) {
-            .lane => {
-                for (self.d.lanes) |lane| {
-                    if (!std.mem.eql(u8, lane.name, x.from)) continue;
-                    const w = (try self.where(lane.span)) orelse return;
-                    try writes.append(self.gpa, .{ .site = w.site, .key = "name", .json = to });
-                    // A clip places the phrase's lane of the SAME name,
-                    // so the phrases this lane places follow it.
-                    for (lane.clips) |clip| {
-                        const phrase = self.d.phraseByName(clip.phrase) orelse continue;
-                        for (phrase.lanes) |inner| {
-                            if (!std.mem.eql(u8, inner.name, x.from)) continue;
-                            const iw = (try self.where(inner.span)) orelse return;
-                            try writes.append(self.gpa, .{ .site = iw.site, .key = "name", .json = to });
-                        }
-                    }
-                }
-            },
-            .section => {
-                for (self.d.sections) |s| {
-                    if (!std.mem.eql(u8, s.name, x.from)) continue;
-                    const w = (try self.where(s.span)) orelse return;
-                    try writes.append(self.gpa, .{ .site = w.site, .key = "name", .json = to });
-                }
-            },
-            .phrase => {
-                for (self.d.phrases) |p| {
-                    if (!std.mem.eql(u8, p.name, x.from)) continue;
-                    const w = (try self.where(p.span)) orelse return;
-                    try writes.append(self.gpa, .{ .site = w.site, .key = "name", .json = to });
-                }
-                for (self.d.lanes) |lane| {
-                    for (lane.clips) |clip| {
-                        if (!std.mem.eql(u8, clip.phrase, x.from)) continue;
-                        const w = (try self.where(clip.span)) orelse return;
-                        try writes.append(self.gpa, .{ .site = w.site, .key = "phrase", .json = to });
-                    }
-                }
-            },
-            .target => {
-                // A pacer form that declares this name is not ours to
-                // edit, and renaming only our half would break the pair.
-                for (self.d.passthrough) |pt| {
-                    if (!self.passthroughNames(pt, x.from)) continue;
-                    try self.b.refuse(
-                        .edit_readonly_passthrough,
-                        pt.span,
-                        "({s} …) passes through to pacer and names {s}; rename it there",
-                        .{ pt.head, x.from },
-                    );
-                    return;
-                }
-                for (self.d.lanes) |lane| {
-                    if (!std.mem.eql(u8, lane.target, x.from)) continue;
-                    const w = (try self.where(lane.span)) orelse return;
-                    try writes.append(self.gpa, .{ .site = w.site, .key = "target", .json = to });
-                }
-            },
-            .anchor => {
-                for (self.d.anchors) |anchor| {
-                    if (!std.mem.eql(u8, anchor.id, x.from)) continue;
-                    const w = (try self.where(anchor.span)) orelse return;
-                    try writes.append(self.gpa, .{ .site = w.site, .key = "id", .json = to });
-                }
-                if (self.d.conductor) |cond| {
-                    if (std.mem.eql(u8, cond, x.from)) {
-                        if (self.timelineSite()) |site| {
-                            try writes.append(self.gpa, .{ .site = site, .key = "conductor", .json = to });
-                        }
-                    }
-                }
-                for (self.d.lanes) |lane| {
-                    const binding = lane.binding orelse continue;
-                    if (!std.mem.eql(u8, binding.anchor, x.from)) continue;
-                    const w = (try self.where(lane.span)) orelse return;
-                    try writes.append(self.gpa, .{ .site = w.site, .key = "from", .json = to });
-                }
-            },
-        }
+        const collected = switch (x.what) {
+            .lane => try self.renameLane(&writes, x.from, to),
+            .section => try self.renameSection(&writes, x.from, to),
+            .phrase => try self.renamePhrase(&writes, x.from, to),
+            .target => try self.renameTarget(&writes, x.from, to),
+            .anchor => try self.renameAnchor(&writes, x.from, to),
+        };
+        if (!collected) return;
 
         if (writes.items.len == 0) {
             try self.b.refuse(
@@ -1669,6 +1608,128 @@ const Ctx = struct {
         // the order it touches them in is the document's own.
         std.sort.insertion(Write, writes.items, {}, byDocumentOrder);
         for (writes.items) |w| try self.b.setKeyword(w.site, w.key, w.json);
+    }
+
+    /// The writes a lane rename comes to: its `:name`, and the `:name`
+    /// of the phrase lane each of its clips places — a clip places the
+    /// phrase's lane of the SAME name, so those follow it. False after
+    /// a refusal.
+    fn renameLane(
+        self: *Ctx,
+        writes: *std.ArrayList(Write),
+        from: []const u8,
+        to: []const u8,
+    ) Error!bool {
+        for (self.d.lanes) |lane| {
+            if (!std.mem.eql(u8, lane.name, from)) continue;
+            const w = (try self.where(lane.span)) orelse return false;
+            try writes.append(self.arena, .{ .site = w.site, .key = "name", .json = to });
+            for (lane.clips) |clip| {
+                const phrase = self.d.phraseByName(clip.phrase) orelse continue;
+                for (phrase.lanes) |inner| {
+                    if (!std.mem.eql(u8, inner.name, from)) continue;
+                    const iw = (try self.where(inner.span)) orelse return false;
+                    try writes.append(self.arena, .{ .site = iw.site, .key = "name", .json = to });
+                }
+            }
+        }
+        return true;
+    }
+
+    /// The `:name` of every section called `from`. False after a refusal.
+    fn renameSection(
+        self: *Ctx,
+        writes: *std.ArrayList(Write),
+        from: []const u8,
+        to: []const u8,
+    ) Error!bool {
+        for (self.d.sections) |s| {
+            if (!std.mem.eql(u8, s.name, from)) continue;
+            const w = (try self.where(s.span)) orelse return false;
+            try writes.append(self.arena, .{ .site = w.site, .key = "name", .json = to });
+        }
+        return true;
+    }
+
+    /// The phrase's `:name`, and the `:phrase` of every clip that places
+    /// it. False after a refusal.
+    fn renamePhrase(
+        self: *Ctx,
+        writes: *std.ArrayList(Write),
+        from: []const u8,
+        to: []const u8,
+    ) Error!bool {
+        for (self.d.phrases) |p| {
+            if (!std.mem.eql(u8, p.name, from)) continue;
+            const w = (try self.where(p.span)) orelse return false;
+            try writes.append(self.arena, .{ .site = w.site, .key = "name", .json = to });
+        }
+        for (self.d.lanes) |lane| {
+            for (lane.clips) |clip| {
+                if (!std.mem.eql(u8, clip.phrase, from)) continue;
+                const w = (try self.where(clip.span)) orelse return false;
+                try writes.append(self.arena, .{ .site = w.site, .key = "phrase", .json = to });
+            }
+        }
+        return true;
+    }
+
+    /// The `:target` of every lane that names `from`. A pacer form that
+    /// declares this name is not ours to edit, and renaming only our
+    /// half would break the pair: refused, false.
+    fn renameTarget(
+        self: *Ctx,
+        writes: *std.ArrayList(Write),
+        from: []const u8,
+        to: []const u8,
+    ) Error!bool {
+        for (self.d.passthrough) |pt| {
+            if (!self.passthroughNames(pt, from)) continue;
+            try self.b.refuse(
+                .edit_readonly_passthrough,
+                pt.span,
+                "({s} …) passes through to pacer and names {s}; rename it there",
+                .{ pt.head, from },
+            );
+            return false;
+        }
+        for (self.d.lanes) |lane| {
+            if (!std.mem.eql(u8, lane.target, from)) continue;
+            const w = (try self.where(lane.span)) orelse return false;
+            try writes.append(self.arena, .{ .site = w.site, .key = "target", .json = to });
+        }
+        return true;
+    }
+
+    /// The anchor's `:id`, the `(timeline …)`'s `:conductor` when it
+    /// names it, and the `:from` of every lane bound to it. False after
+    /// a refusal.
+    fn renameAnchor(
+        self: *Ctx,
+        writes: *std.ArrayList(Write),
+        from: []const u8,
+        to: []const u8,
+    ) Error!bool {
+        for (self.d.anchors) |anchor| {
+            if (!std.mem.eql(u8, anchor.id, from)) continue;
+            const w = (try self.where(anchor.span)) orelse return false;
+            try writes.append(self.arena, .{ .site = w.site, .key = "id", .json = to });
+        }
+        if (self.d.conductor) |cond| {
+            if (std.mem.eql(u8, cond, from)) {
+                if (self.timelineSite()) |site| {
+                    const write: Write = .{ .site = site, .key = "conductor", .json = to };
+                    try writes.append(self.arena, write);
+                }
+            }
+        }
+        for (self.d.lanes) |lane| {
+            const binding = lane.binding orelse continue;
+            if (!std.mem.eql(u8, binding.anchor, from)) continue;
+            const w = (try self.where(lane.span)) orelse return false;
+            try writes.append(self.arena, .{ .site = w.site, .key = "from", .json = to });
+        }
+        return true;
     }
 
     /// Whether a pass-through pacer form declares `name` — as its
