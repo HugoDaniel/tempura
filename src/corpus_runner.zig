@@ -339,14 +339,14 @@ fn runCase(
     defer case_arena.deinit();
     const arena = case_arena.allocator();
 
-    const harness_src = readCaseFile(
+    const harness_src = (try readCaseFile(
         arena,
         io,
         out,
         root,
         name,
         "times.sjon",
-    ) orelse return .failed;
+    )) orelse return .failed;
     const directives = (try parseHarness(
         arena,
         gpa,
@@ -377,19 +377,24 @@ fn runCase(
         return .updated;
     }
 
-    const expected = readCaseFile(
+    const expected = (try readCaseFile(
         arena,
         io,
         out,
         root,
         name,
         "expected.sjon",
-    ) orelse return .failed;
+    )) orelse return .failed;
     const diff = firstDifference(expected, actual) orelse return .ok;
     try reportMismatch(out, name, diff);
     return .failed;
 }
 
+/// A file the case needs (`times.sjon`, `expected.sjon`), or null having
+/// said on `out` why it could not be read: a file that is missing,
+/// unreadable or past `MAX_FILE_BYTES` fails the CASE and the run goes
+/// on (collection over abort). Running out of memory is the one error —
+/// the header's rule is that only resource exhaustion aborts the run.
 fn readCaseFile(
     arena: Allocator,
     io: Io,
@@ -397,14 +402,19 @@ fn readCaseFile(
     root: []const u8,
     name: []const u8,
     file: []const u8,
-) ?[:0]u8 {
-    const path = std.fs.path.join(arena, &.{ root, name, file }) catch |err| {
-        out.print(
-            "corpus: {s}: cannot join path for {s}: {s}\n",
-            .{ name, file, @errorName(err) },
-        ) catch {};
-        return null;
+) !?[:0]u8 {
+    const path = try std.fs.path.join(arena, &.{ root, name, file });
+    return readInput(arena, io, path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            try out.print("corpus: {s}: cannot read {s}: {s}\n", .{ name, file, @errorName(err) });
+            return null;
+        },
     };
+}
+
+/// One case file, whole and NUL-terminated, in `arena`.
+fn readInput(arena: Allocator, io: Io, path: []const u8) ![:0]u8 {
     return Io.Dir.cwd().readFileAllocOptions(
         io,
         path,
@@ -412,10 +422,7 @@ fn readCaseFile(
         .limited(MAX_FILE_BYTES),
         .of(u8),
         0,
-    ) catch |err| {
-        out.print("corpus: {s}: cannot read {s}: {s}\n", .{ name, file, @errorName(err) }) catch {};
-        return null;
-    };
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -456,14 +463,22 @@ fn findFixture(
     };
     for (candidates) |c| {
         const path = try std.fs.path.join(arena, &.{ root, name, c.file });
-        const bytes = Io.Dir.cwd().readFileAllocOptions(
-            io,
-            path,
-            arena,
-            .limited(MAX_FILE_BYTES),
-            .of(u8),
-            0,
-        ) catch continue;
+        const bytes = readInput(arena, io, path) catch |err| switch (err) {
+            // "Not here" is the one answer that means: try the next name.
+            error.FileNotFound => continue,
+            error.OutOfMemory => return error.OutOfMemory,
+            // A fixture that IS here and cannot be read — too large,
+            // unreadable — fails the case. Falling through would quietly
+            // make an anchored case its `song.*` case, and `--update`
+            // would then write a golden for the wrong input.
+            else => {
+                try out.print(
+                    "corpus: {s}: cannot read {s}: {s}\n",
+                    .{ name, c.file, @errorName(err) },
+                );
+                return null;
+            },
+        };
         return .{ .file = c.file, .bytes = bytes, .kind = c.kind };
     }
     try out.print("corpus: {s}: no fixture (expected doc.sjon, song.mid or song.it)\n", .{name});
@@ -3507,4 +3522,34 @@ test "corpus render: a byte directive on a document case names what it needed" {
         const said = try testRenderRefused(arena, testDocFixture(), &.{ .dump, d });
         try t_.expect(std.mem.indexOf(u8, said, "needs a song.mid or song.it fixture") != null);
     }
+}
+
+test "corpus fixture: a doc.sjon that is here and unreadable fails the case, never becomes song.mid" {
+    var arena_state = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = t_.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(t_.io, "case");
+    try tmp.dir.writeFile(t_.io, .{ .sub_path = "case/song.mid", .data = "MThd" });
+    // `tmpDir` lives at `.zig-cache/tmp/<sub_path>` under the cwd the
+    // test runs in, which is the root the runner joins case names onto.
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    // No `doc.sjon`: "not here" is the one answer that tries the next name.
+    var quiet: Io.Writer.Allocating = .init(arena);
+    const song = (try findFixture(arena, t_.io, &quiet.writer, root, "case")).?;
+    try t_.expectEqual(FixtureKind.smf, song.kind);
+    try t_.expectEqualStrings("", quiet.written());
+
+    // A `doc.sjon` past the corpus's ceiling IS here: the case is a
+    // document case whose input cannot be read, so it fails and says so —
+    // falling through would regenerate a golden for `song.mid` instead.
+    const big = try arena.alloc(u8, MAX_FILE_BYTES + 1);
+    @memset(big, ';');
+    try tmp.dir.writeFile(t_.io, .{ .sub_path = "case/doc.sjon", .data = big });
+    var report: Io.Writer.Allocating = .init(arena);
+    try t_.expect(try findFixture(arena, t_.io, &report.writer, root, "case") == null);
+    try t_.expect(std.mem.indexOf(u8, report.written(), "cannot read doc.sjon") != null);
 }
