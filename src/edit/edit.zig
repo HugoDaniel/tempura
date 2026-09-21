@@ -158,6 +158,12 @@ pub const plan = ops_bound.plan;
 /// `doc.fromSource` returned. The map is the DOCUMENT LAYER's
 /// (`doc.fromSjon.mapOf`), and handing it in saves deriving it twice.
 pub const planWith = ops_bound.planWith;
+/// Read an action list back into a `Plan` — `Plan.text()`'s inverse, and
+/// what a host hands `tpr_apply` when it has looked at a plan and struck
+/// a line out (plan 10's row: "actions as JSON → the document
+/// re-loaded"). Total: an array that is not one is a refusal with a
+/// diagnostic, never an error.
+pub const fromActionsJson = plan_file.fromActionsJson;
 /// Apply a plan to a document's bytes, layout preserved.
 pub const apply = apply_file.apply;
 /// What `apply` returns.

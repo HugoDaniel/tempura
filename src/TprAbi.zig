@@ -17,8 +17,9 @@
 //!               msg_len u32, msg bytes }
 //!
 //!     stage:    which producer's list the record came from —
-//!               0 = the document load, 1 = the derivation,
-//!               2 = the operation (plan / apply / export / build).
+//!               0 = the document load, 1 = the derivation, 2 = the
+//!               verb that was called (a plan, an apply, an export, a
+//!               build, or a zone that could not hold an answer).
 //!               pacer's `source` byte in the same slot; there it names
 //!               the layer, here the stage, because tempura folds SJON's
 //!               own diagnostics into `sjon_diagnostic` and one enum
@@ -78,7 +79,7 @@
 //!     'TLAN' the lane index — [count u32] then count × (32 + name_len)
 //!         { kind u8 (`Doc.LaneKind`'s ordinal), bound u8, name_len u16,
 //!           onsets u32, steps u32, first_tick i64, last_tick i64,
-//!           name bytes }
+//!           rsv u32, name bytes }
 //!       `first_tick` / `last_tick` are the lane's first and last onset,
 //!       both 0 when it has none — the two facts `Derived.echo` prints,
 //!       computed here so a host never walks an onset list to draw a
@@ -180,7 +181,9 @@ pub const LANE_REC_LEN: usize = 32;
 /// The whole `'TPPH'` record, before its section-id tail.
 pub const PLAYHEAD_LEN: usize = 80;
 
-/// Which producer's list a `'TPDG'` record came from.
+/// Which producer's list a `'TPDG'` record came from: the document's
+/// load, its derivation, or the verb a host called (a plan, an apply, an
+/// export, a build — or a zone that could not hold what one produced).
 pub const Stage = enum(u8) { document, derivation, operation };
 
 /// Why a position query has no answer — `Playhead.Error`'s two host

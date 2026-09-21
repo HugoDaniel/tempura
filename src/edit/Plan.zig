@@ -356,3 +356,328 @@ test "Plan: a refusal drops the actions and keeps the diagnostic" {
     defer gpa.free(text);
     try testing.expectEqualStrings("[]\n", text);
 }
+
+// ---------------------------------------------------------------------------
+// `text()`'s inverse
+// ---------------------------------------------------------------------------
+
+/// Read an action list back into a `Plan` — what `text()` wrote, and what
+/// a host hands back after looking at it (plan 10's `tpr_apply` row takes
+/// "actions as JSON").
+///
+/// Each element is kept VERBATIM: the bytes a host handed over are the
+/// bytes `apply` splices, so nothing is re-rendered and
+/// `fromActionsJson(p.text())` gives `p.text()` again. What is parsed out
+/// of each element is only the three facts `apply` SEQUENCES by — the
+/// operation, the address (`"root"` + `"path"`) and the slot (`"index"`)
+/// — which every pathed action in §11.1's grammar carries.
+///
+/// Total, like every reader in this part: an array that is not one, an
+/// element that is not an object, an `"op"` naming no structural
+/// operation, a missing `"root"`/`"path"`/`"index"` — each is a REFUSAL
+/// (no actions, `refused`, a `sjon_diagnostic` spanning the offending
+/// bytes), never a Zig error. `sjon_diagnostic` for the same reason
+/// `Op.fromJson` uses it: the complaint belongs to JSON's vocabulary and
+/// to this grammar, neither of which has a tempura code of its own.
+///
+/// The summary is rebuilt by COUNTING what arrived. `targets` and
+/// `inexact` are facts about the operation that produced the plan, and a
+/// list read back from text has no memory of them, so they stay 0; the
+/// rest count the actions.
+pub fn fromActionsJson(gpa: std.mem.Allocator, text_json: []const u8) Error!Plan {
+    var b: Builder = .init(gpa);
+    errdefer b.deinit();
+    var reader: ActionReader = .{ .gpa = gpa, .b = &b, .src = text_json };
+    reader.run() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // The refusal is already on the builder, which is poisoned: the
+        // actions read so far are gone and nothing more will be added.
+        error.Refused => {},
+    };
+    return b.finish();
+}
+
+/// `fromActionsJson`'s one-pass reader. Two jobs kept apart: a
+/// STRUCTURAL scan that finds each element's byte range (so its text
+/// survives verbatim), and a per-element `std.json` parse that reads the
+/// three facts `apply` sequences by out of it.
+const ActionReader = struct {
+    gpa: std.mem.Allocator,
+    b: *Builder,
+    src: []const u8,
+
+    /// `Refused` is not a failure of this module — it is the refusal
+    /// already recorded on the builder, unwound to the top.
+    const ReadError = error{ OutOfMemory, Refused };
+
+    fn run(self: *ActionReader) ReadError!void {
+        var i = self.skipWs(0);
+        if (i >= self.src.len or self.src[i] != '[') {
+            return self.fail(.{ .start = 0, .end = @intCast(self.src.len) }, "an action list is a JSON array of actions (SJON §11.1)", .{});
+        }
+        i = self.skipWs(i + 1);
+        if (i < self.src.len and self.src[i] == ']') {
+            i += 1;
+        } else while (true) {
+            const end = self.elementEnd(i) orelse
+                return self.fail(self.spanFrom(i), "the action list ends in the middle of an action", .{});
+            try self.readAction(std.mem.trimEnd(u8, self.src[i..end], &std.ascii.whitespace), @intCast(i));
+            i = end;
+            if (i >= self.src.len) return self.fail(self.spanFrom(i), "the action list is not closed", .{});
+            if (self.src[i] == ',') {
+                i = self.skipWs(i + 1);
+                continue;
+            }
+            if (self.src[i] == ']') {
+                i += 1;
+                break;
+            }
+            return self.fail(self.spanFrom(i), "an action is followed by `,` or `]`, not by `{c}`", .{self.src[i]});
+        }
+        if (self.skipWs(i) != self.src.len) {
+            return self.fail(self.spanFrom(i), "there are bytes after the action list", .{});
+        }
+    }
+
+    /// One element: kept verbatim, with its operation, address and slot
+    /// read out of it. `at` is where it starts in `src`, so a complaint
+    /// spans the action a host can actually see.
+    fn readAction(self: *ActionReader, text: []const u8, at: u32) ReadError!void {
+        const span: Diag.Span = .{ .start = at, .end = at + @as(u32, @intCast(text.len)) };
+        var parsed = std.json.parseFromSlice(std.json.Value, self.gpa, text, .{}) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return self.fail(span, "this action is not JSON: {s}", .{@errorName(e)}),
+        };
+        defer parsed.deinit();
+        const obj = switch (parsed.value) {
+            .object => |o| o,
+            else => return self.fail(span, "an action is a JSON object", .{}),
+        };
+
+        const op_name = switch (obj.get("op") orelse
+            return self.fail(span, "an action names its operation with \"op\"", .{})) {
+            .string => |s| s,
+            else => return self.fail(span, "an action's \"op\" is a string", .{}),
+        };
+        const kind = std.meta.stringToEnum(Kind, op_name) orelse
+            return self.fail(span, "\"{s}\" is not one of SJON's eight structural operations", .{op_name});
+
+        // The two FOREST operations name no node, so they carry the root
+        // list's own empty address and say everything in their slot.
+        const site: Site = switch (kind) {
+            .insert_root, .remove_root => .{ .root = 0, .path = &.{} },
+            else => .{
+                .root = try self.intOf(obj, "root", span),
+                .path = try self.pathOf(obj, span),
+            },
+        };
+        const slot: ?u32 = switch (kind) {
+            .set_keyword, .remove_keyword, .replace, .wrap => null,
+            .insert_positional, .remove_positional, .remove_root => try self.intOf(obj, "index", span),
+            // §11.3: an omitted index is the append spelling.
+            .insert_root => if (obj.get("index") == null) null else try self.intOf(obj, "index", span),
+        };
+
+        const a = self.b.allocator();
+        try self.b.actions.append(a, .{
+            .json = try a.dupe(u8, text),
+            .kind = kind,
+            .site = site,
+            .slot = slot,
+        });
+        switch (kind) {
+            .set_keyword, .remove_keyword => self.b.summary.set += 1,
+            .replace, .wrap => self.b.summary.replaced += 1,
+            .insert_positional, .insert_root => self.b.summary.inserted += 1,
+            .remove_positional, .remove_root => self.b.summary.removed += 1,
+        }
+    }
+
+    /// A required whole-number key, in `u32`'s range — every `"root"`,
+    /// `"path"` step and `"index"` the grammar has is one.
+    fn intOf(self: *ActionReader, obj: std.json.ObjectMap, key: []const u8, span: Diag.Span) ReadError!u32 {
+        const value = obj.get(key) orelse
+            return self.fail(span, "this action needs a \"{s}\"", .{key});
+        return self.u32Of(value, key, span);
+    }
+
+    fn u32Of(self: *ActionReader, value: std.json.Value, key: []const u8, span: Diag.Span) ReadError!u32 {
+        const n = switch (value) {
+            .integer => |x| x,
+            else => return self.fail(span, "\"{s}\" is a whole number", .{key}),
+        };
+        if (n < 0 or n > std.math.maxInt(u32)) {
+            return self.fail(span, "\"{s}\" is {d}, which is not a slot in any document", .{ key, n });
+        }
+        return @intCast(n);
+    }
+
+    fn pathOf(self: *ActionReader, obj: std.json.ObjectMap, span: Diag.Span) ReadError![]const u32 {
+        const value = obj.get("path") orelse
+            return self.fail(span, "this action needs a \"path\"", .{});
+        const items = switch (value) {
+            .array => |arr| arr.items,
+            else => return self.fail(span, "\"path\" is an array of positional steps", .{}),
+        };
+        const path = try self.b.allocator().alloc(u32, items.len);
+        for (items, path) |step, *out| out.* = try self.u32Of(step, "path", span);
+        return path;
+    }
+
+    /// Record the refusal and unwind. `sjon_diagnostic` for the reason
+    /// `Op.fromJson` uses it: the complaint belongs to JSON's vocabulary
+    /// and to §11.1's grammar, neither of which has a tempura code.
+    fn fail(self: *ActionReader, span: Diag.Span, comptime fmt: []const u8, args: anytype) ReadError {
+        try self.b.refuse(.sjon_diagnostic, span, fmt, args);
+        return error.Refused;
+    }
+
+    fn spanFrom(self: *ActionReader, at: usize) Diag.Span {
+        return .{ .start = @intCast(@min(at, self.src.len)), .end = @intCast(self.src.len) };
+    }
+
+    fn skipWs(self: *ActionReader, from: usize) usize {
+        var i = from;
+        while (i < self.src.len and std.ascii.isWhitespace(self.src[i])) i += 1;
+        return i;
+    }
+
+    /// Where the element starting at `from` ends: the index of the `,`
+    /// or `]` that closes it. A STRUCTURAL scan — brace depth, with
+    /// strings skipped whole — because the element's own bytes are what
+    /// gets spliced and a re-render would not be them.
+    fn elementEnd(self: *ActionReader, from: usize) ?usize {
+        var depth: usize = 0;
+        var i = from;
+        while (i < self.src.len) {
+            switch (self.src[i]) {
+                '"' => {
+                    i = self.stringEnd(i) orelse return null;
+                    continue;
+                },
+                '{', '[' => depth += 1,
+                '}', ']' => {
+                    if (depth == 0) return i;
+                    depth -= 1;
+                },
+                ',' => if (depth == 0) return i,
+                else => {},
+            }
+            i += 1;
+        }
+        return null;
+    }
+
+    /// Just past the string starting at `from`, escapes honoured.
+    fn stringEnd(self: *ActionReader, from: usize) ?usize {
+        var i = from + 1;
+        while (i < self.src.len) : (i += 1) {
+            if (self.src[i] == '\\') {
+                i += 1;
+                continue;
+            }
+            if (self.src[i] == '"') return i + 1;
+        }
+        return null;
+    }
+};
+
+test "Plan.fromActionsJson: a plan's own text reads back as the same plan" {
+    const gpa = testing.allocator;
+    var b: Builder = .init(gpa);
+    errdefer b.deinit();
+
+    const lane: Site = .{ .root = 3, .path = &.{} };
+    const note: Site = .{ .root = 3, .path = &.{1} };
+    try b.setKeyword(note, "at", "{\"$num\":[2,\"q\"]}");
+    try b.removeKeyword(note, "off-vel");
+    try b.removePositional(lane, 0);
+    try b.insertPositional(lane, 2, "{\"$form\":\"note\",\"at\":{\"$num\":[3,\"q\"]}}");
+    try b.insertRoot(null, "{\"$form\":\"cue\",\"name\":\"end\"}");
+    try b.removeRoot(4);
+
+    var p = try b.finish();
+    defer p.deinit();
+    const text = try p.text(gpa);
+    defer gpa.free(text);
+
+    var back = try fromActionsJson(gpa, text);
+    defer back.deinit();
+
+    try testing.expect(!back.summary.refused);
+    try testing.expect(!back.diags.hasErrors());
+    try testing.expectEqual(p.actions.len, back.actions.len);
+    for (p.actions, back.actions) |want, got| {
+        try testing.expectEqualStrings(want.json, got.json);
+        try testing.expectEqual(want.kind, got.kind);
+        try testing.expectEqual(want.site.root, got.site.root);
+        try testing.expectEqualSlices(u32, want.site.path, got.site.path);
+        try testing.expectEqual(want.slot, got.slot);
+    }
+    // Byte-for-byte, which is what makes the round trip a real inverse.
+    const again = try back.text(gpa);
+    defer gpa.free(again);
+    try testing.expectEqualStrings(text, again);
+
+    // Counted, not carried: `targets` is the operation's fact and is gone.
+    try testing.expectEqual(@as(u32, 2), back.summary.set);
+    try testing.expectEqual(@as(u32, 2), back.summary.inserted);
+    try testing.expectEqual(@as(u32, 2), back.summary.removed);
+    try testing.expectEqual(@as(u32, 0), back.summary.targets);
+}
+
+test "Plan.fromActionsJson: a host that dropped an action gets the rest" {
+    const gpa = testing.allocator;
+    var back = try fromActionsJson(gpa,
+        \\[
+        \\{"op":"remove_positional","root":3,"path":[],"index":2},
+        \\{"op":"remove_positional","root":3,"path":[],"index":0}
+        \\]
+    );
+    defer back.deinit();
+    try testing.expectEqual(@as(usize, 2), back.actions.len);
+    try testing.expectEqual(@as(u32, 2), back.actions[0].slot.?);
+    try testing.expectEqual(@as(u32, 0), back.actions[1].slot.?);
+
+    // …and the empty list is a plan that does nothing, not a refusal.
+    var none = try fromActionsJson(gpa, "[]\n");
+    defer none.deinit();
+    try testing.expectEqual(@as(usize, 0), none.actions.len);
+    try testing.expect(!none.summary.refused);
+}
+
+test "Plan.fromActionsJson: the append spelling of insert_root keeps its null slot" {
+    const gpa = testing.allocator;
+    var back = try fromActionsJson(gpa,
+        \\[{"op":"insert_root","value":{"$form":"cue"}},{"op":"insert_root","index":1,"value":{"$form":"cue"}}]
+    );
+    defer back.deinit();
+    try testing.expectEqual(@as(usize, 2), back.actions.len);
+    // §11.3: an omitted index names the far end of the root list.
+    try testing.expectEqual(@as(?u32, null), back.actions[0].slot);
+    try testing.expectEqual(@as(?u32, 1), back.actions[1].slot);
+    try testing.expectEqual(@as(u32, 0), back.actions[0].site.root);
+}
+
+test "Plan.fromActionsJson: what is not an action list is a refusal, never an error" {
+    const gpa = testing.allocator;
+    const bad = [_][]const u8{
+        "{}", // an object is one action, not a list
+        "[1]", // an element that is not an object
+        "not json at all",
+        "[{\"op\":\"nope\",\"root\":0,\"path\":[]}]", // no such structural operation
+        "[{\"op\":\"set_keyword\",\"path\":[]}]", // no :root
+        "[{\"op\":\"set_keyword\",\"root\":0}]", // no :path
+        "[{\"op\":\"remove_positional\",\"root\":0,\"path\":[]}]", // no :index
+        "[{\"op\":\"set_keyword\",\"root\":0,\"path\":[-1]}]", // a path step is never negative
+        "[{\"op\":\"remove_positional\",\"root\":0,\"path\":[]},", // truncated
+    };
+    for (bad) |text| {
+        var back = try fromActionsJson(gpa, text);
+        defer back.deinit();
+        try testing.expect(back.summary.refused);
+        try testing.expect(back.diags.hasErrors());
+        try testing.expectEqual(@as(usize, 0), back.actions.len);
+        try testing.expectEqual(@as(usize, 1), back.diags.count(.sjon_diagnostic));
+    }
+}

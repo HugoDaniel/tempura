@@ -13,11 +13,17 @@
 # the commit message, never a reflex. Lowering it after a real shrink is
 # free and welcome.
 #
-#   measured: 1 344 540 bytes (2026-09-21, the E3 export surface: both
-#             format cores, the bridges, the time model, the edit engine,
-#             the exporters, the residue, SJON's parser / validator /
-#             printer / Edit / Binary IR)
-#   ceiling:  1 478 994 bytes (measured + 10 %)
+#   measured: 1 355 643 bytes (2026-09-21, the E3 export surface: both
+#             format cores, the bridges, the time model, the edit engine
+#             — including `Plan.fromActionsJson`, which `tpr_apply`'s
+#             action-list spelling needs — the exporters, the residue,
+#             and SJON's parser / validator / printer / Edit / Binary IR)
+#   ceiling:  1 491 224 bytes (measured + 10 %)
+#
+# The number was re-measured once the whole surface was in: the first
+# reading (1 344 540) predated the action-list reader that plan 10's
+# `tpr_apply` row requires, so the ceiling it implied was not the one
+# this artifact freezes at.
 #
 # Usage: tools/wasm_budget.sh [path/to/tempura.wasm]
 #        `zig build wasm` first — this script measures, it never builds.
@@ -25,7 +31,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-CEILING=1478994
+CEILING=1491224
 WASM="${1:-zig-out/bin/tempura.wasm}"
 
 if [ ! -f "$WASM" ]; then

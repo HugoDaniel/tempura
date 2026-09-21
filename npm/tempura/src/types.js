@@ -199,7 +199,9 @@ export {};
  * and cues, which are roots.
  * @typedef {object} Selection
  * @property {string[]} [lanes]
- * @property {[number, number]} [range] Half-open `[from, to)`, in ticks.
+ * @property {[bigint | number, bigint | number]} [range] Half-open `[from, to)`,
+ *   in ticks — a BigInt like every other tick here, or a number when the
+ *   caller knows it is small. `ops.sel` narrows it for JSON.
  * @property {Array<'note' | 'keyframe' | 'clip' | 'section' | 'cue'>} [kinds]
  * @property {number[]} [keys] MIDI keys, 0..127.
  */

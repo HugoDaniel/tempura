@@ -44,8 +44,8 @@
 //!
 //! ## Lifecycle
 //!
-//! `tpr_load(len)`, `tpr_loadFile(kind, len)` and `tpr_attachAnchor(len)`
-//! return a status:
+//! `tpr_load(len)`, `tpr_loadFile(kind, len)`, `tpr_attachAnchor(len)` and
+//! `tpr_apply(len)` return a status:
 //!
 //!   0 ok — the document is live and nothing is wrong with it;
 //!   1 diagnostics — read the `'TPDG'` blob;
@@ -349,6 +349,31 @@ fn fill(zone: []u8, bytes: []const u8) u32 {
     return @intCast(bytes.len);
 }
 
+/// `fill`, with the refusal SAID: a zone that cannot hold the answer
+/// publishes why before returning 0, because the header's promise is
+/// that a zero length is explained by the `'TPDG'` blob and not left to
+/// a host to guess at.
+///
+/// `sjon_diagnostic` is the code for the reason `Op.fromJson` and
+/// `apply` use it: "this zone is too small" belongs to the HOST's
+/// vocabulary, which has no tempura code of its own, and the span is
+/// `0..0` because it is not a fact about any text.
+fn fillOrSay(zone: []u8, bytes: []const u8, what: []const u8) u32 {
+    const written = fill(zone, bytes);
+    if (written != 0 or bytes.len == 0) return written;
+    var report: Diag.List = .init(gpa);
+    defer report.deinit();
+    report.add(
+        .sjon_diagnostic,
+        .err,
+        .{ .start = 0, .end = 0 },
+        "the {s} is {d} bytes and its zone holds {d}; nothing was written",
+        .{ what, bytes.len, zone.len },
+    ) catch return 0;
+    publishDiags(.operation, &report);
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Exports — the handshake and the zones
 // ---------------------------------------------------------------------------
@@ -538,7 +563,7 @@ export fn tpr_attachAnchor(len: u32) u32 {
 /// every comment the carrier went to the trouble of keeping.
 export fn tpr_text() u32 {
     const s = live() orelse return 0;
-    return fill(&text_buffer, s.source);
+    return fillOrSay(&text_buffer, s.source, "document");
 }
 
 /// `'TPTL'` at `tpr_timelinePtr`: the derivation as a packed blob.
@@ -594,13 +619,23 @@ export fn tpr_snap(tick: i64, grid: u32, swing: f64) i64 {
 
 /// One operation as JSON at `tpr_opPtr` (the `--op` grammar,
 /// `edit/edit.zig`'s header) → the actions as JSON at `tpr_outPtr`,
-/// exactly `Plan.text()`. Returns their length; 0 when nothing is
-/// loaded, the ask is not an operation, or the plan refused — the
-/// `'TPDG'` blob says which.
+/// exactly `Plan.text()`. Returns their length.
 ///
-/// The plan is HELD: `tpr_apply(0)` commits the very actions this call
-/// handed back, so an editor plans, shows the actions, and applies
-/// without the document moving underneath them.
+/// A REFUSED plan is `"[]\n"` — three bytes, the empty action list, with
+/// the reason in the `'TPDG'` blob — because that is what `Plan.text()`
+/// spells for a plan with no actions, and inventing a second spelling
+/// for "nothing to do" would be a second thing for a host to handle. A
+/// length of 0 means only that there was nothing to answer WITH: nothing
+/// loaded, the ask was not an operation at all, or the actions did not
+/// fit `tpr_outCap`. The blob tells the two apart, and so does `pending`
+/// — see below.
+///
+/// A plan that was NOT refused is HELD: `tpr_apply(0)` commits the very
+/// actions this call handed back, so an editor plans, shows the actions,
+/// and applies without the document moving underneath them. A refused
+/// plan, and one whose actions the out zone could not hold, are NOT held
+/// — there is nothing a host could have looked at — so the `tpr_apply(0)`
+/// that follows either is a bad call rather than a silent commit.
 export fn tpr_plan(len: u32) u32 {
     if (len > OP_CAP) return 0;
     const s = live() orelse return 0;
@@ -613,10 +648,49 @@ export fn tpr_plan(len: u32) u32 {
         return 0;
     };
     defer gpa.free(text);
+
+    // The zone first: a plan the host cannot read is a plan it must not
+    // be able to commit either, and `fillOrSay` is what puts the reason
+    // in the blob instead of the plan's own diagnostics.
+    const written = fillOrSay(&out_buffer, text, "plan");
+    if (written == 0) {
+        p.?.deinit();
+        return 0;
+    }
     publishDiags(.operation, &p.?.diags);
-    const written = fill(&out_buffer, text);
+    // Held only if there is something to commit. A refusal's actions are
+    // `[]` and the diagnostics above say why.
+    if (refusal(&p.?)) {
+        p.?.deinit();
+        return written;
+    }
     pending = p.?;
     return written;
+}
+
+/// Whether a plan must not reach the document: the planner refused it,
+/// or it came back from a host with a complaint. The CLI's own rule
+/// (`src/cli/edit.zig`: `plan.summary.refused or plan.diags.hasErrors()`)
+/// — and the reason both halves are needed is that they are different
+/// facts. `refused` is the planner saying "this cannot be done", and an
+/// error diagnostic is anything else that went wrong on the way; a plan
+/// with either is an empty action list, and `edit.apply` over an empty
+/// list hands the source straight back — which would read as a clean
+/// no-op edit if nobody looked.
+fn refusal(p: *const edit.Plan) bool {
+    return p.summary.refused or p.diags.hasErrors();
+}
+
+/// The first byte that is not whitespace, or 0 for an empty payload —
+/// which of `tpr_apply`'s two textual spellings arrived. `[` and `{` are
+/// the only two answers a well-formed payload gives; anything else falls
+/// through to the operation reader, whose complaint about it is the one a
+/// host wants to read.
+fn firstToken(payload: []const u8) u8 {
+    for (payload) |c| {
+        if (!std.ascii.isWhitespace(c)) return c;
+    }
+    return 0;
 }
 
 /// Plan `op_json` against the live document. Null = the ask was not an
@@ -639,18 +713,31 @@ fn planOp(s: *State, op_json: []const u8) error{OutOfMemory}!?edit.Plan {
 
 /// Commit an edit and re-load the document; `tpr_text()` reads it back.
 ///
-/// `len == 0` applies the plan `tpr_plan` last produced — the actions
-/// the host is looking at. `len > 0` reads one operation as JSON at
-/// `tpr_opPtr` and plans it first, which is the CLI's `edit --op` in one
-/// call.
+/// Three payloads, told apart by the first token at `tpr_opPtr` — plan
+/// 10's row is "actions as JSON → the document re-loaded", and the other
+/// two are what a host actually has in hand at the moment it wants to
+/// commit:
 ///
-/// The ACTIONS are not the input spelling, deliberately: `Plan.Action`
-/// carries the address and the slot `apply` sequences by, and §11.1's
-/// JSON grammar does not repeat them — an action list read back from a
-/// host would have to be re-addressed against a document it may no
-/// longer describe. Planning from the operation, or committing a plan
-/// this module still holds, are the two spellings that cannot
-/// desynchronise.
+///   * `len == 0` — commit the plan `tpr_plan` last produced. The
+///     cheapest path, and the only one that cannot have drifted: the
+///     actions are the ones the host is looking at.
+///   * a JSON ARRAY — an action list, read back with
+///     `edit.fromActionsJson`. Plan 10's spelling, and the one an editor
+///     needs when it showed the plan and the author struck a line out:
+///     the elements are kept verbatim and only the three facts `apply`
+///     sequences by (the operation, `"root"`+`"path"`, `"index"`) are
+///     read out of them.
+///   * a JSON OBJECT — one operation in the `--op` grammar, planned and
+///     applied in a single call (the CLI's `edit --op`).
+///
+/// An action list is read against the CURRENT document, so a host that
+/// edited the text underneath a plan gets whatever those addresses now
+/// name: "a path plus a root is an address, and an address is where a
+/// node is, not which node it is" (SJON §11.2). That is the risk the
+/// spelling carries, and `len == 0` is the spelling that does not.
+///
+/// A plan that was REFUSED never reaches the document: status 1, the
+/// reason in the `'TPDG'` blob, and the document exactly as it was.
 export fn tpr_apply(len: u32) u32 {
     if (len > OP_CAP) return @intFromEnum(Status.bad_call);
     const s = live() orelse return @intFromEnum(Status.bad_call);
@@ -660,18 +747,34 @@ export fn tpr_apply(len: u32) u32 {
     const p: *const edit.Plan = if (len == 0) blk: {
         break :blk if (pending) |*held| held else return @intFromEnum(Status.bad_call);
     } else blk: {
-        planned = planOp(s, op_buffer[0..len]) catch return @intFromEnum(Status.oom);
+        const payload = op_buffer[0..len];
+        planned = if (firstToken(payload) == '[')
+            edit.fromActionsJson(gpa, payload) catch return @intFromEnum(Status.oom)
+        else
+            planOp(s, payload) catch return @intFromEnum(Status.oom);
         break :blk if (planned) |*fresh| fresh else return @intFromEnum(Status.diagnostics);
     };
+
+    // BEFORE the document is touched. `edit.apply` over an empty action
+    // list hands the source straight back, so a refusal that got this
+    // far would install an identical document and report success.
+    if (refusal(p)) {
+        publishDiags(.operation, &p.diags);
+        return @intFromEnum(Status.diagnostics);
+    }
 
     var applied = edit.apply(gpa, s.source, p) catch return @intFromEnum(Status.oom);
     const source = gpa.dupeZ(u8, applied.text) catch {
         applied.deinit();
         return @intFromEnum(Status.oom);
     };
-    const refused = applied.diags.hasErrors();
+    const spliced = applied.diags.hasErrors();
+    // The splice's own complaints, not the plan's: SJON refusing an edit
+    // is a different fact from the planner refusing to plan one, and a
+    // host that sees status 1 here reads the blob for which.
+    if (spliced) publishDiags(.operation, &applied.diags);
     applied.deinit();
-    if (refused) {
+    if (spliced) {
         gpa.free(source);
         return @intFromEnum(Status.diagnostics);
     }

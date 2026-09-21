@@ -440,7 +440,9 @@ for (const name of cases) {
           '(export-score …) — (score …) pins exporter counts and takes hints no export spells',
         );
       } else {
-        skipForms(d.head === 'read' ? 'read' : d.head);
+        // `read`, `roundtrip`, `walk`, `write`: the golden's form is
+        // named after the directive, so one rule covers all four.
+        skipForms(d.head);
         skipped(`(${d.head}) — it asks about bytes, which no export hands out`);
       }
     }

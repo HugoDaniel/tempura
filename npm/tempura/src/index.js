@@ -262,11 +262,17 @@ export class Tempura {
 
   /**
    * Plan one operation (`./ops` builds them) without touching the
-   * document: the actions come back as `Plan.text()` spells them, and
-   * the plan is HELD so `apply()` commits exactly what was shown.
+   * document: the actions come back as `Plan.text()` spells them, and a
+   * plan that was not refused is HELD so `apply()` commits exactly what
+   * was shown.
    *
-   * A refusal is `actions: ''` and a diagnostic saying why — never a
-   * throw, because an operation is user input like any other.
+   * A REFUSED plan is `actions: '[]\n'` — the empty action list, with the
+   * reason in `diagnostics` — and nothing is held, so the `apply()` that
+   * follows is a bad call rather than a silent no-op. `actions: ''` means
+   * only that there was nothing to answer with: nothing loaded, the ask
+   * was not an operation, or the actions did not fit the out zone.
+   *
+   * Never a throw: an operation is user input like any other.
    *
    * @param {object | string} op
    * @returns {PlanResult}
@@ -281,11 +287,23 @@ export class Tempura {
   /**
    * Commit an edit and reload the document; `text` reads it back.
    *
-   * With no argument this applies the plan `plan()` last produced — the
-   * actions the host is looking at. With one, it plans that operation
-   * and applies it in a single call (the CLI's `edit --op`).
+   * Three payloads, and the module tells them apart by their first token:
    *
-   * @param {object | string} [op]
+   * - no argument — commit the plan `plan()` last produced. The only
+   *   spelling that cannot have drifted: the actions are the ones the
+   *   host is looking at.
+   * - an ACTION LIST, as `plan()` handed it back (a JSON array, or the
+   *   string `plan()` returned) — plan 10's own spelling, and what an
+   *   editor needs when the author struck a line out of the plan. Read
+   *   against the CURRENT document, so a host that edited the text
+   *   underneath a plan gets whatever those addresses now name.
+   * - an OPERATION (a JSON object, `./ops` builds them) — planned and
+   *   applied in one call, the CLI's `edit --op`.
+   *
+   * A plan the engine refused never reaches the document: `status` is 1,
+   * `diagnostics` says why, and `text` is unchanged.
+   *
+   * @param {object | ReadonlyArray<object> | string} [op]
    * @returns {LoadResult}
    */
   apply(op) {
@@ -357,9 +375,11 @@ export class Tempura {
   }
 
   /**
-   * Write an operation into the op zone. An object is serialized; a
-   * string is taken as already-serialized JSON.
-   * @param {object | string} op
+   * Write an operation or an action list into the op zone. A value is
+   * serialized; a string is taken as already-serialized JSON, which is
+   * what makes `apply(plan(op).actions)` a pass-through rather than a
+   * re-render.
+   * @param {object | ReadonlyArray<object> | string} op
    * @returns {number}
    */
   #writeOp(op) {

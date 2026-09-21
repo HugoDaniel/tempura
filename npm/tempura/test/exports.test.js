@@ -20,6 +20,26 @@ const fromRepo = (rel) => fileURLToPath(new URL(`../../../${rel}`, import.meta.u
 
 const wasmBytes = readFileSync(fromRoot('tempura.wasm'));
 
+/**
+ * `Diag.Code`'s variants in ordinal order, read from the enum itself.
+ * The ordinal IS the wire (it rides the `'TPDG'` blob) and the enum is
+ * append-only from E3, so a test that wants to name a code reads it here
+ * rather than hard-coding a number that means nothing to a reader.
+ * Repo-root reads are test-only, the lockstep test's rule.
+ */
+const DIAG_CODES = (() => {
+  const src = readFileSync(fromRepo('src/Diag.zig'), 'utf8');
+  const body = src.slice(src.indexOf('pub const Code = enum(u16) {'));
+  return [...body.slice(0, body.indexOf('\n};')).matchAll(/^ {4}([a-z][a-z0-9_]*),$/gm)].map(
+    (m) => m[1],
+  );
+})();
+const diagCode = (name) => {
+  const at = DIAG_CODES.indexOf(name);
+  assert.ok(at >= 0, `src/Diag.zig has no code named ${name}`);
+  return at;
+};
+
 const DOC = `(timeline :title "exports" :length 2bar)
 
 (tempo-point :at 0bar :us 500000)
@@ -41,8 +61,15 @@ test('publishable: ESM, side-effect free, ships the wasm + types + license', () 
   assert.ok(pkg.files.includes('tempura.wasm'), 'files ships tempura.wasm');
   assert.ok(pkg.files.includes('types'), 'files ships the .d.ts');
   assert.ok(pkg.files.includes('LICENSE'), 'files ships the LICENSE');
+  assert.ok(pkg.files.includes('README.md'), 'files ships the README');
   assert.ok(existsSync(fromRoot('LICENSE')), 'LICENSE exists on disk');
   assert.match(readFileSync(fromRoot('LICENSE'), 'utf8'), /CC0 1\.0 Universal/);
+  // The README is what a consumer sees on the registry page; an empty
+  // one there is worse than none.
+  assert.ok(existsSync(fromRoot('README.md')), 'README.md exists on disk');
+  const readme = readFileSync(fromRoot('README.md'), 'utf8');
+  assert.match(readme, /^# tempura$/m, 'the README names the package');
+  assert.match(readme, /tempura\/tempura\.wasm/, 'and says where the wasm bytes come from');
   assert.equal(pkg.exports['.'].types, './types/index.d.ts');
 });
 
@@ -240,6 +267,97 @@ test('plan → apply → text, and the plan is held between them', async () => {
   const again = t.apply(ops.transpose({ sel: ops.sel({ kinds: ['note'] }), semitones: 12 }));
   assert.equal(again.ok, true, JSON.stringify(again.diagnostics));
   assert.match(t.text, /:key 48/);
+});
+
+test('plan(): a refusal is the empty action list, and nothing is held to commit', async () => {
+  const t = await Tempura.load(wasmBytes, DOC);
+  // A well-formed operation the planner rejects: `Plan.text()` spells a
+  // plan with no actions `[]`, and the reason rides the 'TPDG' blob.
+  const planned = t.plan(ops.unbind('nope'));
+  assert.equal(planned.actions, '[]\n');
+  assert.equal(planned.diagnostics.length, 1);
+  assert.equal(planned.diagnostics[0].severity, 'error');
+  assert.equal(planned.diagnostics[0].code, diagCode('edit_range_empty'));
+
+  // …and there is nothing to commit, so the `apply()` that follows is a
+  // BAD CALL rather than a silent no-op reported as success.
+  const applied = t.apply();
+  assert.equal(applied.status, 2);
+  assert.equal(t.text, DOC, 'the document stands');
+});
+
+test('apply(op): a plan the planner refused never reaches the document', async () => {
+  const t = await Tempura.load(wasmBytes, DOC);
+  const applied = t.apply(ops.retime({ sel: ops.sel({ lanes: ['nope'] }), delta: 1 }));
+  assert.equal(applied.status, 1, 'diagnostics, not success');
+  assert.equal(applied.ok, false);
+  assert.deepEqual(
+    applied.diagnostics.map((d) => [d.stage, d.severity, d.code]),
+    [['operation', 'error', diagCode('edit_range_empty')]],
+  );
+  assert.equal(t.text, DOC, 'the document stands');
+});
+
+test('apply(actions): the list a plan handed back commits in a fresh instance', async () => {
+  // Plan 10's own spelling for `tpr_apply`: "actions as JSON → the
+  // document re-loaded". A host plans, shows the actions, and commits
+  // them — possibly in a process that has only the document and the text
+  // of the plan.
+  const retime = ops.retime({ sel: ops.sel({ kinds: ['note'] }), delta: 46126080 });
+
+  const held = await Tempura.load(wasmBytes, DOC);
+  const planned = held.plan(retime);
+  assert.match(planned.actions, /^\[\n\{"op":"set_keyword"/, 'the actions are the JSON array');
+  assert.equal(held.apply().status, 0, 'the held plan commits');
+
+  const fresh = await Tempura.load(wasmBytes, DOC);
+  const applied = fresh.apply(planned.actions);
+  assert.equal(applied.status, 0, JSON.stringify(applied.diagnostics));
+  assert.equal(fresh.text, held.text, 'the action list and the held plan are the same edit');
+});
+
+test('apply(actions): a host that struck a line out applies the rest', async () => {
+  // Three notes, so a plan has three actions and striking two out is a
+  // real edit to the plan rather than to the whole of it.
+  const three = `(timeline :title "struck" :length 2bar)
+
+(tempo-point :at 0bar :us 500000)
+(meter-point :at 0bar :sig [4 4])
+
+(lane :name flash :kind notes :target flash
+  (note :at 0bar :dur 1q :key 36 :vel 110)
+  (note :at 1q :dur 1q :key 38 :vel 90)
+  (note :at 2q :dur 1q :key 41 :vel 80))
+`;
+  const t = await Tempura.load(wasmBytes, three);
+  const planned = t.plan(ops.transpose({ sel: ops.sel({ kinds: ['note'] }), semitones: 12 }));
+  const lines = planned.actions.trimEnd().split('\n');
+  assert.equal(lines.length, 5, '`[`, three actions, `]`');
+
+  // Keep the first action, drop the other two — the array a host hands
+  // back after deleting lines in an editor.
+  const edited = `${lines[0]}\n${lines[1].replace(/,$/, '')}\n]\n`;
+  const applied = t.apply(edited);
+  assert.equal(applied.status, 0, JSON.stringify(applied.diagnostics));
+  assert.match(t.text, /:key 48/, 'the action that was kept landed');
+  assert.match(t.text, /:key 38/, 'and the two struck out did not');
+  assert.match(t.text, /:key 41/);
+});
+
+test('apply(actions): a list that is not an action list is diagnostics, document intact', async () => {
+  const t = await Tempura.load(wasmBytes, DOC);
+  for (const payload of [
+    '[{"op":"nope","root":0,"path":[]}]',
+    '[{"op":"set_keyword","root":0}]',
+    '[1]',
+    '[',
+  ]) {
+    const applied = t.apply(payload);
+    assert.equal(applied.status, 1, `${payload} is refused`);
+    assert.equal(applied.diagnostics.length, 1);
+    assert.equal(applied.diagnostics[0].code, diagCode('sjon_diagnostic'));
+    assert.equal(t.text, DOC, `${payload} left the document alone`);
+  }
 });
 
 test('plan(): an ask that is not an operation is diagnostics, never a throw', async () => {
