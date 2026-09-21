@@ -792,7 +792,7 @@ const Reader = struct {
             .dur = dur,
             .key = @intCast(std.math.clamp(key, 0, 127)),
             .vel = if (vel) |x| @intCast(std.math.clamp(x, 1, 127)) else null,
-            .ch = if (ch) |x| @intCast(std.math.clamp(x - 1, 0, 15)) else null,
+            .ch = if (ch) |x| wireOf(u4, x) else null,
             .off_vel = if (off_vel) |x| @intCast(std.math.clamp(x, 0, 127)) else null,
         } };
     }
@@ -878,7 +878,7 @@ const Reader = struct {
             const column = try self.str(o.get("column") orelse .null);
             const fx = try self.str(o.get("fx") orelse .null);
             return .{ .it = .{
-                .channel = @intCast(std.math.clamp((self.int(v) orelse 1) - 1, 0, 63)),
+                .channel = wireOf(u6, self.int(v) orelse 1),
                 .column = if (column) |c| std.meta.stringToEnum(doc.ItColumn, c) else null,
                 .fx = if (fx) |f| (if (f.len > 0) f[0] else null) else null,
             } };
@@ -940,13 +940,13 @@ const Reader = struct {
                 var set: doc.Channels = .none;
                 for (arr.items) |item| {
                     const n = self.int(item) orelse return null;
-                    const c: u4 = @intCast(std.math.clamp(n - 1, 0, 15));
+                    const c: u4 = wireOf(u4, n);
                     if (set.has(c)) return null;
                     set = set.with(c);
                 }
                 return set;
             },
-            else => return .single(@intCast(std.math.clamp((self.int(value) orelse 1) - 1, 0, 15))),
+            else => return .single(wireOf(u4, self.int(value) orelse 1)),
         }
     }
 
@@ -1149,6 +1149,16 @@ const Reader = struct {
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+/// A channel as a musician counts it (`1` is the first) to the wire's
+/// numbering, `T`'s whole range: `u4` for a MIDI channel, `u6` for an
+/// Impulse Tracker one. Clamped into `1..2^bits` BEFORE the subtraction,
+/// because `x` is any JSON integer and `minInt(i64) - 1` overflows; for
+/// every other `x` this is the `clamp(x - 1, 0, 2^bits - 1)` it replaces.
+fn wireOf(comptime T: type, x: i64) T {
+    const count: i64 = std.math.maxInt(T) + 1;
+    return @intCast(std.math.clamp(x, 1, count) - 1);
 }
 
 /// A bound SMF lane's channels as the JSON value a `:ch` edit action
@@ -1519,6 +1529,53 @@ test "Op.fromJson: a number no field can hold is refused, never truncated" {
             Diag.Code.sjon_diagnostic,
             p.diags.items()[p.diags.items().len - 1].code,
         );
+    }
+}
+
+test "Op.fromJson: a channel counted from 1 is clamped before it is made a wire number" {
+    // `clamp(x - 1, …)` subtracted first, and `x` is any JSON integer: at
+    // `minInt(i64)` the subtraction overflowed on text `--op` and
+    // `tpr_plan` take from anybody. Clamped into the counted range first,
+    // the answer is the one the old spelling gave every other number.
+    const min = std.math.minInt(i64);
+    {
+        var p = try parsed(std.fmt.comptimePrint(
+            \\{{"op":"insert","lane":"flash","note":{{"at":0,"dur":1,"key":60,"ch":{d}}}}}
+        , .{min}));
+        defer p.deinit();
+        try testing.expectEqual(@as(u4, 0), p.op.?.insert.what.note.ch.?);
+    }
+    {
+        var p = try parsed(std.fmt.comptimePrint(
+            \\{{"op":"bind","lane":"bass","anchor":"song","channel":{d}}}
+        , .{min}));
+        defer p.deinit();
+        try testing.expectEqual(@as(u6, 0), p.op.?.bind.address.it.channel);
+    }
+    {
+        var p = try parsed(std.fmt.comptimePrint(
+            \\{{"op":"bind","lane":"pad","anchor":"song","track":1,"ch":{d}}}
+        , .{min}));
+        defer p.deinit();
+        try testing.expect(p.op.?.bind.address.smf.ch.has(0));
+    }
+    {
+        var p = try fromJson(testing.allocator, std.fmt.comptimePrint(
+            \\{{"op":"bind","lane":"pad","anchor":"song","track":1,"ch":[{d},16,99]}}
+        , .{min}));
+        defer p.deinit();
+        // 16 and 99 both clamp onto channel 16, which is one channel
+        // named twice — not an address, as before.
+        try testing.expect(p.op == null);
+    }
+    {
+        var p = try parsed(std.fmt.comptimePrint(
+            \\{{"op":"bind","lane":"pad","anchor":"song","track":1,"ch":[{d},2]}}
+        , .{min}));
+        defer p.deinit();
+        const chs = p.op.?.bind.address.smf.ch;
+        try testing.expect(chs.has(0) and chs.has(1));
+        try testing.expectEqual(@as(u8, 2), chs.count());
     }
 }
 
