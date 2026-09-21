@@ -944,6 +944,34 @@ test "read: the hand-built two-track fixture parses to the expected Sequence" {
     try testing.expectEqual(@as(i64, 288), t1[10].at);
 }
 
+test "read: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails
+    // with error.OutOfMemory and testing.allocator sees no leak; past
+    // the last index it succeeds. Bounded by the number of allocations
+    // the call makes, which the loop discovers.
+    const gpa = testing.allocator;
+    const bytes = try support.twoTrackFixture(gpa);
+    defer gpa.free(bytes);
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const result = read(failing.allocator(), bytes);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var value = try result;
+            value.deinit();
+            break;
+        }
+    }
+    // An arena asks its backing allocator for chunks, not for every
+    // slice, so the count is small — but a sweep of one index would
+    // prove nothing, so it is at least two.
+    try testing.expect(fail_index > 1);
+}
+
 test "read: the SourceMap carries the chunks, the event offsets and the running-status reuse" {
     const gpa = testing.allocator;
     const bytes = try support.twoTrackFixture(gpa);

@@ -469,6 +469,36 @@ fn twoNotes(gpa: std.mem.Allocator) !Sequence {
     return b.finish();
 }
 
+test "write: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
+    // Goal: prove the errdefer discipline behind "an owned struct with
+    // arena-backed deinit": at EVERY allocation index the call fails
+    // with error.OutOfMemory and testing.allocator sees no leak; past
+    // the last index it succeeds. Bounded by the number of allocations
+    // the call makes, which the loop discovers. The value written is the
+    // two-track fixture as read, so every payload shape is on the path.
+    const gpa = testing.allocator;
+    const bytes = try support.twoTrackFixture(gpa);
+    defer gpa.free(bytes);
+    var result = try reader.read(gpa, bytes);
+    defer result.deinit();
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        const written = write(failing.allocator(), &result.sequence, .{ .ppq = 480 });
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, written);
+        } else {
+            var value = try written;
+            value.deinit();
+            break;
+        }
+    }
+    // Small, since an arena takes chunks and not slices; more than one,
+    // or the sweep proved nothing.
+    try testing.expect(fail_index > 1);
+}
+
 test "write: the header is the format and the track count, and never a SMPTE division" {
     const gpa = testing.allocator;
 
