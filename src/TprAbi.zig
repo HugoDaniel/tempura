@@ -235,6 +235,9 @@ pub fn encodeDiags(sources: []const DiagSource, dest: []u8) []u8 {
     var pos: usize = DIAGS_HEADER_LEN;
     var count: u32 = 0;
     outer: for (sources) |src| {
+        // The read side of `Diag.List`'s contract: every code about to go
+        // on the wire is one a decoder with this enum can name.
+        src.list.invariants();
         for (src.list.items()) |d| {
             if (!appendDiag(dest, &pos, src.stage, d)) break :outer;
             count += 1;

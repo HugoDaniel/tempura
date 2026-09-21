@@ -273,9 +273,9 @@ pub const List = struct {
         comptime fmt: []const u8,
         args: anytype,
     ) Error!void {
-        const a = self.arena.allocator();
-        const message = try std.fmt.allocPrint(a, fmt, args);
-        try self.entries.append(a, .{
+        const arena = self.arena.allocator();
+        const message = try std.fmt.allocPrint(arena, fmt, args);
+        try self.entries.append(arena, .{
             .code = code,
             .severity = severity,
             .span = span,
@@ -286,6 +286,14 @@ pub const List = struct {
     /// The report so far, in insertion order. Borrowed from the list.
     pub fn items(self: *const List) []const Diagnostic {
         return self.entries.items;
+    }
+
+    /// The read side: what every consumer of a WHOLE list may assume of
+    /// it, asserted once at its entry (plan 12). `invariantsOf` is the
+    /// same check over a borrowed slice, for a consumer that was handed
+    /// several lists' entries joined.
+    pub fn invariants(self: *const List) void {
+        invariantsOf(self.entries.items);
     }
 
     /// Whether any entry is an `err` — the one question a caller asks
@@ -307,6 +315,28 @@ pub const List = struct {
         return n;
     }
 };
+
+/// What a consumer may assume of any run of diagnostics, wherever they
+/// came from: every code's ordinal is one `code_order` pins, so what goes
+/// on the wire as a `u16` is a code a decoder with this enum can name.
+/// Compiles out of `ReleaseSmall`, so the wasm pays nothing.
+///
+/// Plan 12 also names `span.start <= span.end`, and it is NOT asserted
+/// yet, because it is not yet a property our producers establish: the IT
+/// reader spans a truncation from the offset the header DECLARED to the
+/// file's end (`itf/read.zig`, `readMessage` and five siblings), and a
+/// declared offset past the end inverts the span — the pseudo-random
+/// read test in `itf/write.zig` finds one within its first seeds. An
+/// assertion here would panic a Debug `tempura dump` on a truncated
+/// `.it`, which is asserting on user input. Once the reader clamps its
+/// `start` to the file's length, the clause goes in here and in `add`.
+pub fn invariantsOf(diags: []const Diagnostic) void {
+    for (diags) |d| {
+        const ordinal = @intFromEnum(d.code);
+        std.debug.assert(ordinal < code_order.len);
+        std.debug.assert(code_order[ordinal] == d.code);
+    }
+}
 
 /// Every variant in ordinal order, pinned by NAME — the table the test
 /// below walks. Append here in the same edit that appends to `Code`.
@@ -476,6 +506,27 @@ test "Diag.List: the message belongs to the list's arena, not the caller's buffe
     @memset(&lane, 'x');
 
     try testing.expectEqualStrings("lane kick is missing", list.items()[0].message);
+}
+
+test "Diag.List: invariants hold on an empty list, a full one and a joined slice" {
+    var list: List = .init(testing.allocator);
+    defer list.deinit();
+    list.invariants();
+
+    // Only codes this file's other tests already name: a test body here
+    // counts as coverage for `tools/zt audit-diagnostics`, and a new name
+    // would hand a code coverage nobody earned.
+    try list.add(.tick_overflow, .err, .{ .start = 0, .end = 0 }, "empty span", .{});
+    try list.add(.build_cross_kind, .info, .{ .start = 3, .end = 9 }, "another", .{});
+    list.invariants();
+
+    // A consumer handed several lists joined checks the slice it got.
+    var joined: std.ArrayList(Diagnostic) = .empty;
+    defer joined.deinit(testing.allocator);
+    try joined.appendSlice(testing.allocator, list.items());
+    try joined.appendSlice(testing.allocator, list.items());
+    invariantsOf(joined.items);
+    try testing.expectEqual(@as(usize, 4), joined.items.len);
 }
 
 test "Diag.List: hasErrors reflects severity and count is per code" {

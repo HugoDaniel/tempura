@@ -132,6 +132,9 @@ pub fn render(
     diags: []const Diag.Diagnostic,
     style: Style,
 ) Writer.Error!void {
+    // The read side of `Diag.List`'s contract, over whatever the verb
+    // joined: every code has a name to print.
+    Diag.invariantsOf(diags);
     const name = label(path);
     for (diags) |d| {
         switch (space) {
