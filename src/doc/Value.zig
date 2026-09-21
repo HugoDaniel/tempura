@@ -454,80 +454,29 @@ pub const Doc = struct {
     /// documents that say the same thing in two layouts are one
     /// document. The comments an author wrote above a root are still
     /// compared exactly — the printer is required to put those back.
+    ///
+    /// The tiers are compared by COUNT only. Two dumps are equal when
+    /// they say the same thing, and saying so means walking two event
+    /// streams or two pattern grids across two byte pools — which is
+    /// `Sequence` / `Module` equality, a thing neither core exports yet
+    /// (plan 05's rung 2 spells the shape in its own tests). The
+    /// round-trip property this function serves is the DOCUMENT's, and a
+    /// dump's own round trip is pinned where it belongs, in the two
+    /// bridges' fixed-point tests. Deferred by the controller.
     pub fn eql(a: *const Doc, b: *const Doc) bool {
         if (!optStrEql(a.title, b.title)) return false;
         if (!optEql(i64, a.length, b.length)) return false;
         if (a.end != b.end) return false;
         if (!optStrEql(a.conductor, b.conductor)) return false;
-
-        if (a.anchors.len != b.anchors.len) return false;
-        for (a.anchors, b.anchors) |x, y| {
-            if (!std.mem.eql(u8, x.id, y.id)) return false;
-            if (x.kind != y.kind) return false;
-            if (!std.mem.eql(u8, x.file, y.file)) return false;
-            if (!optEql(u64, x.size, y.size)) return false;
-            if (!optStrEql(x.sha256_src, y.sha256_src)) return false;
-            if ((x.sha256 == null) != (y.sha256 == null)) return false;
-            if (x.sha256) |d| if (!std.mem.eql(u8, &d, &y.sha256.?)) return false;
-            if (x.inline_dump != y.inline_dump) return false;
-            if (x.resolved != y.resolved) return false;
-        }
-
-        if (a.tempo.len != b.tempo.len) return false;
-        for (a.tempo, b.tempo) |x, y| {
-            if (x.tick != y.tick) return false;
-            if (spellingOf(x) != spellingOf(y)) return false;
-            switch (x.tempo) {
-                .us => |u| if (u != y.tempo.us) return false,
-                .qpm => |q| if (q != y.tempo.qpm) return false,
-            }
-        }
-
-        if (a.meter.len != b.meter.len) return false;
-        for (a.meter, b.meter) |x, y| {
-            if (x.tick != y.tick or x.n != y.n or x.d != y.d) return false;
-        }
-
-        if (a.sections.len != b.sections.len) return false;
-        for (a.sections, b.sections) |x, y| {
-            if (!std.mem.eql(u8, x.name, y.name)) return false;
-            if (x.at != y.at or x.dur != y.dur) return false;
-        }
-
-        if (a.cues.len != b.cues.len) return false;
-        for (a.cues, b.cues) |x, y| {
-            if (!std.mem.eql(u8, x.name, y.name) or x.at != y.at) return false;
-        }
-
-        if (!lanesEql(a.lanes, b.lanes)) return false;
-
-        if (a.phrases.len != b.phrases.len) return false;
-        for (a.phrases, b.phrases) |x, y| {
-            if (!std.mem.eql(u8, x.name, y.name)) return false;
-            if (x.length != y.length) return false;
-            if (!lanesEql(x.lanes, y.lanes)) return false;
-        }
-
-        if (a.passthrough.len != b.passthrough.len) return false;
-        for (a.passthrough, b.passthrough) |x, y| {
-            if (!std.mem.eql(u8, x.head, y.head)) return false;
-            if (!passthroughEql(x.text, y.text)) return false;
-            if (x.comments.len != y.comments.len) return false;
-            for (x.comments, y.comments) |cx, cy| {
-                if (!std.mem.eql(u8, cx, cy)) return false;
-            }
-        }
-
-        // The tiers are compared by COUNT only. Two dumps are equal when
-        // they say the same thing, and saying so means walking two event
-        // streams or two pattern grids across two byte pools — which is
-        // `Sequence` / `Module` equality, a thing neither core exports
-        // yet (plan 05's rung 2 spells the shape in its own tests). The
-        // round-trip property this function serves is the DOCUMENT's, and
-        // a dump's own round trip is pinned where it belongs, in the two
-        // bridges' fixed-point tests. Deferred by the controller.
-        if (a.midi.len != b.midi.len or a.it.len != b.it.len) return false;
-        return true;
+        if (!allEql(Anchor, a.anchors, b.anchors, anchorEql)) return false;
+        if (!allEql(TempoPoint, a.tempo, b.tempo, tempoPointEql)) return false;
+        if (!allEql(MeterPoint, a.meter, b.meter, meterPointEql)) return false;
+        if (!allEql(Section, a.sections, b.sections, sectionEql)) return false;
+        if (!allEql(Cue, a.cues, b.cues, cueEql)) return false;
+        if (!allEql(Lane, a.lanes, b.lanes, laneEql)) return false;
+        if (!allEql(Phrase, a.phrases, b.phrases, phraseEql)) return false;
+        if (!allEql(Passthrough, a.passthrough, b.passthrough, passthroughFormEql)) return false;
+        return a.midi.len == b.midi.len and a.it.len == b.it.len;
     }
 };
 
@@ -634,60 +583,123 @@ const Tokens = struct {
     }
 };
 
-fn lanesEql(a: []const Lane, b: []const Lane) bool {
+/// Two slices of one length whose elements are pairwise `eqlFn`.
+fn allEql(comptime T: type, a: []const T, b: []const T, comptime eqlFn: fn (T, T) bool) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| {
-        if (!std.mem.eql(u8, x.name, y.name)) return false;
-        if (x.kind != y.kind) return false;
-        if (!std.mem.eql(u8, x.target, y.target)) return false;
-        if ((x.range == null) != (y.range == null)) return false;
-        if (x.range) |r| if (r[0] != y.range.?[0] or r[1] != y.range.?[1]) return false;
-        if ((x.binding == null) != (y.binding == null)) return false;
-        if (x.binding) |bx| {
-            const by = y.binding.?;
-            if (!std.mem.eql(u8, bx.anchor, by.anchor)) return false;
-            if (std.meta.activeTag(bx.address) != std.meta.activeTag(by.address)) return false;
-            switch (bx.address) {
-                .smf => |s| {
-                    const o = by.address.smf;
-                    if (s.track != o.track or !s.ch.eql(o.ch)) return false;
-                    if (!optEql(u7, s.key, o.key)) return false;
-                    if ((s.curve == null) != (o.curve == null)) return false;
-                    if (s.curve) |c| if (!std.meta.eql(c, o.curve.?)) return false;
-                },
-                .it => |s| {
-                    const o = by.address.it;
-                    if (s.channel != o.channel) return false;
-                    if (!optEql(ItColumn, s.column, o.column)) return false;
-                    if (!optEql(u8, s.fx, o.fx)) return false;
-                },
-            }
-        }
-        if ((x.cc == null) != (y.cc == null)) return false;
-        if (x.cc) |c| if (!std.meta.eql(c, y.cc.?)) return false;
-        if (x.notes.len != y.notes.len) return false;
-        for (x.notes, y.notes) |nx, ny| {
-            if (nx.at != ny.at or nx.dur != ny.dur) return false;
-            if (nx.key != ny.key or nx.vel != ny.vel or nx.ch != ny.ch) return false;
-            if (!optEql(u7, nx.off_vel, ny.off_vel)) return false;
-        }
-        if (x.keyframes.len != y.keyframes.len) return false;
-        for (x.keyframes, y.keyframes) |kx, ky| {
-            if (kx.at != ky.at or kx.ncomp != ky.ncomp) return false;
-            if (!std.mem.eql(f32, &kx.value, &ky.value)) return false;
-            if (!std.mem.eql(u8, kx.ease_src, ky.ease_src)) return false;
-        }
-        if (x.clips.len != y.clips.len) return false;
-        for (x.clips, y.clips) |cx, cy| {
-            if (cx.at != cy.at or cx.offset != cy.offset) return false;
-            if (!std.mem.eql(u8, cx.phrase, cy.phrase)) return false;
-            if (cx.repeat != cy.repeat or cx.transpose != cy.transpose) return false;
-            if (!optEql(i64, cx.length, cy.length)) return false;
-        }
-        if (!optStrEql(x.query_src, y.query_src)) return false;
-        if (!optStrEql(x.expr_src, y.expr_src)) return false;
+        if (!eqlFn(x, y)) return false;
     }
     return true;
+}
+
+fn anchorEql(x: Anchor, y: Anchor) bool {
+    if (!std.mem.eql(u8, x.id, y.id)) return false;
+    if (x.kind != y.kind) return false;
+    if (!std.mem.eql(u8, x.file, y.file)) return false;
+    if (!optEql(u64, x.size, y.size)) return false;
+    if (!optStrEql(x.sha256_src, y.sha256_src)) return false;
+    if ((x.sha256 == null) != (y.sha256 == null)) return false;
+    if (x.sha256) |d| if (!std.mem.eql(u8, &d, &y.sha256.?)) return false;
+    return x.inline_dump == y.inline_dump and x.resolved == y.resolved;
+}
+
+/// The same tick, the same authored spelling, the same number under it.
+fn tempoPointEql(x: TempoPoint, y: TempoPoint) bool {
+    if (x.tick != y.tick) return false;
+    if (spellingOf(x) != spellingOf(y)) return false;
+    return switch (x.tempo) {
+        .us => |u| u == y.tempo.us,
+        .qpm => |q| q == y.tempo.qpm,
+    };
+}
+
+fn meterPointEql(x: MeterPoint, y: MeterPoint) bool {
+    return x.tick == y.tick and x.n == y.n and x.d == y.d;
+}
+
+fn sectionEql(x: Section, y: Section) bool {
+    return std.mem.eql(u8, x.name, y.name) and x.at == y.at and x.dur == y.dur;
+}
+
+fn cueEql(x: Cue, y: Cue) bool {
+    return std.mem.eql(u8, x.name, y.name) and x.at == y.at;
+}
+
+fn phraseEql(x: Phrase, y: Phrase) bool {
+    if (!std.mem.eql(u8, x.name, y.name)) return false;
+    if (x.length != y.length) return false;
+    return allEql(Lane, x.lanes, y.lanes, laneEql);
+}
+
+/// A pass-through form: its head, its text STRUCTURALLY, and the
+/// comments above it exactly (`passthroughEql` says why the two differ).
+fn passthroughFormEql(x: Passthrough, y: Passthrough) bool {
+    if (!std.mem.eql(u8, x.head, y.head)) return false;
+    if (!passthroughEql(x.text, y.text)) return false;
+    return allEql([]const u8, x.comments, y.comments, strEql);
+}
+
+fn strEql(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
+
+fn laneEql(x: Lane, y: Lane) bool {
+    if (!std.mem.eql(u8, x.name, y.name)) return false;
+    if (x.kind != y.kind) return false;
+    if (!std.mem.eql(u8, x.target, y.target)) return false;
+    if ((x.range == null) != (y.range == null)) return false;
+    if (x.range) |r| if (r[0] != y.range.?[0] or r[1] != y.range.?[1]) return false;
+    if (!bindingEql(x.binding, y.binding)) return false;
+    if ((x.cc == null) != (y.cc == null)) return false;
+    if (x.cc) |c| if (!std.meta.eql(c, y.cc.?)) return false;
+    if (!allEql(Note, x.notes, y.notes, noteEql)) return false;
+    if (!allEql(Keyframe, x.keyframes, y.keyframes, keyframeEql)) return false;
+    if (!allEql(Clip, x.clips, y.clips, clipEql)) return false;
+    if (!optStrEql(x.query_src, y.query_src)) return false;
+    return optStrEql(x.expr_src, y.expr_src);
+}
+
+fn bindingEql(a: ?Binding, b: ?Binding) bool {
+    if (a == null or b == null) return a == null and b == null;
+    const x = a.?;
+    const y = b.?;
+    if (!std.mem.eql(u8, x.anchor, y.anchor)) return false;
+    if (std.meta.activeTag(x.address) != std.meta.activeTag(y.address)) return false;
+    switch (x.address) {
+        .smf => |s| {
+            const o = y.address.smf;
+            if (s.track != o.track or !s.ch.eql(o.ch)) return false;
+            if (!optEql(u7, s.key, o.key)) return false;
+            if ((s.curve == null) != (o.curve == null)) return false;
+            if (s.curve) |c| if (!std.meta.eql(c, o.curve.?)) return false;
+        },
+        .it => |s| {
+            const o = y.address.it;
+            if (s.channel != o.channel) return false;
+            if (!optEql(ItColumn, s.column, o.column)) return false;
+            if (!optEql(u8, s.fx, o.fx)) return false;
+        },
+    }
+    return true;
+}
+
+fn noteEql(x: Note, y: Note) bool {
+    if (x.at != y.at or x.dur != y.dur) return false;
+    if (x.key != y.key or x.vel != y.vel or x.ch != y.ch) return false;
+    return optEql(u7, x.off_vel, y.off_vel);
+}
+
+fn keyframeEql(x: Keyframe, y: Keyframe) bool {
+    if (x.at != y.at or x.ncomp != y.ncomp) return false;
+    if (!std.mem.eql(f32, &x.value, &y.value)) return false;
+    return std.mem.eql(u8, x.ease_src, y.ease_src);
+}
+
+fn clipEql(x: Clip, y: Clip) bool {
+    if (x.at != y.at or x.offset != y.offset) return false;
+    if (!std.mem.eql(u8, x.phrase, y.phrase)) return false;
+    if (x.repeat != y.repeat or x.transpose != y.transpose) return false;
+    return optEql(i64, x.length, y.length);
 }
 
 fn optEql(comptime T: type, a: ?T, b: ?T) bool {
