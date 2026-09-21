@@ -27,7 +27,12 @@ pub const Error = error{OutOfMemory};
 /// The conversion to a pulses-per-quarter grid is
 /// `pulsesPerQuarter()` — it cannot be spelled `ppq()` because the
 /// variant already claims that name, and the variant is the one a
-/// consumer pattern-matches on.
+/// consumer pattern-matches on. The conversion has ONE seam beside it,
+/// `tempoOnGrid()`: what a `set-tempo` says once its ticks are on that
+/// grid. The two are a pair, and anything that emits a SMPTE sequence
+/// on its converted grid — the canonical writer, the `midi/` bridge's
+/// printer — uses both, or the wall clock the grid was chosen to keep
+/// is lost.
 pub const Division = union(enum) {
     /// Bit 15 clear: pulses per quarter note, 1..32767.
     ppq: u15,
@@ -36,14 +41,23 @@ pub const Division = union(enum) {
     /// says so in the `SourceMap`.
     smpte: struct { fps: u8, tpf: u8 },
 
+    /// The tempo `tempoOnGrid` answers for every SMPTE `set-tempo`:
+    /// 500 000 microseconds a quarter, 120 quarter notes per minute —
+    /// the premise of the `fps · tpf / 2` approximation, and an
+    /// integer, so the one SMPTE segment keeps plan 03's integer path.
+    pub const smpte_tempo_us: u32 = 500_000;
+
     /// The grid this file's ticks are on.
     ///
     /// For SMPTE this is OpenMPT's approximation (`Load_mid.cpp:661-669`,
     /// `frames · subframes / 2`), exact only at 120 quarter notes per
-    /// minute — which is why the SMF conductor of a SMPTE file is one
-    /// 120 QPM segment and its `set-tempo` events are ignored for timing
-    /// (`smpte_tempo_ignored`, plan 03). A zero falls back to 96, as
-    /// OpenMPT's loader does, so no caller ever divides by nothing.
+    /// minute: `fps · tpf` ticks a second read as `fps · tpf / 2` a
+    /// quarter is a second of two quarters. That premise is why the SMF
+    /// conductor of a SMPTE file is one 120 QPM segment and its
+    /// `set-tempo` events are ignored for timing (`smpte_tempo_ignored`,
+    /// plan 03), and why `tempoOnGrid` rewrites them on the way out. A
+    /// zero falls back to 96, as OpenMPT's loader does, so no caller
+    /// ever divides by nothing.
     pub fn pulsesPerQuarter(self: Division) u15 {
         const raw: u32 = switch (self) {
             .ppq => |p| p,
@@ -51,6 +65,28 @@ pub const Division = union(enum) {
         };
         if (raw == 0 or raw > std.math.maxInt(u15)) return 96;
         return @intCast(raw);
+    }
+
+    /// What a `set-tempo` of `us` microseconds a quarter says ONCE its
+    /// ticks are on `pulsesPerQuarter()`'s grid.
+    ///
+    /// For `.ppq` that is `us` itself: the grid is the file's own. For
+    /// `.smpte` it is `smpte_tempo_us`, whatever the event said, because
+    /// 120 QPM is the tempo the approximation ASSUMED — a SMPTE tick is a
+    /// fixed slice of the wall clock, and on a musical grid it stays one
+    /// only while that grid is read at the tempo it was derived for. A
+    /// `set-tempo` copied unchanged beside the converted division would
+    /// CONDUCT: at 60 QPM every second of the file would become two,
+    /// which is exactly what the reader's `smpte_tempo_ignored` promised
+    /// never happens (plan 03; plan 05, "Chunks"). The reader keeps the
+    /// event as read and the `Sequence` stays faithful; this is the rule
+    /// for the two places that EMIT the event on the converted grid, the
+    /// canonical writer and the bridge's printer.
+    pub fn tempoOnGrid(self: Division, us: u32) u32 {
+        return switch (self) {
+            .ppq => us,
+            .smpte => smpte_tempo_us,
+        };
     }
 };
 
@@ -562,6 +598,22 @@ test "Division: the grid PPQ is as read, OpenMPT's conversion for SMPTE, 96 for 
     try testing.expectEqual(@as(u15, 96), (Division{ .ppq = 0 }).pulsesPerQuarter());
     try testing.expectEqual(@as(u15, 96), (Division{ .smpte = .{ .fps = 0, .tpf = 0 } }).pulsesPerQuarter());
     try testing.expectEqual(@as(u15, 96), (Division{ .smpte = .{ .fps = 1, .tpf = 1 } }).pulsesPerQuarter());
+}
+
+test "Division: tempoOnGrid is the tempo as read on a PPQ grid, and 120 QPM on a converted one" {
+    // A PPQ file's grid is its own: every tempo passes through.
+    try testing.expectEqual(@as(u32, 1_000_000), (Division{ .ppq = 480 }).tempoOnGrid(1_000_000));
+    try testing.expectEqual(@as(u32, 1), (Division{ .ppq = 1 }).tempoOnGrid(1));
+    try testing.expectEqual(@as(u32, 0), (Division{ .ppq = 96 }).tempoOnGrid(0));
+
+    // A SMPTE grid was derived at 120 QPM, and is read at 120 QPM
+    // whatever the event said — a 60 on it would double every second.
+    const smpte = Division{ .smpte = .{ .fps = 25, .tpf = 40 } };
+    try testing.expectEqual(Division.smpte_tempo_us, smpte.tempoOnGrid(1_000_000));
+    try testing.expectEqual(@as(u32, 500_000), smpte.tempoOnGrid(500_000));
+    try testing.expectEqual(@as(u32, 500_000), smpte.tempoOnGrid(0));
+    // The 96 fallback is still a converted grid.
+    try testing.expectEqual(@as(u32, 500_000), (Division{ .smpte = .{ .fps = 0, .tpf = 0 } }).tempoOnGrid(250_000));
 }
 
 test "Kind: the ordinals are the wire, pinned by name and append-only" {

@@ -8,6 +8,16 @@
 //! hex strings and text payloads SJON strings when the bytes are valid
 //! UTF-8.
 //!
+//! A SMPTE division is printed as the grid it converted to, and every
+//! `set-tempo` on that grid as 500 000 µs — the tempo the conversion
+//! assumed (`smf.Division.tempoOnGrid`, the one seam beside
+//! `pulsesPerQuarter`). The `Sequence` keeps the event as read; the dump
+//! is the first place the file's ticks are BELIEVED on a musical grid,
+//! so it is the first place the tempo has to be the grid's own, or a
+//! `tempura build` of the dump would conduct a wall-clock file at a
+//! tempo it never had. The `; smpte …` note beside the header says how
+//! many events were rewritten.
+//!
 //! Above the text sit the two derivations a BOUND lane needs: note
 //! pairing (`pairNotes`) and controller steps (`curveSteps`). Neither
 //! writes anything back — a bound lane's content lives in the file
@@ -63,6 +73,11 @@ pub const Options = struct {
 /// (plan 05, "Chunks") and the dump would otherwise not say what the
 /// file held. A hand-built sequence passes `null` and the note comes
 /// from `seq.division` itself.
+///
+/// A SMPTE sequence's `set-tempo :us` is `tempoOnGrid`'s 500 000, not
+/// the event's own number, and the note counts the events rewritten —
+/// the same rule the canonical writer applies to the same bytes, so a
+/// dump and a write of one file agree on what its grid means.
 pub fn sequenceToForms(
     gpa: Allocator,
     seq: *const smf.Sequence,
@@ -152,7 +167,10 @@ const Printer = struct {
         try self.raw(")");
         // A SMPTE division is converted on read and never written back
         // (plan 05, "Chunks"), so the dump says what the file held —
-        // midi 02's own `; smpte 25 fps × 40` note.
+        // midi 02's own `; smpte 25 fps × 40` note — and how many
+        // `set-tempo` events `event()` spelled as the grid's 500 000 µs
+        // rather than their own number, so a reader of the dump knows
+        // the tier was rewritten to keep the clock, not authored so.
         const smpte = if (source_map) |m| m.smpte else null;
         if (smpte) |s| {
             try self.smpteNote(s.fps, s.tpf);
@@ -178,6 +196,31 @@ const Printer = struct {
         try self.int(fps);
         try self.raw(" fps × ");
         try self.int(tpf);
+        // The count is of what THIS printer rewrote, which keys on the
+        // sequence's own division exactly as `event()` does — a source
+        // map that says SMPTE over a PPQ sequence (which the reader never
+        // produces) would note the conversion and count nothing.
+        const rewritten = self.rewrittenTempos();
+        if (rewritten == 0) return;
+        try self.raw(", ");
+        try self.int(rewritten);
+        try self.raw(" set-tempo rewritten to ");
+        try self.int(smf.Division.smpte_tempo_us);
+        try self.raw(" µs on the converted grid");
+    }
+
+    /// How many `set-tempo` events `event()` will spell as the grid's
+    /// tempo rather than their own: every one, for a SMPTE sequence;
+    /// none otherwise.
+    fn rewrittenTempos(self: *const Printer) usize {
+        if (self.seq.division != .smpte) return 0;
+        var n: usize = 0;
+        for (self.seq.tracks) |track| {
+            for (track.events) |e| {
+                if (e.kind == .set_tempo) n += 1;
+            }
+        }
+        return n;
     }
 
     /// A GLOBAL head, with the tier's namespace when asked for. The event
@@ -266,8 +309,12 @@ const Printer = struct {
             },
             .end_of_track => {},
             .set_tempo => {
+                // The grid's tempo, not the event's: on a converted SMPTE
+                // grid that is 500 000 whatever the file said, or the
+                // dump would conduct wall-clock ticks at a tempo their
+                // grid was never derived for (`Division.tempoOnGrid`).
                 try self.raw(" :us ");
-                try self.int(e.payload.tempo);
+                try self.int(self.seq.division.tempoOnGrid(e.payload.tempo));
             },
             .smpte_offset => {
                 const s = e.payload.smpte;
@@ -1146,6 +1193,150 @@ test "bridge_smf: a SMPTE sequence dumps with the converted PPQ and says what it
         \\  (end-of-track :at 0))
         \\
     , text);
+}
+
+test "bridge_smf: a SMPTE sequence's set-tempo dumps as 500000 µs, and the note counts the rewrite" {
+    const gpa = testing.allocator;
+
+    // 60 QPM in the file; 120 QPM on the grid the file converted to.
+    var built = built: {
+        var b: smf.Builder = .init(gpa);
+        errdefer b.deinit();
+        b.format = 0;
+        b.division = .{ .smpte = .{ .fps = 25, .tpf = 40 } };
+        const t = try b.addTrack();
+        try b.addEvent(t, 0, .set_tempo, .{ .tempo = 1_000_000 });
+        try b.addEvent(t, 1000, .set_tempo, .{ .tempo = 250_000 });
+        try b.addEvent(t, 1000, .end_of_track, .empty);
+        break :built try b.finish();
+    };
+    defer built.deinit();
+
+    const text = try sequenceToForms(gpa, &built, null, .{});
+    defer gpa.free(text);
+    try testing.expectEqualStrings(
+        \\(midi/smf :format 0 :division 500) ; smpte 25 fps × 40, 2 set-tempo rewritten to 500000 µs on the converted grid
+        \\
+        \\(midi/mtrk
+        \\  (set-tempo :at 0 :us 500000)
+        \\  (set-tempo :at 1000 :us 500000)
+        \\  (end-of-track :at 1000))
+        \\
+    , text);
+    // The value was never touched: the rewrite is the printer's.
+    try testing.expectEqual(@as(u32, 1_000_000), built.tracks[0].events[0].payload.tempo);
+
+    // The same sequence with the reader's source map says the same.
+    var map: smf.SourceMap = .{
+        .arena = .init(gpa),
+        .chunks = &.{},
+        .tracks = &.{},
+        .foreign = &.{},
+        .smpte = .{ .fps = 25, .tpf = 40, .ppq = 500 },
+        .riff = null,
+    };
+    defer map.deinit();
+    const mapped = try sequenceToForms(gpa, &built, &map, .{});
+    defer gpa.free(mapped);
+    try testing.expectEqualStrings(text, mapped);
+
+    // A PPQ sequence's tempo is its own, and there is no note to count in.
+    var plain = plain: {
+        var b: smf.Builder = .init(gpa);
+        errdefer b.deinit();
+        b.format = 0;
+        b.division = .{ .ppq = 500 };
+        const t = try b.addTrack();
+        try b.addEvent(t, 0, .set_tempo, .{ .tempo = 1_000_000 });
+        try b.addEvent(t, 0, .end_of_track, .empty);
+        break :plain try b.finish();
+    };
+    defer plain.deinit();
+    const plain_text = try sequenceToForms(gpa, &plain, null, .{});
+    defer gpa.free(plain_text);
+    try testing.expectEqualStrings(
+        \\(midi/smf :format 0 :division 500)
+        \\
+        \\(midi/mtrk
+        \\  (set-tempo :at 0 :us 1000000)
+        \\  (end-of-track :at 0))
+        \\
+    , plain_text);
+}
+
+// Test-only imports: the wall-clock proof below reads the rebuilt tier
+// through the document layer's own conductor — the one owner of plan
+// 03's rule 2 — and the time map it feeds, rather than through a second
+// model of tempo written into the test.
+const fromSjon = @import("fromSjon.zig");
+const Grid = @import("../time/Grid.zig");
+const TimeMap = @import("../time/TimeMap.zig");
+
+/// The seconds `fromSjon.smfConductor` gives `smf_tick` of `seq`, through
+/// `TimeMap.derive`: the same path a dump's timeline takes.
+fn conductedSeconds(gpa: Allocator, seq: *const smf.Sequence, smf_tick: i64) !f64 {
+    var c = try fromSjon.smfConductor(gpa, seq, .{ .start = 0, .end = 1 });
+    defer c.deinit();
+    try testing.expect(!c.diags.hasErrors());
+    var res = try TimeMap.derive(gpa, c.tempo, c.meter, c.end, .hold);
+    defer res.deinit();
+    const tick = Grid.smfToTicks(smf_tick, seq.division.pulsesPerQuarter()).tick;
+    return res.map.secondsFromTick(tick);
+}
+
+test "bridge_smf: a SMPTE file's one-second note still lasts one second after dump → build" {
+    const gpa = testing.allocator;
+
+    // 25 fps × 40 tpf is 1000 ticks a second: the note runs 0..1000, one
+    // second of wall clock, and the file's set-tempo says 60 QPM — which
+    // a PPQ reader of the converted grid would believe, and double.
+    var original = built: {
+        var b: smf.Builder = .init(gpa);
+        errdefer b.deinit();
+        b.format = 0;
+        b.division = .{ .smpte = .{ .fps = 25, .tpf = 40 } };
+        const t = try b.addTrack();
+        try b.addEvent(t, 0, .set_tempo, .{ .tempo = 1_000_000 });
+        try b.addEvent(t, 0, .note_on, .{ .note = .{ .ch = 0, .key = 60, .vel = 100 } });
+        try b.addEvent(t, 1000, .note_off, .{ .note = .{ .ch = 0, .key = 60, .vel = 64 } });
+        try b.addEvent(t, 1000, .end_of_track, .empty);
+        break :built try b.finish();
+    };
+    defer original.deinit();
+
+    // As read: the reader's promise, one 120 QPM segment over the grid.
+    try testing.expectEqual(@as(f64, 1.0), try conductedSeconds(gpa, &original, 1000));
+
+    // `tempura dump`: the tier as text, read back as a document's own
+    // inline `midi/` tier — a PPQ sequence now, on 500 pulses.
+    const text = try sequenceToForms(gpa, &original, null, .{});
+    defer gpa.free(text);
+    const source = try gpa.dupeZ(u8, text);
+    defer gpa.free(source);
+    var parsed = try parse(gpa, source);
+    defer parsed.deinit();
+    var tier = try formsToSequence(gpa, &parsed.tree, parsed.roots);
+    defer tier.deinit();
+    try testing.expectEqual(smf.Division{ .ppq = 500 }, tier.sequence.division);
+    try testing.expectEqual(@as(u32, 500_000), tier.sequence.tracks[0].events[0].payload.tempo);
+    try testing.expectEqual(@as(f64, 1.0), try conductedSeconds(gpa, &tier.sequence, 1000));
+
+    // `tempura build` of that document: the inline tier through the
+    // canonical writer, and the file it makes read back and conducted.
+    var written = try smf.write(gpa, &tier.sequence, .{});
+    defer written.deinit();
+    try testing.expect(!written.diags.hasErrors());
+    var rebuilt = try smf.read(gpa, written.bytes);
+    defer rebuilt.deinit();
+    try testing.expectEqual(smf.Division{ .ppq = 500 }, rebuilt.sequence.division);
+    try testing.expectEqual(@as(i64, 1000), rebuilt.sequence.tracks[0].events[2].at);
+    try testing.expectEqual(@as(f64, 1.0), try conductedSeconds(gpa, &rebuilt.sequence, 1000));
+
+    // And the writer's own path on the ORIGINAL sequence — `write(read)`
+    // without a dump between — is the same file, byte for byte.
+    var direct = try smf.write(gpa, &original, .{});
+    defer direct.deinit();
+    try testing.expectEqualSlices(u8, written.bytes, direct.bytes);
 }
 
 test "bridge_smf: :qualify false spells the two global heads bare" {

@@ -228,12 +228,18 @@ fn smfRunningStatus(gpa: Allocator) ![]u8 {
 
 /// `smf-smpte` — a wall-clock file: 25 frames per second, 40 ticks per
 /// frame, which OpenMPT's `frames · subframes / 2` reads as a 500-pulse
-/// grid. Its `set-tempo` is kept and not believed.
+/// grid. Its `set-tempo` says 60 QPM and is kept and not believed: the
+/// grid was derived at 120, so the writer and the bridge spell that
+/// event as 500 000 µs on it (`Division.tempoOnGrid`), and the case's
+/// rung 2 pins exactly that one payload moving. A 500 000 here would
+/// pin nothing.
 ///
 /// The canonical writer never emits a SMPTE division (plan 05), so the
 /// file is written on the grid the conversion gives and its two division
 /// bytes are then overwritten. That is the whole of the hand-laying:
-/// every other byte is the writer's own.
+/// every other byte is the writer's own — the tempo included, because
+/// the rewrite is for a SMPTE sequence and this one is PPQ until its
+/// header is patched.
 fn smfSmpte(gpa: Allocator) ![]u8 {
     var b: smf.Builder = .init(gpa);
     errdefer b.deinit();
@@ -243,7 +249,7 @@ fn smfSmpte(gpa: Allocator) ![]u8 {
     const t = try b.addTrack();
     const name = try b.addBytes("smpte");
     try b.addEvent(t, 0, .sequence_name, .{ .bytes = name });
-    try b.addEvent(t, 0, .set_tempo, .{ .tempo = 500_000 });
+    try b.addEvent(t, 0, .set_tempo, .{ .tempo = 1_000_000 });
     try b.addEvent(t, 0, .note_on, .{ .note = .{ .ch = 0, .key = 60, .vel = 100 } });
     try b.addEvent(t, 40, .note_off, .{ .note = .{ .ch = 0, .key = 60, .vel = 64 } });
     const bytes = try finishSmf(gpa, &b, .{});

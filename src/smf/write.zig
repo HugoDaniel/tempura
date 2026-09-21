@@ -5,7 +5,10 @@
 //!
 //!   * the header carries the sequence's `format` and the track count,
 //!     and a division that is always PULSES PER QUARTER — a file read
-//!     with a SMPTE division is written on the grid it converted to;
+//!     with a SMPTE division is written on the grid it converted to,
+//!     and every `set-tempo` on that grid says 500 000 µs, the tempo
+//!     the conversion assumed (`Division.tempoOnGrid`), so the wall
+//!     clock the SMPTE ticks measured survives the rewrite;
 //!   * each track's events are STABLE-sorted by absolute tick (document
 //!     order breaks ties, which is what the residue's placement rule
 //!     stands on) and the deltas re-derived;
@@ -355,11 +358,19 @@ const Emit = struct {
                 e.kind.metaType().?,
                 &[_]u8{e.payload.byte},
             ),
-            .set_tempo => try self.meta(w, 0x51, &[_]u8{
-                @truncate(e.payload.tempo >> 16),
-                @truncate(e.payload.tempo >> 8),
-                @truncate(e.payload.tempo),
-            }),
+            .set_tempo => {
+                // The number on the file's grid, not the number as read:
+                // for a SMPTE sequence that is 500 000 µs whatever the
+                // event said, or the converted division would be
+                // conducted at a tempo it was never derived for
+                // (`Division.tempoOnGrid`).
+                const us = self.seq.division.tempoOnGrid(e.payload.tempo);
+                try self.meta(w, 0x51, &[_]u8{
+                    @truncate(us >> 16),
+                    @truncate(us >> 8),
+                    @truncate(us),
+                });
+            },
             .smpte_offset => {
                 const s = e.payload.smpte;
                 try self.meta(w, 0x54, &[_]u8{ s.hr, s.mn, s.se, s.fr, s.ff });
@@ -460,6 +471,44 @@ test "write: the header is the format and the track count, and never a SMPTE div
         0x01, 0xF4, // 500 pulses per quarter
     }, out.bytes[0..14]);
     try testing.expect(!out.diags.hasErrors());
+}
+
+test "write: a SMPTE sequence's set-tempo is written as 500 000 µs, the tempo its grid assumed" {
+    const gpa = testing.allocator;
+
+    // 25 fps × 40 tpf: 1000 ticks a second, on a 500-pulse grid. The
+    // file says 60 QPM; the grid was derived at 120, and a 60 on it
+    // would make every second two (`Division.tempoOnGrid`).
+    var b: sequence.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.format = 0;
+    b.division = .{ .smpte = .{ .fps = 25, .tpf = 40 } };
+    const t = try b.addTrack();
+    try b.addEvent(t, 0, .set_tempo, .{ .tempo = 1_000_000 });
+    try b.addEvent(t, 0, .note_on, .{ .note = .{ .ch = 0, .key = 60, .vel = 100 } });
+    try b.addEvent(t, 1000, .note_off, .{ .note = .{ .ch = 0, .key = 60, .vel = 64 } });
+    try b.addEvent(t, 1000, .end_of_track, .empty);
+    var seq = try b.finish();
+    defer seq.deinit();
+
+    var out = try write(gpa, &seq, .{});
+    defer out.deinit();
+    try testing.expect(!out.diags.hasErrors());
+
+    // The tempo bytes are `07 A1 20`, never `0F 42 40`; the ticks are
+    // untouched.
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20 }, out.bytes[22..29]);
+    try testing.expect(std.mem.indexOf(u8, out.bytes, &[_]u8{ 0x0F, 0x42, 0x40 }) == null);
+
+    var back = try reader.read(gpa, out.bytes);
+    defer back.deinit();
+    const events = back.sequence.tracks[0].events;
+    try testing.expectEqual(sequence.Division{ .ppq = 500 }, back.sequence.division);
+    try testing.expectEqual(Kind.set_tempo, events[0].kind);
+    try testing.expectEqual(@as(u32, 500_000), events[0].payload.tempo);
+    try testing.expectEqual(@as(i64, 1000), events[2].at);
+    // The value itself was never touched: the rewrite is the writer's.
+    try testing.expectEqual(@as(u32, 1_000_000), seq.tracks[0].events[0].payload.tempo);
 }
 
 test "write: events are stable-sorted by tick and the deltas re-derived" {

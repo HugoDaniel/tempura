@@ -2,23 +2,42 @@
 ;
 ; 25 frames per second, 40 ticks per frame: OpenMPT's `frames ·
 ; subframes / 2` makes that a 500-pulse grid, and the file's `set-tempo`
-; is kept and recorded as ignored (`smpte_tempo_ignored`, plan 03).
+; — 1 000 000 µs, 60 QPM — is kept and recorded as ignored
+; (`smpte_tempo_ignored`, plan 03). A SMPTE tick is a slice of the wall
+; clock, and the 500-pulse grid reproduces it exactly only when read at
+; 120 QPM: that is the approximation's premise (plan 05, "Chunks").
 ;
-; This is one of the corpus's two NON-CANONICAL fixtures, and it is here
-; for rung 2. The canonical writer's division is ALWAYS pulses per
-; quarter (plan 05, "The canonical writer"), so `write(read(bytes))`
-; differs from these bytes in exactly the two division bytes and
-; `(rung1 :ok false)` is the expected, PINNED fact — rung 1 is a gate on
-; files the writer produced, and this file is authored to be one it never
-; would. Rung 2 is what the case asserts: every event comes back with its
-; tick, its kind and its payload after the file has been round-tripped
-; onto the grid its division converted to, which is plan 09's rung for a
-; foreign file. A golden is reviewed, not obeyed: the `:ok false` here is
-; read as "the writer normalised it, on purpose", and the byte-equality
-; of this whole text with `expected.sjon` is the gate.
+; This is one of the corpus's two NON-CANONICAL fixtures, and BOTH rungs
+; are pinned `:ok false`, each on purpose:
 ;
-; `(write)` beside it hashes that normalised output, so a change in what
-; the writer makes of a SMPTE file moves a number rather than a verdict.
+;   rung 1 — the canonical writer's division is ALWAYS pulses per quarter
+;   (plan 05, "The canonical writer"), so `write(read(bytes))` differs
+;   from these bytes; rung 1 is a gate on files the writer produced, and
+;   this file is authored to be one it never would.
+;
+;   rung 2 — `read(write(read(bytes)))` comes back with every tick, kind
+;   and payload but ONE: the set-tempo's. On the converted grid the
+;   writer spells every `set-tempo` as 500 000 µs, the tempo the grid was
+;   derived for (`Division.tempoOnGrid`), because a 60 QPM believed on a
+;   grid derived at 120 would make every second of this file two.
+;   `:differs` names exactly that payload and nothing else; any other
+;   sentence there is a regression, and so is `:ok true` — it would mean
+;   the tempo went through unchanged and the clock with it.
+;
+; A golden is reviewed, not obeyed: both `:ok false` are read as "the
+; writer normalised it, on purpose", and the byte-equality of this whole
+; text with `expected.sjon` is the gate.
+;
+; `(write)` hashes that normalised output — division 500, tempo 500 000
+; — so a change in what the writer makes of a SMPTE file moves a number
+; rather than a verdict. `(dump)` and `(build :kind mid)` are the
+; document half of the same fact: the dumped `midi/` tier carries the
+; rewritten event, so the echo's one tempo segment is 500 000 µs and the
+; map derived from the dump keeps the wall clock; and the built file's
+; hash is `(write)`'s, so `dump → build` and `write` are one answer to
+; what this file's grid means.
 (read)
 (roundtrip)
 (write)
+(dump)
+(build :kind mid)
