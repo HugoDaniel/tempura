@@ -1825,70 +1825,76 @@ pub fn playedPatterns(arena: Allocator, rows: *const walk.RowMap) Error![]u16 {
 
 /// A bound lane's address as the tail (or any document) spells it.
 fn addressOf(tree: *const Ast.Tree, form: NodeIndex, kind: Doc.AnchorKind) ?Doc.Address {
-    switch (kind) {
-        .smf => {
-            const track: u16 = @intCast(@max(1, intValue(tree, form, "track") orelse 1));
-            // `:ch 2`, or `:ch [1 2]` — the set the tail (which prints
-            // through `residue/it.zig`'s `Tailer`, the printer's own
-            // spelling) wrote for a lane bound at several channels.
-            var ch: Doc.Channels = .none;
-            if (keyValue(tree, form, "ch")) |v| {
-                if (tree.tagOf(v) == .vector) {
-                    for (tree.vectorElements(v)) |e| {
-                        const c_1 = numberOf(tree, e) orelse continue;
-                        ch = ch.with(@intCast(@min(15, @max(0, c_1 - 1))));
-                    }
-                } else if (numberOf(tree, v)) |c_1| {
-                    ch = .single(@intCast(@min(15, @max(0, c_1 - 1))));
-                }
+    return switch (kind) {
+        .smf => .{ .smf = smfAddressOf(tree, form) },
+        .it => .{ .it = itAddressOf(tree, form) },
+    };
+}
+
+/// A `.mid` address's keys. Each is clamped to its domain BEFORE it is
+/// narrowed or has one taken off: the tail is parsed with no schema, so
+/// a `:track 70000` or a `:ch` at the bottom of i64 reaches here.
+fn smfAddressOf(tree: *const Ast.Tree, form: NodeIndex) @FieldType(Doc.Address, "smf") {
+    const track_1 = intValue(tree, form, "track") orelse 1;
+    const track: u16 = @intCast(std.math.clamp(track_1, 1, std.math.maxInt(u16)));
+    // `:ch 2`, or `:ch [1 2]` — the set the tail (which prints through
+    // `residue/it.zig`'s `Tailer`, the printer's own spelling) wrote for a
+    // lane bound at several channels.
+    var ch: Doc.Channels = .none;
+    if (keyValue(tree, form, "ch")) |v| {
+        if (tree.tagOf(v) == .vector) {
+            for (tree.vectorElements(v)) |e| {
+                const c_1 = numberOf(tree, e) orelse continue;
+                ch = ch.with(@intCast(std.math.clamp(c_1, 1, 16) - 1));
             }
-            if (ch.isEmpty()) ch = .single(0);
-            const key: ?u7 = if (intValue(tree, form, "key")) |k|
-                @intCast(@min(127, @max(0, k)))
-            else
-                null;
-            var curve: ?Doc.SmfCurve = null;
-            if (intValue(tree, form, "cc")) |n| {
-                curve = .{ .cc = @intCast(@min(127, @max(0, n))) };
-            } else if (keyValue(tree, form, "cc")) |v| {
-                if (tree.tagOf(v) == .vector) {
-                    const els = tree.vectorElements(v);
-                    if (els.len == 2) {
-                        const msb = numberOf(tree, els[0]) orelse 0;
-                        const lsb = numberOf(tree, els[1]) orelse 0;
-                        curve = .{ .cc14 = .{
-                            @intCast(@min(127, @max(0, msb))),
-                            @intCast(@min(127, @max(0, lsb))),
-                        } };
-                    }
-                }
-            } else if (boolValue(tree, form, "bend")) {
-                curve = .bend;
-            } else if (boolValue(tree, form, "pressure")) {
-                curve = .pressure;
-            } else if (boolValue(tree, form, "velocity")) {
-                curve = .velocity;
-            }
-            return .{ .smf = .{ .track = track, .ch = ch, .key = key, .curve = curve } };
-        },
-        .it => {
-            const ch_1 = intValue(tree, form, "channel") orelse 1;
-            const channel: u6 = @intCast(@min(63, @max(0, ch_1 - 1)));
-            var column: ?Doc.ItColumn = null;
-            if (keyValue(tree, form, "column")) |v| {
-                if (atomText(tree, v)) |t| {
-                    column = std.meta.stringToEnum(Doc.ItColumn, t);
-                }
-            }
-            var fx: ?u8 = null;
-            if (keyValue(tree, form, "fx")) |v| {
-                if (atomText(tree, v)) |t| {
-                    if (t.len == 1) fx = t[0];
-                }
-            }
-            return .{ .it = .{ .channel = channel, .column = column, .fx = fx } };
-        },
+        } else if (numberOf(tree, v)) |c_1| {
+            ch = .single(@intCast(std.math.clamp(c_1, 1, 16) - 1));
+        }
     }
+    if (ch.isEmpty()) ch = .single(0);
+    const key: ?u7 = if (intValue(tree, form, "key")) |k| data7(k) else null;
+    return .{ .track = track, .ch = ch, .key = key, .curve = curveOf(tree, form) };
+}
+
+/// The one key that names a `.mid` address's controller surface, or null.
+fn curveOf(tree: *const Ast.Tree, form: NodeIndex) ?Doc.SmfCurve {
+    if (intValue(tree, form, "cc")) |n| return .{ .cc = data7(n) };
+    if (keyValue(tree, form, "cc")) |v| {
+        if (tree.tagOf(v) != .vector) return null;
+        const els = tree.vectorElements(v);
+        if (els.len != 2) return null;
+        const msb = numberOf(tree, els[0]) orelse 0;
+        const lsb = numberOf(tree, els[1]) orelse 0;
+        return .{ .cc14 = .{ data7(msb), data7(lsb) } };
+    }
+    if (boolValue(tree, form, "bend")) return .bend;
+    if (boolValue(tree, form, "pressure")) return .pressure;
+    if (boolValue(tree, form, "velocity")) return .velocity;
+    return null;
+}
+
+/// A `.it` address's keys, the channel clamped to 1..64 before the one
+/// is taken off, for `smfAddressOf`'s reason.
+fn itAddressOf(tree: *const Ast.Tree, form: NodeIndex) @FieldType(Doc.Address, "it") {
+    const ch_1 = intValue(tree, form, "channel") orelse 1;
+    const channel: u6 = @intCast(std.math.clamp(ch_1, 1, 64) - 1);
+    var column: ?Doc.ItColumn = null;
+    if (keyValue(tree, form, "column")) |v| {
+        if (atomText(tree, v)) |t| column = std.meta.stringToEnum(Doc.ItColumn, t);
+    }
+    var fx: ?u8 = null;
+    if (keyValue(tree, form, "fx")) |v| {
+        if (atomText(tree, v)) |t| {
+            if (t.len == 1) fx = t[0];
+        }
+    }
+    return .{ .channel = channel, .column = column, .fx = fx };
+}
+
+/// A MIDI data byte from any i64: clamped to 0..127, never narrowed
+/// out of range.
+fn data7(v: i64) u7 {
+    return @intCast(std.math.clamp(v, 0, 127));
 }
 
 fn numberOf(tree: *const Ast.Tree, idx: NodeIndex) ?i64 {
@@ -3233,6 +3239,48 @@ test "reconcile: rule 5 — the tail alone is the shape of the piece and says wh
     try testing.expectEqualStrings("hats", got.verdicts[0].lane);
     try testing.expectEqual(Action.became_bound, got.verdicts[0].action);
     try testing.expect(!got.verdicts[0].hash_ok);
+}
+
+test "reconcile: rule 5 — a tail's address keys past their domain are clamped, never wrapped" {
+    // The message tail is `sjon.parse`d with no schema behind it, so an
+    // address key can hold any i64 a tracker's user typed into the song
+    // text: `:channel` at the bottom of the range would wrap in `c − 1`
+    // and `:track 70000` does not fit the u16 it becomes. Each clamps to
+    // its domain before it is subtracted from or narrowed.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var it_case = try itCase(gpa, &schema, .{ .chunk = false, .tail = false });
+    defer it_case.deinit();
+    const it_tail =
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind it :file "self")
+        \\(lane :name low :kind notes :from song :channel -9223372036854775808)
+        \\(lane :name high :kind notes :from song :channel 9223372036854775807)
+    ;
+    var it_got = try reconcile(gpa, &schema, it_case.input(), .{ .tail = it_tail }, .{});
+    defer it_got.deinit();
+    try testing.expectEqual(Rule.partial, it_got.rule);
+    try testing.expectEqual(@as(u6, 0), it_got.verdictFor("low").?.address.it.channel);
+    try testing.expectEqual(@as(u6, 63), it_got.verdictFor("high").?.address.it.channel);
+
+    var smf_case = try smfCase(gpa, .{ .essence = false, .conductor = false, .lanes = false });
+    defer smf_case.deinit();
+    const smf_tail =
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind smf :file "self")
+        \\(lane :name far :kind notes :from song :track 70000 :ch -9223372036854775808)
+        \\(lane :name set :kind notes :from song :track -5 :ch [-9223372036854775808 99])
+    ;
+    var smf_got = try reconcile(gpa, &schema, smf_case.input(), .{ .tail = smf_tail }, .{});
+    defer smf_got.deinit();
+    const far = smf_got.verdictFor("far").?.address.smf;
+    try testing.expectEqual(@as(u16, std.math.maxInt(u16)), far.track);
+    try testing.expectEqual(Doc.Channels.single(0), far.ch);
+    const set = smf_got.verdictFor("set").?.address.smf;
+    try testing.expectEqual(@as(u16, 1), set.track);
+    try testing.expectEqual(Doc.Channels.single(0).with(15), set.ch);
 }
 
 test "reconcile: rule 2 — a document with no points of its own still hears the handover" {
