@@ -561,6 +561,19 @@ const US_PER_MINUTE: f64 = 60_000_000;
 /// fallback never forces the f64 path on a document that says `:us`).
 const DEFAULT_US: f64 = 500_000;
 
+/// The widest `us` the integer path admits, exclusive. Its origins are
+/// `Σ Δtick_j · us_j` in i128 and a query forms `(tick − tick_i) · us_i`
+/// the same way over any `i64` tick a host hands it; with every `us`
+/// below 2^63 and every tick inside `i64`, both products stay under
+/// 2^126. A whole number of microseconds at or above it — a `:qpm` under
+/// 6.6e-12, which the schema refuses and the reader keeps — is still a
+/// tempo, and takes the f64 path, where nothing accumulates.
+const MAX_INTEGRAL_US: f64 = 0x1p63;
+
+comptime {
+    std.debug.assert(MAX_INTEGRAL_US == @as(f64, @floatFromInt(@as(u64, 1) << 63)));
+}
+
 /// The derived maps, best-effort: every defect is a diagnostic and the
 /// map is still built (plan 03; an editor has to show something).
 ///
@@ -834,12 +847,14 @@ fn blank(tick: i64, us: f64) Segment {
 /// Which of plan 03's two paths this map takes, decided ONCE: the
 /// integer origins when every `us` is a whole number of microseconds (an
 /// SMF conductor, or a document that says `:us`, or a `:qpm` whose
-/// `60e6 / qpm` divides out), the f64 origins otherwise. A single
-/// fractional `us` takes the whole table with it; a document never mixes
-/// them at run time.
+/// `60e6 / qpm` divides out) that the accumulator can hold
+/// (`MAX_INTEGRAL_US`), the f64 origins otherwise. A single fractional
+/// or oversized `us` takes the whole table with it; a document never
+/// mixes them at run time.
 fn isIntegral(segments: []const Segment) bool {
     for (segments) |s| {
         if (s.us != @trunc(s.us)) return false;
+        if (s.us >= MAX_INTEGRAL_US) return false;
     }
     return true;
 }
@@ -1512,6 +1527,45 @@ test "TimeMap.derive: a tempo point at tick 0 that names no tempo still leaves a
     try testing.expectEqual(@as(usize, 2), not_numbers.diags.count(.tempo_map_invalid));
     try testing.expectEqual(@as(usize, 1), not_numbers.map.segments.len);
     try testing.expectEqual(@as(f64, 500_000), not_numbers.map.segments[0].us);
+}
+
+test "TimeMap.derive: a whole-microsecond us too wide for the i128 origins takes the f64 path" {
+    // `:qpm 1e-30` is 6e37 microseconds per quarter note — a whole
+    // number, as every float that large is, and one the schema refuses
+    // (`qpm-value` is 1..1000) while the reader keeps it. The integer
+    // path's `Σ Δtick · us` overflowed i128 on the second point and
+    // trapped `fromSource` itself; a `us` at or past `MAX_INTEGRAL_US`
+    // now sends the table down the f64 path, where a slow tempo is only
+    // a small rate.
+    var wide = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 1e-30 } },
+        .{ .tick = Grid.TPQ, .tempo = .{ .qpm = 120 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 8 * Grid.TPQ, .hold);
+    defer wide.deinit();
+    try testing.expectEqual(false, wide.map.integral);
+    try testing.expectEqual(@as(usize, 2), wide.map.segments.len);
+    try testing.expect(wide.map.segments[0].us >= MAX_INTEGRAL_US);
+    try testing.expect(std.math.isFinite(wide.map.loop_secs));
+    try testing.expectEqual(@as(i64, 0), try wide.map.tickFromSeconds(0));
+    // A segment start is still exact by construction — the one claim the
+    // f64 path makes about a table whose first segment is 6e31 s long.
+    try testing.expectEqual(
+        @as(i64, Grid.TPQ),
+        try wide.map.tickFromSeconds(wide.map.segments[1].start_sec),
+    );
+
+    // Inside the bound the path is still the integer one: `:qpm 1e-10`
+    // is 6e17 microseconds, under 2^63, and `TPQ · 6e17` is 2.8e25 —
+    // well inside i128, and the undivided origin of the second segment.
+    var narrow = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 1e-10 } },
+        .{ .tick = Grid.TPQ, .tempo = .{ .qpm = 120 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 8 * Grid.TPQ, .hold);
+    defer narrow.deinit();
+    try testing.expectEqual(true, narrow.map.integral);
+    const us_0: i128 = @intFromFloat(narrow.map.segments[0].us);
+    try testing.expect(us_0 < 1 << 63);
+    try testing.expectEqual(us_0 * Grid.TPQ, narrow.map.segments[1].t_i);
 }
 
 // ---------------------------------------------------------------------
