@@ -195,12 +195,62 @@ const Writer = struct {
         try self.diags.add(code, severity, .{ .start = at, .end = end }, fmt, args);
     }
 
+    /// What the file is written with, settled before a byte goes out:
+    /// the trimmed order list, the clamped record counts, the message
+    /// with its tail, and `Flags`/`Special` as the sections that follow
+    /// will justify them.
+    const Plan = struct {
+        orders: []u8,
+        message: []u8,
+        ins_count: usize,
+        smp_count: usize,
+        pat_count: usize,
+        history: ?Region,
+        embed_midi: bool,
+        flags: u16,
+        special: u16,
+    };
+
+    /// Where the three parapointer arrays sit, back-patched as each
+    /// record lands.
+    const Parapointers = struct { ins: u32, smp: u32, pat: u32 };
+
+    /// The canonical layout, section by section, in the order the file
+    /// header's diagram gives them. Each section is one call; the order
+    /// of the calls IS the layout, frozen at E1.
     fn run(self: *Writer) Error!void {
+        const plan = try self.settle();
+        try self.writeHeader(.{
+            .ord_num = @intCast(plan.orders.len),
+            .ins_num = @intCast(plan.ins_count),
+            .smp_num = @intCast(plan.smp_count),
+            .pat_num = @intCast(plan.pat_count),
+            .flags = plan.flags,
+            .special = plan.special,
+        });
+        try self.blob(plan.orders);
+        const pp = try self.reserveParapointers(plan);
+        try self.writeBlocks(plan);
+        try self.writeInstruments(pp.ins, plan.ins_count);
+        const sample_headers = try self.writeSampleHeaders(pp.smp, plan.smp_count);
+        try self.writePatterns(pp.pat, plan.pat_count);
+        try self.writeSampleData(sample_headers);
+        try self.writeTail();
+    }
+
+    /// Everything the header has to say before its sections exist, in
+    /// the order the diagnostics have always come: orders, the three
+    /// counts, the message, then the bits.
+    fn settle(self: *Writer) Error!Plan {
         const m = self.module;
         const orders = try self.trimOrders();
-        const ins_count = try self.clampCount(m.instruments.len, self.limits.instruments, "instruments", hdr.ins_num);
-        const smp_count = try self.clampCount(m.samples.len, self.limits.samples, "samples", hdr.smp_num);
-        const pat_count = try self.clampCount(m.patterns.len, self.limits.patterns, "patterns", hdr.pat_num);
+        const limits = self.limits;
+        const ins_count =
+            try self.clampCount(m.instruments.len, limits.instruments, "instruments", hdr.ins_num);
+        const smp_count =
+            try self.clampCount(m.samples.len, limits.samples, "samples", hdr.smp_num);
+        const pat_count =
+            try self.clampCount(m.patterns.len, limits.patterns, "patterns", hdr.pat_num);
         const message = try self.buildMessage();
 
         // Special b1 is set only when a block is really written — never
@@ -220,94 +270,146 @@ const Writer = struct {
         // keys on either one finds the block.
         const flags = setBit(m.header.flags, model.flag.embed_midi, embed_midi);
 
-        try self.writeHeader(.{
-            .ord_num = @intCast(orders.len),
-            .ins_num = @intCast(ins_count),
-            .smp_num = @intCast(smp_count),
-            .pat_num = @intCast(pat_count),
+        return .{
+            .orders = orders,
+            .message = message,
+            .ins_count = ins_count,
+            .smp_count = smp_count,
+            .pat_count = pat_count,
+            .history = history,
+            .embed_midi = embed_midi,
             .flags = flags,
             .special = special,
-        });
-        try self.blob(orders);
+        };
+    }
 
-        const ins_pp = self.here();
-        try self.zeros(ins_count * 4);
-        const smp_pp = self.here();
-        try self.zeros(smp_count * 4);
-        const pat_pp = self.here();
-        try self.zeros(pat_count * 4);
+    /// The three parapointer arrays, zeroed for now: instruments,
+    /// samples, patterns, four bytes a record.
+    fn reserveParapointers(self: *Writer, plan: Plan) Error!Parapointers {
+        const ins = self.here();
+        try self.zeros(plan.ins_count * 4);
+        const smp = self.here();
+        try self.zeros(plan.smp_count * 4);
+        const pat = self.here();
+        try self.zeros(plan.pat_count * 4);
+        return .{ .ins = ins, .smp = smp, .pat = pat };
+    }
 
-        if (history) |region| {
+    /// The optional blocks between the parapointers and the records:
+    /// the edit history, the MIDI configuration and the message, each
+    /// only when the plan says so.
+    fn writeBlocks(self: *Writer, plan: Plan) Error!void {
+        const m = self.module;
+        if (plan.history) |region| {
             try self.copyRegion(region, region.len, .it_truncated, "the edit-history block");
         }
-        if (embed_midi) {
+        if (plan.embed_midi) {
             if (m.midi_config_bytes) |bytes| {
                 // The block the module OWNS — a document's `(it/midi …)`
                 // lowered, or a read module's copy — ahead of the region,
                 // which needs an anchor a built module does not have.
                 try self.copyBytes(bytes, model.midi_config_size, "the MIDI configuration");
             } else if (m.midi_config) |region| {
-                try self.copyRegion(region, model.midi_config_size, .it_truncated, "the MIDI configuration");
+                try self.copyRegion(
+                    region,
+                    model.midi_config_size,
+                    .it_truncated,
+                    "the MIDI configuration",
+                );
             } else {
                 // The flags demand a block and the module has none: IT's
                 // default table goes back (it 03, "What becomes a ref").
                 try self.zeros(model.midi_config_size);
             }
         }
-        if (message.len > 0) {
-            self.patchWord(hdr.message_length, @intCast(message.len));
+        if (plan.message.len > 0) {
+            self.patchWord(hdr.message_length, @intCast(plan.message.len));
             self.patchDword(hdr.message_offset, self.here());
-            try self.blob(message);
+            try self.blob(plan.message);
         }
+    }
 
-        for (m.instruments[0..ins_count], 0..) |instrument, i| {
-            self.patchDword(ins_pp + @as(u32, @intCast(i)) * 4, self.here());
+    /// The instrument records, each one's parapointer patched to where
+    /// it landed.
+    fn writeInstruments(self: *Writer, pp: u32, count: usize) Error!void {
+        for (self.module.instruments[0..count], 0..) |instrument, i| {
+            self.patchDword(pp + @as(u32, @intCast(i)) * 4, self.here());
             // The region is the instrument, so a region the anchor
             // cannot give is a pointer that leads nowhere;
             // `it_no_instrument` is plan 08's, for a render with no
             // instrument to sound.
-            try self.copyRegion(instrument.raw, model.instrument_size, .it_parapointer_out_of_range, "an instrument body");
+            try self.copyRegion(
+                instrument.raw,
+                model.instrument_size,
+                .it_parapointer_out_of_range,
+                "an instrument body",
+            );
         }
+    }
 
-        const sample_headers = try self.arena.alloc(u32, smp_count);
-        for (m.samples[0..smp_count], 0..) |sample, i| {
-            self.patchDword(smp_pp + @as(u32, @intCast(i)) * 4, self.here());
-            sample_headers[i] = self.here();
-            try self.copyRegion(sample.raw, model.sample_header_size, .it_sample_extent_truncated, "a sample header");
+    /// The sample headers, parapointers patched; returns where each
+    /// header landed, so `writeSampleData` can patch its data pointer.
+    fn writeSampleHeaders(self: *Writer, pp: u32, count: usize) Error![]u32 {
+        const headers = try self.arena.alloc(u32, count);
+        for (self.module.samples[0..count], 0..) |sample, i| {
+            self.patchDword(pp + @as(u32, @intCast(i)) * 4, self.here());
+            headers[i] = self.here();
+            try self.copyRegion(
+                sample.raw,
+                model.sample_header_size,
+                .it_sample_extent_truncated,
+                "a sample header",
+            );
         }
+        return headers;
+    }
 
-        for (m.patterns[0..pat_count], 0..) |p, i| {
-            // An empty 64-row pattern is a parapointer 0 and no data —
-            // exactly what IT writes (it 05, `D_SaveIT1`). Any other
-            // height has to be written, because a 0 would read back as
-            // 64 rows.
+    /// The patterns. An empty 64-row pattern is a parapointer 0 and no
+    /// data — exactly what IT writes (it 05, `D_SaveIT1`). Any other
+    /// height has to be written, because a 0 would read back as 64 rows.
+    fn writePatterns(self: *Writer, pp: u32, count: usize) Error!void {
+        for (self.module.patterns[0..count], 0..) |p, i| {
             if (p.rows == model.empty_pattern_rows and p.isEmpty()) continue;
-            self.patchDword(pat_pp + @as(u32, @intCast(i)) * 4, self.here());
+            self.patchDword(pp + @as(u32, @intCast(i)) * 4, self.here());
             try self.writePattern(p, i);
         }
+    }
 
-        for (m.samples[0..smp_count], 0..) |sample, i| {
-            const pointer_at = sample_headers[i] + model.smp.sample_pointer;
+    /// The sample data, in sample-index order, each header's pointer
+    /// patched to its data — or to 0 when there is none, or none the
+    /// anchor can give.
+    fn writeSampleData(self: *Writer, headers: []const u32) Error!void {
+        for (self.module.samples[0..headers.len], headers, 0..) |sample, header_at, i| {
+            const pointer_at = header_at + model.smp.sample_pointer;
             if (sample.data.isEmpty()) {
                 self.patchDword(pointer_at, 0);
                 continue;
             }
-            const bytes = self.regionBytes(sample.data);
-            if (bytes == null) {
-                try self.note(.it_sample_extent_truncated, .warning, pointer_at, pointer_at + 4, "sample {d}'s data is not inside the anchor's bytes; written without data", .{i});
+            const bytes = self.regionBytes(sample.data) orelse {
+                try self.note(
+                    .it_sample_extent_truncated,
+                    .warning,
+                    pointer_at,
+                    pointer_at + 4,
+                    "sample {d}'s data is not inside the anchor's bytes; written without data",
+                    .{i},
+                );
                 self.patchDword(pointer_at, 0);
                 continue;
-            }
+            };
             self.patchDword(pointer_at, self.here());
-            try self.blob(bytes.?);
+            try self.blob(bytes);
         }
+    }
 
+    /// The foreign chunks verbatim and in order, then the residue chunk
+    /// last, where every tracker puts its own extensions (plan 04, "The
+    /// IT carriers").
+    fn writeTail(self: *Writer) Error!void {
+        const m = self.module;
         for (m.foreign) |chunk| {
             try self.copyRegion(chunk.raw, chunk.raw.len, .it_truncated, "a foreign chunk");
         }
-
-        // The residue chunk is last, where every tracker puts its own
-        // extensions (plan 04, "The IT carriers").
         const payload: ?[]const u8 = self.opts.tmpu orelse
             if (m.tmpu) |region| self.regionBytes(region) else null;
         if (payload) |bytes| {

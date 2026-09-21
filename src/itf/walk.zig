@@ -374,11 +374,33 @@ const Walker = struct {
         return null;
     }
 
+    /// What an `Sxy` does to time.
+    const Special = union(enum) {
+        /// `S6x`: x more ticks on this row.
+        frame_delay: u8,
+        /// `SBx`: the row to go back to when this row is over.
+        loop: u16,
+        /// `SDx`: the channel's note sounds this many ticks late.
+        note_delay: u8,
+        /// `SEx`: how many times the row plays.
+        row_plays: u16,
+    };
+
+    /// What a `Txx` does to the tempo.
+    const Tempo = union(enum) {
+        set: u8,
+        /// Applied on every non-row tick, up or down.
+        slide: i8,
+    };
+
     /// Read a row's cells and run the tick-0 effects that touch time,
     /// channel by channel from the LEFT (plan 06 step 2: "Read the row's
     /// cells; process the tick-0 effects that touch time"). Which
     /// effects those are is plan 06's closed list; everything else
-    /// changes what sounds, not when a row starts.
+    /// changes what sounds, not when a row starts. The two families with
+    /// a parameter memory are resolved by `specialEffect` and
+    /// `tempoEffect`; this parent applies what they answer, so the
+    /// leftmost-wins rules are all in one place.
     fn readRow(self: *Walker, pat: model.Pattern, row: u16) RowRead {
         var out: RowRead = .{};
         var row_plays_set = false;
@@ -395,67 +417,81 @@ const Walker = struct {
                 fx_b => out.pending = .{ .jump = c.param },
                 // `Cxx` — break to row xx of the next order.
                 fx_c => out.break_row = c.param,
-                // The `Sxy` family.
-                fx_s => {
-                    const p = self.specialParam(ch, c.param);
-                    switch (p >> 4) {
-                        // `S6x` — fine pattern delay: x more ticks on
-                        // this row.
-                        0x6 => out.frame_delay += p & 0x0F,
-                        // `SBx` — pattern loop. `SB0` marks; `SBx` runs
-                        // the loop x times from the mark, the counter
-                        // coming down to 0 when it is done.
-                        0xB => {
-                            const x: u8 = p & 0x0F;
-                            const chan = &self.chans[ch];
-                            if (x == 0) {
-                                chan.loop_start = row;
-                            } else {
-                                if (chan.loop_count == 0) {
-                                    chan.loop_count = x;
-                                } else {
-                                    chan.loop_count -= 1;
-                                }
-                                if (chan.loop_count > 0 and out.pending != .loop) {
-                                    out.pending = .{ .loop = chan.loop_start };
-                                }
-                            }
-                        },
-                        // `SDx` — note delay. `SD0` sounds a tick late
-                        // like `SD1` (plan 06, per OpenMPT's IT
-                        // handling).
-                        0xD => out.delays[ch] = @max(1, p & 0x0F),
-                        // `SEx` — row delay, leftmost channel wins.
-                        0xE => if (!row_plays_set) {
-                            out.row_plays = (p & 0x0F) + 1;
-                            row_plays_set = true;
-                        },
-                        else => {},
-                    }
+                fx_s => if (self.specialEffect(ch, c.param, row)) |effect| switch (effect) {
+                    .frame_delay => |x| out.frame_delay += x,
+                    // A loop a channel to the left already asked for
+                    // stands.
+                    .loop => |start| if (out.pending != .loop) {
+                        out.pending = .{ .loop = start };
+                    },
+                    .note_delay => |x| out.delays[ch] = x,
+                    // `SEx` — leftmost channel wins.
+                    .row_plays => |n| if (!row_plays_set) {
+                        out.row_plays = n;
+                        row_plays_set = true;
+                    },
                 },
-                // `Txx` with `xx >= 0x20` sets the tempo. `T00` reads
-                // this CHANNEL's memory before anything else applies,
-                // and any other parameter becomes that memory (plan 06;
-                // it 06's `mem_tempo`).
-                fx_t => {
-                    const p = self.tempoParam(ch, c.param);
-                    if (p >= 0x20) {
-                        self.tempo = p;
-                    } else if (p >= 0x10) {
-                        // `T1x`: up by x on every non-row tick.
-                        out.slides[ch] = @intCast(p & 0x0F);
+                fx_t => if (self.tempoEffect(ch, c.param)) |effect| switch (effect) {
+                    .set => |tempo| self.tempo = tempo,
+                    .slide => |d| {
+                        out.slides[ch] = d;
                         out.any_slide = true;
-                    } else if (p > 0) {
-                        // `T0x`: down by x. `T00` with nothing
-                        // remembered lands here as 0 and does nothing.
-                        out.slides[ch] = -@as(i8, @intCast(p));
-                        out.any_slide = true;
-                    }
+                    },
                 },
                 else => {},
             }
         }
         return out;
+    }
+
+    /// What one `Sxy` asks of the row, once its parameter is resolved
+    /// against the channel's memory (`S00` recalls) and, for `SBx`, the
+    /// channel's loop counter stepped; null for the members of the
+    /// family that change what sounds rather than when.
+    fn specialEffect(self: *Walker, ch: usize, param: u8, row: u16) ?Special {
+        const p = self.specialParam(ch, param);
+        switch (p >> 4) {
+            // `S6x` — fine pattern delay: x more ticks on this row.
+            0x6 => return .{ .frame_delay = p & 0x0F },
+            // `SBx` — pattern loop. `SB0` marks; `SBx` runs the loop x
+            // times from the mark, the counter coming down to 0 when it
+            // is done.
+            0xB => {
+                const x: u8 = p & 0x0F;
+                const chan = &self.chans[ch];
+                if (x == 0) {
+                    chan.loop_start = row;
+                    return null;
+                }
+                if (chan.loop_count == 0) {
+                    chan.loop_count = x;
+                } else {
+                    chan.loop_count -= 1;
+                }
+                return if (chan.loop_count > 0) .{ .loop = chan.loop_start } else null;
+            },
+            // `SDx` — note delay. `SD0` sounds a tick late like `SD1`
+            // (plan 06, per OpenMPT's IT handling).
+            0xD => return .{ .note_delay = @max(1, p & 0x0F) },
+            // `SEx` — row delay: the row plays x + 1 times.
+            0xE => return .{ .row_plays = @as(u16, p & 0x0F) + 1 },
+            else => return null,
+        }
+    }
+
+    /// What one `Txx` asks of the tempo, once its parameter is resolved
+    /// against the channel's memory — `T00` reads this CHANNEL's memory
+    /// before anything else applies, and any other parameter becomes
+    /// that memory (plan 06; it 06's `mem_tempo`). `xx >= 0x20` sets the
+    /// tempo, `T1x` slides it up by x on every non-row tick and `T0x`
+    /// down; a `T00` with nothing remembered lands here as 0 and asks
+    /// nothing.
+    fn tempoEffect(self: *Walker, ch: usize, param: u8) ?Tempo {
+        const p = self.tempoParam(ch, param);
+        if (p >= 0x20) return .{ .set = p };
+        if (p >= 0x10) return .{ .slide = @intCast(p & 0x0F) };
+        if (p > 0) return .{ .slide = -@as(i8, @intCast(p)) };
+        return null;
     }
 
     /// The row's note onsets, in (row, channel) order — once per row
@@ -538,6 +574,8 @@ const Walker = struct {
         }
     }
 
+    /// The walk itself: from the first playable order, row after row,
+    /// until the timing state comes round or the cap trips.
     fn run(self: *Walker, gpa: std.mem.Allocator) Error!void {
         var seen: std.AutoHashMap(Key, Seen) = .init(gpa);
         defer seen.deinit();
@@ -546,6 +584,7 @@ const Walker = struct {
         var order = self.resolveOrder(0) orelse return;
         var row: u16 = 0;
 
+        // Bounded by `max_rows`: every turn appends a row or stops.
         while (true) {
             const pat_idx = self.module.orders[order];
             const pat = self.module.patterns[pat_idx];
@@ -559,38 +598,18 @@ const Walker = struct {
             // rows, so row 0 always exists and the walk always advances.
             if (row >= pat.rows) row = 0;
 
-            // The cap. A module whose timing state never repeats — a
-            // tempo that slides for ever, a `Bxx` backwards onto a
-            // changed state — would walk without end, so the walk gives
-            // up and says so (plan 06, "Termination").
             if (self.rows.items.len >= self.opts.max_rows) {
-                try self.diags.add(
-                    .walk_runaway,
-                    .err,
-                    .{ .start = 0, .end = 0 },
-                    "the walk gave up at order {d} row {d} after {d} rows: the module's timing state never repeated",
-                    .{ order, row, self.opts.max_rows },
-                );
+                try self.runaway(order, row);
                 break;
             }
 
-            // The walk ends at the first `(order, row)` revisited with an
-            // identical timing state, and that first visit is the loop
-            // point (plan 06, "Termination").
-            const gop = try seen.getOrPut(self.key(order, row));
-            if (gop.found_existing) {
-                gop.value_ptr.visits += 1;
-                if (gop.value_ptr.visits > loops) {
-                    self.loop_row = gop.value_ptr.first;
-                    break;
-                }
-            } else {
-                gop.value_ptr.* = .{ .first = @intCast(self.rows.items.len), .visits = 1 };
+            const row_index: u32 = @intCast(self.rows.items.len);
+            if (try revisit(&seen, self.key(order, row), row_index, loops)) |first| {
+                self.loop_row = first;
+                break;
             }
 
-            const row_index: u32 = @intCast(self.rows.items.len);
             const start = self.tick;
-
             const r = self.readRow(pat, row);
             try self.pushTempo(start);
 
@@ -619,6 +638,40 @@ const Walker = struct {
             order = next.order;
             row = next.row;
         }
+    }
+
+    /// The cap. A module whose timing state never repeats — a tempo that
+    /// slides for ever, a `Bxx` backwards onto a changed state — would
+    /// walk without end, so the walk gives up and says so (plan 06,
+    /// "Termination").
+    fn runaway(self: *Walker, order: u16, row: u16) Error!void {
+        try self.diags.add(
+            .walk_runaway,
+            .err,
+            .{ .start = 0, .end = 0 },
+            "the walk gave up at order {d} row {d} after {d} rows: the module's timing state " ++
+                "never repeated",
+            .{ order, row, self.opts.max_rows },
+        );
+    }
+
+    /// Counts a visit to `state`. Null while the walk goes on; once the
+    /// same `(order, row)` has come round in the same timing state more
+    /// times than `loops` allows, the index of its FIRST visit — the
+    /// loop point (plan 06, "Termination").
+    fn revisit(
+        seen: *std.AutoHashMap(Key, Seen),
+        state: Key,
+        row_index: u32,
+        loops: u8,
+    ) Error!?u32 {
+        const gop = try seen.getOrPut(state);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{ .first = row_index, .visits = 1 };
+            return null;
+        }
+        gop.value_ptr.visits += 1;
+        return if (gop.value_ptr.visits > loops) gop.value_ptr.first else null;
     }
 };
 

@@ -88,6 +88,10 @@ pub const Unpacked = struct {
 
 /// Packed stream → dense cells. Spans are offsets into `bytes`; a caller
 /// that read `bytes` out of a file rebases them onto the file.
+///
+/// The parent keeps the cursor, the row and the diagnostics; `readEntry`
+/// reads one channel entry into its cache and `cellOf` spells the cell
+/// that cache holds.
 pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8, rows: u16) Error!Unpacked {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_state.deinit();
@@ -100,7 +104,8 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8, rows: u16) Error!Unpack
     var cache: [model.channels]Cache = @splat(.{});
     var row: u16 = 0;
     var p: usize = 0;
-    stream: while (row < rows and p < bytes.len) {
+    // Bounded by the stream: every turn consumes its lead byte at least.
+    while (row < rows and p < bytes.len) {
         const lead = bytes[p];
         p += 1;
         if (lead == 0) {
@@ -109,85 +114,99 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8, rows: u16) Error!Unpack
         }
         const channel = (lead -% 1) & 63;
         const c = &cache[channel];
-        if (lead & 0x80 != 0) {
-            if (p >= bytes.len) {
+        switch (readEntry(bytes, &p, lead, c)) {
+            .truncated => {
                 try truncated(&diags, p, bytes.len);
-                break :stream;
-            }
-            c.mask = bytes[p];
-            p += 1;
+                break;
+            },
+            .unknown_command => |at| try diags.add(
+                .it_command_unknown,
+                .warning,
+                .{ .start = @intCast(at), .end = @intCast(at + 2) },
+                "command byte {d} names no IT effect; read as no effect",
+                .{bytes[at]},
+            ),
+            .ok => {},
         }
-
-        var cell: Cell = .empty;
-        if (c.mask & mask_note != 0) {
-            if (p >= bytes.len) {
-                try truncated(&diags, p, bytes.len);
-                break :stream;
-            }
-            c.note = decodeNote(bytes[p]);
-            c.note_set = true;
-            p += 1;
-        }
-        if (c.mask & (mask_note | mask_note_repeat) != 0) cell.note = c.note;
-
-        if (c.mask & mask_ins != 0) {
-            if (p >= bytes.len) {
-                try truncated(&diags, p, bytes.len);
-                break :stream;
-            }
-            c.ins = bytes[p];
-            c.ins_set = true;
-            p += 1;
-        }
-        if (c.mask & (mask_ins | mask_ins_repeat) != 0) cell.ins = c.ins;
-
-        if (c.mask & mask_vol != 0) {
-            if (p >= bytes.len) {
-                try truncated(&diags, p, bytes.len);
-                break :stream;
-            }
-            c.vol = bytes[p];
-            c.vol_set = true;
-            p += 1;
-        }
-        if (c.mask & (mask_vol | mask_vol_repeat) != 0) cell.vol = c.vol;
-
-        if (c.mask & mask_cmd != 0) {
-            if (p + 2 > bytes.len) {
-                try truncated(&diags, p, bytes.len);
-                break :stream;
-            }
-            const raw_cmd = bytes[p];
-            const param = bytes[p + 1];
-            if (raw_cmd > cmd_max) {
-                // 27–31 sit in ITTECH's range and name no letter; above
-                // that is garbage. Both read as NO EFFECT, with the
-                // command dropped on write (it 04).
-                try diags.add(
-                    .it_command_unknown,
-                    .warning,
-                    .{ .start = @intCast(p), .end = @intCast(p + 2) },
-                    "command byte {d} names no IT effect; read as no effect",
-                    .{raw_cmd},
-                );
-                c.fx = 0;
-                c.param = 0;
-            } else {
-                c.fx = raw_cmd;
-                c.param = param;
-            }
-            c.cmd_set = true;
-            p += 2;
-        }
-        if (c.mask & (mask_cmd | mask_cmd_repeat) != 0) {
-            cell.fx = c.fx;
-            cell.param = c.param;
-        }
-
-        cells[@as(usize, row) * model.channels + channel] = cell;
+        cells[@as(usize, row) * model.channels + channel] = cellOf(c.*);
     }
 
     return .{ .arena = arena_state, .cells = cells, .diags = diags };
+}
+
+/// What reading one channel entry found.
+const Entry = union(enum) {
+    ok,
+    /// The command byte at this offset names no letter; the cache took
+    /// no effect in its place.
+    unknown_command: usize,
+    /// The stream ended inside the entry; the cursor sits where the
+    /// missing byte would have been.
+    truncated,
+};
+
+/// One channel entry after its lead byte: the mask when the lead says a
+/// new one follows, then the fields the mask names, each into the
+/// channel's cache — the cache is what `cellOf` then reads, repeat bits
+/// and all. The cursor is advanced past what was read.
+fn readEntry(bytes: []const u8, p: *usize, lead: u8, c: *Cache) Entry {
+    if (lead & 0x80 != 0) {
+        c.mask = takeByte(bytes, p) orelse return .truncated;
+    }
+    if (c.mask & mask_note != 0) {
+        c.note = decodeNote(takeByte(bytes, p) orelse return .truncated);
+        c.note_set = true;
+    }
+    if (c.mask & mask_ins != 0) {
+        c.ins = takeByte(bytes, p) orelse return .truncated;
+        c.ins_set = true;
+    }
+    if (c.mask & mask_vol != 0) {
+        c.vol = takeByte(bytes, p) orelse return .truncated;
+        c.vol_set = true;
+    }
+    if (c.mask & mask_cmd != 0) {
+        if (p.* + 2 > bytes.len) return .truncated;
+        const at = p.*;
+        const raw_cmd = bytes[at];
+        const param = bytes[at + 1];
+        p.* += 2;
+        c.cmd_set = true;
+        if (raw_cmd > cmd_max) {
+            // 27–31 sit in ITTECH's range and name no letter; above that
+            // is garbage. Both read as NO EFFECT, with the command dropped
+            // on write (it 04).
+            c.fx = 0;
+            c.param = 0;
+            return .{ .unknown_command = at };
+        }
+        c.fx = raw_cmd;
+        c.param = param;
+    }
+    return .ok;
+}
+
+/// The byte at the cursor, advancing past it, or null at the end of
+/// the stream (the cursor stays on the end).
+fn takeByte(bytes: []const u8, p: *usize) ?u8 {
+    if (p.* >= bytes.len) return null;
+    const b = bytes[p.*];
+    p.* += 1;
+    return b;
+}
+
+/// The cell a channel's cache spells under its mask: a field the mask
+/// names as sent or as repeated is the cache's, the rest are absent.
+fn cellOf(c: Cache) Cell {
+    var cell: Cell = .empty;
+    if (c.mask & (mask_note | mask_note_repeat) != 0) cell.note = c.note;
+    if (c.mask & (mask_ins | mask_ins_repeat) != 0) cell.ins = c.ins;
+    if (c.mask & (mask_vol | mask_vol_repeat) != 0) cell.vol = c.vol;
+    if (c.mask & (mask_cmd | mask_cmd_repeat) != 0) {
+        cell.fx = c.fx;
+        cell.param = c.param;
+    }
+    return cell;
 }
 
 fn truncated(diags: *Diag.List, at: usize, end: usize) Error!void {
@@ -239,6 +258,9 @@ pub const Packed = struct {
 /// has. Diagnostic spans are relative to the OUTPUT (a caller that lands
 /// the pattern in a file rebases them), because there is no input file to
 /// point at — the rows are named in the message instead.
+///
+/// The parent keeps the row, the output and the ceiling; `maskFor`
+/// decides what one cell sends and `writeEntry` spells it.
 pub fn pack(gpa: std.mem.Allocator, cells: []const Cell, rows: u16) Error!Packed {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_state.deinit();
@@ -258,64 +280,10 @@ pub fn pack(gpa: std.mem.Allocator, cells: []const Cell, rows: u16) Error!Packed
         for (0..model.channels) |channel| {
             const at = base + channel;
             if (at >= cells.len) break;
-            const cell = cells[at];
             const c = &cache[channel];
-
-            var mask: u8 = 0;
-            if (cell.note != model.note_none) {
-                if (c.note_set and c.note == cell.note) {
-                    mask |= mask_note_repeat;
-                } else {
-                    mask |= mask_note;
-                    c.note = cell.note;
-                    c.note_set = true;
-                }
-            }
-            if (cell.ins != 0) {
-                if (c.ins_set and c.ins == cell.ins) {
-                    mask |= mask_ins_repeat;
-                } else {
-                    mask |= mask_ins;
-                    c.ins = cell.ins;
-                    c.ins_set = true;
-                }
-            }
-            if (cell.vol != model.vol_none) {
-                if (c.vol_set and c.vol == cell.vol) {
-                    mask |= mask_vol_repeat;
-                } else {
-                    mask |= mask_vol;
-                    c.vol = cell.vol;
-                    c.vol_set = true;
-                }
-            }
-            if (cell.fx != 0 or cell.param != 0) {
-                if (c.cmd_set and c.fx == cell.fx and c.param == cell.param) {
-                    mask |= mask_cmd_repeat;
-                } else {
-                    mask |= mask_cmd;
-                    c.fx = cell.fx;
-                    c.param = cell.param;
-                    c.cmd_set = true;
-                }
-            }
+            const mask = maskFor(cells[at], c);
             if (mask == 0) continue;
-
-            const lead: u8 = @intCast(channel + 1);
-            if (mask != c.mask) {
-                try out.append(arena, lead | 0x80);
-                try out.append(arena, mask);
-                c.mask = mask;
-            } else {
-                try out.append(arena, lead);
-            }
-            if (mask & mask_note != 0) try out.append(arena, encodeNote(cell.note));
-            if (mask & mask_ins != 0) try out.append(arena, cell.ins);
-            if (mask & mask_vol != 0) try out.append(arena, cell.vol);
-            if (mask & mask_cmd != 0) {
-                try out.append(arena, cell.fx);
-                try out.append(arena, cell.param);
-            }
+            try writeEntry(&out, arena, @intCast(channel), mask, c, cells[at]);
         }
         try out.append(arena, 0);
 
@@ -328,7 +296,8 @@ pub fn pack(gpa: std.mem.Allocator, cells: []const Cell, rows: u16) Error!Packed
                 .it_pattern_too_large,
                 .err,
                 .{ .start = 0, .end = 0 },
-                "a {d}-row pattern packs past IT's 64 KB ceiling; split it at row {d} (rows {d}–{d} were dropped)",
+                "a {d}-row pattern packs past IT's 64 KB ceiling; split it at row {d} " ++
+                    "(rows {d}–{d} were dropped)",
                 .{ rows, row, row, rows - 1 },
             );
             break;
@@ -336,6 +305,80 @@ pub fn pack(gpa: std.mem.Allocator, cells: []const Cell, rows: u16) Error!Packed
     }
 
     return .{ .arena = arena_state, .bytes = out.items, .diags = diags };
+}
+
+/// The mask one cell packs under, and the cache it leaves behind: a
+/// field that is absent sends nothing, one that repeats what the channel
+/// last sent is a repeat bit, and anything else is sent and becomes the
+/// channel's value (it 05's two caches). Zero for an empty cell.
+fn maskFor(cell: Cell, c: *Cache) u8 {
+    var mask: u8 = 0;
+    if (cell.note != model.note_none) {
+        if (c.note_set and c.note == cell.note) {
+            mask |= mask_note_repeat;
+        } else {
+            mask |= mask_note;
+            c.note = cell.note;
+            c.note_set = true;
+        }
+    }
+    if (cell.ins != 0) {
+        if (c.ins_set and c.ins == cell.ins) {
+            mask |= mask_ins_repeat;
+        } else {
+            mask |= mask_ins;
+            c.ins = cell.ins;
+            c.ins_set = true;
+        }
+    }
+    if (cell.vol != model.vol_none) {
+        if (c.vol_set and c.vol == cell.vol) {
+            mask |= mask_vol_repeat;
+        } else {
+            mask |= mask_vol;
+            c.vol = cell.vol;
+            c.vol_set = true;
+        }
+    }
+    if (cell.fx != 0 or cell.param != 0) {
+        if (c.cmd_set and c.fx == cell.fx and c.param == cell.param) {
+            mask |= mask_cmd_repeat;
+        } else {
+            mask |= mask_cmd;
+            c.fx = cell.fx;
+            c.param = cell.param;
+            c.cmd_set = true;
+        }
+    }
+    return mask;
+}
+
+/// One channel entry's bytes: the lead, the mask when it differs from
+/// the one the channel last sent (which it then becomes), then every
+/// field the mask says is sent. `out` grows in the `Packed`'s arena.
+fn writeEntry(
+    out: *std.ArrayList(u8),
+    arena: std.mem.Allocator,
+    channel: u8,
+    mask: u8,
+    c: *Cache,
+    cell: Cell,
+) Error!void {
+    const lead: u8 = channel + 1;
+    if (mask != c.mask) {
+        try out.append(arena, lead | 0x80);
+        try out.append(arena, mask);
+        c.mask = mask;
+    } else {
+        try out.append(arena, lead);
+    }
+    if (mask & mask_note != 0) try out.append(arena, encodeNote(cell.note));
+    if (mask & mask_ins != 0) try out.append(arena, cell.ins);
+    if (mask & mask_vol != 0) try out.append(arena, cell.vol);
+    if (mask & mask_cmd != 0) {
+        try out.append(arena, cell.fx);
+        try out.append(arena, cell.param);
+    }
 }
 
 test "pattern.unpack: ITTECH's mask algorithm over hand-packed rows" {
