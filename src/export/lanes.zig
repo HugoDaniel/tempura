@@ -168,27 +168,12 @@ pub fn curve(
     // A NATIVE lane is printed as authored — every keyframe, its easing
     // verbatim, its value literal. Nothing below this line runs for one.
     if (!index.bound) {
-        const keys = try gpa.alloc(simplify.Key, index.steps.len);
-        for (index.steps, keys) |src, *dst| dst.* = .{
-            .tick = mapper.position(src.tick),
-            .value = src.value,
-            .ncomp = src.ncomp,
-            .ease = src.ease_src,
-        };
-        return .{ .keys = keys, .source_steps = source_steps };
+        return .{ .keys = try nativeKeys(gpa, index, mapper), .source_steps = source_steps };
     }
 
     const mode: simplify.Mode = if (opts.ease_linear) .linear else .hold;
-    const ease_name = @tagName(mode);
-
-    const raw = try gpa.alloc(simplify.Key, index.steps.len);
+    const raw = try boundKeys(gpa, lane, index, mapper, @tagName(mode));
     defer gpa.free(raw);
-    for (index.steps, raw) |src, *dst| dst.* = .{
-        .tick = mapper.position(src.tick),
-        .value = scaled(src.value, src.ncomp, lane.range),
-        .ncomp = src.ncomp,
-        .ease = ease_name,
-    };
 
     var out: std.ArrayList(simplify.Key) = .empty;
     errdefer out.deinit(gpa);
@@ -228,6 +213,43 @@ pub fn curve(
 }
 
 // ---- the pieces ----
+
+/// A native lane's keyframes as keys: every one, on pacer's lattice, its
+/// `:ease` source verbatim and its value as authored. Caller owns.
+fn nativeKeys(
+    gpa: Allocator,
+    index: *const derive.LaneIndex,
+    mapper: *pos.Mapper,
+) Error![]simplify.Key {
+    const keys = try gpa.alloc(simplify.Key, index.steps.len);
+    for (index.steps, keys) |src, *dst| dst.* = .{
+        .tick = mapper.position(src.tick),
+        .value = src.value,
+        .ncomp = src.ncomp,
+        .ease = src.ease_src,
+    };
+    return keys;
+}
+
+/// A bound lane's steps as keys: on pacer's lattice, scaled into the
+/// lane's `:range`, every one `ease_name` until a verified hint says
+/// otherwise. Caller owns.
+fn boundKeys(
+    gpa: Allocator,
+    lane: *const doc.Lane,
+    index: *const derive.LaneIndex,
+    mapper: *pos.Mapper,
+    ease_name: []const u8,
+) Error![]simplify.Key {
+    const raw = try gpa.alloc(simplify.Key, index.steps.len);
+    for (index.steps, raw) |src, *dst| dst.* = .{
+        .tick = mapper.position(src.tick),
+        .value = scaled(src.value, src.ncomp, lane.range),
+        .ncomp = src.ncomp,
+        .ease = ease_name,
+    };
+    return raw;
+}
 
 /// A verified hint's span over `raw`, inclusive at both ends.
 const Span = struct { start: usize, end: usize, ease: []const u8 };
