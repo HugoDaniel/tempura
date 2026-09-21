@@ -1808,6 +1808,46 @@ const Ctx = struct {
 /// drift apart into two answers about one lane.
 pub const address_keys = [_][]const u8{ "track", "ch", "key", "cc", "bend", "pressure", "velocity", "channel", "column", "fx" };
 
+/// Who keeps its slot, over a container's children in slot order:
+/// `finals[k]` is where child `k` lands and `moved[k]` whether a move put
+/// it there. An UNMOVED child always keeps its slot — the plan never
+/// reorders a document it did not write (plan 07's risk note) — and a
+/// moved one does while it still sits between the last child that kept
+/// its slot and the next child that will. The one rule behind
+/// `moveInLane` and `ops_bound.moveEvents`; the answer is `arena`'s.
+pub fn keptSlots(arena: std.mem.Allocator, finals: []const i64, moved: []const bool) Error![]bool {
+    const keep = try arena.alloc(bool, finals.len);
+    var last: i64 = std.math.minInt(i64);
+    for (0..finals.len) |k| {
+        if (!moved[k]) {
+            keep[k] = true;
+            last = finals[k];
+            continue;
+        }
+        var next: i64 = std.math.maxInt(i64);
+        for (k + 1..finals.len) |n| {
+            if (moved[n]) continue;
+            next = finals[n];
+            break;
+        }
+        keep[k] = finals[k] >= last and finals[k] <= next;
+        if (keep[k]) last = finals[k];
+    }
+    return keep;
+}
+
+/// The positional index a child landing at `to` takes among `ats`, the
+/// ticks a container's children have in slot order: before the first one
+/// past `to`, or at the end. Ties go AFTER what is already there, which
+/// is what keeps an insert from reordering the neighbours the document
+/// has.
+pub fn slotAmong(ats: []const i64, to: i64) u32 {
+    for (ats, 0..) |at, i| {
+        if (at > to) return @intCast(i);
+    }
+    return @intCast(ats.len);
+}
+
 fn bySlot(_: void, x: Child, y: Child) bool {
     return x.slot < y.slot;
 }

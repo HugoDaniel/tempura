@@ -53,11 +53,12 @@
 //!
 //! `moveEvents` here and `ops_native.moveInLane` run the SAME running model
 //! over different rows — a `(slot, at, final)` triple, who keeps its slot,
-//! then the removals and the inserts against what they left. They are not
-//! one function because what each writes differs (one `:at` integer here,
-//! `writesFor`'s whole override list there) and the extraction would need
-//! a callback per difference; the duplication is named here so a change to
-//! the rule is made in both.
+//! then the removals and the inserts against what they left. The two pure
+//! rules in that model are one function each (`ops_native.keptSlots`,
+//! `ops_native.slotAmong`); the walks around them are not one function
+//! because what each writes differs (one `:at` integer here, `writesFor`'s
+//! whole override list there) and the extraction would need a callback per
+//! difference.
 //!
 //! An `(ev …)` cell re-inserted somewhere else comes back spelled
 //! `(ev :ins 1 1 "E-5")` rather than `(ev 1 "E-5" :ins 1)`: SJON's JSON
@@ -494,6 +495,18 @@ const Ctx = struct {
 
     // ---- SMF: the operations ----
 
+    /// What an SMF lane's selection comes to, before an action is
+    /// written: the events that go, the events that move, the note-ons
+    /// whose `:vel` is written, and the two counts. Every list lives in
+    /// the plan's arena.
+    const SmfEdits = struct {
+        gone: std.ArrayList(u32) = .empty,
+        moves: std.ArrayList(EvMove) = .empty,
+        vel: std.ArrayList(u32) = .empty,
+        targets: u32 = 0,
+        inexact: u32 = 0,
+    };
+
     fn smfLane(self: *Ctx, li: u32, op: Op.Op) Error!void {
         const lane = self.d.lanes[li];
         const binding = lane.binding.?;
@@ -512,74 +525,14 @@ const Ctx = struct {
         const evs = try self.events(track);
         const sel = selectionOf(op).?;
 
-        var moves: std.ArrayList(EvMove) = .empty;
-        defer moves.deinit(self.gpa);
-        var gone: std.ArrayList(u32) = .empty;
-        defer gone.deinit(self.gpa);
-        var targets: u32 = 0;
-        var inexact: u32 = 0;
+        const edits: SmfEdits = if (lane.kind == .curve and sel.kinds.keyframe)
+            try self.stepEdits(try self.steps(evs, addr.ch, addr.curve.?), ppq, sel, op)
+        else if (lane.kind == .notes and sel.kinds.note)
+            try self.pairEdits(try self.pairs(evs, addr.ch, addr.key), ppq, sel, op)
+        else
+            .{};
 
-        if (lane.kind == .curve and sel.kinds.keyframe) {
-            for (try self.steps(evs, addr.ch, addr.curve.?)) |s| {
-                const at = Grid.smfToTicks(s.at, ppq).tick;
-                if (!sel.covers(at)) continue;
-                targets += 1;
-                switch (op) {
-                    .remove => try gone.append(self.gpa, s.slot),
-                    .retime => |x| {
-                        const to = smfTickOf(destination(x, at), ppq);
-                        if (!to.exact) inexact += 1;
-                        try moves.append(self.gpa, .{ .slot = s.slot, .to = to.tick });
-                    },
-                    // A controller value is a POINT: it has no end to
-                    // resize and no velocity to write.
-                    .resize, .velocity => {},
-                    else => unreachable,
-                }
-            }
-        } else if (lane.kind == .notes and sel.kinds.note) {
-            for (try self.pairs(evs, addr.ch, addr.key)) |pair| {
-                const at = Grid.smfToTicks(pair.at, ppq).tick;
-                if (!sel.covers(at)) continue;
-                if (!Select.keyWanted(sel.keys, pair.key)) continue;
-                targets += 1;
-                switch (op) {
-                    .remove => {
-                        try gone.append(self.gpa, pair.on);
-                        if (pair.off) |off| try gone.append(self.gpa, off);
-                    },
-                    .velocity => |x| try self.b.setKeyword(
-                        try self.slotSite(track, pair.on),
-                        "vel",
-                        try self.intJson(x.vel),
-                    ),
-                    // Only the off moves: a note's onset is where it
-                    // was and its end is what a resize asks about.
-                    .resize => |x| {
-                        const dur = x.dur orelse continue;
-                        const off = pair.off orelse continue;
-                        const end = smfTickOf(at +| @max(0, dur), ppq);
-                        if (!end.exact) inexact += 1;
-                        try moves.append(self.gpa, .{ .slot = off, .to = end.tick });
-                    },
-                    .retime => |x| {
-                        const to = smfTickOf(destination(x, at), ppq);
-                        if (!to.exact) inexact += 1;
-                        try moves.append(self.gpa, .{ .slot = pair.on, .to = to.tick });
-                        // The file's own duration, kept exactly: the two
-                        // events move by one delta and neither rounds
-                        // twice.
-                        if (pair.off) |off| try moves.append(self.gpa, .{
-                            .slot = off,
-                            .to = to.tick + (pair.end - pair.at),
-                        });
-                    },
-                    else => unreachable,
-                }
-            }
-        }
-
-        if (targets == 0) {
+        if (edits.targets == 0) {
             try self.b.refuse(
                 .edit_range_empty,
                 lane.span,
@@ -588,22 +541,125 @@ const Ctx = struct {
             );
             return;
         }
-        self.b.summary.targets = targets;
+        self.b.summary.targets = edits.targets;
 
-        std.sort.insertion(u32, gone.items, {}, ascending);
-        for (gone.items) |slot| try self.b.removePositional(.{ .root = track, .path = &.{} }, slot);
-        try self.moveEvents(track, evs, moves.items);
+        if (op == .velocity) for (edits.vel.items) |on| {
+            const site = try self.slotSite(track, on);
+            try self.b.setKeyword(site, "vel", try self.intJson(op.velocity.vel));
+        };
+        std.sort.insertion(u32, edits.gone.items, {}, ascending);
+        const track_site: Site = .{ .root = track, .path = &.{} };
+        for (edits.gone.items) |slot| try self.b.removePositional(track_site, slot);
+        try self.moveEvents(track, evs, edits.moves.items);
 
-        if (inexact > 0 and !self.b.summary.refused) {
-            self.b.summary.inexact = inexact;
+        if (edits.inexact > 0 and !self.b.summary.refused) {
+            self.b.summary.inexact = edits.inexact;
             try self.b.note(
                 .edit_inexact,
                 .warning,
                 lane.span,
                 "{d} position(s) rounded onto the file's own {d}-PPQ grid",
-                .{ inexact, ppq },
+                .{ edits.inexact, ppq },
             );
         }
+    }
+
+    /// A curve lane's edits: every step the selection covers. A
+    /// controller value is a POINT — it has no end to resize and no
+    /// velocity to write — so only `remove` and `retime` come to
+    /// anything; the other two count their targets and write nothing.
+    fn stepEdits(
+        self: *Ctx,
+        found: []const Step,
+        ppq: u15,
+        sel: Select.Select,
+        op: Op.Op,
+    ) Error!SmfEdits {
+        var edits: SmfEdits = .{};
+        for (found) |s| {
+            const at = Grid.smfToTicks(s.at, ppq).tick;
+            if (!sel.covers(at)) continue;
+            edits.targets += 1;
+            switch (op) {
+                .remove => try edits.gone.append(self.arena, s.slot),
+                .retime => |x| {
+                    const to = smfTickOf(destination(x, at), ppq);
+                    if (!to.exact) edits.inexact += 1;
+                    try edits.moves.append(self.arena, .{ .slot = s.slot, .to = to.tick });
+                },
+                .resize, .velocity => {},
+                else => unreachable,
+            }
+        }
+        return edits;
+    }
+
+    /// A notes lane's edits: every pair the selection covers. `remove`
+    /// takes both events, `velocity` names the note-on, `resize` moves
+    /// the off alone (a note's onset is where it was; its end is what a
+    /// resize asks about), and `retime` moves both by ONE delta so the
+    /// file's own duration is kept exactly and neither event rounds
+    /// twice.
+    fn pairEdits(
+        self: *Ctx,
+        found: []const Pair,
+        ppq: u15,
+        sel: Select.Select,
+        op: Op.Op,
+    ) Error!SmfEdits {
+        var edits: SmfEdits = .{};
+        for (found) |pair| {
+            const at = Grid.smfToTicks(pair.at, ppq).tick;
+            if (!sel.covers(at)) continue;
+            if (!Select.keyWanted(sel.keys, pair.key)) continue;
+            edits.targets += 1;
+            switch (op) {
+                .remove => {
+                    try edits.gone.append(self.arena, pair.on);
+                    if (pair.off) |off| try edits.gone.append(self.arena, off);
+                },
+                .velocity => try edits.vel.append(self.arena, pair.on),
+                .resize => |x| {
+                    const dur = x.dur orelse continue;
+                    const off = pair.off orelse continue;
+                    const end = smfTickOf(at +| @max(0, dur), ppq);
+                    if (!end.exact) edits.inexact += 1;
+                    try edits.moves.append(self.arena, .{ .slot = off, .to = end.tick });
+                },
+                .retime => |x| {
+                    const to = smfTickOf(destination(x, at), ppq);
+                    if (!to.exact) edits.inexact += 1;
+                    try edits.moves.append(self.arena, .{ .slot = pair.on, .to = to.tick });
+                    if (pair.off) |off| try edits.moves.append(self.arena, .{
+                        .slot = off,
+                        .to = to.tick + (pair.end - pair.at),
+                    });
+                },
+                else => unreachable,
+            }
+        }
+        return edits;
+    }
+
+    /// Where every event of a track lands after a batch, and which of
+    /// them the batch named. Arena-owned.
+    const Landing = struct { at: []i64, moved: []bool };
+
+    fn landingOf(self: *Ctx, evs: []const Ev, moves: []const EvMove) Error!Landing {
+        const at = try self.arena.alloc(i64, evs.len);
+        const moved = try self.arena.alloc(bool, evs.len);
+        for (evs, at, moved) |e, *f, *m| {
+            f.* = e.at;
+            m.* = false;
+        }
+        for (moves) |m| {
+            for (evs, 0..) |e, k| {
+                if (e.slot != m.slot) continue;
+                at[k] = m.to;
+                moved[k] = true;
+            }
+        }
+        return .{ .at = at, .moved = moved };
     }
 
     /// Move a batch of events, keeping the track non-decreasing in
@@ -614,55 +670,33 @@ const Ctx = struct {
     /// computed against the untouched track names the wrong slot by the
     /// time the insert is reached. An event keeps its slot — and so its
     /// comments — whenever the order the document already has still
-    /// holds, and a move past a neighbour is a remove and an insert at
-    /// the sorted index, ties AFTER what is already there.
+    /// holds (`ops_native.keptSlots`), and a move past a neighbour is a
+    /// remove and an insert at the sorted index, ties AFTER what is
+    /// already there.
     fn moveEvents(self: *Ctx, root: u32, evs: []const Ev, moves: []const EvMove) Error!void {
         if (moves.len == 0) return;
-        const arena = self.arena;
-
-        const finals = try arena.alloc(i64, evs.len);
-        const moved = try arena.alloc(bool, evs.len);
-        for (evs, finals, moved) |e, *f, *m| {
-            f.* = e.at;
-            m.* = false;
-        }
-        for (moves) |m| {
-            for (evs, 0..) |e, k| {
-                if (e.slot != m.slot) continue;
-                finals[k] = m.to;
-                moved[k] = true;
-            }
-        }
-
-        // Who keeps its slot. An event nothing moved always does — the
-        // plan never reorders a track it did not write — and a moved one
-        // does while it still sits between the last event that kept its
-        // slot and the next event that will.
-        const keep = try arena.alloc(bool, evs.len);
-        var last: i64 = std.math.minInt(i64);
-        for (0..evs.len) |k| {
-            if (!moved[k]) {
-                keep[k] = true;
-                last = finals[k];
-                continue;
-            }
-            var next: i64 = std.math.maxInt(i64);
-            for (k + 1..evs.len) |n| {
-                if (moved[n]) continue;
-                next = finals[n];
-                break;
-            }
-            keep[k] = finals[k] >= last and finals[k] <= next;
-            if (keep[k]) last = finals[k];
-        }
+        const landed = try self.landingOf(evs, moves);
+        const keep = try ops_native.keptSlots(self.arena, landed.at, landed.moved);
 
         for (0..evs.len) |k| {
-            if (!moved[k] or !keep[k] or finals[k] == evs[k].at) continue;
-            try self.b.setKeyword(try self.slotSite(root, evs[k].slot), "at", try self.intJson(finals[k]));
+            if (!landed.moved[k] or !keep[k] or landed.at[k] == evs[k].at) continue;
+            const site = try self.slotSite(root, evs[k].slot);
+            try self.b.setKeyword(site, "at", try self.intJson(landed.at[k]));
         }
+        try self.relocateEvents(root, evs, landed, keep);
+    }
 
-        // The ones that move: every removal, then every insert against
-        // the list the removals leave behind.
+    /// The events that change slot: every removal, then every insert
+    /// against the list the removals leave behind, in ascending
+    /// destination so every index is a slot in the list as it stands
+    /// when that insert is reached.
+    fn relocateEvents(
+        self: *Ctx,
+        root: u32,
+        evs: []const Ev,
+        landed: Landing,
+        keep: []const bool,
+    ) Error!void {
         const parent: Site = .{ .root = root, .path = &.{} };
         var rest: std.ArrayList(i64) = .empty;
         defer rest.deinit(self.gpa);
@@ -670,8 +704,8 @@ const Ctx = struct {
         defer relocated.deinit(self.gpa);
 
         for (0..evs.len) |k| {
-            if (!moved[k] or keep[k]) {
-                try rest.append(self.gpa, finals[k]);
+            if (!landed.moved[k] or keep[k]) {
+                try rest.append(self.gpa, landed.at[k]);
                 continue;
             }
             try self.b.removePositional(parent, evs[k].slot);
@@ -679,24 +713,15 @@ const Ctx = struct {
         }
         if (relocated.items.len == 0) return;
 
-        // Ascending destination, so every index is a slot in the list as
-        // it stands when that insert is reached.
-        std.sort.insertion(usize, relocated.items, @as([]const i64, finals), byFinal);
+        std.sort.insertion(usize, relocated.items, @as([]const i64, landed.at), byFinal);
         for (relocated.items) |k| {
             var out: value.Buf = .empty;
             defer out.deinit(self.gpa);
             try value.form(self.gpa, &out, self.tree, evs[k].node, &.{
-                .{ .key = "at", .json = try self.intJson(finals[k]) },
+                .{ .key = "at", .json = try self.intJson(landed.at[k]) },
             });
-
-            var index: u32 = @intCast(rest.items.len);
-            for (rest.items, 0..) |at, n| {
-                if (at > finals[k]) {
-                    index = @intCast(n);
-                    break;
-                }
-            }
-            try rest.insert(self.gpa, index, finals[k]);
+            const index = ops_native.slotAmong(rest.items, landed.at[k]);
+            try rest.insert(self.gpa, index, landed.at[k]);
             try self.b.insertPositional(parent, index, out.items);
         }
     }
@@ -933,90 +958,18 @@ const Ctx = struct {
         keep: bool,
     };
 
-    fn moveCells(self: *Ctx, root: u32, rowmap: *const walk.RowMap, cells_: []const Cell, x: Op.Retime) Error!void {
-        const arena = self.arena;
+    fn moveCells(
+        self: *Ctx,
+        root: u32,
+        rowmap: *const walk.RowMap,
+        cells_: []const Cell,
+        x: Op.Retime,
+    ) Error!void {
         const module = self.tree.root[root];
         var moves: std.ArrayList(CellMove) = .empty;
-
         for (cells_) |c| {
-            const to = destination(x, c.at);
-            if (@rem(to, Grid.IT_TICK) != 0) {
-                try self.b.refuse(
-                    .edit_inexact,
-                    c.span,
-                    "an Impulse Tracker cell sounds on a tick of the module's own clock, and this position is between two",
-                    .{},
-                );
-                return;
-            }
-            const ri = rowIndexAt(rowmap, @divExact(to, Grid.IT_TICK)) orelse {
-                try self.b.refuse(.edit_range_empty, c.span, "that position is past the module's last row", .{});
-                return;
-            };
-            const played = rowmap.rows[ri];
-            const delay = @divExact(to, Grid.IT_TICK) - played.start_tick;
-            if (delay > 15) {
-                try self.b.refuse(
-                    .edit_inexact,
-                    c.span,
-                    "a cell can be held back by at most fifteen ticks (SDF), and this one would need {d}",
-                    .{delay},
-                );
-                return;
-            }
-
-            // The effect column. `SDx` is the only way a cell sounds off
-            // a row start, and the plan refuses rather than drop an
-            // effect that is already there (plan 07's open question).
-            var fx: ?[]const u8 = null;
-            var keep = true;
-            const delayed = isDelay(c.cell);
-            if (delay > 0) {
-                if (c.cell.fx != 0 and !delayed) {
-                    try self.b.refuse(
-                        .edit_inexact,
-                        c.span,
-                        "this cell's effect column already carries {c}{X:0>2}; a sub-row move needs it for SDx",
-                        .{ '@' + c.cell.fx, c.cell.param },
-                    );
-                    return;
-                }
-                fx = try self.stringJson(try std.fmt.allocPrint(arena, "SD{X}", .{delay}));
-                keep = false;
-            } else if (delayed) {
-                // Back onto the row start: the delay it carried goes.
-                keep = false;
-            }
-
-            // The SOURCE pattern was asked about before any of this
-            // (`refuseShared`); what is left is the pattern the cell
-            // lands IN, which the ask has not been shown yet.
-            if (played.pattern != c.pattern and !x.allow_shared) {
-                const plays = playCount(rowmap, played.pattern);
-                if (plays > 1) {
-                    try self.b.refuse(
-                        .edit_pattern_shared,
-                        c.span,
-                        "this move crosses into a pattern {d} orders play; every occurrence would change, so it wants :allow-shared",
-                        .{plays},
-                    );
-                    return;
-                }
-            }
-
-            const dst = (try self.numbered(module, "pattern", played.pattern)) orelse {
-                try self.b.refuse(.edit_range_empty, c.span, "the module has no (it/pattern {d} …) to move into", .{played.pattern});
-                return;
-            };
-            try moves.append(arena, .{
-                .cell = c,
-                .pattern = played.pattern,
-                .row = played.row,
-                .pattern_slot = dst.slot,
-                .pattern_node = dst.node,
-                .fx = fx,
-                .keep = keep,
-            });
+            const m = (try self.cellMove(module, rowmap, c, x)) orelse return;
+            try moves.append(self.arena, m);
         }
 
         // The ones that stay on their row: only the effect column moves,
@@ -1031,6 +984,125 @@ const Ctx = struct {
             }
         }
         try self.relocateCells(root, moves.items);
+    }
+
+    /// What one cell's retime comes to — the row it lands on, the
+    /// pattern that row is in, and the effect column as the move leaves
+    /// it — or null after a refusal: a position between two of the
+    /// module's ticks, past its last row, more than SDF away from a row
+    /// start, or into a shared pattern the ask did not allow.
+    fn cellMove(
+        self: *Ctx,
+        module: NodeIndex,
+        rowmap: *const walk.RowMap,
+        c: Cell,
+        x: Op.Retime,
+    ) Error!?CellMove {
+        const to = destination(x, c.at);
+        if (@rem(to, Grid.IT_TICK) != 0) {
+            try self.b.refuse(
+                .edit_inexact,
+                c.span,
+                "an Impulse Tracker cell sounds on a tick of the module's own clock, " ++
+                    "and this position is between two",
+                .{},
+            );
+            return null;
+        }
+        const ri = rowIndexAt(rowmap, @divExact(to, Grid.IT_TICK)) orelse {
+            try self.b.refuse(
+                .edit_range_empty,
+                c.span,
+                "that position is past the module's last row",
+                .{},
+            );
+            return null;
+        };
+        const played = rowmap.rows[ri];
+        const delay = @divExact(to, Grid.IT_TICK) - played.start_tick;
+        if (delay > 15) {
+            try self.b.refuse(
+                .edit_inexact,
+                c.span,
+                "a cell can be held back by at most fifteen ticks (SDF), " ++
+                    "and this one would need {d}",
+                .{delay},
+            );
+            return null;
+        }
+        const fx = (try self.delayColumn(c, delay)) orelse return null;
+        if (try self.refuseSharedLanding(rowmap, c, played.pattern, x.allow_shared)) return null;
+        const dst = (try self.numbered(module, "pattern", played.pattern)) orelse {
+            try self.b.refuse(
+                .edit_range_empty,
+                c.span,
+                "the module has no (it/pattern {d} …) to move into",
+                .{played.pattern},
+            );
+            return null;
+        };
+        return .{
+            .cell = c,
+            .pattern = played.pattern,
+            .row = played.row,
+            .pattern_slot = dst.slot,
+            .pattern_node = dst.node,
+            .fx = fx.json,
+            .keep = fx.keep,
+        };
+    }
+
+    /// Refuse a move INTO a pattern more than one order plays. The
+    /// SOURCE pattern was asked about before any move was planned
+    /// (`refuseShared`); what is left is the pattern the cell lands in,
+    /// which the ask has not been shown yet. Answers whether it refused.
+    fn refuseSharedLanding(
+        self: *Ctx,
+        rowmap: *const walk.RowMap,
+        c: Cell,
+        landing: u16,
+        allow: bool,
+    ) Error!bool {
+        if (landing == c.pattern or allow) return false;
+        const plays = playCount(rowmap, landing);
+        if (plays <= 1) return false;
+        try self.b.refuse(
+            .edit_pattern_shared,
+            c.span,
+            "this move crosses into a pattern {d} orders play; every occurrence would " ++
+                "change, so it wants :allow-shared",
+            .{plays},
+        );
+        return true;
+    }
+
+    /// The effect column as a sub-row move leaves it: JSON for a new
+    /// `:fx`, null to take the key off, and `keep` when the cell's own
+    /// effect stands.
+    const FxColumn = struct { json: ?[]const u8, keep: bool };
+
+    /// `SDx` is the only way a cell sounds off a row start, and the plan
+    /// refuses (null) rather than drop an effect that is already there
+    /// (plan 07's open question). Back onto the row start, the delay the
+    /// cell carried goes.
+    fn delayColumn(self: *Ctx, c: Cell, delay: i64) Error!?FxColumn {
+        const delayed = isDelay(c.cell);
+        if (delay > 0) {
+            if (c.cell.fx != 0 and !delayed) {
+                try self.b.refuse(
+                    .edit_inexact,
+                    c.span,
+                    "this cell's effect column already carries {c}{X:0>2}; " ++
+                        "a sub-row move needs it for SDx",
+                    .{ '@' + c.cell.fx, c.cell.param },
+                );
+                return null;
+            }
+            const spelled = try std.fmt.allocPrint(self.arena, "SD{X}", .{delay});
+            return .{ .json = try self.stringJson(spelled), .keep = false };
+        }
+        if (delayed) return .{ .json = null, .keep = false };
+        return .{ .json = null, .keep = true };
     }
 
     /// The cells that change row: every removal, then every insert
@@ -1056,55 +1128,47 @@ const Ctx = struct {
         for (order) |i| {
             const m = moves[i];
             const rows = try self.rowsOf(&patterns, m.pattern_slot, m.pattern_node, going.items);
-            var overrides: [1]value.Override = .{.{ .key = "fx", .json = m.fx }};
-            var json: value.Buf = .empty;
-            defer json.deinit(self.gpa);
-            try value.form(self.gpa, &json, self.tree, m.cell.node, if (m.keep) overrides[0..0] else overrides[0..1]);
-
+            const json = try self.cellJson(m);
             const pattern_site = try (Site{ .root = root, .path = &.{} }).child(arena, m.pattern_slot);
             if (rows.find(m.row)) |at| {
-                // The row is there and stays: the cell goes in beside
-                // the ones already on it, in channel order.
-                //
-                // Its slot is NOT the one the document gave it. Every
-                // `remove_positional` of this plan runs before any
-                // insert, so a row this plan emptied lower down the
-                // pattern has already taken its place with it — the
-                // slot is the row's place among the rows that SURVIVE,
-                // which is exactly what the sibling branch below counts.
-                const r = &rows.items.items[at];
-                var index: u32 = @intCast(r.channels.items.len);
-                for (r.channels.items, 0..) |c, n| {
-                    if (c > @as(u32, m.cell.channel)) {
-                        index = @intCast(n);
-                        break;
-                    }
-                }
-                try r.channels.insert(arena, index, m.cell.channel);
+                // The row is there and stays. Its slot is NOT the one the
+                // document gave it: every `remove_positional` of this plan
+                // runs before any insert, so a row this plan emptied lower
+                // down the pattern has already taken its place with it —
+                // the slot is the row's place among the rows that SURVIVE,
+                // which `slotOf` counts.
+                const index = try rows.placeOn(arena, at, m.cell.channel);
                 const row_site = try pattern_site.child(arena, rows.slotOf(at));
-                try self.b.insertPositional(row_site, after_number + index, json.items);
+                try self.b.insertPositional(row_site, after_number + index, json);
             } else {
                 // No row: one is created, holding this cell.
-                var index: u32 = @intCast(rows.items.items.len);
-                for (rows.items.items, 0..) |r, n| {
-                    if (r.number > m.row) {
-                        index = @intCast(n);
-                        break;
-                    }
-                }
-                var form = try value.Form.init(self.gpa, "row");
-                defer form.deinit();
-                var number: value.Buf = .empty;
-                defer number.deinit(self.gpa);
-                try value.integer(self.gpa, &number, m.row);
-                try form.children(&.{ number.items, json.items });
-
-                var channels: std.ArrayList(u32) = .empty;
-                try channels.append(arena, m.cell.channel);
-                try rows.items.insert(arena, index, .{ .number = m.row, .slot = null, .channels = channels });
-                try self.b.insertPositional(pattern_site, after_number + index, try form.done());
+                const index = try rows.placeNew(arena, m.row, m.cell.channel);
+                const row_json = try self.rowJson(m.row, json);
+                try self.b.insertPositional(pattern_site, after_number + index, row_json);
             }
         }
+    }
+
+    /// The cell as JSON, its `:fx` as the move leaves it. Arena-owned.
+    fn cellJson(self: *Ctx, m: CellMove) Error![]const u8 {
+        const overrides: [1]value.Override = .{.{ .key = "fx", .json = m.fx }};
+        const applied: []const value.Override = if (m.keep) overrides[0..0] else overrides[0..1];
+        var json: value.Buf = .empty;
+        defer json.deinit(self.gpa);
+        try value.form(self.gpa, &json, self.tree, m.cell.node, applied);
+        return self.arena.dupe(u8, json.items);
+    }
+
+    /// `(row N …)` holding one relocated cell: the row a move creates
+    /// where the pattern had none. Arena-owned.
+    fn rowJson(self: *Ctx, number: u16, cell_json: []const u8) Error![]const u8 {
+        var form = try value.Form.init(self.gpa, "row");
+        defer form.deinit();
+        var text: value.Buf = .empty;
+        defer text.deinit(self.gpa);
+        try value.integer(self.gpa, &text, number);
+        try form.children(&.{ text.items, cell_json });
+        return self.arena.dupe(u8, try form.done());
     }
 
     /// One pattern's rows as the plan leaves them: every row form the
@@ -1153,6 +1217,57 @@ const Ctx = struct {
             }
             return slot;
         }
+
+        /// A cell landing on entry `at` — a row the document holds and
+        /// this plan keeps: it goes in beside the ones already there, in
+        /// channel order. Records the channel and answers the index
+        /// among the row's cells, counted against the cells that SURVIVE
+        /// this plan and not the document's: every `remove_positional`
+        /// runs before any insert, so a cell this plan took off the row
+        /// is not there when the insert is reached.
+        fn placeOn(
+            self: *PatternRows,
+            arena: std.mem.Allocator,
+            at: usize,
+            channel: u32,
+        ) Error!u32 {
+            const r = &self.items.items[at];
+            var index: u32 = @intCast(r.channels.items.len);
+            for (r.channels.items, 0..) |c, n| {
+                if (c > channel) {
+                    index = @intCast(n);
+                    break;
+                }
+            }
+            try r.channels.insert(arena, index, channel);
+            return index;
+        }
+
+        /// A cell landing on a row the pattern does not hold: one is
+        /// created for it, at its number's place among the rows. Records
+        /// the row and answers its index among them.
+        fn placeNew(
+            self: *PatternRows,
+            arena: std.mem.Allocator,
+            number: u16,
+            channel: u32,
+        ) Error!u32 {
+            var index: u32 = @intCast(self.items.items.len);
+            for (self.items.items, 0..) |r, n| {
+                if (r.number > number) {
+                    index = @intCast(n);
+                    break;
+                }
+            }
+            var channels: std.ArrayList(u32) = .empty;
+            try channels.append(arena, channel);
+            try self.items.insert(arena, index, .{
+                .number = number,
+                .slot = null,
+                .channels = channels,
+            });
+            return index;
+        }
     };
 
     fn rowsOf(
@@ -1193,41 +1308,167 @@ const Ctx = struct {
 
     // ---- materialize ----
 
+    /// What `materialize` reads from and writes to, once every refusal
+    /// is past: the lane, its SMF address, the file's division, and the
+    /// two roots — the lane's own and its track's.
+    const Source = struct {
+        li: u32,
+        addr: @FieldType(doc.Address, "smf"),
+        ppq: u15,
+        lane_root: u32,
+        track: u32,
+    };
+
     /// Copy a bound lane's content into the document and take it out of
     /// the file: plan 07's `materialize`, and plan 04's "one home".
     fn materialize(self: *Ctx, x: Op.Materialize) Error!void {
-        const li = laneByName(self.d, x.lane) orelse {
-            try self.b.refuse(.edit_range_empty, .{ .start = 0, .end = 0 }, "no lane is named {s}", .{x.lane});
-            return;
-        };
-        const lane = self.d.lanes[li];
-        if (lane.notes.len + lane.keyframes.len + lane.clips.len > 0) {
+        const src = (try self.materializeSource(x)) orelse return;
+        const lane = self.d.lanes[src.li];
+        const evs = try self.events(src.track);
+        const lane_site: Site = .{ .root = src.lane_root, .path = &.{} };
+
+        var gone: std.ArrayList(u32) = .empty;
+        defer gone.deinit(self.gpa);
+        var index: u32 = 0;
+        var inexact: u32 = 0;
+
+        if (lane.kind == .curve) {
+            for (try self.steps(evs, src.addr.ch, src.addr.curve.?)) |s| {
+                const at = Grid.smfToTicks(s.at, src.ppq);
+                if (!at.exact) inexact += 1;
+                try self.b.insertPositional(lane_site, index, try self.keyframeJson(at.tick, s.v));
+                try gone.append(self.gpa, s.slot);
+                index += 1;
+            }
+        } else {
+            for (try self.pairs(evs, src.addr.ch, src.addr.key)) |pair| {
+                const at = Grid.smfToTicks(pair.at, src.ppq);
+                const end = Grid.smfToTicks(pair.end, src.ppq);
+                if (!at.exact or !end.exact) inexact += 1;
+                const json = try self.noteJson(pair, at.tick, end.tick);
+                try self.b.insertPositional(lane_site, index, json);
+                try gone.append(self.gpa, pair.on);
+                if (pair.off) |off| try gone.append(self.gpa, off);
+                index += 1;
+            }
+        }
+
+        if (index == 0) {
             try self.b.refuse(
-                .edit_would_duplicate,
+                .edit_range_empty,
                 lane.span,
-                "this lane already carries content; materializing its anchor's would give one content two homes",
+                "this lane's address carries nothing in the file",
                 .{},
             );
             return;
         }
-        const binding = lane.binding orelse {
-            try self.b.refuse(.edit_range_empty, lane.span, "this lane is not bound; there is nothing to materialize", .{});
-            return;
+        self.b.summary.targets = index;
+
+        std.sort.insertion(u32, gone.items, {}, ascending);
+        const track_site: Site = .{ .root = src.track, .path = &.{} };
+        for (gone.items) |slot| try self.b.removePositional(track_site, slot);
+        try self.detachLane(lane_site, src.lane_root);
+
+        if (inexact > 0) {
+            self.b.summary.inexact = inexact;
+            try self.b.note(
+                .edit_inexact,
+                .warning,
+                lane.span,
+                "{d} position(s) rounded off the file's own {d}-PPQ grid",
+                .{ inexact, src.ppq },
+            );
+        }
+    }
+
+    /// The lane `materialize` was asked about and where its content is,
+    /// with every refusal on the way: no such lane, the lane's own and
+    /// its surface's (`materializable`, `smfSurface`), a lane the tree
+    /// cannot address, a track the dump does not have. Null after one.
+    fn materializeSource(self: *Ctx, x: Op.Materialize) Error!?Source {
+        const li = laneByName(self.d, x.lane) orelse {
+            try self.b.refuse(.edit_range_empty, .{ .start = 0, .end = 0 }, "no lane is named {s}", .{x.lane});
+            return null;
         };
+        const lane = self.d.lanes[li];
+        const binding = (try self.materializable(lane)) orelse return null;
+        const surface = (try self.smfSurface(lane, binding)) orelse return null;
+        const lane_root = (try self.rootOf(lane.span)) orelse {
+            try self.b.refuse(
+                .sjon_diagnostic,
+                lane.span,
+                "the document and its source tree disagree about this lane",
+                .{},
+            );
+            return null;
+        };
+        const track = self.mtrkRoot(binding.anchor, surface.addr.track) orelse {
+            try self.b.refuse(
+                .edit_range_empty,
+                lane.span,
+                "the inline dump of \"{s}\" has no track {d}",
+                .{ binding.anchor, surface.addr.track },
+            );
+            return null;
+        };
+        return .{
+            .li = li,
+            .addr = surface.addr,
+            .ppq = surface.ppq,
+            .lane_root = lane_root,
+            .track = track,
+        };
+    }
+
+    /// The binding of a lane that may be materialized: one that carries
+    /// no content of its own (one content, one home — plan 04) and
+    /// reads an anchor. Null after a refusal.
+    fn materializable(self: *Ctx, lane: doc.Lane) Error!?doc.Binding {
+        if (lane.notes.len + lane.keyframes.len + lane.clips.len > 0) {
+            try self.b.refuse(
+                .edit_would_duplicate,
+                lane.span,
+                "this lane already carries content; materializing its anchor's would give " ++
+                    "one content two homes",
+                .{},
+            );
+            return null;
+        }
+        return lane.binding orelse {
+            try self.b.refuse(
+                .edit_range_empty,
+                lane.span,
+                "this lane is not bound; there is nothing to materialize",
+                .{},
+            );
+            return null;
+        };
+    }
+
+    /// An SMF address and the division of the file it reads — a surface
+    /// this operation can take out of its file one event per value.
+    const Surface = struct { addr: @FieldType(doc.Address, "smf"), ppq: u15 };
+
+    /// `binding`'s surface, or null after a refusal. An Impulse Tracker
+    /// binding is parked: a channel's cells serve every ORDER that plays
+    /// the pattern, so there is no removal that leaves one home. An
+    /// anchor whose dump is not inline has nothing here to move. And a
+    /// 14-bit controller or `:velocity` is not one event per value
+    /// (plan 05, "Curve lanes") — the velocities belong to the notes
+    /// that carry them — so the operation says so rather than writing
+    /// half of one.
+    fn smfSurface(self: *Ctx, lane: doc.Lane, binding: doc.Binding) Error!?Surface {
         const addr = switch (binding.address) {
-            .smf => |a_| a_,
-            // A channel's cells serve every ORDER that plays the
-            // pattern, so taking them out of the module would silence
-            // the other plays: there is no removal that leaves one home,
-            // and plan 07 parks the operation rather than inventing one.
+            .smf => |smf| smf,
             .it => {
                 try self.b.refuse(
                     .edit_would_duplicate,
                     lane.span,
-                    "an Impulse Tracker channel's cells serve every order that plays their pattern; removing them would change more than this lane",
+                    "an Impulse Tracker channel's cells serve every order that plays their " ++
+                        "pattern; removing them would change more than this lane",
                     .{},
                 );
-                return;
+                return null;
             },
         };
         const tier = smfTier(self.d, binding.anchor) orelse {
@@ -1237,121 +1478,64 @@ const Ctx = struct {
                 "this lane's content lives in its anchor's file; inline it first",
                 .{},
             );
-            return;
+            return null;
         };
         if (lane.kind == .curve) switch (addr.curve orelse .bend) {
             .cc, .bend, .pressure => {},
-            // A 14-bit controller is two events per value and
-            // `:velocity` is the notes' own velocities rather than a
-            // stream of its own (plan 05, "Curve lanes"). Neither has a
-            // removal that leaves ONE home — the velocities belong to
-            // the notes that carry them — so the operation says so
-            // rather than writing half of one.
             .cc14, .velocity => {
                 try self.b.refuse(
                     .edit_target_bound,
                     lane.span,
-                    "this lane reads a surface that is not one event per value; its content stays in the file",
+                    "this lane reads a surface that is not one event per value; " ++
+                        "its content stays in the file",
                     .{},
                 );
-                return;
+                return null;
             },
         };
-        const lane_root = (try self.rootOf(lane.span)) orelse {
-            try self.b.refuse(
-                .sjon_diagnostic,
-                lane.span,
-                "the document and its source tree disagree about this lane",
-                .{},
-            );
-            return;
-        };
-        const ppq = tier.sequence.division.pulsesPerQuarter();
-        const track = self.mtrkRoot(binding.anchor, addr.track) orelse {
-            try self.b.refuse(
-                .edit_range_empty,
-                lane.span,
-                "the inline dump of \"{s}\" has no track {d}",
-                .{ binding.anchor, addr.track },
-            );
-            return;
-        };
-        const evs = try self.events(track);
-        const lane_site: Site = .{ .root = lane_root, .path = &.{} };
+        return .{ .addr = addr, .ppq = tier.sequence.division.pulsesPerQuarter() };
+    }
 
-        var gone: std.ArrayList(u32) = .empty;
-        defer gone.deinit(self.gpa);
-        var index: u32 = 0;
-        var inexact: u32 = 0;
+    /// A `(keyframe …)` for one controller step, at the document's own
+    /// spelling of `at`. Arena-owned.
+    fn keyframeJson(self: *Ctx, at: i64, v: f32) Error![]const u8 {
+        var form = try value.Form.init(self.gpa, "keyframe");
+        defer form.deinit();
+        try form.position("at", self.map, at);
+        try form.components("value", .{ v, 0, 0, 0 }, 1);
+        return self.arena.dupe(u8, try form.done());
+    }
 
-        if (lane.kind == .curve) {
-            for (try self.steps(evs, addr.ch, addr.curve.?)) |s| {
-                const at = Grid.smfToTicks(s.at, ppq);
-                if (!at.exact) inexact += 1;
-                var form = try value.Form.init(self.gpa, "keyframe");
-                defer form.deinit();
-                try form.position("at", self.map, at.tick);
-                try form.components("value", .{ s.v, 0, 0, 0 }, 1);
-                try self.b.insertPositional(lane_site, index, try form.done());
-                try gone.append(self.gpa, s.slot);
-                index += 1;
-            }
-        } else {
-            for (try self.pairs(evs, addr.ch, addr.key)) |pair| {
-                const at = Grid.smfToTicks(pair.at, ppq);
-                const end = Grid.smfToTicks(pair.end, ppq);
-                if (!at.exact or !end.exact) inexact += 1;
-                var form = try value.Form.init(self.gpa, "note");
-                defer form.deinit();
-                try form.position("at", self.map, at.tick);
-                try form.duration("dur", self.map, @max(0, end.tick - at.tick), at.tick);
-                try form.integer("key", pair.key);
-                try form.integer("vel", pair.vel);
-                // The lane's `:ch` goes with its binding, and a note's
-                // own `:ch` defaults to channel 1: the key is written
-                // only when the file says something else — and it is
-                // the NOTE's channel that is written, because an
-                // address may name several and each note keeps its own.
-                if (pair.ch != 0) try form.integer("ch", @as(i64, pair.ch) + 1);
-                if (pair.off_vel) |v| try form.integer("off-vel", v);
-                try self.b.insertPositional(lane_site, index, try form.done());
-                try gone.append(self.gpa, pair.on);
-                if (pair.off) |off| try gone.append(self.gpa, off);
-                index += 1;
-            }
-        }
+    /// A `(note …)` for one paired note sounding from `at` to `end`.
+    /// The lane's `:ch` goes with its binding and a note's own `:ch`
+    /// defaults to channel 1, so the key is written only when the file
+    /// says something else — and it is the NOTE's channel that is
+    /// written, because an address may name several and each note
+    /// keeps its own. Arena-owned.
+    fn noteJson(self: *Ctx, pair: Pair, at: i64, end: i64) Error![]const u8 {
+        var form = try value.Form.init(self.gpa, "note");
+        defer form.deinit();
+        try form.position("at", self.map, at);
+        try form.duration("dur", self.map, @max(0, end - at), at);
+        try form.integer("key", pair.key);
+        try form.integer("vel", pair.vel);
+        if (pair.ch != 0) try form.integer("ch", @as(i64, pair.ch) + 1);
+        if (pair.off_vel) |v| try form.integer("off-vel", v);
+        return self.arena.dupe(u8, try form.done());
+    }
 
-        if (index == 0) {
-            try self.b.refuse(.edit_range_empty, lane.span, "this lane's address carries nothing in the file", .{});
-            return;
-        }
-        self.b.summary.targets = index;
-
-        std.sort.insertion(u32, gone.items, {}, ascending);
-        for (gone.items) |slot| try self.b.removePositional(.{ .root = track, .path = &.{} }, slot);
-
-        // One home: the lane stops reading the file the moment it holds
-        // the content itself.
+    /// One home: the lane stops reading the file the moment it holds
+    /// the content itself — `:from` goes, and every address key with
+    /// it. `:cc` stays: on a native curve lane it is the controller a
+    /// build renders onto (plan 08), so the lane keeps the number its
+    /// values came from; the other keys read an anchor and mean nothing
+    /// without `:from`.
+    fn detachLane(self: *Ctx, lane_site: Site, lane_root: u32) Error!void {
         try self.b.removeKeyword(lane_site, "from");
         for (ops_native.address_keys) |key| {
-            // `:cc` stays: on a native curve lane it is the controller a
-            // build renders onto (plan 08), so the lane keeps the number
-            // its values came from. The other keys read an anchor and
-            // mean nothing without `:from`.
             if (std.mem.eql(u8, key, "cc")) continue;
             if (kvNode(self.tree, self.tree.root[lane_root], key) == null) continue;
             try self.b.removeKeyword(lane_site, key);
-        }
-
-        if (inexact > 0) {
-            self.b.summary.inexact = inexact;
-            try self.b.note(
-                .edit_inexact,
-                .warning,
-                lane.span,
-                "{d} position(s) rounded off the file's own {d}-PPQ grid",
-                .{ inexact, ppq },
-            );
         }
     }
 };
