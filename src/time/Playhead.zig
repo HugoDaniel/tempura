@@ -165,8 +165,14 @@ pub fn secondsOf(d: *const Derived, tick: i64) f64 {
 /// bar it belongs to. `swing` is a fraction of the step (0 is straight,
 /// 0.5 puts the odd line halfway to the next) and offsets every SECOND
 /// line, counting the bar's own line as 0. A tie resolves DOWN.
+///
+/// Total over `i64`, because `tpr_snap` hands a host's tick straight in:
+/// a position is never negative and never past the grid's ceiling (plan
+/// 03), so the tick is clamped into `[0, MAX_TICK]` first — which keeps
+/// every sum below (the next bar's start, a line's offset in its bar)
+/// inside `i64` — and the answer is a line on the grid.
 pub fn snap(d: *const Derived, tick: i64, grid: SnapGrid, swing: f64) i64 {
-    const t = @max(tick, 0);
+    const t = std.math.clamp(tick, 0, Grid.MAX_TICK);
     var best: ?i64 = null;
 
     // This bar, the one before and the one after: a line near a bar line
@@ -178,8 +184,9 @@ pub fn snap(d: *const Derived, tick: i64, grid: SnapGrid, swing: f64) i64 {
     consider(&best, t, barAt(d, here.start + here.len), grid, swing);
 
     const snapped = best orelse t;
-    // A line before tick 0 is never weighed, and `t` is clamped to it.
+    // A line off the grid is never weighed, and `t` is clamped onto it.
     std.debug.assert(snapped >= 0);
+    std.debug.assert(snapped <= Grid.MAX_TICK);
     return snapped;
 }
 
@@ -286,9 +293,11 @@ fn consider(best: *?i64, t: i64, bar: Bar, grid: SnapGrid, swing: f64) void {
     }
 }
 
-/// One line, weighed: nearer wins, and a tie resolves DOWN.
+/// One line, weighed: nearer wins, and a tie resolves DOWN. A line off
+/// the grid — before tick 0, or past the ceiling (the bar after the one
+/// holding `MAX_TICK` starts there) — is no answer.
 fn weigh(best: *?i64, t: i64, line: i64) void {
-    if (line < 0) return;
+    if (line < 0 or line > Grid.MAX_TICK) return;
     const current = best.* orelse {
         best.* = line;
         return;
@@ -806,4 +815,29 @@ test "Playhead.snap: swing under a meter change, and a swung tie resolves down" 
     try testing.expectEqual(@as(i64, 0), snap(&d, 17_297_280, .q8, 0.5));
     // One tick past the middle it is the swung line's.
     try testing.expectEqual(@as(i64, 34_594_560), snap(&d, 17_297_281, .q8, 0.5));
+}
+
+test "Playhead.snap: a tick past the grid ceiling snaps onto the grid, never past it" {
+    // `tpr_snap` hands a host's i64 straight in. `maxInt(i64)` used to be
+    // clamped at 0 only, and the bar after it — `start + len` — and a
+    // line's `start + from_start + off` overflowed. Past the ceiling the
+    // answer is the ceiling's own: the tick is clamped into the grid
+    // first, and a line past the ceiling is never weighed, as a line
+    // before tick 0 is not.
+    const gpa = testing.allocator;
+    var doc = try fixture(gpa, .hold);
+    defer doc.deinit();
+    var d = try derive_file.derive(gpa, &doc);
+    defer d.deinit();
+
+    const grids = [_]SnapGrid{ .q4, .q8, .q12, .q16, .q32, .bar, .beat };
+    for (grids) |g| {
+        for ([_]f64{ 0, 0.5, -1 }) |swing| {
+            const top = snap(&d, std.math.maxInt(i64), g, swing);
+            try testing.expect(top >= 0);
+            try testing.expect(top <= Grid.MAX_TICK);
+            try testing.expectEqual(snap(&d, Grid.MAX_TICK, g, swing), top);
+            try testing.expectEqual(@as(i64, 0), snap(&d, std.math.minInt(i64), g, swing));
+        }
+    }
 }
