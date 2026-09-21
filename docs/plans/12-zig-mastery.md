@@ -185,3 +185,110 @@ wrap, the docs) ran last on `main`. Each task is one commit shape:
   One NEW assertion was narrowed before it shipped: a window's `span ≥ 0` holds in beats
   mode and not in seconds mode, where a non-finite wall clock rounds to tick 0 (`bc77ad3`).
   That is the rule working — an assertion is written only where the code establishes it.
+
+## The second wave (2026-09-21, `9eda67a` onward)
+
+The ask came again the same day, and the tree was re-read against the set with fresh eyes. The
+first wave's table did not survive contact with a mechanical reading: `itf/write.writePattern`
+had grown back to 100 lines, `build.zig`'s `build` was 482 (never measured — it is not under
+`src/`), `doc/Resolver.zig` still read the filesystem from inside the core (the audit's "IO at the
+borders: met" was wrong), and three read-only reviews of the parts found undefined behaviour
+reachable from a host's input in fourteen places the fuzz gate never drives. A rule a reviewer
+has to remember drifts, so this wave makes the rules a gate first and fixes what the gate and the
+reviews found second.
+
+### The gate: `tools/zt lint`
+
+`tools/lint.zig` parses every `.zig` file under `src/` and `tools/`, and `build.zig`, with
+`std.zig.Ast`, and fails on: a function over 70 lines (a `test` body is exempt, a fixture
+builder is not); a line over 100 columns (codepoints — a test's name and a raw `\\` line are
+exempt); an allocator not named `gpa`/`arena`; a `catch unreachable` with no proof comment (test
+code uses `try`); a `while (true)` whose comment names no bound; recursion whose doc comment does
+not name SJON's `MAX_PARSE_DEPTH`; a filesystem, clock, process, thread, print or process-wide
+allocator in the core; a container-level `var` in the core; a managed `std` container; a `pub
+fn`/`export fn` without `///`. "Test code" includes a helper only tests reach, found by name
+reference to a fixed point, so the tree needs no test banner convention and no allowlist.
+
+First reading, at `9c787a9` (after `build.zig` was decomposed): **156 findings** — 129 `pub_doc`,
+12 `fn_length`, 7 `allocator_name`, 2 `unreachable_proof`, 2 `core_io` (`Resolver.Fs`), 2
+`managed_container` (`itf/walk`'s `AutoHashMap`), 1 `loop_bound`, 1 `recursion`. The verb joins
+`verify` when the tree reads clean.
+
+### The reviews' findings, by part
+
+Category 1 is undefined behaviour in `ReleaseSmall` (the wasm): an overflow, a failing
+`@intCast`, an `unreachable` or an assertion a host's bytes, document or JSON can reach. Each is
+fixed with a test that drives the input, and joins the fuzz gate's seeds.
+
+**A — the format cores, the exporter, the residue** (`smf/`, `itf/`, `export/`, `residue/`)
+
+- Undefined behaviour: `reconcile.addressOf` (`:channel -2^63`, `:track 70000` from a message
+  tail); `Module.Builder.finish`'s `ord_num` narrowing (65,536 orders); `smf/write`'s `at - last`
+  (a saturated negative `:at`); `render_it`'s polyphony count narrowed to u16 (and O(n²));
+  `render_smf`'s track number narrowed to u16; `export/pos.nearest(+inf)` driving a negative span
+  into `spellSeconds`' assertion; `'@' + fx` on a builder-seated `fx ≥ 192`.
+- Wrong answers: a `:qpm 2` set-tempo truncated to 24 bits silently (4.5 qpm, no diagnostic);
+  `render_it.slotAt` counting inexact cuts that are later dropped; both renderers' conductors
+  reading the raw `doc.tempo` rather than the map (a refused `:qpm -5` is still written);
+  `reconcile` spelling `:fx "\""` unescaped; `render_smf.conductorTrack`'s weaker meter test;
+  `smf/read`'s `@truncate` hiding format 256; `residue/it`'s `:query`/`:expr` not `%XX`-escaped.
+- One owner: the `7D 't' 'e' 'm'` residue head in five places and `sniffSequencerSpecific` a
+  copy of `smf/read`'s (`smf/Sequence.zig` owns both; `smf.zig` re-exports `Note` too);
+  `copyEvent` twice; the address-key spelling three times (drifted); `easeAt` copied to dodge an
+  import cycle (a std-only `src/Easing.zig`); `sceneName`; the 7-bit quantizer.
+- Pure leaves: `records.reassemble` (`partsSize` + `join`), `Emit.scaled` (`rescale`),
+  `writePattern` (`padShort`), `Tailer.escaped` (`needsEscape`), `slotAt` (`slotOf`).
+- Memory: `pattern.unpack`/`pack` into the module's arena rather than a gpa copy; the score
+  exporter's scratch in a scratch arena; `renderSmf`/`renderIt` check `base.invariants()`.
+
+**B — the document, time and edit layers** (`doc/`, `time/`, `edit/`)
+
+- Undefined behaviour: `Playhead.snap` near `maxInt(i64)` (`tpr_snap`); a non-finite float
+  printed as `inf` into an edit action that `apply` then meets as `unreachable` (`revalue` with
+  `1e39`); `Op`'s `clamp(x - 1)` on `minInt(i64)`; `parseNoteName`'s octave arithmetic
+  (`"C300000000"`); `bridge_smf`'s pairing subtractions on a saturated `:at`; `ops_bound`'s
+  retime sum and `:bend`'s `val - 8192`; `skeleton.smfTier`'s track number narrowed to u16 (a
+  65,536-chunk `.mid`).
+- Wrong answers and one owner: the conductor tables and the default `:length` derived THREE times
+  (`finalMap`, `mapOf`, `derive.conduct`), and they disagree on a document whose conductor anchor
+  is absent but which carries its own tempo — the edit engine and the playhead then read two
+  different maps; the clip window formula four times (`:repeat 0` diverges); `insertMeter` and
+  `insertTempo` accepting what the map then refuses; three narrowing helpers with different
+  out-of-range rules (one `doc/narrow.zig`).
+- Pure leaves: `ops_bound.cellMove` (`cellLanding`), the wall-clock `insertTempo`
+  (`wallClockMoves`), `bridge_it.Printer.volume` (`volSpelling`).
+- Memory: `pipeline`'s `Dumped`, `Report` and `Built` keep a `gpa` field to free one slice each
+  — the struct-never-retains-the-GPA rule; the ownership `///` on the public producers.
+
+**C — the borders** (`cli/`, `wasm_entry.zig`, `TprAbi.zig`, `corpus_runner.zig`, `tools/`)
+
+- Undefined behaviour: `TprAbi.writeName`'s assertion and `@intCast` on a name over 65,535 bytes
+  (a 70,000-byte cue name through `tpr_timeline`); `Refusal.of` mapping OOM to `unreachable` in a
+  public function.
+- IO at the borders: `doc/Resolver.zig`'s `Fs` store moves out of the core to a border file; the
+  inline verb's computation (tier text, root index, the insert plan) moves into the core, so a
+  wasm host can call what the CLI calls.
+- Wrong answers: a zero-length `tpr_*` answer leaving the previous call's `'TPDG'` report in
+  place; `samePath` swallowing OOM into "not the anchor" (and `-o` then overwrites it);
+  `findFixture` treating every read error as "not here"; `planInsert` leaking its plan on the
+  refusal path; `timeline --json` writing a bare `inf`.
+- One owner: `Diag.Severity.word`, the magic sniff, `rung1Of` in `renderBuild`, `verbName`.
+
+**Across the borders, last** (after A, B and C land): the ease hints `tpr_exportScore` drops
+(the CLI's and the wasm's scores differ for a stale curve lane); one `edit.planJson` for the
+three hosts; the fuzz gate gains `snap`, `encodeTimeline`, `pipeline.build` and `edit.apply` of
+accepted action lists, with a seed per defect above; `lint` joins `verify`.
+
+### Filed, not fixed — rulings for Hugo
+
+- **Snapping has two implementations that disagree** (`Playhead.snap` behind `tpr_snap`, and
+  `edit/Snap` behind quantize and nudge): the first swings odd bars on a bar grid and rounds half
+  to even, the second never swings, truncates, and clamps to ±step rather than ±(step−1). One
+  owner in `time/` is the fix, but which behaviour is right is a ruling, and the snap goldens
+  move with it.
+- **A host may build, plan and apply over a document that loaded with errors** where the CLI
+  refuses (`tpr_build`, and now `tpr_plan`/`tpr_apply` through `blocksEdit`): refuse with a
+  diagnostic, or keep going and say so. The first wave's follow-up, widened.
+- **`tools/*.sh` stay shell.** The set says scripts are Zig; `tools/zt` is the lock around every
+  `zig` invocation and cannot be one, and the other five are glue shared with pacer's family, so
+  porting them is a family decision. `tools/lint.zig` is Zig, as new tooling is.
