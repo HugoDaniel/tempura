@@ -291,6 +291,13 @@ pub const Kind = enum(u8) {
 /// the same in every optimisation mode.
 pub const Bytes = extern struct { off: u32, len: u32 };
 
+/// The most microseconds a quarter note a `set-tempo` can say: its
+/// payload is three bytes (RP-001's `FF 51 03 tt tt tt`), so 16 777 215
+/// µs — about 3.58 quarter notes a minute — is the slowest tempo a file
+/// holds. A `Payload.tempo` is a u32 and a builder may seat more; the
+/// writer and the renderer clamp to this and say so.
+pub const max_tempo_us: u32 = 0xFF_FFFF;
+
 /// `note_off`, `note_on`.
 pub const Note = extern struct { ch: u8, key: u8, vel: u8 };
 

@@ -234,20 +234,22 @@ const Emit = struct {
         var end_at: ?i64 = if (ends_at) |at| try self.scaled(at, base) else null;
 
         for (events, 0..) |e, i| {
-            const at = try self.scaled(e.at, base + body.written().len);
+            const offset = base + body.written().len;
+            const at = try self.scaled(e.at, offset);
             if (e.kind == .end_of_track) {
                 if (i + 1 != events.len) try self.diag(
                     .end_of_track_early,
                     .warning,
-                    base + body.written().len,
+                    offset,
                     "an end of track with {d} events after it; one is written, at the end",
                     .{events.len - i - 1},
                 );
                 end_at = at;
                 continue;
             }
-            try self.delta(w, last, at, base + body.written().len);
+            try self.delta(w, last, at, offset);
             last = at;
+            if (e.kind == .set_tempo) try self.tempoRange(e.payload.tempo, offset);
             try self.event(w, e, &running);
         }
 
@@ -325,6 +327,24 @@ const Emit = struct {
             return vlq.write(w, vlq.MAX);
         }
         try vlq.write(w, @intCast(value));
+    }
+
+    /// A `set-tempo` a builder seated past the three bytes the event
+    /// holds (`Sequence.max_tempo_us`): written as the ceiling by
+    /// `fixedMeta`, and said here, because the tempo the file then
+    /// carries is not the one the sequence did. Never raised on what the
+    /// reader produced — it reads three bytes.
+    fn tempoRange(self: *Emit, us: u32, offset: usize) Fail!void {
+        const on_grid = self.seq.division.tempoOnGrid(us);
+        if (on_grid <= sequence.max_tempo_us) return;
+        try self.diag(
+            .tempo_inexact,
+            .err,
+            offset,
+            "a set-tempo of {d} microseconds a quarter; the event holds 24 bits, so it was " ++
+                "written as {d}",
+            .{ on_grid, sequence.max_tempo_us },
+        );
     }
 
     /// One event's bytes, after its delta. A channel message rides on
@@ -409,7 +429,11 @@ const Emit = struct {
                 // event said, or the converted division would be
                 // conducted at a tempo it was never derived for
                 // (`Division.tempoOnGrid`).
-                const us = self.seq.division.tempoOnGrid(p.tempo);
+                //
+                // Clamped to the 24 bits the event holds rather than
+                // truncated, which would write a different tempo with no
+                // word said (`tempoRange` says it).
+                const us = @min(self.seq.division.tempoOnGrid(p.tempo), sequence.max_tempo_us);
                 buf[0..3].* = .{ @truncate(us >> 16), @truncate(us >> 8), @truncate(us) };
                 return buf[0..3];
             },
@@ -992,6 +1016,32 @@ test "write: a delta a VLQ cannot hold is tick_overflow, and the file stays read
     defer back.deinit();
     try testing.expect(!back.diags.hasErrors());
     try testing.expectEqual(@as(i64, vlq.MAX), back.sequence.tracks[0].events[1].at);
+}
+
+test "write: a set-tempo past 24 bits is clamped and tempo_inexact, never truncated" {
+    // 30 000 000 µs is `:qpm 2`. Truncated to three bytes it would read
+    // back as 13 222 912 µs — about 4.5 quarter notes a minute — with no
+    // word said; the ceiling is the nearest tempo the event can hold.
+    const gpa = testing.allocator;
+
+    var b: sequence.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.format = 0;
+    b.division = .{ .ppq = 96 };
+    const t = try b.addTrack();
+    try b.addEvent(t, 0, .set_tempo, .{ .tempo = 30_000_000 });
+    try b.addEvent(t, 96, .end_of_track, .empty);
+    var seq = try b.finish();
+    defer seq.deinit();
+
+    var out = try write(gpa, &seq, .{});
+    defer out.deinit();
+    try testing.expectEqual(@as(usize, 1), out.diags.count(.tempo_inexact));
+    try testing.expect(out.diags.hasErrors());
+
+    var back = try reader.read(gpa, out.bytes);
+    defer back.deinit();
+    try testing.expectEqual(sequence.max_tempo_us, back.sequence.tracks[0].events[0].payload.tempo);
 }
 
 test "write: a delta across a saturated negative tick is tick_overflow, never a wrap" {
