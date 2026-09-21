@@ -89,6 +89,7 @@ pub const Written = struct {
 /// Borrows the sequence and never mutates it — the sort happens on a copy
 /// of each track's events.
 pub fn write(gpa: std.mem.Allocator, seq: *const Sequence, opts: Options) Error!Written {
+    seq.invariants();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);

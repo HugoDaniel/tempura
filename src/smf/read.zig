@@ -153,11 +153,45 @@ pub fn read(gpa: std.mem.Allocator, bytes: []const u8) Error!Result {
         .riff = r.riff,
         .arena = r.arena,
     };
-    return .{
+    const result: Result = .{
         .sequence = try r.builder.finish(),
         .source_map = map,
         .diags = r.diags,
     };
+    result.sequence.invariants();
+    postconditions(&result);
+    return result;
+}
+
+/// What the READER establishes over and above `Sequence.invariants()`,
+/// asserted once per `read` (plan 12, "The invariants"): ticks are
+/// non-negative and never go backwards inside a track (the deltas are
+/// summed, saturating); every channel event carries a channel in 0..15
+/// and data bytes under 0x80 (the status nibble and the 0x7F mask, so a
+/// pitch bend is 14 bits); and the map is parallel to the sequence — one
+/// site per event, one entry per track and per foreign chunk, every
+/// track pointing at a chunk on the map. Properties of the walk's own
+/// arithmetic, never of the file: random bytes satisfy them.
+fn postconditions(result: *const Result) void {
+    const seq = &result.sequence;
+    const map = &result.source_map;
+    std.debug.assert(seq.tracks.len == map.tracks.len);
+    std.debug.assert(seq.foreign.len == map.foreign.len);
+    for (seq.tracks, map.tracks) |track, track_map| {
+        std.debug.assert(track.events.len == track_map.events.len);
+        std.debug.assert(track_map.chunk < map.chunks.len);
+        var previous: i64 = 0;
+        for (track.events) |e| {
+            std.debug.assert(e.at >= 0);
+            std.debug.assert(e.at >= previous);
+            previous = e.at;
+            const data = e.payload.channelData(e.kind) orelse continue;
+            std.debug.assert(data.ch < 16);
+            std.debug.assert(data.d1 < 0x80);
+            std.debug.assert(data.d2 < 0x80);
+            if (e.kind == .pitch_bend) std.debug.assert(e.payload.bend.value <= 0x3FFF);
+        }
+    }
 }
 
 /// One pass over one file. Everything mutable the walk needs, so the

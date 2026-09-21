@@ -398,6 +398,29 @@ pub const Payload = extern union {
         };
     }
 
+    /// The channel and the data bytes of a channel message, in wire
+    /// order — `d2` is 0 for the one-byte kinds — or null when the kind
+    /// is not one. The writer spells the status and data bytes from it
+    /// and the reader's postconditions check them; the bytes come back
+    /// AS HELD (a builder may have seated a 200), which is why the
+    /// writer still masks.
+    pub fn channelData(self: Payload, kind: Kind) ?ChannelData {
+        return switch (kind.payloadField()) {
+            .note => .{ .ch = self.note.ch, .d1 = self.note.key, .d2 = self.note.vel },
+            .poly => .{ .ch = self.poly.ch, .d1 = self.poly.key, .d2 = self.poly.val },
+            .control => .{ .ch = self.control.ch, .d1 = self.control.num, .d2 = self.control.val },
+            .program => .{ .ch = self.program.ch, .d1 = self.program.num, .d2 = 0 },
+            .pressure => .{ .ch = self.pressure.ch, .d1 = self.pressure.val, .d2 = 0 },
+            // 14 bits, LSB first, centre 8192.
+            .bend => .{
+                .ch = self.bend.ch,
+                .d1 = @truncate(self.bend.value & 0x7F),
+                .d2 = @truncate((self.bend.value >> 7) & 0x7F),
+            },
+            else => null,
+        };
+    }
+
     /// Whether two payloads of the same kind agree on everything they
     /// hold THEMSELVES.
     ///
@@ -429,6 +452,10 @@ pub const Payload = extern union {
         };
     }
 };
+
+/// What `Payload.channelData` answers: a channel message's channel and
+/// its one or two data bytes, in the order the file spells them.
+pub const ChannelData = struct { ch: u8, d1: u8, d2: u8 };
 
 /// One event at an ABSOLUTE tick in the file's division.
 pub const Event = struct {
@@ -484,6 +511,28 @@ pub const Sequence = struct {
         var n: usize = 0;
         for (self.tracks) |t| n += t.events.len;
         return n;
+    }
+
+    /// What holds of EVERY `Sequence`, whoever built it — the reader,
+    /// a `Builder`, the residue's rebuild, the document bridge: each run
+    /// an event or a foreign chunk names lies inside `pool`, so `bytesOf`
+    /// is total. Asserted at the end of the reader and the entry of the
+    /// writer (plan 12, "The invariants"). Nothing about the VALUES is
+    /// claimed: a builder may seat a data byte of 200 or events out of
+    /// tick order, and the writer masks the one and sorts the other; what
+    /// the READER establishes beyond this is asserted in `read.zig`.
+    pub fn invariants(self: *const Sequence) void {
+        for (self.tracks) |t| {
+            for (t.events) |e| {
+                const run = e.payload.poolBytes(e.kind) orelse continue;
+                std.debug.assert(run.off <= self.pool.len);
+                std.debug.assert(run.len <= self.pool.len - run.off);
+            }
+        }
+        for (self.foreign) |chunk| {
+            std.debug.assert(chunk.bytes.off <= self.pool.len);
+            std.debug.assert(chunk.bytes.len <= self.pool.len - chunk.bytes.off);
+        }
     }
 };
 
@@ -582,6 +631,20 @@ comptime {
     std.debug.assert(@alignOf(Payload) == 4);
     std.debug.assert(@sizeOf(Event) == 24);
     std.debug.assert(@alignOf(Event) == 8);
+
+    // The reader's one table is the inverse of the writer's: a kind with
+    // a status byte is the kind that byte names, and a kind without one
+    // is named by no byte at all. A build break rather than a per-event
+    // assert, since it is a property of the two tables and not of a
+    // value.
+    for (std.enums.values(Kind)) |kind| {
+        if (kind.status()) |status_byte| {
+            std.debug.assert(Kind.fromStatus(status_byte) == kind);
+            std.debug.assert(kind.dataBytes() == 1 or kind.dataBytes() == 2);
+        } else {
+            std.debug.assert(!kind.isChannel());
+        }
+    }
 }
 
 test "Division: the grid PPQ is as read, OpenMPT's conversion for SMPTE, 96 for a zero" {
@@ -736,6 +799,86 @@ test "Kind: payloadField names one member per kind, and poolBytes finds the runs
     try testing.expectEqual(Field.residue, Kind.tempura_residue.payloadField());
     try testing.expectEqual(Field.tempo, Kind.set_tempo.payloadField());
     try testing.expectEqual(Field.none, Kind.end_of_track.payloadField());
+}
+
+test "Payload: channelData is the wire order of every channel kind, and null for the rest" {
+    const Case = struct { kind: Kind, payload: Payload, want: ChannelData };
+    const cases = [_]Case{
+        .{
+            .kind = .note_on,
+            .payload = .{ .note = .{ .ch = 3, .key = 60, .vel = 100 } },
+            .want = .{ .ch = 3, .d1 = 60, .d2 = 100 },
+        },
+        .{
+            .kind = .note_off,
+            .payload = .{ .note = .{ .ch = 3, .key = 60, .vel = 64 } },
+            .want = .{ .ch = 3, .d1 = 60, .d2 = 64 },
+        },
+        .{
+            .kind = .poly_pressure,
+            .payload = .{ .poly = .{ .ch = 1, .key = 2, .val = 3 } },
+            .want = .{ .ch = 1, .d1 = 2, .d2 = 3 },
+        },
+        .{
+            .kind = .control_change,
+            .payload = .{ .control = .{ .ch = 0, .num = 7, .val = 127 } },
+            .want = .{ .ch = 0, .d1 = 7, .d2 = 127 },
+        },
+        // The one-byte kinds answer a zero second byte the writer never
+        // emits.
+        .{
+            .kind = .program_change,
+            .payload = .{ .program = .{ .ch = 9, .num = 5 } },
+            .want = .{ .ch = 9, .d1 = 5, .d2 = 0 },
+        },
+        .{
+            .kind = .channel_pressure,
+            .payload = .{ .pressure = .{ .ch = 9, .val = 80 } },
+            .want = .{ .ch = 9, .d1 = 80, .d2 = 0 },
+        },
+        // 14 bits, LSB first: centre 8192 is `00 40`, 8193 is `01 40`.
+        .{
+            .kind = .pitch_bend,
+            .payload = .{ .bend = .{ .ch = 0, .value = 8192 } },
+            .want = .{ .ch = 0, .d1 = 0x00, .d2 = 0x40 },
+        },
+        .{
+            .kind = .pitch_bend,
+            .payload = .{ .bend = .{ .ch = 0, .value = 8193 } },
+            .want = .{ .ch = 0, .d1 = 0x01, .d2 = 0x40 },
+        },
+    };
+    for (cases) |c| try testing.expectEqual(c.want, c.payload.channelData(c.kind).?);
+    // Everything else carries no channel.
+    for (std.enums.values(Kind)) |kind| {
+        if (kind.isChannel()) continue;
+        try testing.expectEqual(@as(?ChannelData, null), Payload.empty.channelData(kind));
+    }
+}
+
+test "Sequence.invariants: a built sequence holds, run by run" {
+    // Exercised on purpose (an invariant no value reaches proves
+    // nothing): the runs a builder seats are inside its pool, foreign
+    // chunks included, and the check walks them without complaint.
+    var b: Builder = .init(testing.allocator);
+    errdefer b.deinit();
+    const t0 = try b.addTrack();
+    try b.addEvent(t0, 0, .marker, .{ .bytes = try b.addBytes("intro") });
+    const unknown = try b.addBytes("\xAB");
+    try b.addEvent(t0, 0, .meta_unknown, .{ .meta = .{ .bytes = unknown, .meta_type = 0x0A } });
+    try b.addEvent(t0, 0, .tempura_residue, .{ .residue = .{
+        .ver = 1,
+        .kind = 1,
+        .seq = 0,
+        .total = 1,
+        .body = try b.addBytes("hi"),
+    } });
+    try b.addEvent(t0, 96, .end_of_track, .empty);
+    try b.addForeign("XFIH".*, try b.addBytes("somebody's chunk"));
+    var seq = try b.finish();
+    defer seq.deinit();
+    seq.invariants();
+    try testing.expectEqual(@as(usize, 5 + 1 + 2 + 16), seq.pool.len);
 }
 
 test "Payload: eqlOutsidePool compares the active member, never the union's other bytes" {
