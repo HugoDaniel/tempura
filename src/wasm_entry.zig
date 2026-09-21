@@ -156,9 +156,21 @@ comptime {
 /// The status every lifecycle verb returns. See the header.
 const Status = enum(u32) { ok = 0, diagnostics = 1, bad_call = 2, oom = 3 };
 
+comptime {
+    // The header's table IS the wire: a host switches on these numbers.
+    std.debug.assert(@intFromEnum(Status.ok) == 0);
+    std.debug.assert(@intFromEnum(Status.diagnostics) == 1);
+    std.debug.assert(@intFromEnum(Status.bad_call) == 2);
+    std.debug.assert(@intFromEnum(Status.oom) == 3);
+    // `kindOf`'s two answers are `Doc.AnchorKind`'s own ordinals, so a
+    // host that reads one from a `'TPTL'` lane record can hand it back.
+    std.debug.assert(@intFromEnum(doc.AnchorKind.smf) == 0);
+    std.debug.assert(@intFromEnum(doc.AnchorKind.it) == 1);
+}
+
 /// `kind` as the two lifecycle verbs spell it on the wire: 0 is a `.mid`,
 /// 1 is a `.it`. `Doc.AnchorKind`'s own ordinals, so the wire and the
-/// value agree by construction.
+/// value agree by construction (the `comptime` block above pins it).
 fn kindOf(kind: u32) ?doc.AnchorKind {
     return switch (kind) {
         0 => .smf,
@@ -328,6 +340,9 @@ fn install(next: State) u32 {
         .{ .stage = .derivation, .list = &s.derived.diags },
     };
     diags_len = @intCast(TprAbi.encodeDiags(&sources, &diags_buffer).len);
+    // The encoder truncates by design and never overruns: the zone's
+    // fill is what a host reads, so the border is where that is pinned.
+    std.debug.assert(diags_len <= DIAGS_CAP);
     const bad = s.report().hasErrors() or s.derived.diags.hasErrors();
     return @intFromEnum(if (bad) Status.diagnostics else Status.ok);
 }
@@ -338,6 +353,7 @@ fn install(next: State) u32 {
 fn publishDiags(stage: TprAbi.Stage, list: *const Diag.List) void {
     const sources = [_]TprAbi.DiagSource{.{ .stage = stage, .list = list }};
     diags_len = @intCast(TprAbi.encodeDiags(&sources, &diags_buffer).len);
+    std.debug.assert(diags_len <= DIAGS_CAP);
 }
 
 /// Copy `bytes` into `zone` and answer its length, or 0 when the zone
@@ -346,6 +362,9 @@ fn publishDiags(stage: TprAbi.Stage, list: *const Diag.List) void {
 fn fill(zone: []u8, bytes: []const u8) u32 {
     if (bytes.len > zone.len) return 0;
     @memcpy(zone[0..bytes.len], bytes);
+    // Every zone's cap is reported through a u32 accessor (the `comptime`
+    // block under the caps), so the fill is one too.
+    std.debug.assert(bytes.len <= std.math.maxInt(u32));
     return @intCast(bytes.len);
 }
 
@@ -570,6 +589,8 @@ export fn tpr_text() u32 {
 export fn tpr_timeline() u32 {
     const s = live() orelse return 0;
     const blob = TprAbi.encodeTimeline(&s.derived, &timeline_buffer) catch return 0;
+    // Never partial, never past the zone: the encoder refused instead.
+    std.debug.assert(blob.len <= TIMELINE_CAP);
     return @intCast(blob.len);
 }
 
@@ -588,6 +609,7 @@ export fn tpr_at(seconds: f64) u32 {
     };
     defer pos.deinit(gpa);
     const blob = TprAbi.encodePlayhead(pos, &playhead_buffer) catch return 0;
+    std.debug.assert(blob.len <= PLAYHEAD_CAP);
     return @intCast(blob.len);
 }
 
@@ -600,6 +622,7 @@ export fn tpr_atTick(tick: i64) u32 {
     var pos = Playhead.atTick(gpa, &s.derived, tick) catch return 0;
     defer pos.deinit(gpa);
     const blob = TprAbi.encodePlayhead(pos, &playhead_buffer) catch return 0;
+    std.debug.assert(blob.len <= PLAYHEAD_CAP);
     return @intCast(blob.len);
 }
 
