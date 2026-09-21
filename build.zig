@@ -47,6 +47,8 @@ pub fn build(b: *std.Build) void {
     addConform(ctx);
     addAuditDiagnostics(ctx);
     const docs_check = addDocs(ctx);
+    // Not yet in `verify`: joined once the tree it checks is clean.
+    _ = addLint(ctx);
 
     // `zig build verify` — the whole gate in one verb. The corpus runs
     // through its OWN run step, without `b.args`: `zig build verify --
@@ -600,6 +602,29 @@ fn addDocs(ctx: Ctx) *std.Build.Step {
     timeline_docs_check.setCwd(b.path("."));
     timeline_docs_check.addArtifactArg(sjon_cli);
     return &timeline_docs_check.step;
+}
+
+/// `zig build lint` — plan 12's rules as a gate (`tools/lint.zig`'s
+/// header lists them). Its own tests run first, as the fixture
+/// generator's do: the tool is rooted in `tools/`, so no other root
+/// reaches them. `has_side_effects` because the input is the source tree
+/// itself, which the build graph does not track as a file dependency.
+fn addLint(ctx: Ctx) *std.Build.Step {
+    const b = ctx.b;
+    const lint_mod = b.createModule(.{
+        .root_source_file = b.path("tools/lint.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+    });
+    const lint_exe = b.addExecutable(.{ .name = "lint", .root_module = lint_mod });
+    const run_lint = b.addRunArtifact(lint_exe);
+    run_lint.addDirectoryArg(b.path("."));
+    run_lint.has_side_effects = true;
+    run_lint.step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lint_mod })).step);
+    const lint_step = b.step("lint", "Check plan 12's rules: function length, columns, " ++
+        "allocator names, proofs, bounds, IO in the core, docs");
+    lint_step.dependOn(&run_lint.step);
+    return &run_lint.step;
 }
 
 /// …and the landing proof, through the REAL `pacer.wasm` (pacer's
