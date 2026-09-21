@@ -171,49 +171,29 @@ pub fn parseChunk(gpa: Allocator, bytes: []const u8) Error!ParsedChunk {
     defer if (!kept) arena.deinit();
     const a = arena.allocator();
 
-    var parts: std.ArrayList(records.Part) = .empty;
-    var lanes: std.ArrayList([]const u8) = .empty;
-    var conductor: ?[]const u8 = null;
+    var taken: records.Gathered = .{};
     var newer: ?u8 = null;
 
     var at: usize = 0;
+    // Bounded by the chunk's own length: every record read moves `at`
+    // past its head, and a head that does not fit ends the walk.
     while (at < bytes.len) {
-        const head = records.readHead(bytes[at..]) orelse return .{ .corrupt = .residue_corrupt };
-        at += records.head_len;
-        if (bytes.len - at < 4) return .{ .corrupt = .residue_corrupt };
-        const len = std.mem.readInt(u32, bytes[at..][0..4], .little);
-        at += 4;
-        if (bytes.len - at < len) return .{ .corrupt = .residue_corrupt };
-        const body = bytes[at..][0..len];
-        at += len;
-
-        if (head.ver != records.version) {
-            if (newer == null) newer = head.ver;
+        const rec = framedAt(bytes, at) orelse return .{ .corrupt = .residue_corrupt };
+        at = rec.next;
+        if (rec.payload.ver != records.version) {
+            if (newer == null) newer = rec.payload.ver;
             continue;
         }
-        switch (@as(records.Kind, @enumFromInt(head.kind))) {
-            .essence => try parts.append(a, .{
-                .seq = head.seq,
-                .total = head.total,
-                .body = try a.dupe(u8, body),
-            }),
-            .lane => try lanes.append(a, try a.dupe(u8, body)),
-            .conductor => if (conductor == null) {
-                conductor = try a.dupe(u8, body);
-            },
-            // `04` is midivia's; anything else is nobody's this build
-            // knows. The chunk is re-emitted whole by the IT writer, so
-            // stepping over them here loses nothing.
-            .reserved, _ => {},
-        }
+        // `04` is midivia's; anything else is nobody's this build
+        // knows. The chunk is re-emitted whole by the IT writer, so
+        // stepping over them here loses nothing.
+        _ = try taken.take(a, rec.payload);
     }
 
     // The framing held but nothing in it is this version's: the whole
     // chunk belongs to a newer tempura.
     if (newer) |v| {
-        if (parts.items.len == 0 and lanes.items.len == 0 and conductor == null) {
-            return .{ .version = v };
-        }
+        if (taken.isEmpty()) return .{ .version = v };
     }
 
     // A chunk never splits the essence — it has room — but a reader that
@@ -222,7 +202,7 @@ pub fn parseChunk(gpa: Allocator, bytes: []const u8) Error!ParsedChunk {
     // business, and `choose` is where a corrupt chunk becomes one.
     var quiet: Diag.List = .init(gpa);
     defer quiet.deinit();
-    const essence_body = try records.reassemble(a, parts.items, &quiet);
+    const essence_body = try records.reassemble(a, taken.parts.items, &quiet);
     if (quiet.count(.residue_corrupt) > 0) return .{ .corrupt = .residue_corrupt };
 
     kept = true;
@@ -230,10 +210,28 @@ pub fn parseChunk(gpa: Allocator, bytes: []const u8) Error!ParsedChunk {
         .arena = arena,
         .payloads = .{
             .essence = essence_body,
-            .conductor = conductor,
-            .lanes = lanes.items,
+            .conductor = taken.conductor,
+            .lanes = taken.lanes.items,
         },
     } };
+}
+
+/// One record as the chunk frames it, at `at`: the envelope, the `u32
+/// LE` length the chunk supplies, and the body it promises — with
+/// `next` the offset of the record after it. Null when the framing does
+/// not hold: no envelope, no room for the length, or a body the chunk
+/// has not got. Pure over the bytes, and total on any of them.
+const Framed = struct { payload: records.Payload, next: usize };
+
+fn framedAt(bytes: []const u8, at: usize) ?Framed {
+    var p = records.readHead(bytes[at..]) orelse return null;
+    var cursor = at + records.head_len;
+    if (bytes.len - cursor < 4) return null;
+    const len = std.mem.readInt(u32, bytes[cursor..][0..4], .little);
+    cursor += 4;
+    if (bytes.len - cursor < len) return null;
+    p.body = bytes[cursor..][0..len];
+    return .{ .payload = p, .next = cursor + len };
 }
 
 // ---- the message tail ------------------------------------------------
@@ -520,58 +518,8 @@ const Tailer = struct {
             try self.raw(" :from ");
             try self.symbol(b.anchor);
             switch (b.address) {
-                .smf => |s| {
-                    try self.raw(" :track ");
-                    try self.int(s.track);
-                    // The canonical printer's spelling: `:ch 2`, or
-                    // `:ch [1 2]` for a set.
-                    try self.raw(" :ch ");
-                    if (s.ch.count() == 1) {
-                        try self.int(@as(u8, s.ch.first()) + 1);
-                    } else {
-                        try self.raw("[");
-                        var it = s.ch.iterator();
-                        var sep = false;
-                        while (it.next()) |c| {
-                            if (sep) try self.raw(" ");
-                            sep = true;
-                            try self.int(@as(u8, c) + 1);
-                        }
-                        try self.raw("]");
-                    }
-                    if (s.key) |k| {
-                        try self.raw(" :key ");
-                        try self.int(k);
-                    }
-                    if (s.curve) |curve| switch (curve) {
-                        .cc => |n| {
-                            try self.raw(" :cc ");
-                            try self.int(n);
-                        },
-                        .cc14 => |pair| {
-                            try self.raw(" :cc [");
-                            try self.int(pair[0]);
-                            try self.raw(" ");
-                            try self.int(pair[1]);
-                            try self.raw("]");
-                        },
-                        .bend => try self.raw(" :bend true"),
-                        .pressure => try self.raw(" :pressure true"),
-                        .velocity => try self.raw(" :velocity true"),
-                    };
-                },
-                .it => |s| {
-                    try self.raw(" :channel ");
-                    try self.int(@as(u8, s.channel) + 1);
-                    if (s.column) |col| {
-                        try self.raw(" :column ");
-                        try self.raw(@tagName(col));
-                    }
-                    if (s.fx) |letter| {
-                        try self.raw(" :fx ");
-                        try self.string(&[_]u8{letter});
-                    }
-                },
+                .smf => |s| try self.smfAddress(s),
+                .it => |s| try self.itAddress(s),
             }
         }
         if (l.range) |r| {
@@ -593,6 +541,71 @@ const Tailer = struct {
         }
         try self.raw(")");
         try self.commit(group_lane);
+    }
+
+    /// A `.mid` address's keys: the track, the channel or channel set,
+    /// and the key and the controller that narrow it, in the canonical
+    /// printer's order and spelling.
+    fn smfAddress(self: *Tailer, s: @FieldType(Doc.Address, "smf")) Error!void {
+        try self.raw(" :track ");
+        try self.int(s.track);
+        try self.raw(" :ch ");
+        try self.channels(s.ch);
+        if (s.key) |k| {
+            try self.raw(" :key ");
+            try self.int(k);
+        }
+        if (s.curve) |curve| try self.curveKey(curve);
+    }
+
+    /// The canonical printer's spelling of a channel set: `2` for one
+    /// channel, `[1 2]` for several, 1-based as the document counts.
+    fn channels(self: *Tailer, chs: Doc.Channels) Error!void {
+        if (chs.count() == 1) return self.int(@as(u8, chs.first()) + 1);
+        try self.raw("[");
+        var it = chs.iterator();
+        var sep = false;
+        while (it.next()) |c| {
+            if (sep) try self.raw(" ");
+            sep = true;
+            try self.int(@as(u8, c) + 1);
+        }
+        try self.raw("]");
+    }
+
+    /// The one key that names a curve's controller surface.
+    fn curveKey(self: *Tailer, curve: Doc.SmfCurve) Error!void {
+        switch (curve) {
+            .cc => |n| {
+                try self.raw(" :cc ");
+                try self.int(n);
+            },
+            .cc14 => |pair| {
+                try self.raw(" :cc [");
+                try self.int(pair[0]);
+                try self.raw(" ");
+                try self.int(pair[1]);
+                try self.raw("]");
+            },
+            .bend => try self.raw(" :bend true"),
+            .pressure => try self.raw(" :pressure true"),
+            .velocity => try self.raw(" :velocity true"),
+        }
+    }
+
+    /// A `.it` address's keys: the channel, 1-based, and the column and
+    /// effect letter that narrow it.
+    fn itAddress(self: *Tailer, s: @FieldType(Doc.Address, "it")) Error!void {
+        try self.raw(" :channel ");
+        try self.int(@as(u8, s.channel) + 1);
+        if (s.column) |col| {
+            try self.raw(" :column ");
+            try self.raw(@tagName(col));
+        }
+        if (s.fx) |letter| {
+            try self.raw(" :fx ");
+            try self.string(&[_]u8{letter});
+        }
     }
 
     /// A pacer root, verbatim but for its newlines, which become IT's.
