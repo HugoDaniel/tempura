@@ -900,6 +900,23 @@ const Ctx = struct {
     fn resize(self: *Ctx, x: Op.Resize) Error!void {
         var r = (try self.targets(x.sel)) orelse return;
         defer r.deinit();
+        // A note made longer reaches the next one on its key — one the
+        // document holds, or one this same plan is lengthening — and two
+        // notes on one key in one lane cannot overlap (the document's
+        // own `note_overlap`). A resize is a move that stays put with a
+        // duration of its own, which is exactly the batch
+        // `refuseOverlaps` was written for, so it is refused there as a
+        // move would be rather than written and complained about on
+        // reload.
+        if (x.dur) |dur| {
+            var grown: std.ArrayList(Move) = .empty;
+            defer grown.deinit(self.gpa);
+            for (r.targets) |t| {
+                if (t.kind != .note) continue;
+                try grown.append(self.gpa, .{ .t = t, .to = t.at, .dur = @max(0, dur) });
+            }
+            if (try self.refuseOverlaps(grown.items)) return;
+        }
         for (r.targets) |t| {
             const w = (try self.where(t.span)) orelse return;
             switch (t.kind) {
@@ -3186,6 +3203,64 @@ test "ops: insert-tempo and insert-meter at a tick a point already holds are ref
     try testing.expect(meter.summary.refused);
     const m = meter.findDiag(.meter_map_invalid) orelse return error.NotRefused;
     try testing.expectEqual(fx.doc_().meter[1].span, m.span);
+}
+
+test "ops: a resize that would sound two notes on one key at once is edit_overlap" {
+    // Two notes on key 60, end to end. A note made longer than its slot
+    // reaches the next one, which is the document's own `note_overlap`
+    // on reload — so the plan is refused here, as a move onto the
+    // neighbour would be, naming the note in the way.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.adjacent);
+    defer fx.deinit();
+    const notes = fx.doc_().lanes[0].notes;
+
+    var first = try plan(gpa, fx.doc_(), &fx.tree, .{ .resize = .{
+        .sel = .{ .lanes = &.{"flash"}, .kinds = .notes, .range = .{ 0, 1 } },
+        .dur = 2 * TPQ,
+    } });
+    defer first.deinit();
+    try testing.expectEqual(@as(usize, 0), first.actions.len);
+    try testing.expect(first.summary.refused);
+    const d = first.findDiag(.edit_overlap) orelse return error.NotRefused;
+    try testing.expectEqual(notes[1].span, d.span);
+
+    // Both at once collide with EACH OTHER — a collision the plan makes
+    // with itself, which no check against the document as it stands
+    // would see.
+    var both = try plan(gpa, fx.doc_(), &fx.tree, .{ .resize = .{
+        .sel = .{ .lanes = &.{"flash"}, .kinds = .notes },
+        .dur = 2 * TPQ,
+    } });
+    defer both.deinit();
+    try testing.expectEqual(@as(usize, 0), both.actions.len);
+    try testing.expect(both.findDiag(.edit_overlap) != null);
+
+    // The second note has nothing after it: accepted, applied, and the
+    // document reloads clean with the length asked for.
+    var last = try plan(gpa, fx.doc_(), &fx.tree, .{ .resize = .{
+        .sel = .{ .lanes = &.{"flash"}, .kinds = .notes, .range = .{ TPQ, 2 * TPQ } },
+        .dur = 2 * TPQ,
+    } });
+    defer last.deinit();
+    try testing.expect(!last.summary.refused);
+    try testing.expectEqual(@as(usize, 1), last.actions.len);
+    var re = try test_support.Reloaded.init(gpa, fx.source, &last);
+    defer re.deinit();
+    try testing.expectEqual(@as(i64, 2 * TPQ), re.doc_().lanes[0].notes[1].dur);
+
+    // Both made shorter never collide.
+    var shorter = try plan(gpa, fx.doc_(), &fx.tree, .{ .resize = .{
+        .sel = .{ .lanes = &.{"flash"}, .kinds = .notes },
+        .dur = @divExact(TPQ, 2),
+    } });
+    defer shorter.deinit();
+    try testing.expect(!shorter.summary.refused);
+    try testing.expectEqual(@as(usize, 2), shorter.actions.len);
+    var re_short = try test_support.Reloaded.init(gpa, fx.source, &shorter);
+    defer re_short.deinit();
+    try testing.expectEqual(@as(i64, @divExact(TPQ, 2)), re_short.doc_().lanes[0].notes[0].dur);
+    try testing.expectEqual(@as(i64, @divExact(TPQ, 2)), re_short.doc_().lanes[0].notes[1].dur);
 }
 
 test "ops: remove a clip whose window does not fit an i64, and the document reloads" {

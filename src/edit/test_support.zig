@@ -240,6 +240,20 @@ pub const unsorted: [:0]const u8 =
     \\
 ;
 
+/// Two notes on ONE key, end to end: the second starts where the first
+/// stops, so a note made longer than its slot sounds over the other —
+/// the shape `resize` has to refuse, as a move would.
+pub const adjacent: [:0]const u8 =
+    \\(timeline :length 1bar)
+    \\(tempo-point :at 0q :qpm 120)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(lane :name flash
+    \\  (note :at 0q :dur 1q :key 60)
+    \\  (note :at 1q :dur 1q :key 60))
+    \\
+;
+
 /// Two tempo points and two meter points, spread out: the shape that
 /// tells "after the last root of this head" from "at the tick's own
 /// place among them".
