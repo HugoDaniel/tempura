@@ -240,6 +240,35 @@ pub const unsorted: [:0]const u8 =
     \\
 ;
 
+/// Two tempo points and two meter points, spread out: the shape that
+/// tells "after the last root of this head" from "at the tick's own
+/// place among them".
+pub const spread: [:0]const u8 =
+    \\(timeline :length 8bar)
+    \\(tempo-point :at 0q :qpm 120)
+    \\(tempo-point :at 8q :qpm 100)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\(meter-point :at 4bar :sig [3 4])
+    \\
+    \\(lane :name flash
+    \\  (note :at 0q :dur 1q :key 60))
+    \\
+;
+
+/// A document whose tempo map STARTS LATE: no point at tick 0, which is
+/// `tempo_map_invalid` at load (`Fixture.initUnchecked`). The one shape
+/// in which an inserted point precedes every root of its head — and the
+/// edit that repairs the document, so its reload is the proof.
+pub const late_tempo: [:0]const u8 =
+    \\(timeline :length 4bar)
+    \\(tempo-point :at 4q :qpm 100)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(lane :name flash
+    \\  (note :at 0q :dur 1q :key 60))
+    \\
+;
+
 /// A clip whose window does not fit an `i64`: a phrase two ticks under
 /// the grid ceiling, placed with a `:repeat` the manifest puts no
 /// maximum on. The phrase's lane is empty, so the document places

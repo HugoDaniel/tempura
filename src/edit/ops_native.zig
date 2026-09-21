@@ -431,16 +431,55 @@ const Ctx = struct {
             if (self.tree.tagOf(root) != .form) continue;
             if (std.mem.eql(u8, self.tree.formHeader(root).head, head)) after = @intCast(i);
         }
+        try self.insertRootBefore(if (after) |i| i + 1 else null, json);
+    }
+
+    /// `insert_root` at the CHRONOLOGICAL place among the roots that
+    /// `points` are the document's reading of — the tempo or the meter
+    /// points, each with its `tick` and its `span`: directly after the
+    /// last one whose tick is below `tick`, before the first one when
+    /// the new point precedes them all, and after the head's last root
+    /// (`insertRootAfterHead`) when the document has none to order
+    /// against.
+    ///
+    /// "After the last root of this head" is not enough for a point: the
+    /// map's validation (`TimeMap.derive`) reads the points in DOCUMENT
+    /// order and wants each after the previous one, so a point at 1bar
+    /// appended after one at 8q is text the reload refuses as
+    /// `tempo_map_invalid` — a document the operation wrote and nobody
+    /// can load, which is the contract's other half. A point at a tick
+    /// one already occupies is the caller's to refuse before it gets
+    /// here.
+    fn insertRootInOrder(self: *Ctx, head: []const u8, tick: i64, points: anytype, json: []const u8) Error!void {
+        var after: ?u32 = null;
+        var before: ?u32 = null;
+        for (points) |p| {
+            const w = (try self.where(p.span)) orelse return;
+            if (w.parent != null) {
+                try self.refuseUnaddressable(p.span);
+                return;
+            }
+            if (p.tick < tick) {
+                if (after == null or w.slot > after.?) after = w.slot;
+            } else if (before == null or w.slot < before.?) {
+                before = w.slot;
+            }
+        }
+        if (after) |i| return self.insertRootBefore(i + 1, json);
+        if (before) |i| return self.insertRootBefore(i, json);
+        return self.insertRootAfterHead(head, json);
+    }
+
+    /// `insert_root` before root `index` of the document as it stands,
+    /// or an append for null — and for an index past the last root,
+    /// which is the omitted-index spelling (§11.3) and lands where a
+    /// re-print would put it: past the document's trailing comments
+    /// rather than in front of them.
+    fn insertRootBefore(self: *Ctx, index: ?u32, json: []const u8) Error!void {
         const count: u32 = @intCast(self.tree.root.len);
-        // An append past the last root is the omitted-index spelling
-        // (§11.3), and it lands where a re-print would put it — past the
-        // document's trailing comments rather than in front of them.
-        const index: ?u32 = if (after) |i| blk: {
-            const want = i + 1 + self.root_inserts;
-            break :blk if (want >= count + self.root_inserts) null else want;
-        } else null;
+        const at: ?u32 = if (index) |i| (if (i >= count) null else i + self.root_inserts) else null;
         self.root_inserts += 1;
-        try self.b.insertRoot(index, json);
+        try self.b.insertRoot(at, json);
     }
 
     /// The form an `insert` builds, key by key in the schema's own order.
@@ -1303,10 +1342,29 @@ const Ctx = struct {
         return true;
     }
 
+    /// A point at a tick the map already has a point at: the reload
+    /// would say `tempo_map_invalid` / `meter_map_invalid` ("not after
+    /// the previous point"), so the planner says it first, with that
+    /// code, at the point that is there. True = refused.
+    fn refuseIfOccupied(self: *Ctx, code: Diag.Code, what: []const u8, points: anytype, tick: i64) Error!bool {
+        for (points) |p| {
+            if (p.tick != tick) continue;
+            try self.b.refuse(
+                code,
+                p.span,
+                "a {s} point already sits at tick {d}; a second one there would not load (one point per tick). Remove this one first, or insert at another tick",
+                .{ what, tick },
+            );
+            return true;
+        }
+        return false;
+    }
+
     /// A tempo point, and — in `wall_clock` mode — the retime that keeps
     /// every later event at the second it was already at.
     fn insertTempo(self: *Ctx, x: Op.InsertTempo) Error!void {
         if (try self.refuseIfConducted("tempo")) return;
+        if (try self.refuseIfOccupied(.tempo_map_invalid, "tempo", self.d.tempo, x.point.tick)) return;
         var points: std.ArrayList(doc.TempoPoint) = .empty;
         defer points.deinit(self.gpa);
         try points.appendSlice(self.gpa, self.d.tempo);
@@ -1359,7 +1417,7 @@ const Ctx = struct {
             .us => |us| try f.integer("us", us),
             .qpm => |qpm| try f.float("qpm", @floatCast(qpm)),
         }
-        try self.insertRootAfterHead("tempo-point", try f.done());
+        try self.insertRootInOrder("tempo-point", x.point.tick, self.d.tempo, try f.done());
     }
 
     /// A meter point, and the re-spelling that keeps the document saying
@@ -1372,6 +1430,7 @@ const Ctx = struct {
     /// the grid and the clock, neither of which a meter touches.
     fn insertMeter(self: *Ctx, x: Op.InsertMeter) Error!void {
         if (try self.refuseIfConducted("meter")) return;
+        if (try self.refuseIfOccupied(.meter_map_invalid, "meter", self.d.meter, x.point.tick)) return;
         if (self.map.isBarLine(x.point.tick) == null) {
             try self.b.refuse(
                 .edit_off_bar,
@@ -1406,7 +1465,7 @@ const Ctx = struct {
         defer f.deinit();
         try f.position("at", self.map, x.point.tick);
         try f.raw("sig", try std.fmt.allocPrint(self.a(), "[{d},{d}]", .{ x.point.n, x.point.d }));
-        try self.insertRootAfterHead("meter-point", try f.done());
+        try self.insertRootInOrder("meter-point", x.point.tick, self.d.meter, try f.done());
     }
 
     /// Re-spell every position and duration of `node` (and of its
@@ -2276,16 +2335,19 @@ test "ops: insert-tempo and insert-meter on a CONDUCTED document are refused" {
         try testing.expect(d.span.end > d.span.start);
     }
 
-    // …and the same two operations on the same document with the
-    // `:conductor` gone are not refused, so the guard is the conductor's
-    // and not the tick's.
+    // …and the same operation on a document with no `:conductor` is not
+    // refused, so the guard is the conductor's and not the tick's. (At a
+    // tick the native map has no point at yet — its own point at 0q
+    // would make the same operation THERE `tempo_map_invalid`, which is
+    // the other guard and the other test.)
     var free = try test_support.Fixture.init(gpa, test_support.native);
     defer free.deinit();
     var ok = try plan(gpa, free.doc_(), &free.tree, .{
-        .insert_tempo = .{ .point = .{ .tick = 0, .tempo = .{ .qpm = 140 } } },
+        .insert_tempo = .{ .point = .{ .tick = 4 * TPQ, .tempo = .{ .qpm = 140 } } },
     });
     defer ok.deinit();
     try testing.expect(ok.findDiag(.conductor_conflict) == null);
+    try testing.expect(!ok.summary.refused);
     try testing.expect(ok.actions.len > 0);
 }
 
@@ -2978,6 +3040,153 @@ test "ops: rename a section, and rename a target no pacer form declares" {
 }
 
 // ---- plan 07's contract, asked of the document an accepted plan leaves ----
+
+/// The one root the plan inserted, as the index it named — or null when
+/// the plan appended (no index) or inserted nothing.
+fn insertedRootIndex(p: *const Plan.Plan) ?u32 {
+    for (p.actions) |a| {
+        if (a.kind == .insert_root) return a.slot;
+    }
+    return null;
+}
+
+test "ops: insert-tempo lands at its tick's own place among the points, and the document reloads" {
+    // With points at 0q and 8q, a point at 4q used to go in after the
+    // LAST `tempo-point` root — after 8q — and the reload said
+    // `tempo_map_invalid` of text the operation itself wrote. The place
+    // is the chronological one: directly after the last root whose tick
+    // is below the new one, which here is root 1.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.spread);
+    defer fx.deinit();
+
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .insert_tempo = .{ .point = .{ .tick = 4 * TPQ, .tempo = .{ .qpm = 110 } } },
+    });
+    defer p.deinit();
+    try testing.expect(!p.summary.refused);
+    const actions = try p.text(gpa);
+    defer gpa.free(actions);
+    try testing.expectEqualStrings(
+        \\[
+        \\{"op":"insert_root","index":2,"value":{"$form":"tempo-point","at":{"$num":[1,"bar"]},"qpm":110}}
+        \\]
+        \\
+    , actions);
+
+    var re = try test_support.Reloaded.init(gpa, fx.source, &p);
+    defer re.deinit();
+    const tempo = re.doc_().tempo;
+    try testing.expectEqual(@as(usize, 3), tempo.len);
+    try testing.expectEqual(@as(i64, 0), tempo[0].tick);
+    try testing.expectEqual(@as(i64, 4 * TPQ), tempo[1].tick);
+    try testing.expectEqual(@as(i64, 8 * TPQ), tempo[2].tick);
+
+    // Past every point it goes after the last one — root 2, so index
+    // 3 — which is where it always went; the change is only to where a
+    // point in the middle lands.
+    var late = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .insert_tempo = .{ .point = .{ .tick = 12 * TPQ, .tempo = .{ .qpm = 90 } } },
+    });
+    defer late.deinit();
+    try testing.expectEqual(@as(?u32, 3), insertedRootIndex(&late));
+    var re_late = try test_support.Reloaded.init(gpa, fx.source, &late);
+    defer re_late.deinit();
+    try testing.expectEqual(@as(i64, 12 * TPQ), re_late.doc_().tempo[2].tick);
+
+    // …and the wall-clock mode places the root the same way; what it
+    // moves besides are the events after the point, which this document
+    // has none of.
+    var wall = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .insert_tempo = .{ .point = .{ .tick = 4 * TPQ, .tempo = .{ .qpm = 110 } }, .mode = .wall_clock },
+    });
+    defer wall.deinit();
+    try testing.expectEqual(@as(?u32, 2), insertedRootIndex(&wall));
+    var re_wall = try test_support.Reloaded.init(gpa, fx.source, &wall);
+    defer re_wall.deinit();
+    try testing.expectEqual(@as(i64, 4 * TPQ), re_wall.doc_().tempo[1].tick);
+}
+
+test "ops: insert-meter lands at its tick's own place among the points, and the document reloads" {
+    // 2bar is 8q under the [4 4] before it — a bar line — and lies
+    // between the meter points at 0bar and 4bar, roots 3 and 4. The
+    // point at 4bar is re-spelled by the same plan (it is bar 6 once two
+    // bars of [2 4] precede it), so the reload reads three points in
+    // order at 0, 8q and 16q.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.spread);
+    defer fx.deinit();
+
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .insert_meter = .{ .point = .{ .tick = 8 * TPQ, .n = 2, .d = 4 } },
+    });
+    defer p.deinit();
+    try testing.expect(!p.summary.refused);
+    try testing.expectEqual(@as(?u32, 4), insertedRootIndex(&p));
+
+    var re = try test_support.Reloaded.init(gpa, fx.source, &p);
+    defer re.deinit();
+    const meter = re.doc_().meter;
+    try testing.expectEqual(@as(usize, 3), meter.len);
+    try testing.expectEqual(@as(i64, 0), meter[0].tick);
+    try testing.expectEqual(@as(i64, 8 * TPQ), meter[1].tick);
+    try testing.expectEqual(@as(u8, 2), meter[1].n);
+    try testing.expectEqual(@as(i64, 16 * TPQ), meter[2].tick);
+    try testing.expectEqual(@as(u8, 3), meter[2].n);
+}
+
+test "ops: a point that precedes every point of its head goes in before the first, and repairs the map" {
+    // No point at tick 0 is `tempo_map_invalid` at load. Inserting one
+    // is the edit that repairs the document — provided it lands BEFORE
+    // the point at 4q, root 1, and not after it.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.initUnchecked(gpa, test_support.late_tempo);
+    defer fx.deinit();
+    try testing.expectEqual(@as(usize, 1), fx.loaded.diags.count(.tempo_map_invalid));
+
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .insert_tempo = .{ .point = .{ .tick = 0, .tempo = .{ .qpm = 120 } } },
+    });
+    defer p.deinit();
+    try testing.expect(!p.summary.refused);
+    try testing.expectEqual(@as(?u32, 1), insertedRootIndex(&p));
+
+    // `Reloaded.init` is the clean-document assertion: the reload has
+    // no `tempo_map_invalid` any more.
+    var re = try test_support.Reloaded.init(gpa, fx.source, &p);
+    defer re.deinit();
+    try testing.expectEqual(@as(usize, 2), re.doc_().tempo.len);
+    try testing.expectEqual(@as(i64, 0), re.doc_().tempo[0].tick);
+    try testing.expectEqual(@as(i64, 4 * TPQ), re.doc_().tempo[1].tick);
+}
+
+test "ops: insert-tempo and insert-meter at a tick a point already holds are refused with the reload's code" {
+    // Two points at one tick reload as `tempo_map_invalid` /
+    // `meter_map_invalid` ("not after the previous point"), so the plan
+    // is refused with that code at the point that is already there —
+    // `refuseIfConducted`'s precedent.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.spread);
+    defer fx.deinit();
+
+    var tempo = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .insert_tempo = .{ .point = .{ .tick = 8 * TPQ, .tempo = .{ .qpm = 110 } } },
+    });
+    defer tempo.deinit();
+    try testing.expectEqual(@as(usize, 0), tempo.actions.len);
+    try testing.expect(tempo.summary.refused);
+    const t = tempo.findDiag(.tempo_map_invalid) orelse return error.NotRefused;
+    try testing.expectEqual(fx.doc_().tempo[1].span, t.span);
+
+    var meter = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .insert_meter = .{ .point = .{ .tick = 16 * TPQ, .n = 2, .d = 4 } },
+    });
+    defer meter.deinit();
+    try testing.expectEqual(@as(usize, 0), meter.actions.len);
+    try testing.expect(meter.summary.refused);
+    const m = meter.findDiag(.meter_map_invalid) orelse return error.NotRefused;
+    try testing.expectEqual(fx.doc_().meter[1].span, m.span);
+}
 
 test "ops: remove a clip whose window does not fit an i64, and the document reloads" {
     // The selection used to overflow computing the clip's window before
