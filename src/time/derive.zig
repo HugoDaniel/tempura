@@ -46,7 +46,26 @@ pub const Cue = struct { name: []const u8, at: i64 };
 
 /// One note, placed: the document's own notes and every note a clip put
 /// on the timeline, in one list.
-pub const Onset = struct { tick: i64, dur: i64, key: u7, vel: u7 };
+///
+/// `ch` and `off_vel` are the note's own — `(note :ch …)` and
+/// `(note :off-vel …)` of plan 02, and for a BOUND lane the address's
+/// channel and the release velocity the file spelled. A playhead reads
+/// neither, but a renderer does: plan 08 writes note pairs "on `:ch`",
+/// and a lane whose notes name two channels is two channels' worth of
+/// music, not one. They carry defaults so the field set stays additive:
+/// a producer with nothing to say about a MIDI channel (an IT-bound
+/// lane, a synthetic onset in a test) says nothing.
+pub const Onset = struct {
+    tick: i64,
+    dur: i64,
+    key: u7,
+    vel: u7,
+    /// The MIDI channel, on the wire (`:ch 1` is 0).
+    ch: u4 = 0,
+    /// The release velocity, or null for "whatever the format's default
+    /// is" — 64 for a `.mid`.
+    off_vel: ?u7 = null,
+};
 
 /// One point on a curve lane — a keyframe of plan 02 with its tick
 /// resolved, and what `curveAt` hands back.
@@ -327,6 +346,8 @@ fn laneTable(
                 .dur = n.dur,
                 .key = n.key,
                 .vel = n.vel,
+                .ch = n.ch,
+                .off_vel = n.off_vel,
             });
             for (src.keyframes) |k| try steps.append(a, .{
                 .tick = k.at,
@@ -387,6 +408,8 @@ fn bound(
                             .dur = end - at,
                             .key = n.key,
                             .vel = n.vel,
+                            .ch = addr.ch,
+                            .off_vel = n.off_vel,
                         });
                     }
                 },
@@ -546,6 +569,8 @@ fn place(
                 .dur = n.dur,
                 .key = transposed(n.key, clip.transpose),
                 .vel = n.vel,
+                .ch = n.ch,
+                .off_vel = n.off_vel,
             });
         }
         for (from.keyframes) |k| {
@@ -744,6 +769,79 @@ test "derive: a native notes lane, its clip expanded by :repeat and :transpose" 
         .{ .tick = 207_567_360, .dur = 11_531_520, .key = 50, .vel = 80 },
         .{ .tick = 230_630_400, .dur = 11_531_520, .key = 50, .vel = 100 },
         .{ .tick = 253_693_440, .dur = 11_531_520, .key = 50, .vel = 80 },
+    }, lane.onsets);
+}
+
+test "derive: an onset carries its note's :ch and :off-vel, through a clip too" {
+    // A playhead reads neither, and a RENDERER reads both (plan 08:
+    // "note-on / note-off pairs on `:ch`"). They are the note's own,
+    // and a clip carries them across with the key it transposes.
+    const gpa = testing.allocator;
+    var doc: Doc = .empty(gpa);
+    defer doc.deinit();
+
+    var tempo = [_]tm.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
+    var meter = [_]tm.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
+    const span: Diag.Span = .{ .start = 0, .end = 1 };
+
+    var phrase_notes = [_]value.Note{
+        .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 9, .off_vel = 7, .span = span },
+    };
+    var phrase_lanes = [_]value.Lane{.{
+        .name = "kit",
+        .kind = .notes,
+        .target = "kit",
+        .range = null,
+        .binding = null,
+        .notes = &phrase_notes,
+        .keyframes = &.{},
+        .clips = &.{},
+        .query_src = null,
+        .expr_src = null,
+        .span = span,
+    }};
+    var phrases = [_]value.Phrase{.{ .name = "fill", .length = TPQ, .lanes = &phrase_lanes, .span = span }};
+
+    var notes = [_]value.Note{
+        .{ .at = 0, .dur = TPQ / 2, .key = 36, .vel = 110, .ch = 3, .off_vel = 20, .span = span },
+        .{ .at = TPQ, .dur = TPQ / 2, .key = 60, .vel = 90, .ch = 0, .off_vel = null, .span = span },
+    };
+    var clips = [_]value.Clip{.{
+        .at = 2 * TPQ,
+        .phrase = "fill",
+        .repeat = 1,
+        .offset = 0,
+        .length = null,
+        .transpose = 0,
+        .span = span,
+    }};
+    var lanes = [_]value.Lane{.{
+        .name = "kit",
+        .kind = .notes,
+        .target = "kit",
+        .range = null,
+        .binding = null,
+        .notes = &notes,
+        .keyframes = &.{},
+        .clips = &clips,
+        .query_src = null,
+        .expr_src = null,
+        .span = span,
+    }};
+    doc.tempo = &tempo;
+    doc.meter = &meter;
+    doc.phrases = &phrases;
+    doc.lanes = &lanes;
+    doc.length = bar44;
+
+    var d = try derive(gpa, &doc);
+    defer d.deinit();
+
+    const lane = d.laneByName("kit").?;
+    try testing.expectEqualSlices(Onset, &.{
+        .{ .tick = 0, .dur = TPQ / 2, .key = 36, .vel = 110, .ch = 3, .off_vel = 20 },
+        .{ .tick = TPQ, .dur = TPQ / 2, .key = 60, .vel = 90, .ch = 0, .off_vel = null },
+        .{ .tick = 2 * TPQ, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 9, .off_vel = 7 },
     }, lane.onsets);
 }
 
@@ -1489,8 +1587,11 @@ test "derive: a bound SMF notes lane, paired and converted to the grid" {
 
     const lead = d.laneByName("lead").?;
     try testing.expect(lead.bound);
+    // The address's channel and the file's own release velocity ride
+    // on the onset: a renderer writes the pair back on `:ch`, and the
+    // playhead simply ignores both.
     try testing.expectEqualSlices(Onset, &.{
-        .{ .tick = 0, .dur = 23_063_040, .key = 60, .vel = 100 },
+        .{ .tick = 0, .dur = 23_063_040, .key = 60, .vel = 100, .ch = 0, .off_vel = 64 },
     }, lead.onsets);
 
     // A bound curve's value stays NORMALISED; `:range` scales it at

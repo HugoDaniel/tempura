@@ -46,9 +46,10 @@ const Grid = @import("../time/Grid.zig");
 const derive = @import("../time/derive.zig");
 const itf = @import("../itf/itf.zig");
 const records = @import("../residue/records.zig");
+const reconcile = @import("../residue/reconcile.zig");
 
 const Allocator = std.mem.Allocator;
-const Module = itf.model;
+const model = itf.model;
 const testing = std.testing;
 
 /// Rendering can only fail the way any allocation fails.
@@ -132,8 +133,12 @@ pub fn renderIt(
     // one a dump will make of the same bytes, so the addresses agree.
     var rows = try itf.walk.derive(gpa, &module, .{});
     defer rows.deinit();
-    const played = try playedPatterns(gpa, &rows);
-    defer gpa.free(played);
+    // ONE owner for "which patterns sound": `reconcile` computes it when
+    // it re-hashes a lane, and a hash both sides compute has to be over
+    // the same set.
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const played = try reconcile.playedPatterns(scratch.allocator(), &rows);
 
     for (r.lanes.items) |*rec| {
         rec.hash = records.hashItLane(&module, &rows, &[_]u8{rec.address.it.channel}, played);
@@ -150,20 +155,6 @@ pub fn renderIt(
         .diags = diags,
         .arena = arena,
     };
-}
-
-/// Every pattern the walk played, ascending and deduplicated — the same
-/// list `residue/reconcile.zig` builds when it re-hashes a lane, because
-/// a hash both sides compute has to be over the same set.
-fn playedPatterns(gpa: Allocator, rows: *const itf.walk.RowMap) Error![]u16 {
-    var seen: std.ArrayList(u16) = .empty;
-    errdefer seen.deinit(gpa);
-    for (rows.rows) |row| {
-        if (std.mem.indexOfScalar(u16, seen.items, row.pattern) != null) continue;
-        try seen.append(gpa, row.pattern);
-    }
-    std.mem.sort(u16, seen.items, {}, std.sort.asc(u16));
-    return seen.toOwnedSlice(gpa);
 }
 
 // ---------------------------------------------------------------------
@@ -197,8 +188,16 @@ const Render = struct {
     /// The base's walk, for the anchored path. Null for a fresh module.
     rows: ?itf.walk.RowMap = null,
     orders: []const u8 = &.{},
+    /// The first channel this render may write to: 0 for a fresh module,
+    /// one past the anchor's highest used channel otherwise. The
+    /// conductor's own `Txx` cells obey it too — nothing tempura writes
+    /// goes into a cell the anchor was using.
+    first_channel: u16 = 0,
     said_no_instrument: bool = false,
     inexact: usize = 0,
+    /// How many notes were dropped because the voice's cell was already
+    /// taken by another note of the same lane.
+    collisions: usize = 0,
 
     fn deinit(self: *Render) void {
         self.patterns.deinit(self.gpa);
@@ -209,14 +208,14 @@ const Render = struct {
         var b: itf.Builder = .init(self.gpa);
         errdefer b.deinit();
 
-        const first_channel = try self.layout(&b);
+        self.first_channel = try self.layout(&b);
 
         // The conductor goes down FIRST: a `Txx` owns the effect column
         // of the cell it lands in, and a note that wanted an `SDx` there
         // has to know (plan 08, "when the cell's effect column is free").
         try self.conductorCells();
 
-        var channel: u16 = first_channel;
+        var channel: u16 = self.first_channel;
         for (self.doc.lanes, 0..) |*lane, i| {
             if (!try self.renders(lane)) continue;
             const want: u16 = switch (lane.kind) {
@@ -226,13 +225,13 @@ const Render = struct {
                 )),
                 else => 1,
             };
-            if (channel + want > Module.channels) {
+            if (channel + want > model.channels) {
                 try self.diags.add(
                     .render_channels_exhausted,
                     .warning,
                     lane.span,
                     "the lane '{s}' needs {d} channel(s) and this module has none left of its {d}; its content rides in the residue alone",
-                    .{ lane.name, want, Module.channels },
+                    .{ lane.name, want, model.channels },
                 );
                 continue;
             }
@@ -250,6 +249,13 @@ const Render = struct {
             .{ .start = 0, .end = 0 },
             "{d} position(s) do not land on this module's row grid ({d} ticks to the row) and were written to the nearest row",
             .{ self.inexact, self.speed },
+        );
+        if (self.collisions > 0) try self.diags.add(
+            .render_inexact,
+            .warning,
+            .{ .start = 0, .end = 0 },
+            "{d} note(s) rounded onto a cell one of their own lane's notes already held; a cell holds one note, so the later one was not written and rides in the residue alone",
+            .{self.collisions},
         );
 
         return b.finish();
@@ -271,7 +277,7 @@ const Render = struct {
                 @memcpy(dst.cells, p.cells);
                 try self.patterns.append(self.gpa, dst);
             }
-            for (src.instruments) |ins| try b.addInstrument(Module.nameText(&ins.name), ins.raw);
+            for (src.instruments) |ins| try b.addInstrument(model.nameText(&ins.name), ins.raw);
             for (src.samples) |s| try b.addSample(s);
             for (src.foreign) |f| try b.addForeign(f.tag, f.raw);
             self.orders = src.orders;
@@ -337,7 +343,7 @@ const Render = struct {
                     if (minor >= 1 and minor <= 255 and major >= 1 and major <= 255) {
                         b.module.header.highlight_minor = @intCast(minor);
                         b.module.header.highlight_major = @intCast(major);
-                        b.module.header.special |= Module.special.highlight;
+                        b.module.header.special |= model.special.highlight;
                     }
                 }
             }
@@ -455,7 +461,7 @@ const Render = struct {
             cuts[v] = self.slotAt(end);
             busy[v] = end;
 
-            self.placeNote(slot, first + v, o);
+            try self.placeNote(slot, first + v, o);
         }
         for (cuts, 0..) |cut, v| {
             if (cut) |c| self.placeCut(c, first + @as(u8, @intCast(v)), null);
@@ -469,9 +475,17 @@ const Render = struct {
         });
     }
 
-    fn placeNote(self: *Render, slot: Slot, channel: u8, o: derive.Onset) void {
+    fn placeNote(self: *Render, slot: Slot, channel: u8, o: derive.Onset) Error!void {
         const cell = self.cellAt(slot, channel) orelse return;
-        cell.note = @min(o.key, Module.note_max);
+        // One cell holds one note. Two notes of one voice that round
+        // onto the same cell are not a note and a louder note — the
+        // second would silently replace the first — so the cell keeps
+        // what it has and the loss is counted.
+        if (cell.note != model.note_none and cell.note != model.note_cut) {
+            self.collisions += 1;
+            return;
+        }
+        cell.note = @min(o.key, model.note_max);
         cell.ins = 1;
         cell.vol = volumeOf(o.vel);
         if (slot.delay > 0) {
@@ -489,19 +503,29 @@ const Render = struct {
         }
         if (!self.said_no_instrument and self.instrumentless()) {
             self.said_no_instrument = true;
-            self.noInstrument() catch {};
+            try self.noInstrument();
         }
     }
 
     /// `^^^` at `cut`, unless the next note lands on the same cell — a
     /// cut there would silence the note it was meant to follow.
+    ///
+    /// Only the NOTE column has to be free. A cell with a `Txx` in it is
+    /// still a cell that can end a note, and requiring the whole cell to
+    /// be empty meant a note whose end fell on a tempo change's row rang
+    /// on for ever — the one place a duration was silently lost.
     fn placeCut(self: *Render, cut: Slot, channel: u8, next: ?Slot) void {
         if (next) |n| {
             if (n.pattern == cut.pattern and n.row == cut.row) return;
         }
         const cell = self.cellAt(cut, channel) orelse return;
-        if (!cell.isEmpty()) return;
-        cell.note = Module.note_cut;
+        if (cell.note != model.note_none) return;
+        cell.note = model.note_cut;
+        // The end is a position like any other: an `SDx` says it exactly.
+        if (cut.delay > 0 and cell.fx == 0) {
+            cell.fx = fx_s;
+            cell.param = sd | cut.delay;
+        }
     }
 
     fn instrumentless(self: *Render) bool {
@@ -646,18 +670,20 @@ const Render = struct {
         return .{ .pattern = @intCast(last), .row = p.rows - 1, .delay = 0 };
     }
 
-    fn cellAt(self: *Render, slot: Slot, channel: u8) ?*Module.Cell {
+    fn cellAt(self: *Render, slot: Slot, channel: u8) ?*model.Cell {
         if (slot.pattern >= self.patterns.items.len) return null;
         const p = self.patterns.items[slot.pattern];
-        if (slot.row >= p.rows or channel >= Module.channels) return null;
+        if (slot.row >= p.rows or channel >= model.channels) return null;
         return p.at(slot.row, channel);
     }
 
     /// An effect into the lowest channel of `slot`'s row whose effect
     /// column is still free. False when every one of them is taken.
     fn placeFx(self: *Render, slot: Slot, fx: u8, param: u8) bool {
-        var c: u8 = 0;
-        while (c < Module.channels) : (c += 1) {
+        // From the first channel this render owns: an anchor's cells are
+        // its own, and a conductor effect is not a reason to touch one.
+        var c: u8 = @intCast(self.first_channel);
+        while (c < model.channels) : (c += 1) {
             const cell = self.cellAt(slot, c) orelse return false;
             if (cell.fx != 0) continue;
             cell.fx = fx;
@@ -710,12 +736,12 @@ fn scale(v: f64, range: [2]f32, top: u8) u8 {
 fn highestUsed(module: *const itf.Module) u16 {
     var highest: u16 = 0;
     for (module.patterns) |p| {
-        if (p.cells.len < @as(usize, p.rows) * Module.channels) continue;
+        if (p.cells.len < @as(usize, p.rows) * model.channels) continue;
         var row: u16 = 0;
         while (row < p.rows) : (row += 1) {
             var c: u16 = 0;
-            while (c < Module.channels) : (c += 1) {
-                if (!p.cells[@as(usize, row) * Module.channels + c].isEmpty()) highest = @max(highest, c + 1);
+            while (c < model.channels) : (c += 1) {
+                if (!p.cells[@as(usize, row) * model.channels + c].isEmpty()) highest = @max(highest, c + 1);
             }
         }
     }
@@ -761,7 +787,7 @@ fn load(gpa: Allocator, source: [:0]const u8) !Fixture {
     return .{ .doc = d, .derived = derived };
 }
 
-fn cellOf(module: *const itf.Module, pattern: usize, row: u16, channel: u8) Module.Cell {
+fn cellOf(module: *const itf.Module, pattern: usize, row: u16, channel: u8) model.Cell {
     return module.patterns[pattern].at(row, channel).*;
 }
 
@@ -797,10 +823,10 @@ test "renderIt: notes land on rows with :ins 1, a volume and a cut at the end" {
     try testing.expectEqual(@as(u8, 1), first.ins);
     try testing.expectEqual(@as(u8, 64), first.vol);
     // The cut at the note's end, because the next note is farther away.
-    try testing.expectEqual(@as(u8, Module.note_cut), cellOf(&out.module, 0, 4, 0).note);
+    try testing.expectEqual(@as(u8, model.note_cut), cellOf(&out.module, 0, 4, 0).note);
     try testing.expectEqual(@as(u8, 62), cellOf(&out.module, 0, 8, 0).note);
     try testing.expectEqual(@as(u8, 32), cellOf(&out.module, 0, 8, 0).vol);
-    try testing.expectEqual(@as(u8, Module.note_cut), cellOf(&out.module, 0, 12, 0).note);
+    try testing.expectEqual(@as(u8, model.note_cut), cellOf(&out.module, 0, 12, 0).note);
 
     // No instrument in the module, so the cells name 1 and say so.
     try testing.expectEqual(@as(usize, 1), out.diags.count(.it_no_instrument));
@@ -883,6 +909,37 @@ test "renderIt: a tempo change becomes a Txx at its row" {
     const cell = cellOf(&out.module, 0, 4, 0);
     try testing.expectEqual(fx_t, cell.fx);
     try testing.expectEqual(@as(u8, 150), cell.param);
+    // The note ends on that same row, and a `Txx` in the cell is no
+    // reason to lose its duration: the cut needs the NOTE column, not
+    // the whole cell.
+    try testing.expectEqual(@as(u8, model.note_cut), cell.note);
+}
+
+test "renderIt: a note whose voice's cell is already taken is counted, never overwritten" {
+    const gpa = testing.allocator;
+    // A row is 6 IT ticks; two notes half an IT tick apart round onto
+    // the same cell, and a cell holds one note.
+    var fx = try load(gpa,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :us 500000)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name kick :kind notes
+        \\  (note :at 0q :dur 960960t :key 60 :vel 100)
+        \\  (note :at 960960t :dur 960960t :key 62 :vel 90))
+    );
+    defer fx.deinit();
+
+    var out = try renderIt(gpa, &fx.doc, &fx.derived, null, .{});
+    defer out.deinit();
+
+    // The first note kept the cell; the second is named and dropped.
+    try testing.expectEqual(@as(u8, 60), cellOf(&out.module, 0, 0, 0).note);
+    try testing.expect(out.diags.count(.render_inexact) >= 1);
+    var said = false;
+    for (out.diags.items()) |d| {
+        if (std.mem.indexOf(u8, d.message, "a cell holds one note") != null) said = true;
+    }
+    try testing.expect(said);
 }
 
 test "renderIt: a three-voice chord takes three channels and a fifth voice trips the cap" {
@@ -960,7 +1017,7 @@ test "renderIt: a curve writes the volume column, linear per row, in-cubic as st
     defer eased.deinit();
     var steps = try renderIt(gpa, &eased.doc, &eased.derived, null, .{});
     defer steps.deinit();
-    try testing.expectEqual(@as(u8, Module.vol_none), cellOf(&steps.module, 0, 1, 0).vol);
+    try testing.expectEqual(@as(u8, model.vol_none), cellOf(&steps.module, 0, 1, 0).vol);
     try testing.expectEqual(@as(usize, 1), steps.lanes[0].steps_only.len);
     try testing.expectEqualStrings("in-cubic", steps.lanes[0].steps_only[0].ease);
 }
@@ -993,10 +1050,44 @@ test "renderIt: rendering into an anchor keeps its patterns and takes channels a
     // The anchor's own cells, untouched.
     try testing.expectEqual(@as(u8, 48), cellOf(&out.module, 0, 0, 0).note);
     try testing.expectEqual(@as(u8, 52), cellOf(&out.module, 0, 0, 1).note);
+    try testing.expectEqual(@as(u8, 0), cellOf(&out.module, 0, 0, 0).fx);
+    try testing.expectEqual(@as(u8, 0), cellOf(&out.module, 0, 0, 1).fx);
     // And the lane above them.
     try testing.expectEqual(@as(u8, 60), cellOf(&out.module, 0, 0, 2).note);
     try testing.expectEqual(@as(u6, 2), out.lanes[0].address.it.channel);
     try testing.expectEqual(@as(usize, 1), out.module.patterns.len);
+}
+
+test "renderIt: an anchored conductor's Txx goes above the anchor's channels too" {
+    const gpa = testing.allocator;
+    var fx = try load(gpa,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :qpm 125)
+        \\(tempo-point :at 1q :qpm 150)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name kick :kind notes
+        \\  (note :at 0q :dur 1q :key 60 :vel 100))
+    );
+    defer fx.deinit();
+
+    var b: itf.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.module.header.initial_speed = 6;
+    b.module.header.initial_tempo = 125;
+    try b.addOrder(0);
+    const p = try b.addPattern(64);
+    p.at(0, 0).* = .{ .note = 48, .ins = 1, .vol = 64 };
+    var base = b.finish();
+    defer base.deinit();
+
+    var out = try renderIt(gpa, &fx.doc, &fx.derived, &base, .{});
+    defer out.deinit();
+
+    // Row 4, channel 0 is the ANCHOR's column and stays empty; the
+    // tempo change goes in the first channel this render owns.
+    try testing.expect(cellOf(&out.module, 0, 4, 0).isEmpty());
+    try testing.expectEqual(fx_t, cellOf(&out.module, 0, 4, 1).fx);
+    try testing.expectEqual(@as(u8, 150), cellOf(&out.module, 0, 4, 1).param);
 }
 
 test "renderIt: a lane with no channel left is render_channels_exhausted" {
@@ -1016,7 +1107,7 @@ test "renderIt: a lane with no channel left is render_channels_exhausted" {
     errdefer b.deinit();
     try b.addOrder(0);
     const p = try b.addPattern(64);
-    p.at(0, Module.channels - 1).* = .{ .note = 48, .ins = 1, .vol = 64 };
+    p.at(0, model.channels - 1).* = .{ .note = 48, .ins = 1, .vol = 64 };
     var base = b.finish();
     defer base.deinit();
 
@@ -1026,7 +1117,7 @@ test "renderIt: a lane with no channel left is render_channels_exhausted" {
     try testing.expectEqual(@as(usize, 1), out.diags.count(.render_channels_exhausted));
     try testing.expectEqual(@as(usize, 0), out.lanes.len);
     // And the anchor's own cell is untouched.
-    try testing.expectEqual(@as(u8, 48), cellOf(&out.module, 0, 0, Module.channels - 1).note);
+    try testing.expectEqual(@as(u8, 48), cellOf(&out.module, 0, 0, model.channels - 1).note);
 }
 
 test "renderIt: a query lane is residue_only and no channel is spent on it" {
@@ -1067,8 +1158,9 @@ test "renderIt: the lane record's hash is the hash of the module that comes back
 
     var rows = try itf.walk.derive(gpa, &back.module, .{});
     defer rows.deinit();
-    const played = try playedPatterns(gpa, &rows);
-    defer gpa.free(played);
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const played = try reconcile.playedPatterns(scratch.allocator(), &rows);
 
     try testing.expect(out.lanes.len > 0);
     for (out.lanes) |rec| {

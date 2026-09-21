@@ -375,6 +375,30 @@ fn newerSmf(seq: *const smf.Sequence) ?u8 {
     return null;
 }
 
+/// The `TMPU` payload an anchor's own bytes still carry, borrowed from
+/// them — null when the file has none, or when there is no file.
+///
+/// The read is a full one, through the same core every other reader of
+/// these bytes uses: the chunk sits after the samples and the foreign
+/// chunks, and finding it means walking the same framing `itf/read.zig`
+/// already walks. A build of an anchored document reads and writes this
+/// module several times over anyway, and a second opinion about where a
+/// chunk begins is the one thing this could not afford.
+/// The slice BORROWS the caller's bytes and outlives the read that found
+/// it, because a region is an offset into those bytes and never a copy
+/// (plan 06, "bytes are sacred").
+fn anchorTmpu(gpa: Allocator, bytes: ?[]const u8) Error!?[]const u8 {
+    const source = bytes orelse return null;
+    var read = try itf.read.read(gpa, source);
+    // Its diagnostics are deliberately dropped: the anchor was already
+    // read, verified and reported on by whoever built the document, and
+    // a second copy of that report here would be one file complained
+    // about twice.
+    defer read.deinit();
+    const region = read.module.tmpu orelse return null;
+    return region.slice(source);
+}
+
 /// The same question of a `TMPU` chunk, asked of its first record's
 /// head alone: a chunk this build cannot read is one it will not step
 /// through.
@@ -541,7 +565,14 @@ pub const BuildOptions = struct {
     force_residue: bool = false,
 
     // ---- the `.mid` side ----
-    ppq: u15 = render_smf.default_ppq,
+    /// `--ppq N`. For a NATIVE document it is the division the renderer
+    /// lays the file out on; for an ANCHORED one the anchor's own
+    /// division rules the render and this becomes the writer's rescale
+    /// (plan 05's `--ppq`, plan 10's `build --ppq N [--round]`). Null
+    /// takes 960 for a fresh file and leaves an anchor's own alone.
+    ppq: ?u15 = null,
+    /// `--round`: accept a rescaled tick that does not land exactly.
+    round: bool = false,
     /// `--cc`: which controller a native curve lane renders onto.
     cc: ?u7 = null,
     cc_rate: i64 = render_smf.default_cc_rate,
@@ -656,6 +687,36 @@ const Pieces = struct {
     essence_bytes: usize,
 };
 
+/// An anchor of this kind that carries no inline dump is one nothing has
+/// read: the build renders the document's own lanes and the FILE's own
+/// content — its tracks or its patterns, its samples, its opaque regions
+/// — is simply not there to render into.
+///
+/// That is not a refusal (the document's own music still becomes a file)
+/// but it is not what the author asked for either, so it is said out
+/// loud at the seam where it is first true. `anchor_unavailable` is the
+/// resolver's code for exactly this condition, and a build is the second
+/// place it can be met.
+fn missingTier(
+    diags: *Diag.List,
+    doc: *const Doc.Doc,
+    kind: Doc.AnchorKind,
+    have_tier: bool,
+) Error!void {
+    if (have_tier) return;
+    for (doc.anchors) |anchor| {
+        if (anchor.kind != kind) continue;
+        try diags.add(
+            .anchor_unavailable,
+            .warning,
+            anchor.span,
+            "the anchor '{s}' ({s}) carries no inline dump, so this build renders the document's own lanes into a FRESH file and the anchor's own content is not in it",
+            .{ anchor.id, anchor.file },
+        );
+        return;
+    }
+}
+
 /// Plan 08's "Cross-kind builds": true when this document may not be
 /// built into `kind` at all.
 fn refuseCrossKind(diags: *Diag.List, doc: *const Doc.Doc, kind: Doc.AnchorKind) Error!bool {
@@ -741,8 +802,10 @@ fn buildSmf(
         break :blk null;
     };
 
+    try missingTier(diags, doc, .smf, base != null);
+
     var rendered = try render_smf.renderSmf(gpa, doc, derived, base, .{
-        .ppq = opts.ppq,
+        .ppq = opts.ppq orelse render_smf.default_ppq,
         .cc = opts.cc,
         .cc_rate = opts.cc_rate,
         .section_markers = opts.section_markers,
@@ -754,6 +817,12 @@ fn buildSmf(
     const wopts: smf.Options = .{
         .running_status = opts.running_status,
         .format0 = opts.format0,
+        // A fresh file was RENDERED on `--ppq`, so there is nothing to
+        // rescale; an anchor's events are on the anchor's division, and
+        // moving them onto another one is the writer's job and the
+        // writer's diagnostic (`ppq_rescale_inexact`).
+        .ppq = if (base != null) opts.ppq else null,
+        .round = opts.round,
     };
 
     const lanes = try a.alloc(records.LaneRecord, rendered.lanes.len);
@@ -841,6 +910,8 @@ fn buildIt(
         break :blk null;
     };
 
+    try missingTier(diags, doc, .it, base != null);
+
     var rendered = try render_it.renderIt(gpa, doc, derived, base, .{
         .speed = opts.speed,
         .rows = opts.rows,
@@ -891,14 +962,26 @@ fn buildIt(
         }
     }
 
-    const newer = if (base) |m| blk: {
-        const region = m.tmpu orelse break :blk null;
-        const bytes = source orelse break :blk null;
-        break :blk newerIt(region.slice(bytes));
-    } else null;
+    // What the ANCHOR's own bytes still carry. The reader keeps a `TMPU`
+    // chunk OUT of `Module.foreign` (it is tempura's, not another
+    // tracker's) and hands it back as `module.tmpu`; the `it/` bridge
+    // does not write it into the document, because a dump CONSUMES the
+    // residue (plan 04, "The IT carriers"). So the anchor's file is the
+    // only place a payload this build did not write still exists, and
+    // rule 3 — "the payloads stay where they are" — has to read it from
+    // there rather than from the tier.
+    const carried = try anchorTmpu(gpa, source);
+    const newer = newerIt(carried);
 
     if (!try wantsResidue(diags, opts, newer)) {
-        var plain = try itf.write.write(gpa, &rendered.module, source, wopts);
+        // Rule 3 again: a newer tempura's payload is COPIED THROUGH, so
+        // this build shadows nothing. `--no-residue` asked for a file
+        // that carries nothing and gets exactly that.
+        var plain = try itf.write.write(gpa, &rendered.module, source, .{
+            .loose = wopts.loose,
+            .preserve_history = wopts.preserve_history,
+            .tmpu = if (opts.no_residue) null else carried,
+        });
         defer plain.deinit();
         try copyDiags(diags, &plain.diags);
         return .{
@@ -1436,6 +1519,68 @@ test "pipeline.build: --no-residue writes a file that carries nothing of its own
     var got = try dump(gpa, &schema, built.bytes, .smf, .{});
     defer got.deinit();
     try testing.expectEqual(reconcile.Rule.derived, got.rule);
+}
+
+test "pipeline.build: a by-reference anchor's own content is absent, and the build says so" {
+    // The anchor names a file and carries no inline dump, so nothing has
+    // read it: the document's lanes still become a `.mid`, and the
+    // anchor's own tracks are not in it. Said once, at the seam.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    const source: [:0]const u8 =
+        \\(timeline :title "by reference" :length 1bar)
+        \\(anchor :id song :kind smf :file "elsewhere.mid")
+        \\(tempo-point :at 0bar :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name kick :kind notes
+        \\  (note :at 0bar :dur 1q :key 36 :vel 100))
+        \\
+    ;
+    var fx = try ready(gpa, &schema, source);
+    defer fx.deinit();
+
+    var built = try build(gpa, &schema, source, &fx.res.doc, &fx.derived, .smf, .{});
+    defer built.deinit();
+
+    try testing.expectEqual(@as(usize, 1), built.diags.count(.anchor_unavailable));
+    try testing.expect(!built.diags.hasErrors());
+    try testing.expect(built.bytes.len > 0);
+}
+
+test "pipeline.build: --ppq rescales an ANCHORED build and is the renderer's grid otherwise" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    // Native: `--ppq` is what the renderer lays the file out on.
+    var fx = try ready(gpa, &schema, native_doc);
+    defer fx.deinit();
+    var fine = try build(gpa, &schema, native_doc, &fx.res.doc, &fx.derived, .smf, .{
+        .cc = 74,
+        .ppq = 96,
+    });
+    defer fine.deinit();
+    var read_back = try smf.read(gpa, fine.bytes);
+    defer read_back.deinit();
+    try testing.expectEqual(@as(u15, 96), read_back.sequence.division.pulsesPerQuarter());
+
+    // Anchored: the anchor's own division rules the render, and `--ppq`
+    // is the writer's rescale. 96 → 192 doubles every tick exactly.
+    const bytes = try smfBytes(gpa, records.version, false);
+    defer gpa.free(bytes);
+    var dumped = try dump(gpa, &schema, bytes, .smf, .{});
+    defer dumped.deinit();
+    var derived = try time_derive.derive(gpa, &dumped.doc);
+    defer derived.deinit();
+
+    var wide = try build(gpa, &schema, dumped.text, &dumped.doc, &derived, .smf, .{ .ppq = 192 });
+    defer wide.deinit();
+    try testing.expect(!wide.diags.hasErrors());
+    var again = try smf.read(gpa, wide.bytes);
+    defer again.deinit();
+    try testing.expectEqual(@as(u15, 192), again.sequence.division.pulsesPerQuarter());
 }
 
 test "pipeline.build: an IT-anchored document refuses to build a .mid" {

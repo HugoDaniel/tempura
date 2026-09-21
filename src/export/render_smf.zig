@@ -8,8 +8,9 @@
 //! lane, named by the lane, with a lane record describing what was
 //! written there:
 //!
-//!   * `notes` → `note-on` / `note-off` pairs at `k · PPQ / TPQ`, exact
-//!     iff the division divides the tick and counted in `render_inexact`
+//!   * `notes` → `note-on` / `note-off` pairs on the note's own `:ch`
+//!     with its own `:off-vel`, at `k · PPQ / TPQ`, exact iff the
+//!     division divides the tick and counted in `render_inexact`
 //!     otherwise; clips already expanded by `time/derive.zig`;
 //!   * `curve` → `control-change` on `opts.cc`, the value
 //!     `round((v − lo) / (hi − lo) · 127)` under the lane's `:range`;
@@ -27,6 +28,16 @@
 //! tempura's own rendering from a DAW's edit of it. This module therefore
 //! never writes a record it did not also write the events for.
 //!
+//! A hash is over a `(track, ch)` PAIR (`residue/records.zig`,
+//! `hashSmfLane`), and a lane's notes may name several channels. So a
+//! lane writes **one record per channel it used**, all naming the same
+//! track and the same lane: between them they cover every channel of the
+//! track, which is every event this renderer put there, and
+//! `reconcile`'s "any record of this lane is stale ⇒ the lane binds"
+//! rule then means a DAW edit to any of the lane's channels is caught.
+//! A lane that placed nothing still gets one record, at channel 0, so
+//! that its emptiness is hashed too.
+//!
 //! **Into an anchor.** With `base`, the anchor's own tracks are kept and
 //! the lanes' tracks are APPENDED, so `build` of a dumped `.mid` with an
 //! added native lane is the original file plus tracks. A bound lane is
@@ -43,14 +54,11 @@
 //!      native lane has none — so the number comes from `opts.cc`
 //!      (`--cc`) and a curve with neither is `render_cc_missing`, its
 //!      content left to the essence.
-//!   2. A lane's MIDI channel past its first note. `derive.Onset` carries
-//!      no channel (it is the playhead's view), so a lane renders on the
-//!      channel its first authored note names — one lane, one
-//!      `(track, ch)` address, which is what a lane record can say.
-//!   3. A note's release velocity, for the same reason: 64, the value
-//!      every sequencer writes for a note off with nothing to say.
+//!   2. A note with no `:off-vel` has no release velocity to write, so
+//!      it gets 64 — the value every sequencer writes for a note off
+//!      with nothing to say. A note that HAS one keeps it.
 //!
-//! All three are LOSSES OF THE VIEW and none of the document: the essence
+//! Both are LOSSES OF THE VIEW and none of the document: the essence
 //! carries the lane verbatim and `dump` restores it.
 
 const std = @import("std");
@@ -328,17 +336,21 @@ const Render = struct {
         lane: *const Doc.Lane,
         index: *const derive.LaneIndex,
     ) Error!void {
-        const ch = laneChannel(self.doc, lane);
-
         var pairs: std.ArrayList(NoteEvent) = .empty;
         defer pairs.deinit(self.gpa);
         var off_grid: usize = 0;
+        // Which channels this lane wrote to — one lane record each, so
+        // that every event on the track is inside some hash.
+        var used: [16]bool = @splat(false);
+
         for (index.onsets, 0..) |o, i| {
             const on = self.pulse(o.tick, &off_grid);
             const off = self.pulse(o.tick +| @max(o.dur, 0), &off_grid);
+            used[o.ch] = true;
             try pairs.append(self.gpa, .{
                 .at = on,
                 .off = false,
+                .ch = o.ch,
                 .key = o.key,
                 .vel = o.vel,
                 .seq = @intCast(i),
@@ -350,8 +362,9 @@ const Render = struct {
             try pairs.append(self.gpa, .{
                 .at = @max(off, on),
                 .off = true,
+                .ch = o.ch,
                 .key = o.key,
-                .vel = off_velocity,
+                .vel = o.off_vel orelse off_velocity,
                 .seq = @intCast(i),
             });
         }
@@ -360,10 +373,22 @@ const Render = struct {
             track,
             e.at,
             if (e.off) .note_off else .note_on,
-            .{ .note = .{ .ch = ch, .key = e.key, .vel = e.vel } },
+            .{ .note = .{ .ch = e.ch, .key = e.key, .vel = e.vel } },
         );
         if (off_grid > 0) try self.rounded(lane.name, off_grid);
 
+        var any = false;
+        for (used, 0..) |touched, ch| {
+            if (!touched) continue;
+            any = true;
+            try self.noteRecord(lane, track, @intCast(ch));
+        }
+        // A lane that placed nothing is still a lane, and its emptiness
+        // is worth hashing: one record, at channel 0.
+        if (!any) try self.noteRecord(lane, track, 0);
+    }
+
+    fn noteRecord(self: *Render, lane: *const Doc.Lane, track: u32, ch: u4) Error!void {
         try self.lanes.append(self.a, .{
             .lane = try self.a.dupe(u8, lane.name),
             .address = .{ .smf = .{
@@ -479,7 +504,7 @@ const Render = struct {
 };
 
 /// One end of a rendered note, before the pairs are ordered.
-const NoteEvent = struct { at: i64, off: bool, key: u7, vel: u7, seq: u32 };
+const NoteEvent = struct { at: i64, off: bool, ch: u4, key: u7, vel: u7, seq: u32 };
 
 /// Offs before ons at one pulse, then the onset's own order — so a
 /// re-struck key is released before it sounds again, which is what keeps
@@ -546,21 +571,6 @@ fn value7f(v: f64, range: [2]f32) u7 {
     if (!(scaled > 0)) return 0;
     if (scaled >= 127) return 127;
     return @intFromFloat(scaled);
-}
-
-/// The channel a lane renders on: its first authored note's, or the
-/// first note of the first phrase it clips, or 0. See the header — a
-/// lane is one stream and a lane record names one `(track, ch)`.
-fn laneChannel(doc: *const Doc.Doc, lane: *const Doc.Lane) u4 {
-    if (lane.notes.len > 0) return lane.notes[0].ch;
-    for (lane.clips) |c| {
-        const phrase = doc.phraseByName(c.phrase) orelse continue;
-        for (phrase.lanes) |*l| {
-            if (!std.mem.eql(u8, l.name, lane.name)) continue;
-            if (l.notes.len > 0) return l.notes[0].ch;
-        }
-    }
-    return 0;
 }
 
 /// One event from `src` into `b`, pool bytes and all — the same copy
@@ -718,6 +728,46 @@ test "renderSmf: a notes lane becomes a named track of pairs, with a lane record
     try testing.expectEqualStrings("kick", out.lanes[0].lane);
     try testing.expectEqual(@as(u16, 2), out.lanes[0].address.smf.track);
     try testing.expectEqual(@as(u4, 2), out.lanes[0].address.smf.ch);
+}
+
+test "renderSmf: a pair is on its own note's :ch with its own :off-vel" {
+    // Plan 08: "note-on / note-off pairs on `:ch`". A lane whose notes
+    // name two channels is two channels' worth of music, and it gets one
+    // lane record each — together they cover every event on the track,
+    // which is what a hash per `(track, ch)` pair needs.
+    const gpa = testing.allocator;
+    var fx = try load(gpa,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :us 500000)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name kit :kind notes
+        \\  (note :at 0q :dur 1q :key 36 :vel 110 :ch 10 :off-vel 20)
+        \\  (note :at 1q :dur 1q :key 60 :vel 90 :ch 1))
+    );
+    defer fx.deinit();
+
+    var out = try renderSmf(gpa, &fx.doc, &fx.derived, null, .{});
+    defer out.deinit();
+
+    const evs = out.seq.tracks[1].events;
+    // `:ch 10` is 9 on the wire, `:ch 1` is 0.
+    try testing.expectEqual(@as(u8, 9), evs[1].payload.note.ch);
+    try testing.expectEqual(Sequence.Kind.note_off, evs[2].kind);
+    try testing.expectEqual(@as(u8, 9), evs[2].payload.note.ch);
+    try testing.expectEqual(@as(u8, 20), evs[2].payload.note.vel);
+    try testing.expectEqual(@as(u8, 0), evs[3].payload.note.ch);
+    // No `:off-vel` on the second note, so the note off is the 64 every
+    // sequencer writes.
+    try testing.expectEqual(@as(u8, 64), evs[4].payload.note.vel);
+
+    // Two channels, two records, one track, one lane name.
+    try testing.expectEqual(@as(usize, 2), out.lanes.len);
+    try testing.expectEqualStrings("kit", out.lanes[0].lane);
+    try testing.expectEqualStrings("kit", out.lanes[1].lane);
+    try testing.expectEqual(@as(u4, 0), out.lanes[0].address.smf.ch);
+    try testing.expectEqual(@as(u4, 9), out.lanes[1].address.smf.ch);
+    try testing.expectEqual(@as(u16, 2), out.lanes[0].address.smf.track);
+    try testing.expectEqual(@as(u16, 2), out.lanes[1].address.smf.track);
 }
 
 test "renderSmf: the lane record's hash is the hash of the file that comes back" {

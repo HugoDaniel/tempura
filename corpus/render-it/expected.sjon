@@ -10,7 +10,7 @@
   (lane :name lead :kind notes :onsets 1 :first 1921920 :last 1921920)
   (lane :name glow :kind curve :onsets 0 :first 0 :last 0)
   (lane :name hats :kind query :onsets 0 :first 0 :last 0))
-(built :kind it :len 3744 :sha256 "0338b1351d3ad730584300c00e8547e25502b2c8c0aa531e3e99a322c285191a"
+(built :kind it :len 3744 :sha256 "800c1f6c339b6553e9ec54567d8c8c0cd853482179e93463849d5d57ac39bb58"
   (rung1 :ok true)
   (residue :essence 2827 :lanes 5 :conductor true)
   (rung3 :ok true)
