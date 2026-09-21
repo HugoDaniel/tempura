@@ -43,6 +43,9 @@ const smf = @import("../smf/smf.zig");
 const Ast = sjon.Ast;
 const NodeIndex = Ast.NodeIndex;
 const Allocator = std.mem.Allocator;
+/// The note payload the core keeps behind `Payload.note`, named here for
+/// the pairing's helpers.
+const Note = @FieldType(smf.Payload, "note");
 const testing = std.testing;
 
 /// Explicit error set: only resource exhaustion. Every defect of a
@@ -235,7 +238,48 @@ const Printer = struct {
         try self.raw(headName(e.kind));
         try self.raw(" :at ");
         try self.int(e.at);
+        switch (e.kind) {
+            .note_off,
+            .note_on,
+            .poly_pressure,
+            .control_change,
+            .program_change,
+            .channel_pressure,
+            .pitch_bend,
+            => try self.channelKeys(e),
+            .sysex,
+            .escape,
+            .sequencer_specific,
+            .ease_hint,
+            .tempura_residue,
+            .meta_unknown,
+            => try self.bytesKeys(e),
+            .text_event,
+            .copyright_notice,
+            .sequence_name,
+            .instrument_name,
+            .lyric,
+            .marker,
+            .cue_point,
+            .program_name,
+            .device_name,
+            => try self.textOrBytes(self.seq.bytesOf(e.payload.bytes)),
+            .sequence_number,
+            .midi_channel_prefix,
+            .midi_port,
+            .end_of_track,
+            .set_tempo,
+            .smpte_offset,
+            .time_signature,
+            .key_signature,
+            => try self.metaKeys(e),
+        }
+        try self.raw(")");
+    }
 
+    /// The keys of a channel event: its `:ch`, then what the kind
+    /// carries. Called for the seven channel kinds only.
+    fn channelKeys(self: *Printer, e: smf.Event) Error!void {
         switch (e.kind) {
             .note_off, .note_on => {
                 const n = e.payload.note;
@@ -271,6 +315,15 @@ const Printer = struct {
                 try self.raw(" :val ");
                 try self.int(n.value);
             },
+            else => unreachable,
+        }
+    }
+
+    /// The keys of an event whose payload is bytes: `:data` as hex, and
+    /// an unknown meta's `:type` ahead of it. Called for those six kinds
+    /// only.
+    fn bytesKeys(self: *Printer, e: smf.Event) Error!void {
+        switch (e.kind) {
             .sysex, .escape, .sequencer_specific, .ease_hint => {
                 try self.raw(" :data ");
                 try self.hex(self.seq.bytesOf(e.payload.bytes));
@@ -285,16 +338,20 @@ const Printer = struct {
                 try self.raw(" :data ");
                 try self.hexTwo(&head, body);
             },
-            .text_event,
-            .copyright_notice,
-            .sequence_name,
-            .instrument_name,
-            .lyric,
-            .marker,
-            .cue_point,
-            .program_name,
-            .device_name,
-            => try self.textOrBytes(self.seq.bytesOf(e.payload.bytes)),
+            .meta_unknown => {
+                try self.raw(" :type 0x");
+                try self.hexByte(e.payload.meta.meta_type);
+                try self.raw(" :data ");
+                try self.hex(self.seq.bytesOf(e.payload.meta.bytes));
+            },
+            else => unreachable,
+        }
+    }
+
+    /// The keys of a structured meta event. Called for those eight
+    /// kinds only.
+    fn metaKeys(self: *Printer, e: smf.Event) Error!void {
+        switch (e.kind) {
             .sequence_number => {
                 try self.raw(" :num ");
                 try self.int(e.payload.number);
@@ -341,14 +398,8 @@ const Printer = struct {
                 try self.int(k.sf);
                 try self.key(" :mi ", k.mi);
             },
-            .meta_unknown => {
-                try self.raw(" :type 0x");
-                try self.hexByte(e.payload.meta.meta_type);
-                try self.raw(" :data ");
-                try self.hex(self.seq.bytesOf(e.payload.meta.bytes));
-            },
+            else => unreachable,
         }
-        try self.raw(")");
     }
 
     /// `:ch` is 1..16 in text and 0..15 on the wire (midi 02).
@@ -523,33 +574,14 @@ const Reader = struct {
         const children = tree.formHeader(form).children;
 
         const payload: smf.Payload, const real: smf.Kind = switch (kind) {
-            .note_off, .note_on => .{ .{ .note = .{
-                .ch = wireChannel(tree, children),
-                .key = castInt(u8, kvNumber(tree, children, "key"), 0),
-                .vel = castInt(u8, kvNumber(tree, children, "vel"), 0),
-            } }, kind },
-            .poly_pressure => .{ .{ .poly = .{
-                .ch = wireChannel(tree, children),
-                .key = castInt(u8, kvNumber(tree, children, "key"), 0),
-                .val = castInt(u8, kvNumber(tree, children, "val"), 0),
-            } }, kind },
-            .control_change => .{ .{ .control = .{
-                .ch = wireChannel(tree, children),
-                .num = castInt(u8, kvNumber(tree, children, "num"), 0),
-                .val = castInt(u8, kvNumber(tree, children, "val"), 0),
-            } }, kind },
-            .program_change => .{ .{ .program = .{
-                .ch = wireChannel(tree, children),
-                .num = castInt(u8, kvNumber(tree, children, "num"), 0),
-            } }, kind },
-            .channel_pressure => .{ .{ .pressure = .{
-                .ch = wireChannel(tree, children),
-                .val = castInt(u8, kvNumber(tree, children, "val"), 0),
-            } }, kind },
-            .pitch_bend => .{ .{ .bend = .{
-                .ch = wireChannel(tree, children),
-                .value = castInt(u16, kvNumber(tree, children, "val"), 8192),
-            } }, kind },
+            .note_off,
+            .note_on,
+            .poly_pressure,
+            .control_change,
+            .program_change,
+            .channel_pressure,
+            .pitch_bend,
+            => .{ channelPayload(tree, children, kind), kind },
             .sysex, .escape => .{ .{ .bytes = try self.hexBytes(children, "data") }, kind },
             .sequencer_specific => blk: {
                 const raw = try self.decodeHex(children, "data");
@@ -566,32 +598,19 @@ const Reader = struct {
             .program_name,
             .device_name,
             => .{ .{ .bytes = try self.textBytes(children) }, kind },
-            .sequence_number => .{ .{ .number = castInt(u16, kvNumber(tree, children, "num"), 0) }, kind },
-            .midi_channel_prefix => .{ .{ .byte = wireChannel(tree, children) }, kind },
-            .midi_port => .{ .{ .byte = castInt(u8, kvNumber(tree, children, "port"), 0) }, kind },
-            .end_of_track => .{ .empty, kind },
-            .set_tempo => .{ .{ .tempo = castInt(u32, kvNumber(tree, children, "us"), 0) }, kind },
-            .smpte_offset => .{ .{ .smpte = .{
-                .hr = castInt(u8, kvNumber(tree, children, "hr"), 0),
-                .mn = castInt(u8, kvNumber(tree, children, "mn"), 0),
-                .se = castInt(u8, kvNumber(tree, children, "se"), 0),
-                .fr = castInt(u8, kvNumber(tree, children, "fr"), 0),
-                .ff = castInt(u8, kvNumber(tree, children, "ff"), 0),
-            } }, kind },
-            .time_signature => .{ .{ .time_sig = .{
-                .nn = castInt(u8, kvNumber(tree, children, "num"), 4),
-                .dd = powerOfTwo(castInt(u16, kvNumber(tree, children, "denom"), 4)),
-                .cc = castInt(u8, kvNumber(tree, children, "clocks"), 24),
-                .bb = castInt(u8, kvNumber(tree, children, "thirty-seconds"), 8),
-            } }, kind },
-            .key_signature => .{ .{ .key_sig = .{
-                .sf = castInt(i8, kvNumber(tree, children, "sf"), 0),
-                .mi = castInt(u8, kvNumber(tree, children, "mi"), 0),
-            } }, kind },
             .meta_unknown => .{ .{ .meta = .{
                 .bytes = try self.hexBytes(children, "data"),
                 .meta_type = castInt(u8, kvNumber(tree, children, "type"), 0),
             } }, kind },
+            .sequence_number,
+            .midi_channel_prefix,
+            .midi_port,
+            .end_of_track,
+            .set_tempo,
+            .smpte_offset,
+            .time_signature,
+            .key_signature,
+            => .{ metaPayload(tree, children, kind), kind },
             // Never produced by `kindOfHead`: both spell
             // `sequencer-specific` and are re-typed from the payload.
             .ease_hint, .tempura_residue => unreachable,
@@ -634,6 +653,72 @@ const Reader = struct {
 /// Whose `FF 7F` payload is this? The reader's own rule
 /// (`smf/read.zig`'s `sequencerSpecific`), restated so a dump read back
 /// carries the same typed kinds the file did.
+/// A channel event's payload from its keys, every number narrowed to
+/// its byte with the kind's own fallback. For the seven channel kinds
+/// only.
+fn channelPayload(tree: *const Ast.Tree, children: []const NodeIndex, kind: smf.Kind) smf.Payload {
+    return switch (kind) {
+        .note_off, .note_on => .{ .note = .{
+            .ch = wireChannel(tree, children),
+            .key = castInt(u8, kvNumber(tree, children, "key"), 0),
+            .vel = castInt(u8, kvNumber(tree, children, "vel"), 0),
+        } },
+        .poly_pressure => .{ .poly = .{
+            .ch = wireChannel(tree, children),
+            .key = castInt(u8, kvNumber(tree, children, "key"), 0),
+            .val = castInt(u8, kvNumber(tree, children, "val"), 0),
+        } },
+        .control_change => .{ .control = .{
+            .ch = wireChannel(tree, children),
+            .num = castInt(u8, kvNumber(tree, children, "num"), 0),
+            .val = castInt(u8, kvNumber(tree, children, "val"), 0),
+        } },
+        .program_change => .{ .program = .{
+            .ch = wireChannel(tree, children),
+            .num = castInt(u8, kvNumber(tree, children, "num"), 0),
+        } },
+        .channel_pressure => .{ .pressure = .{
+            .ch = wireChannel(tree, children),
+            .val = castInt(u8, kvNumber(tree, children, "val"), 0),
+        } },
+        .pitch_bend => .{ .bend = .{
+            .ch = wireChannel(tree, children),
+            .value = castInt(u16, kvNumber(tree, children, "val"), 8192),
+        } },
+        else => unreachable,
+    };
+}
+
+/// A structured meta event's payload from its keys, with RP-001's
+/// defaults where a key is absent. For those eight kinds only.
+fn metaPayload(tree: *const Ast.Tree, children: []const NodeIndex, kind: smf.Kind) smf.Payload {
+    return switch (kind) {
+        .sequence_number => .{ .number = castInt(u16, kvNumber(tree, children, "num"), 0) },
+        .midi_channel_prefix => .{ .byte = wireChannel(tree, children) },
+        .midi_port => .{ .byte = castInt(u8, kvNumber(tree, children, "port"), 0) },
+        .end_of_track => .empty,
+        .set_tempo => .{ .tempo = castInt(u32, kvNumber(tree, children, "us"), 0) },
+        .smpte_offset => .{ .smpte = .{
+            .hr = castInt(u8, kvNumber(tree, children, "hr"), 0),
+            .mn = castInt(u8, kvNumber(tree, children, "mn"), 0),
+            .se = castInt(u8, kvNumber(tree, children, "se"), 0),
+            .fr = castInt(u8, kvNumber(tree, children, "fr"), 0),
+            .ff = castInt(u8, kvNumber(tree, children, "ff"), 0),
+        } },
+        .time_signature => .{ .time_sig = .{
+            .nn = castInt(u8, kvNumber(tree, children, "num"), 4),
+            .dd = powerOfTwo(castInt(u16, kvNumber(tree, children, "denom"), 4)),
+            .cc = castInt(u8, kvNumber(tree, children, "clocks"), 24),
+            .bb = castInt(u8, kvNumber(tree, children, "thirty-seconds"), 8),
+        } },
+        .key_signature => .{ .key_sig = .{
+            .sf = castInt(i8, kvNumber(tree, children, "sf"), 0),
+            .mi = castInt(u8, kvNumber(tree, children, "mi"), 0),
+        } },
+        else => unreachable,
+    };
+}
+
 fn sniffSequencerSpecific(raw: []const u8, run: smf.Bytes) struct { smf.Payload, smf.Kind } {
     if (raw.len >= 8 and std.mem.eql(u8, raw[0..4], "\x7Dtem")) return .{ .{ .residue = .{
         .ver = raw[4],
@@ -770,86 +855,114 @@ pub fn pairNotes(
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
 
-    var notes: std.ArrayList(PairedNote) = .empty;
-    const a = arena.allocator();
-    const events = trackEvents(seq, track);
-
-    // Which entry of `notes` is still sounding on each (channel, key).
-    // On the arena rather than the stack: sixteen channels of 128 slots
-    // is more than a wasm frame should carry.
-    const open = try a.alloc(?usize, 16 * 128);
-    @memset(open, null);
-    var orphan_offs: u32 = 0;
+    var p: Pairing = .{ .open = try arena.allocator().alloc(?usize, 16 * 128) };
+    @memset(p.open, null);
     var retriggered = false;
     var track_end: i64 = 0;
 
-    for (events) |e| {
+    for (trackEvents(seq, track)) |e| {
         track_end = @max(track_end, e.at);
-        switch (e.kind) {
-            .note_on, .note_off => {},
-            else => continue,
-        }
-        const n = e.payload.note;
-        if (!onChannels(chs, n.ch)) continue;
-        if (key) |want| {
-            if (n.key != @as(u8, want)) continue;
-        }
-        if (n.key > 127) continue;
-
+        const n = addressed(e, chs, key) orelse continue;
         // A `note-on` of velocity 0 is a note off on the wire; the
         // reader stored it as read and the pairing is what interprets it
         // (plan 05, "Events").
-        const is_on = e.kind == .note_on and n.vel > 0;
-        const slot = &open[@as(usize, n.ch) * 128 + n.key];
-
-        if (is_on) {
-            if (slot.*) |held| {
-                // A second on over a held key ends the first HERE, with
-                // no release velocity: none was sent (midi 04's rule).
-                notes.items[held].dur = e.at - notes.items[held].at;
-                if (!retriggered) {
-                    retriggered = true;
-                    try diags.add(
-                        .note_retrigger,
-                        .warning,
-                        .{ .start = 0, .end = 0 },
-                        "a note-on landed on a key this lane was already sounding; the held note ends there",
-                        .{},
-                    );
-                }
+        if (e.kind == .note_on and n.vel > 0) {
+            const retrigger = try p.on(arena.allocator(), e.at, n);
+            if (retrigger and !retriggered) {
+                retriggered = true;
+                try diags.add(
+                    .note_retrigger,
+                    .warning,
+                    .{ .start = 0, .end = 0 },
+                    "a note-on landed on a key this lane was already sounding; " ++
+                        "the held note ends there",
+                    .{},
+                );
             }
-            slot.* = notes.items.len;
-            try notes.append(a, .{
-                .at = e.at,
-                .dur = 0,
-                .key = @intCast(n.key),
-                .vel = @intCast(@min(n.vel, 127)),
-                .off_vel = null,
-                .ch = @intCast(n.ch),
-            });
-        } else if (slot.*) |held| {
-            notes.items[held].dur = e.at - notes.items[held].at;
-            notes.items[held].off_vel = @intCast(@min(n.vel, 127));
-            slot.* = null;
-        } else {
-            // An off with no on: DAWs export such files (plan 05).
-            orphan_offs += 1;
-        }
+        } else p.off(e.at, n);
     }
-
-    // What never closed ends at the track's end-of-track — its tick, or
-    // the last event's when the track has none.
-    for (open) |maybe| {
-        if (maybe) |held| notes.items[held].dur = track_end - notes.items[held].at;
-    }
+    p.closeAll(track_end);
 
     return .{
-        .notes = notes.items,
-        .orphan_offs = orphan_offs,
+        .notes = p.notes.items,
+        .orphan_offs = p.orphan_offs,
         .diags = diags,
         .arena = arena,
     };
 }
+
+/// The note payload of `e` when it is a `note-on` or `note-off` on one
+/// of `chs` (and on `key`, when one is asked for) — null for every other
+/// event, and for a key no `u7` can hold.
+fn addressed(e: smf.Event, chs: Doc.Channels, key: ?u7) ?Note {
+    switch (e.kind) {
+        .note_on, .note_off => {},
+        else => return null,
+    }
+    const n = e.payload.note;
+    if (!onChannels(chs, n.ch)) return null;
+    if (key) |want| {
+        if (n.key != @as(u8, want)) return null;
+    }
+    if (n.key > 127) return null;
+    return n;
+}
+
+/// The pairing's state: the notes so far and, per (channel, key), which
+/// of them is still sounding. `open` lives on the arena rather than the
+/// stack: sixteen channels of 128 slots is more than a wasm frame should
+/// carry.
+const Pairing = struct {
+    notes: std.ArrayList(PairedNote) = .empty,
+    open: []?usize,
+    orphan_offs: u32 = 0,
+
+    fn slot(self: *Pairing, n: Note) *?usize {
+        return &self.open[@as(usize, n.ch) * 128 + n.key];
+    }
+
+    /// A `note-on`: opens a note, and ends the one it retriggers. True
+    /// when it did retrigger one.
+    fn on(self: *Pairing, arena: Allocator, at: i64, n: Note) Error!bool {
+        const held = self.slot(n);
+        const retrigger = held.* != null;
+        // A second on over a held key ends the first HERE, with no
+        // release velocity: none was sent (midi 04's rule).
+        if (held.*) |i| self.notes.items[i].dur = at - self.notes.items[i].at;
+        held.* = self.notes.items.len;
+        try self.notes.append(arena, .{
+            .at = at,
+            .dur = 0,
+            .key = @intCast(n.key),
+            .vel = @intCast(@min(n.vel, 127)),
+            .off_vel = null,
+            .ch = @intCast(n.ch),
+        });
+        return retrigger;
+    }
+
+    /// A `note-off` (or a velocity-0 on): ends the held note with its
+    /// release velocity, or counts an orphan — DAWs export such files
+    /// (plan 05).
+    fn off(self: *Pairing, at: i64, n: Note) void {
+        const held = self.slot(n);
+        const i = held.* orelse {
+            self.orphan_offs += 1;
+            return;
+        };
+        self.notes.items[i].dur = at - self.notes.items[i].at;
+        self.notes.items[i].off_vel = @intCast(@min(n.vel, 127));
+        held.* = null;
+    }
+
+    /// What never closed ends at the track's end-of-track — its tick,
+    /// or the last event's when the track has none.
+    fn closeAll(self: *Pairing, track_end: i64) void {
+        for (self.open) |maybe| {
+            if (maybe) |i| self.notes.items[i].dur = track_end - self.notes.items[i].at;
+        }
+    }
+};
 
 /// One track's events by 1-BASED index, or nothing when the document
 /// names a track the file does not have.
