@@ -14,8 +14,10 @@ checked out on this machine (README). The canonical writer's layout **freezes at
 tempura reads and writes the parts of an Impulse Tracker module that carry **time**: the
 header's timing and option fields, the order list, every pattern's rows, the song message
 (the residue's second carrier, [04](04-residue.md)), and the timing effects' semantics
-through a walk of the order list. Everything else is **opaque and sacred**: instrument bodies,
-sample headers and sample data, the MIDI configuration, the edit history and foreign chunks are
+through a walk of the order list — and the MIDI macro configuration, which a document spells
+slot by slot (`(it/midi …)`) because a tracker's `Zxx` cells mean nothing without it. Everything
+else is **opaque and sacred**: instrument bodies,
+sample headers and sample data, the edit history and foreign chunks are
 regions with an offset and a length, referenced by `(bin :at :len)` against the anchor (it 03),
 copied verbatim by the writer, never decoded. No codec, no envelope semantics, no
 fingerprint quirk matrix beyond what timing needs. batida owns the rest (it 04–07).
@@ -39,7 +41,7 @@ rename).
 | song message | materialised as a string; the residue's tail is split off ([04](04-residue.md)) | materialised |
 | instruments | **opaque**: `(it/instrument N :name "…" :raw (bin :at :len 554))` | materialised fields |
 | sample headers and data | **opaque**: `(it/sample N :name "…" :raw (bin :at :len 80) (data :bits :enc (bin :at :len)))` with the data extent computed | header materialised, data a ref |
-| MIDI config 4896 B | ref, omitted when byte-equal to IT's default | same |
+| MIDI config 4896 B | materialised as `(it/midi (macro sf0 "F0F000z") …)`, one `macro` per non-empty slot, omitted when the block is IT's default (until 2026-09-21 it was omitted ALWAYS, and a build zero-filled it — the final review's D5) | same |
 | edit history | ref via `(it/edit-history (bin …))`, `--preserve-history` | same |
 | foreign trailing chunks | `--preserve-foreign` → `(it/foreign :tag "STPM" (bin …))`; the `TMPU` chunk is tempura's own and never shown as foreign | same |
 
