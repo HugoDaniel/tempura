@@ -481,10 +481,14 @@ const Ctx = struct {
                 },
                 .bend => {
                     if (!std.mem.eql(u8, e.head, "pitch-bend")) continue;
-                    // Centre 8192 is zero; the two halves are 8192 and
-                    // 8191 wide, so the top end reads exactly 1.
-                    const centred: f32 = @floatFromInt(val - 8192);
-                    const span: f32 = if (val >= 8192) 8191.0 else 8192.0;
+                    // Onto the 14 bits the event carries first: the
+                    // number is the tree's, any `i64`, and `val - 8192`
+                    // overflowed at `minInt`. Centre 8192 is zero; the
+                    // two halves are 8192 and 8191 wide, so the top end
+                    // reads exactly 1.
+                    const bend = std.math.clamp(val, 0, 16383);
+                    const centred: f32 = @floatFromInt(bend - 8192);
+                    const span: f32 = if (bend >= 8192) 8191.0 else 8192.0;
                     v = centred / span;
                 },
                 // Neither is a single event: a 14-bit controller is
@@ -512,7 +516,32 @@ const Ctx = struct {
         vel: std.ArrayList(u32) = .empty,
         targets: u32 = 0,
         inexact: u32 = 0,
+        /// The first destination, in the file's own ticks, whose place
+        /// on the grid is past its ceiling — recorded here and refused
+        /// once by `smfLane`, as `ops_native.Ctx.off_grid` is: an
+        /// accepted plan has to be applicable, and an `:at` there would
+        /// reload saturated.
+        off_grid: ?i64 = null,
+
+        /// One event's move to SMF tick `to`, checked against the grid.
+        fn move(self: *SmfEdits, arena: std.mem.Allocator, slot: u32, to: i64, ppq: u15) Error!void {
+            if (self.off_grid == null and Grid.smfToTicks(to, ppq).overflow) self.off_grid = to;
+            try self.moves.append(arena, .{ .slot = slot, .to = to });
+        }
     };
+
+    /// Plan 03's ceiling over a destination this plan COMPUTED in a
+    /// file's own ticks: a diagnostic, never a wrap, and never an `:at`
+    /// the document would reload saturated.
+    fn refusePastCeiling(self: *Ctx, span: Diag.Span, smf_tick: i64) Error!void {
+        try self.b.refuse(
+            .tick_overflow,
+            span,
+            "this edit would put an event at SMF tick {d}, which is past the grid's ceiling " ++
+                "({d} ticks): plan 03 makes a position there a diagnostic and never a wrap",
+            .{ smf_tick, Grid.MAX_TICK },
+        );
+    }
 
     fn smfLane(self: *Ctx, li: u32, op: Op.Op) Error!void {
         const lane = self.d.lanes[li];
@@ -539,6 +568,7 @@ const Ctx = struct {
         else
             .{};
 
+        if (edits.off_grid) |tick| return self.refusePastCeiling(lane.span, tick);
         if (edits.targets == 0) {
             try self.b.refuse(
                 .edit_range_empty,
@@ -592,7 +622,7 @@ const Ctx = struct {
                 .retime => |x| {
                     const to = smfTickOf(destination(x, at), ppq);
                     if (!to.exact) edits.inexact += 1;
-                    try edits.moves.append(self.arena, .{ .slot = s.slot, .to = to.tick });
+                    try edits.move(self.arena, s.slot, to.tick, ppq);
                 },
                 .resize, .velocity => {},
                 else => unreachable,
@@ -631,16 +661,17 @@ const Ctx = struct {
                     const off = pair.off orelse continue;
                     const end = smfTickOf(at +| @max(0, dur), ppq);
                     if (!end.exact) edits.inexact += 1;
-                    try edits.moves.append(self.arena, .{ .slot = off, .to = end.tick });
+                    try edits.move(self.arena, off, end.tick, ppq);
                 },
                 .retime => |x| {
                     const to = smfTickOf(destination(x, at), ppq);
                     if (!to.exact) edits.inexact += 1;
-                    try edits.moves.append(self.arena, .{ .slot = pair.on, .to = to.tick });
-                    if (pair.off) |off| try edits.moves.append(self.arena, .{
-                        .slot = off,
-                        .to = to.tick + (pair.end - pair.at),
-                    });
+                    try edits.move(self.arena, pair.on, to.tick, ppq);
+                    // The file's own duration, read raw off the tree:
+                    // saturating, and never backwards (an off behind
+                    // its on, `at_not_monotone`, lands with it).
+                    const held = @max(0, pair.end -| pair.at);
+                    if (pair.off) |off| try edits.move(self.arena, off, to.tick +| held, ppq);
                 },
                 else => unreachable,
             }
@@ -2184,6 +2215,59 @@ test "bound SMF: materialize of a curve lane writes keyframes and keeps its :cc"
             },
         },
     );
+}
+
+test "bound SMF: a retime whose note-off would leave the grid is tick_overflow, not a panic" {
+    // The off moves by the file's own duration, `pair.end - pair.at`,
+    // read raw off the tree: a note-off at `maxInt(i64)` made the sum
+    // `to + (end - at)` overflow. Saturated, the off's destination is
+    // past the grid's ceiling, and a position there is a diagnostic
+    // (plan 03) — the same refusal `ops_native` gives a native retime.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.initUnchecked(gpa,
+        \\(timeline :title "edge" :conductor song :length 2bar)
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\(midi/smf :format 0 :division 480)
+        \\(midi/mtrk
+        \\  (note-on      :at 0 :ch 1 :key 36 :vel 100)
+        \\  (note-off     :at 9223372036854775807 :ch 1 :key 36 :vel 64)
+        \\  (end-of-track :at 9223372036854775807))
+        \\(lane :name kick :kind notes :from song :track 1 :ch 1)
+        \\
+    );
+    defer fx.deinit();
+
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{ .retime = .{
+        .sel = .{ .lanes = &.{"kick"}, .kinds = .notes },
+        .delta = TPQ,
+    } });
+    defer p.deinit();
+    try testing.expect(p.summary.refused);
+    try testing.expectEqual(@as(usize, 0), p.actions.len);
+    try testing.expect(p.findDiag(.tick_overflow) != null);
+}
+
+test "bound SMF: a pitch-bend :val past 14 bits reads clamped, never an overflow" {
+    // `val - 8192` on a raw tree integer overflowed at `minInt(i64)`;
+    // the manifest refuses the number, and the planner reads it clamped
+    // onto the event's 14 bits — the bottom of the bend, −1.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.initUnchecked(gpa,
+        \\(timeline :title "edge" :conductor song :length 2bar)
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\(midi/smf :format 0 :division 480)
+        \\(midi/mtrk
+        \\  (pitch-bend   :at 0 :ch 1 :val -9223372036854775808)
+        \\  (end-of-track :at 480))
+        \\(lane :name mod :kind curve :from song :track 1 :ch 1 :bend true)
+        \\
+    );
+    defer fx.deinit();
+
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{ .materialize = .{ .lane = "mod" } });
+    defer p.deinit();
+    try testing.expect(!p.summary.refused);
+    try testing.expect(std.mem.indexOf(u8, p.actions[0].json, "\"value\":-1") != null);
 }
 
 test "bound SMF: materialize refuses a lane that already carries content" {
