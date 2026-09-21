@@ -223,9 +223,9 @@ const Render = struct {
         for (self.doc.lanes, 0..) |*lane, i| {
             if (!try self.renders(lane)) continue;
             const want: u16 = switch (lane.kind) {
-                .notes => @max(1, @min(
-                    @as(u16, @max(self.opts.voices, 1)),
-                    @as(u16, @intCast(maxPolyphony(self.derived.lanes[i].onsets))),
+                .notes => @max(1, neededVoices(
+                    self.derived.lanes[i].onsets,
+                    @max(self.opts.voices, 1),
                 )),
                 else => 1,
             };
@@ -723,25 +723,57 @@ const Render = struct {
     }
 };
 
-/// How many notes of `onsets` ever sound at once — how many channels the
-/// lane needs before `--voices` caps it.
+/// How many notes of `onsets` ever sound at once, stopping at `cap` —
+/// how many channels the lane needs, `--voices` already applied.
 ///
-/// A note's window is HALF-OPEN, the same rule the voice allocator below
-/// uses (`busy[v] <= tick`): a note that ends exactly where the next one
+/// A note's window is HALF-OPEN, the same rule the voice allocator uses
+/// (`busy[v] <= tick`): a note that ends exactly where the next one
 /// starts is not sounding with it, so a monophonic line stays on one
-/// channel. A note of no duration still sounds at its own tick, which is
-/// the `other.tick == o.tick` arm.
-fn maxPolyphony(onsets: []const derive.Onset) usize {
-    var most: usize = 0;
-    for (onsets) |o| {
-        var n: usize = 0;
-        for (onsets) |other| {
-            const end = other.tick +| @max(other.dur, 0);
-            if (other.tick <= o.tick and (o.tick < end or other.tick == o.tick)) n += 1;
+/// channel. A note of no duration still sounds at its own tick, so every
+/// onset of one tick counts, whatever its length.
+///
+/// One sweep over the onsets in `derive`'s order, which is by tick
+/// (`LaneIndex.invariants`): at each tick the count is the onsets there
+/// plus the earlier notes still sounding. The still-sounding set is at
+/// most `cap − 1` ends before the answer is known to be `cap`, so it
+/// fits a fixed buffer, and the count is never wider than the u8 it is
+/// compared with.
+fn neededVoices(onsets: []const derive.Onset, cap: u8) u8 {
+    var ends: [std.math.maxInt(u8)]i64 = undefined;
+    var sounding: usize = 0;
+    var most: u8 = 0;
+    var i: usize = 0;
+    // Bounded by the onsets: every turn consumes the group at one tick.
+    while (i < onsets.len) {
+        const tick = onsets[i].tick;
+        var group = i;
+        while (group < onsets.len and onsets[group].tick == tick) group += 1;
+        sounding = stillSounding(ends[0..sounding], tick);
+        const at_once = sounding + (group - i);
+        if (at_once >= cap) return cap;
+        most = @max(most, @as(u8, @intCast(at_once)));
+        // `at_once < cap <= 255`, so the ends added here still fit.
+        for (onsets[i..group]) |o| {
+            const end = o.tick +| @max(o.dur, 0);
+            if (end <= tick) continue;
+            ends[sounding] = end;
+            sounding += 1;
         }
-        most = @max(most, n);
+        i = group;
     }
     return most;
+}
+
+/// Keeps the ends in `ends` that are still sounding at `tick` (strictly
+/// after it), packed at the front, and answers how many that is.
+fn stillSounding(ends: []i64, tick: i64) usize {
+    var kept: usize = 0;
+    for (ends) |end| {
+        if (end <= tick) continue;
+        ends[kept] = end;
+        kept += 1;
+    }
+    return kept;
 }
 
 /// A velocity as IT's volume column: `round(vel × 64 / 127)`, the
@@ -827,6 +859,34 @@ fn load(gpa: Allocator, source: [:0]const u8) !Fixture {
 
 fn cellOf(module: *const itf.Module, pattern: usize, row: u16, channel: u8) model.Cell {
     return module.patterns[pattern].at(row, channel).*;
+}
+
+test "neededVoices: half-open windows, a zero-length chord still counts, and the cap stops it" {
+    const O = derive.Onset;
+    // A monophonic line whose notes touch: one voice.
+    const line = [_]O{
+        .{ .tick = 0, .dur = q, .key = 60, .vel = 100 },
+        .{ .tick = q, .dur = q, .key = 62, .vel = 100 },
+        .{ .tick = 2 * q, .dur = q, .key = 64, .vel = 100 },
+    };
+    try testing.expectEqual(@as(u8, 1), neededVoices(&line, 8));
+    // Three notes of no duration at one tick are three voices there.
+    const blips = [_]O{
+        .{ .tick = 0, .dur = 0, .key = 60, .vel = 100 },
+        .{ .tick = 0, .dur = 0, .key = 62, .vel = 100 },
+        .{ .tick = 0, .dur = 0, .key = 64, .vel = 100 },
+    };
+    try testing.expectEqual(@as(u8, 3), neededVoices(&blips, 8));
+    // A long note under two short ones: two at once, never three.
+    const pedal = [_]O{
+        .{ .tick = 0, .dur = 4 * q, .key = 36, .vel = 100 },
+        .{ .tick = q, .dur = q, .key = 60, .vel = 100 },
+        .{ .tick = 2 * q, .dur = q, .key = 62, .vel = 100 },
+    };
+    try testing.expectEqual(@as(u8, 2), neededVoices(&pedal, 8));
+    // The cap is the answer as soon as it is reached.
+    try testing.expectEqual(@as(u8, 2), neededVoices(&blips, 2));
+    try testing.expectEqual(@as(u8, 0), neededVoices(&.{}, 4));
 }
 
 test "volumeOf: the inverse of the bridge's velocityOf, at both ends" {
@@ -1049,6 +1109,69 @@ test "renderIt: a three-voice chord takes three channels and a fifth voice trips
     defer capped.deinit();
     try testing.expectEqual(@as(usize, 1), capped.diags.count(.render_polyphony_exceeded));
     try testing.expectEqual(@as(usize, 4), capped.lanes.len);
+}
+
+/// A native notes lane of `n` quarter notes all at tick 0 — the chord
+/// 256 clips of a 256-note phrase expand to, built directly so the test
+/// does not pay the bridge's checks for it. `deinit` frees both halves.
+fn chordFixture(gpa: Allocator, n: usize) !Fixture {
+    var d: Doc.Doc = .empty(gpa);
+    errdefer d.deinit();
+    const arena = d.arena.allocator();
+    const tempo = try arena.alloc(Doc.TempoPoint, 1);
+    tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
+    d.tempo = tempo;
+    const meter = try arena.alloc(Doc.MeterPoint, 1);
+    meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
+    d.meter = meter;
+    d.length = 4 * q;
+    const notes = try arena.alloc(Doc.Note, n);
+    for (notes, 0..) |*note, i| note.* = .{
+        .at = 0,
+        .dur = q,
+        .key = @intCast(i % 128),
+        .vel = 100,
+        .ch = 0,
+        .off_vel = null,
+        .span = .{ .start = 0, .end = 1 },
+    };
+    const lanes = try arena.alloc(Doc.Lane, 1);
+    lanes[0] = .{
+        .name = "wall",
+        .kind = .notes,
+        .target = "wall",
+        .range = null,
+        .binding = null,
+        .notes = notes,
+        .keyframes = &.{},
+        .clips = &.{},
+        .query_src = null,
+        .expr_src = null,
+        .span = .{ .start = 0, .end = 1 },
+    };
+    d.lanes = lanes;
+    const derived = try derive.derive(gpa, &d);
+    return .{ .doc = d, .derived = derived };
+}
+
+test "renderIt: 65 536 notes at once need --voices channels, counted without a narrowing" {
+    // 256 clips of a 256-note chord sound 65 536 notes at one tick. How
+    // many channels the lane wants is capped by `--voices` (a u8), so
+    // the count stops there: it is never a number a u16 has to hold,
+    // and the sweep that finds it is one pass over the sorted onsets.
+    const gpa = testing.allocator;
+    var fx = try chordFixture(gpa, 1 << 16);
+    defer fx.deinit();
+
+    var out = try renderIt(gpa, &fx.doc, &fx.derived, null, .{ .voices = 4 });
+    defer out.deinit();
+    try testing.expectEqual(@as(usize, 4), out.lanes.len);
+    try testing.expectEqual(@as(usize, 1), out.diags.count(.render_polyphony_exceeded));
+    // `derive` orders a tick's onsets by key, and 512 of them are key 0:
+    // the four voices take the first four.
+    try testing.expectEqual(@as(u8, 0), cellOf(&out.module, 0, 0, 0).note);
+    try testing.expectEqual(@as(u8, 0), cellOf(&out.module, 0, 0, 3).note);
+    try testing.expect(cellOf(&out.module, 0, 0, 4).isEmpty());
 }
 
 test "renderIt: a curve writes the volume column, linear per row, in-cubic as steps" {
