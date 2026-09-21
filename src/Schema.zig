@@ -21,12 +21,19 @@
 //!
 //! `loadCorpus` is the second bundle: `schema/tempura-corpus.sjon`, the
 //! golden-corpus harness vocabulary, preloaded ALONE. It is never
-//! composed with the timeline one — both declare a `timing` form (the
-//! `it/` tier's header section, and the harness verb that echoes a
-//! conductor's walk), and one schema holding two would make every
-//! unqualified `(timing …)` `ambiguous_form` in documents and in harness
-//! files alike. Two bundles, never a shared schema — pacer's rule for
-//! `pacer-corpus.sjon`, with a different head doing the colliding.
+//! composed with the timeline one, because a harness file is an ordered
+//! script of verbs and not a document: a shared schema would put the
+//! harness's own verbs into a document's scope, and every document form
+//! into a `times.sjon`'s. The "never composed" test below pins exactly
+//! that — five of those verbs (`plan`, `export-score`, `roundtrip`,
+//! `snap`, `write`) are unreachable in the timeline bundle and all five
+//! resolve in a composed one. Two bundles, never a shared schema —
+//! pacer's rule for `pacer-corpus.sjon`.
+//!
+//! (Until 2026-09-21 the reason was a COLLISION: both manifests declared
+//! a `timing` form, the `it/` tier's header section and a harness verb
+//! that echoed a conductor's walk. Nothing ever implemented the verb, so
+//! it is gone; the `it/` tier's `timing` still resolves.)
 //!
 //! Lifetime — the borrow-whole rule, pacer's outer ring: a `HostResult`
 //! borrows the bundle (its plugin structs alias the preload arena), so
