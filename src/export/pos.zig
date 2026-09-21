@@ -201,18 +201,25 @@ pub const Mapper = struct {
     }
 
     /// A POSITION: the pacer tick this tempura tick lands on, counted.
+    ///
+    /// Never negative, whatever `tick` is: both conversions clamp the
+    /// tempura tick at zero first, which is what lets the spellers
+    /// assert the same of what they print.
     pub fn position(self: *Mapper, tick: i64) i64 {
-        switch (self.mode) {
-            .beats => |b| return self.counter.convert(@max(tick, 0), b.n, b.d),
-            .seconds => |s| {
+        const landed = switch (self.mode) {
+            .beats => |b| self.counter.convert(@max(tick, 0), b.n, b.d),
+            .seconds => |s| blk: {
                 const want = self.wallTicks(tick);
                 const landed = nearest(want);
                 if (want != @as(f64, @floatFromInt(landed)))
                     self.counter.notePosition(@abs(want - @as(f64, @floatFromInt(landed))) /
                         @as(f64, @floatFromInt(ticksPerBeat(s.n))));
-                return landed;
+                break :blk landed;
             },
-        }
+        };
+        std.debug.assert(landed >= 0);
+        std.debug.assert(landed <= Grid.MAX_TICK);
+        return landed;
     }
 
     /// A DURATION: how many pacer ticks the window `[at, at + dur)`
@@ -229,6 +236,9 @@ pub const Mapper = struct {
         const a = self.rawPosition(from);
         const b = self.rawPosition(to);
         const span = b - a;
+        // Both conversions are monotone and `to >= from`, so a window
+        // never spans backwards.
+        std.debug.assert(span >= 0);
         switch (self.mode) {
             .beats => |m| {
                 const divisor = Grid.pacerDivisor(m.n, m.d).?;
@@ -356,17 +366,35 @@ fn shortestFloor(buf: []u8, target: i64, rate: f64) ?[]const u8 {
     if (!std.math.isFinite(rate) or rate <= 0) return null;
 
     var m = firstAtOrAbove(target, rate);
-    var k: usize = 0;
-    while (true) : (k += 1) {
+    std.debug.assert(m >= 0);
+    // One candidate per digit count, `0 … MAX_FRAC_DIGITS`; the last
+    // one either lands or ends the search, so the loop never runs out.
+    for (0..MAX_FRAC_DIGITS + 1) |k| {
         const text = fixed(buf, m, k);
         if (pacerFloor(parse(text), rate) == target) return text;
         if (k == MAX_FRAC_DIGITS) return null;
-        // Widen by one digit: the answer is in `(10·(m − 1), 10·m]`.
-        const top = 10 * m;
-        var next = @max(10 * (m - 1) + 1, 0);
-        while (next < top and pacerFloor(parse(fixed(buf, next, k + 1)), rate) < target) next += 1;
-        m = next;
-    }
+        m = widened(buf, m, k, target, rate);
+    } else unreachable;
+}
+
+/// `g(k + 1)` from `g(k) = m`: the smallest `next` in `(10·(m − 1),
+/// 10·m]` whose `(k + 1)`-digit decimal floors at or above `target` —
+/// `10·m` itself when none below it does, since `m / 10^k` already did.
+fn widened(buf: []u8, m: i128, k: usize, target: i64, rate: f64) i128 {
+    std.debug.assert(m >= 0);
+    const top = 10 * m;
+    const bottom = @max(10 * (m - 1) + 1, 0);
+    var next = bottom;
+    // Ten candidates at most: the interval is nine wide, and `top`
+    // closes it before an eleventh could be asked for.
+    for (0..10) |_| {
+        if (next >= top) break;
+        if (pacerFloor(parse(fixed(buf, next, k + 1)), rate) >= target) break;
+        next += 1;
+    } else unreachable;
+    std.debug.assert(next >= bottom);
+    std.debug.assert(next <= top);
+    return next;
 }
 
 /// The smallest whole number whose `mul + floor` reaches `target` — the
