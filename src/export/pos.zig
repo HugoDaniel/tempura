@@ -54,7 +54,14 @@ const Map = time.TimeMap.TimeMap;
 pub const MAX_FRAC_DIGITS: usize = 17;
 
 /// Enough for `9223372036854775808.` + 17 digits.
-pub const spell_buf_len: usize = 48;
+/// The widest decimal `fixed` writes: an `i128` integer part (39 digits),
+/// the point, and `MAX_FRAC_DIGITS + 1` fraction digits — the widening
+/// loop asks for one more than the ceiling before it gives up.
+pub const spell_buf_len: usize = 64;
+
+comptime {
+    std.debug.assert(spell_buf_len >= 39 + 1 + MAX_FRAC_DIGITS + 1);
+}
 
 /// pacer's ticks per beat under `[n d]`: `PPC / n`, exact for every
 /// `n` in pacer's `meter-component` bound (720 720 is divisible by
@@ -333,15 +340,19 @@ pub fn spellSeconds(writer: anytype, pacer_tick: i64, tps: f64) !void {
 
 /// Print `qpm · d / 4` as the shortest decimal that reads back as that
 /// exact f64 — checked with `std.fmt.parseFloat`, the conversion SJON's
-/// parser performs.
+/// parser performs. Total: a value the fixed-point search cannot hold
+/// (negative, NaN, infinite, or past an i128 once scaled — a `:qpm` the
+/// reader kept with a diagnostic) prints as Zig's own float spelling.
 pub fn spellBpm(writer: anytype, qpm: f64, d: u8) !void {
     const v = pacerBpm(qpm, d);
     var buf: [spell_buf_len]u8 = undefined;
+    // Below 2^126, so `@intFromFloat` to i128 cannot leave its range.
+    const i128_reach: f64 = 0x1p126;
     var k: usize = 0;
     while (k <= MAX_FRAC_DIGITS) : (k += 1) {
         const scale = pow10(k);
         const scaled = @round(v * @as(f64, @floatFromInt(scale)));
-        if (!std.math.isFinite(scaled)) break;
+        if (!(scaled >= 0) or scaled >= i128_reach) break;
         const text = fixed(&buf, @intFromFloat(scaled), k);
         const back = std.fmt.parseFloat(f64, text) catch continue;
         if (back == v) return writer.print("{s}", .{text});
@@ -416,10 +427,10 @@ fn firstAtOrAbove(target: i64, rate: f64) i128 {
     else
         0;
     var steps: usize = 0;
-    while (m > 0 and pacerFloor(
-        @floatFromInt(m - 1),
-        rate,
-    ) >= target and steps < 64) : (steps += 1) m -= 1;
+    while (m > 0 and steps < 64) : (steps += 1) {
+        if (pacerFloor(@floatFromInt(m - 1), rate) < target) break;
+        m -= 1;
+    }
     steps = 0;
     while (pacerFloor(@floatFromInt(m), rate) < target and steps < 64) : (steps += 1) m += 1;
     return m;
@@ -443,9 +454,14 @@ fn pow10(k: usize) i128 {
 /// through a float, so the text is exactly the rational it names.
 fn fixed(buf: []u8, m: i128, k: usize) []const u8 {
     std.debug.assert(m >= 0);
+    std.debug.assert(k <= MAX_FRAC_DIGITS + 1);
+    std.debug.assert(buf.len >= spell_buf_len);
     const scale = pow10(k);
     const int_part = @divFloor(m, scale);
     var frac = m - int_part * scale;
+    // `int_part` is a non-negative i128, at most 39 digits, and the point
+    // and `k` fraction digits follow: `spell_buf_len` holds all of it
+    // (pinned at comptime above), so the write cannot run out of room.
     const head = std.fmt.bufPrint(buf, "{d}", .{int_part}) catch unreachable;
     if (k == 0) return head;
     var len = head.len;
@@ -571,6 +587,18 @@ test "pos.spellBpm: pacer's beat is 4/d of a quarter, so :bpm is qpm · d / 4" {
     // A fractional tempo keeps every digit it needs to read back.
     try testing.expectEqualStrings("128.5", try bpmSlice(&buf, 128.5, 4));
     try testing.expectEqual(@as(f64, 250), pacerBpm(125, 8));
+}
+
+test "pos.spellBpm: a tempo past i128's reach prints as the float, never a trap" {
+    // A `:qpm` the schema refuses is still kept by the reader, and the
+    // score header spells whatever tempo the map holds. `1e300 · 10^k`
+    // is finite and no i128 holds it, so the scaled value must be
+    // bounded before `@intFromFloat` — a trap natively, undefined
+    // behaviour in the wasm. The fallback spells every digit (301 of
+    // them), which the score's own writer grows to hold.
+    var buf: [512]u8 = undefined;
+    const text = try bpmSlice(&buf, 1e300, 4);
+    try testing.expectEqual(@as(f64, 1e300), try std.fmt.parseFloat(f64, text));
 }
 
 test "pos.supportedMeter: pacer's meter-component bound, 1..16 and a power of two below" {

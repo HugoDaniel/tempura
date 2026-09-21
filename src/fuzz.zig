@@ -1310,6 +1310,8 @@ const bad_documents = [_][:0]const u8{
     // Positions at and past the grid ceiling.
     "(timeline :length 1e30q)\n(tempo-point :at 0q :qpm 120)\n(meter-point :at 0bar :sig [4 4])\n",
     "(timeline)\n(tempo-point :at 0q :qpm 1e30)\n(meter-point :at 0bar :sig [4 4])\n",
+    // A tempo no i128 holds once scaled, spelled by the score's header.
+    "(timeline)\n(tempo-point :at 0q :qpm 1e300)\n(meter-point :at 0bar :sig [4 4])\n",
     "(timeline)\n(tempo-point :at 0q :us 0)\n(meter-point :at 0bar :sig [0 0])\n",
     // A row and a cell past the module's own domains.
     "(timeline :conductor s)\n(anchor :id s :kind it :file \"x.it\")\n" ++
