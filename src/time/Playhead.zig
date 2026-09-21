@@ -70,10 +70,11 @@ pub const Around = struct { before: ?Step, after: ?Step };
 ///
 /// `section_ids` is allocated with `gpa`; `Position.deinit` frees it.
 pub fn at(gpa: std.mem.Allocator, d: *const Derived, seconds: f64) Error!Position {
+    d.invariants();
     const wrapped = d.map.wrapSeconds(seconds);
     const tick = try d.map.tickFromSeconds(wrapped);
 
-    var pos = try atTick(gpa, d, tick);
+    var pos = try position(gpa, d, tick);
     // The one field the CLOCK answers better than the grid does. A tick
     // is the last one BEGUN at `wrapped`, so `seconds(tick)` may sit an
     // ulp below the second that was actually asked about; the caller
@@ -105,6 +106,15 @@ pub fn at(gpa: std.mem.Allocator, d: *const Derived, seconds: f64) Error!Positio
 ///
 /// `section_ids` is allocated with `gpa`; `Position.deinit` frees it.
 pub fn atTick(gpa: std.mem.Allocator, d: *const Derived, tick: i64) error{OutOfMemory}!Position {
+    d.invariants();
+    return position(gpa, d, tick);
+}
+
+/// Where `tick` is — its bar, beat and second into the bar, the sections
+/// over it, the nearest cue each way and the tracker position — over a
+/// derivation the caller has already held to its invariants. Total over
+/// `i64`; `section_ids` is allocated with `gpa`.
+fn position(gpa: std.mem.Allocator, d: *const Derived, tick: i64) error{OutOfMemory}!Position {
     const where = d.map.barOf(tick);
     const bar_start = tick - (where.beat * Grid.beatTicks(where.meter.d) + where.sub_ticks);
 
@@ -167,7 +177,10 @@ pub fn snap(d: *const Derived, tick: i64, grid: SnapGrid, swing: f64) i64 {
     if (here.start > 0) consider(&best, t, barAt(d, here.start - 1), grid, swing);
     consider(&best, t, barAt(d, here.start + here.len), grid, swing);
 
-    return best orelse t;
+    const snapped = best orelse t;
+    // A line before tick 0 is never weighed, and `t` is clamped to it.
+    std.debug.assert(snapped >= 0);
+    return snapped;
 }
 
 /// The notes of `lane` whose `[at, at + dur)` contains `tick`, in onset
@@ -324,6 +337,10 @@ fn lowerBound(list: []const Onset, tick: i64) usize {
         const mid = lo + (hi - lo) / 2;
         if (list[mid].tick < tick) lo = mid + 1 else hi = mid;
     }
+    // The boundary of a sorted list: everything before it is earlier than
+    // `tick`, and the onset at it is not.
+    if (lo > 0) std.debug.assert(list[lo - 1].tick < tick);
+    if (lo < list.len) std.debug.assert(list[lo].tick >= tick);
     return lo;
 }
 

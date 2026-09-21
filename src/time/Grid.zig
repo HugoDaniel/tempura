@@ -132,13 +132,27 @@ pub fn pacerDivisor(n: u8, d: u8) ?i64 {
 /// the meter map validates before it converts, and `@divExact` makes a
 /// violation loud instead of silently truncating a bar length.
 pub fn beatTicks(d: u8) i64 {
-    return @divExact(4 * TPQ, @as(i64, d));
+    // The precondition's first half, said before the division says it.
+    std.debug.assert(d >= 1);
+    const beat = @divExact(4 * TPQ, @as(i64, d));
+    std.debug.assert(beat > 0);
+    std.debug.assert(beat <= 4 * TPQ);
+    return beat;
 }
 
 /// One bar of a `[n d]` meter in ticks: `n` beats of `4 / d` quarters.
 /// Equals `pacerDivisor(n, d) · PPC` whenever the meter has a divisor.
+///
+/// PRECONDITION: `n >= 1` — a bar of no beats is no bar, and every caller
+/// reads `n` from a meter the map (or the caller itself) has checked.
 pub fn barTicks(n: u8, d: u8) i64 {
-    return @as(i64, n) * beatTicks(d);
+    std.debug.assert(n >= 1);
+    const bar = @as(i64, n) * beatTicks(d);
+    // At least one beat, and never wider than the widest bar a `u8` can
+    // count: 255 whole notes.
+    std.debug.assert(bar >= beatTicks(d));
+    std.debug.assert(bar <= 255 * 4 * TPQ);
+    return bar;
 }
 
 /// Whether `tick` sits on pacer's lattice under meter `[n d]` — that is,

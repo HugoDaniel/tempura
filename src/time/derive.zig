@@ -85,6 +85,29 @@ pub const LaneIndex = struct {
     bound: bool,
     onsets: []Onset,
     steps: []Step,
+
+    /// One lane's tables: onsets in `onsetBefore`'s total order, steps by
+    /// tick, and every tick on the grid's magnitude, `|tick| ≤ MAX_TICK`.
+    ///
+    /// A lane's OWN content — the document's positions, which only ever
+    /// come from `TimeMap.tickFromLiteral`, and a clip's placements, which
+    /// `placedTick` bounds — also never sits before tick 0. A BOUND lane
+    /// is held to less: its ticks are the anchor's, an inline SMF dump
+    /// keeps an event behind tick 0 with `at_not_monotone` rather than drop
+    /// it, and `Grid.smfToTicks` bounds only its magnitude.
+    fn invariants(self: *const LaneIndex) void {
+        const floor: i64 = if (self.bound) -Grid.MAX_TICK else 0;
+        for (self.onsets, 0..) |o, i| {
+            std.debug.assert(o.tick >= floor);
+            std.debug.assert(o.tick <= Grid.MAX_TICK);
+            if (i > 0) std.debug.assert(!onsetBefore({}, o, self.onsets[i - 1]));
+        }
+        for (self.steps, 0..) |s, i| {
+            std.debug.assert(s.tick >= floor);
+            std.debug.assert(s.tick <= Grid.MAX_TICK);
+            if (i > 0) std.debug.assert(self.steps[i - 1].tick <= s.tick);
+        }
+    }
 };
 
 /// The document as a playhead reads it.
@@ -112,6 +135,16 @@ pub const Derived = struct {
         self.diags.deinit();
         self.arena.deinit();
         self.* = undefined;
+    }
+
+    /// The derivation's contract: the map's own (`TimeMap.invariants`)
+    /// and every lane's tables in the order `Playhead` searches them.
+    /// Asserted at the end of `derive` and at the `Playhead` entry points
+    /// that read the whole value (`at`, `atTick`); O(the content), a
+    /// construction's cost and never a lookup's.
+    pub fn invariants(self: *const Derived) void {
+        self.map.invariants();
+        for (self.lanes) |*l| l.invariants();
     }
 
     /// The lane named `name`, or null.
@@ -197,7 +230,7 @@ pub fn derive(gpa: std.mem.Allocator, doc: *const Doc) Error!Derived {
         try relay(&diags, &res.diags);
     }
 
-    return .{
+    const derived: Derived = .{
         .map = res.map,
         .sections = sections,
         .cues = cues,
@@ -206,6 +239,8 @@ pub fn derive(gpa: std.mem.Allocator, doc: *const Doc) Error!Derived {
         .diags = diags,
         .arena = arena_state,
     };
+    derived.invariants();
+    return derived;
 }
 
 // ---- the conductor ----

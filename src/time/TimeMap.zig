@@ -87,22 +87,125 @@ pub const TimeMap = struct {
         self.arena.deinit();
     }
 
+    /// The map's own contract, asserted where a map is made (the end of
+    /// `derive`) and where a whole one is read (`derive.Derived`'s, so the
+    /// `Playhead` entry points). Every clause is one `derive` ESTABLISHES
+    /// whatever the points said — a point that would break one is a
+    /// diagnostic and never an entry — so a failure is a bug in this file,
+    /// never a defect of a document. O(segments + meters + bars): a
+    /// construction's cost, never a query's.
+    pub fn invariants(self: *const TimeMap) void {
+        self.segmentInvariants();
+        self.meterInvariants();
+        self.barInvariants();
+        // The loop point is a number, and a length at or after tick 0
+        // lies at or after second 0. A NEGATIVE length is `derive`'s to
+        // take (see there), and its loop point is then behind second 0.
+        std.debug.assert(!std.math.isNan(self.loop_secs));
+        if (self.length >= 0) std.debug.assert(self.loop_secs >= 0);
+    }
+
+    /// The tempo table: from tick 0, strictly ascending inside the grid
+    /// and the budget, every rate positive, the seconds origins never
+    /// stepping back, and each path's own representation throughout.
+    fn segmentInvariants(self: *const TimeMap) void {
+        const segs = self.segments;
+        std.debug.assert(segs.len >= 1);
+        std.debug.assert(segs.len <= MAX_TEMPO_SEGMENTS);
+        std.debug.assert(segs[0].tick == 0);
+        std.debug.assert(segs[0].start_sec == 0);
+        std.debug.assert(segs[0].t_i == 0);
+        for (segs, 0..) |s, i| {
+            std.debug.assert(s.tick <= Grid.MAX_TICK);
+            std.debug.assert(std.math.isFinite(s.us));
+            std.debug.assert(s.us > 0);
+            // Positive, so never a NaN — but NOT always finite: a `:qpm`
+            // near f64's own ceiling makes a `us` whose rate overflows to
+            // +inf, which every read of the table answers without a trap.
+            std.debug.assert(s.tps > 0);
+            if (self.integral) {
+                std.debug.assert(s.us == @trunc(s.us));
+                std.debug.assert(s.us < MAX_INTEGRAL_US);
+            } else {
+                std.debug.assert(s.t_i == 0);
+            }
+            if (i == 0) continue;
+            const prev = segs[i - 1];
+            std.debug.assert(s.tick > prev.tick);
+            std.debug.assert(s.start_sec >= prev.start_sec);
+            std.debug.assert(s.t_i >= prev.t_i);
+        }
+    }
+
+    /// The meter table: from tick 0 and bar 0, strictly ascending inside
+    /// the grid, every signature one `meterOk` admits, and every change a
+    /// whole number of bars of the meter before it — which is what the
+    /// bar numbers and beat counts it carries say.
+    fn meterInvariants(self: *const TimeMap) void {
+        const mets = self.meters;
+        std.debug.assert(mets.len >= 1);
+        std.debug.assert(mets[0].tick == 0);
+        std.debug.assert(mets[0].first_bar == 0);
+        std.debug.assert(mets[0].beats_before == 0);
+        for (mets, 0..) |m, i| {
+            std.debug.assert(m.tick <= Grid.MAX_TICK);
+            std.debug.assert(m.n >= 1);
+            std.debug.assert(m.n <= 64);
+            std.debug.assert(m.d >= 1);
+            std.debug.assert(m.d <= 32);
+            std.debug.assert(std.math.isPowerOfTwo(m.d));
+            // A segment the bar table reaches starts on its own first bar.
+            if (m.first_bar < self.bars.len) {
+                std.debug.assert(self.bars[@intCast(m.first_bar)] == m.tick);
+            }
+            if (i == 0) continue;
+            const prev = mets[i - 1];
+            const nbars = m.first_bar - prev.first_bar;
+            std.debug.assert(nbars >= 1);
+            std.debug.assert(m.tick - prev.tick == nbars * Grid.barTicks(prev.n, prev.d));
+            std.debug.assert(m.beats_before - prev.beats_before == nbars * prev.n);
+        }
+    }
+
+    /// The bar table: bar 0 at tick 0, strictly ascending inside the grid
+    /// and the budget, and stopping at the FIRST bar line at or after the
+    /// length — so no entry before the last one reaches it.
+    fn barInvariants(self: *const TimeMap) void {
+        const bars = self.bars;
+        std.debug.assert(bars.len >= 1);
+        std.debug.assert(bars.len <= MAX_BARS);
+        std.debug.assert(bars[0] == 0);
+        std.debug.assert(bars[bars.len - 1] <= Grid.MAX_TICK);
+        for (bars[1..], bars[0 .. bars.len - 1]) |b, prev| std.debug.assert(b > prev);
+        if (bars.len >= 2) std.debug.assert(bars[bars.len - 2] < @max(self.length, 0));
+    }
+
     /// `seconds(tick)`, plan 03's formula in whichever path this map
     /// took. A SEGMENT START is exact by construction — `seconds(tick_i)`
     /// IS `start_sec_i`, the table entry — which is what makes
     /// `tickFromSeconds(secondsFromTick(tick_i))` return `tick_i`.
     /// Interior ticks make no such claim: a clock value is the last tick
     /// BEGUN, and `seconds(k)` may sit one ulp below `k`'s true start.
+    ///
+    /// Total over `i64`: `Playhead.atTick` hands it whatever tick a host
+    /// asked about, so it asserts nothing of `tick` — only that the
+    /// answer is a number on the same side of zero as the tick. Not
+    /// always a FINITE one: a near-zero rate reaches +inf.
     pub fn secondsFromTick(self: *const TimeMap, tick: i64) f64 {
         const seg = self.segments[self.segmentOfTick(tick)];
-        if (self.integral) {
+        const seconds = if (self.integral) integral: {
             // (T_i + (tick − tick_i) · us_i) / (TPQ · 1e6): the numerator
             // is exact in i128, and there is ONE division.
             const num = seg.t_i + @as(i128, tick - seg.tick) * @as(i128, @intFromFloat(seg.us));
-            return @as(f64, @floatFromInt(num)) / TICK_US;
-        }
-        // start_sec_i + (tick − tick_i) / tps_i.
-        return seg.start_sec + @as(f64, @floatFromInt(tick - seg.tick)) / seg.tps;
+            break :integral @as(f64, @floatFromInt(num)) / TICK_US;
+        } else floating: {
+            // start_sec_i + (tick − tick_i) / tps_i.
+            break :floating seg.start_sec + @as(f64, @floatFromInt(tick - seg.tick)) / seg.tps;
+        };
+        std.debug.assert(!std.math.isNan(seconds));
+        if (tick >= 0) std.debug.assert(seconds >= 0);
+        if (tick <= 0) std.debug.assert(seconds <= 0);
+        return seconds;
     }
 
     /// THE clock floor, and the only one in the repo (plan 03's risk
@@ -134,6 +237,9 @@ pub const TimeMap = struct {
         if (floored > ceiling) return error.TickOverflow;
         const tick = seg.tick + @as(i64, @intFromFloat(floored));
         if (tick > Grid.MAX_TICK) return error.TickOverflow;
+        // On the grid, and never before the segment it was read in.
+        std.debug.assert(tick >= seg.tick);
+        std.debug.assert(tick >= 0);
         return tick;
     }
 
@@ -341,6 +447,23 @@ pub const TimeMap = struct {
     /// short of `at` itself (the header's ulp) — and both are answered
     /// as 0 rather than as a distance backwards.
     pub fn durationTicks(self: *const TimeMap, lit: Pos.Literal, at: i64) Error!Resolved {
+        const answer = try self.resolveDuration(lit, at);
+        switch (answer) {
+            // Never a distance backwards, and never past the ceiling.
+            .tick => |t| {
+                std.debug.assert(t >= 0);
+                std.debug.assert(t <= Grid.MAX_TICK);
+            },
+            // Only the codes a position can earn.
+            .err => |code| std.debug.assert(code == .position_negative or
+                code == .position_not_integer or code == .tick_overflow),
+        }
+        return answer;
+    }
+
+    /// `durationTicks`'s answer, unit by unit; the public door asserts
+    /// the contract of what it hands back.
+    fn resolveDuration(self: *const TimeMap, lit: Pos.Literal, at: i64) Error!Resolved {
         if (!std.math.isFinite(lit.value)) return error.NonFiniteTime;
         if (lit.value < 0) return .{ .err = .position_negative };
         const anchor = @max(at, 0);
@@ -402,7 +525,12 @@ pub const TimeMap = struct {
         if (dur >= 0 and at >= 0) {
             if (self.isBarLine(at)) |from| {
                 const end = at +| dur;
-                if (self.isBarLine(end)) |to| return writer.print("{d}bar", .{to - from});
+                if (self.isBarLine(end)) |to| {
+                    // The later line is never earlier in the count: bar
+                    // numbers rise with the tick, past the table too.
+                    std.debug.assert(to >= from);
+                    return writer.print("{d}bar", .{to - from});
+                }
             }
         }
         return Pos.spell(writer, dur, null);
@@ -443,7 +571,14 @@ pub const TimeMap = struct {
     /// which is `Pos.spell`'s — this map only answers the one question
     /// `Pos` owns no table for: is that tick a bar line, and which bar?
     pub fn spell(self: *const TimeMap, writer: anytype, tick: i64) !void {
-        return Pos.spell(writer, tick, self.isBarLine(tick));
+        const bar_line = self.isBarLine(tick);
+        if (bar_line) |bar| {
+            // A bar line is only ever found at or after tick 0, and bars
+            // count from 0.
+            std.debug.assert(tick >= 0);
+            std.debug.assert(bar >= 0);
+        }
+        return Pos.spell(writer, tick, bar_line);
     }
 
     /// Where bar `bar` starts, whether or not the table reaches it: past
@@ -620,6 +755,7 @@ pub fn derive(
     // (pacer's compile-time constant): `wrapSeconds` runs on it per call.
     map.loop_secs = map.secondsFromTick(length);
 
+    map.invariants();
     return .{ .map = map, .diags = diags };
 }
 

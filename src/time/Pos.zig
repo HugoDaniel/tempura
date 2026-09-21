@@ -122,7 +122,13 @@ pub fn tickFromQuarters(q: f64) Error!i64 {
 
     const ceiling: f64 = @floatFromInt(Grid.MAX_TICK);
     if (nearest > ceiling or nearest < -ceiling) return error.TickOverflow;
-    return @intFromFloat(nearest);
+    const tick: i64 = @intFromFloat(nearest);
+    // The quarters' own sign — a tie corrected toward zero never crosses
+    // it — and inside the ceiling either way.
+    if (q >= 0) std.debug.assert(tick >= 0);
+    if (q <= 0) std.debug.assert(tick <= 0);
+    std.debug.assert(@abs(tick) <= Grid.MAX_TICK);
+    return tick;
 }
 
 /// Resolve a literal as far as the grid alone allows.
@@ -134,7 +140,7 @@ pub fn tickFromQuarters(q: f64) Error!i64 {
 /// from a validated SJON number plus a unit token.
 pub fn tickFromLiteral(lit: Literal) TickResult {
     if (lit.value < 0) return .{ .err = .position_negative };
-    return switch (lit.unit) {
+    const result: TickResult = switch (lit.unit) {
         .q => if (tickFromQuarters(lit.value)) |tick|
             .{ .tick = tick }
         else |_|
@@ -149,6 +155,17 @@ pub fn tickFromLiteral(lit: Literal) TickResult {
         },
         .bar, .b, .s => .{ .needs_map = lit.unit },
     };
+    switch (result) {
+        // A point on the grid: never before tick 0, never past the ceiling.
+        .tick => |t| {
+            std.debug.assert(t >= 0);
+            std.debug.assert(t <= Grid.MAX_TICK);
+        },
+        // The grid's own units never ask a map.
+        .needs_map => |u| std.debug.assert(u != .q and u != .t),
+        .err => {},
+    }
+    return result;
 }
 
 /// The `q`-spelling lattice: `TPQ = 9009 · 5120` with `5120 = 2^10 · 5`,
@@ -207,6 +224,9 @@ pub fn spell(writer: anytype, tick: i64, bar_line: ?i64) !void {
                 digits[i - 1] = '0' + @as(u8, @intCast(scaled % 10));
                 scaled /= 10;
             }
+            // Ten digits hold it all: `rem < 5120`, so `scaled` started
+            // under `5120 · 1 953 125 = 10^10`.
+            std.debug.assert(scaled == 0);
             var end: usize = digits.len;
             while (end > 1 and digits[end - 1] == '0') end -= 1;
             try writer.writeAll(".");
