@@ -422,6 +422,9 @@ pub fn fromJson(gpa: std.mem.Allocator, text: []const u8) Error!Parsed {
         );
         return .{ .op = null, .diags = diags, .arena = arena };
     };
+    // Every reader that answers null has said why first, and none says
+    // anything about an operation it then returns.
+    std.debug.assert((op == null) == diags.hasErrors());
     return .{ .op = op, .diags = diags, .arena = arena };
 }
 

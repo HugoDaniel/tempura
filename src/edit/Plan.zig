@@ -121,6 +121,47 @@ pub const Plan = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// What every plan this part hands out satisfies, however it was
+    /// made — asserted by `Builder.finish` on the way out (the write
+    /// side) and by `apply` on the way in (the read side). Never asked
+    /// of a byte no reader has diagnosed: `fromActionsJson` refuses
+    /// what is not an action before it keeps one.
+    ///
+    ///   * A refusal is an empty action list and an error diagnostic;
+    ///     an accepted plan carries none (`Builder.note` warns).
+    ///   * The summary counts the actions: each is in exactly one of
+    ///     `set`, `inserted`, `removed`, `replaced`.
+    ///   * A positional or forest action names its slot and the four
+    ///     that name a node outright do not — `insert_root`'s append
+    ///     spelling is the one optional slot — and a forest action
+    ///     carries the root list's own empty address.
+    ///   * Every action's text is one JSON object.
+    pub fn invariants(self: *const Plan) void {
+        std.debug.assert(self.summary.refused == self.diags.hasErrors());
+        if (self.summary.refused) std.debug.assert(self.actions.len == 0);
+        const s = self.summary;
+        const counted = @as(usize, s.set) + s.inserted + s.removed + s.replaced;
+        std.debug.assert(counted == self.actions.len);
+        for (self.actions) |action| {
+            std.debug.assert(action.json.len >= 2);
+            std.debug.assert(action.json[0] == '{');
+            std.debug.assert(action.json[action.json.len - 1] == '}');
+            switch (action.kind) {
+                .set_keyword, .remove_keyword, .replace, .wrap => {
+                    std.debug.assert(action.slot == null);
+                },
+                .insert_positional, .remove_positional => {
+                    std.debug.assert(action.slot != null);
+                },
+                .remove_root => {
+                    std.debug.assert(action.slot != null);
+                    std.debug.assert(action.site.path.len == 0);
+                },
+                .insert_root => std.debug.assert(action.site.path.len == 0),
+            }
+        }
+    }
+
     /// The first diagnostic carrying `code`, or null. The test helper;
     /// hosts walk `diags.items()`.
     pub fn findDiag(self: *const Plan, code: Diag.Code) ?Diag.Diagnostic {
@@ -245,6 +286,9 @@ pub const Builder = struct {
         comptime fmt: []const u8,
         args: anytype,
     ) Error!void {
+        // Every span this part reports is one it read off a `Doc` node,
+        // a tree node or its own scan of the text: `start ≤ end`.
+        std.debug.assert(span.start <= span.end);
         self.actions.clearRetainingCapacity();
         self.summary = .{ .targets = self.summary.targets, .refused = true };
         try self.diags.add(code, .err, span, fmt, args);
@@ -260,18 +304,21 @@ pub const Builder = struct {
         comptime fmt: []const u8,
         args: anytype,
     ) Error!void {
+        std.debug.assert(span.start <= span.end);
         try self.diags.add(code, severity, span, fmt, args);
     }
 
     pub fn finish(self: *Builder) Error!Plan {
         const actions = try self.actions.toOwnedSlice(self.allocator());
         self.finished = true;
-        return .{
+        const plan: Plan = .{
             .actions = actions,
             .diags = self.diags,
             .summary = self.summary,
             .arena = self.arena,
         };
+        plan.invariants();
+        return plan;
     }
 
     /// `{"op":"<kind>","root":N,"path":[…]` — everything every pathed
@@ -433,6 +480,8 @@ const ActionReader = struct {
             const end = self.elementEnd(i) orelse
                 return self.fail(self.spanFrom(i), "the action list ends in the middle of an action", .{});
             try self.readAction(std.mem.trimEnd(u8, self.src[i..end], &std.ascii.whitespace), @intCast(i));
+            // `readAction` refused an empty element, so this one was not.
+            std.debug.assert(end > i);
             i = end;
             if (i >= self.src.len) return self.fail(self.spanFrom(i), "the action list is not closed", .{});
             if (self.src[i] == ',') {

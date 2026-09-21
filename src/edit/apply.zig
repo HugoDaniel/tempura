@@ -63,6 +63,7 @@ pub const Applied = struct {
 /// as a `sjon_diagnostic` — SJON's complaint in SJON's words, which is
 /// how every other part of this repo carries one.
 pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Error!Applied {
+    p.invariants();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);

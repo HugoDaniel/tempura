@@ -152,7 +152,35 @@ pub fn resolve(gpa: std.mem.Allocator, d: *const doc.Doc, sel: Select) Error!Res
     // Stable, so two targets the key cannot separate keep the order they
     // were read in — which is document order.
     std.sort.insertion(Target, targets, @as(usize, d.lanes.len), lessThan);
+    for (targets, 0..) |t, i| {
+        assertInside(d, t);
+        if (i > 0) std.debug.assert(!lessThan(d.lanes.len, t, targets[i - 1]));
+    }
     return .{ .targets = targets, .bound = bound, .arena = arena };
+}
+
+/// A resolved target names an item that exists: a native lane of the
+/// document and one of that lane's children, or one of the document's
+/// own sections or cues — and only a note carries a key.
+fn assertInside(d: *const doc.Doc, t: Target) void {
+    std.debug.assert((t.key != null) == (t.kind == .note));
+    const li = t.lane orelse {
+        switch (t.kind) {
+            .section => std.debug.assert(t.item < d.sections.len),
+            .cue => std.debug.assert(t.item < d.cues.len),
+            .note, .keyframe, .clip => unreachable,
+        }
+        return;
+    };
+    std.debug.assert(li < d.lanes.len);
+    const lane = d.lanes[li];
+    std.debug.assert(lane.binding == null);
+    switch (t.kind) {
+        .note => std.debug.assert(t.item < lane.notes.len),
+        .keyframe => std.debug.assert(t.item < lane.keyframes.len),
+        .clip => std.debug.assert(t.item < lane.clips.len),
+        .section, .cue => unreachable,
+    }
 }
 
 /// The notes, keyframes and clips of one native lane that the range,

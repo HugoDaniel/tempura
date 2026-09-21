@@ -1877,6 +1877,7 @@ pub const address_keys = [_][]const u8{ "track", "ch", "key", "cc", "bend", "pre
 /// its slot and the next child that will. The one rule behind
 /// `moveInLane` and `ops_bound.moveEvents`; the answer is `arena`'s.
 pub fn keptSlots(arena: std.mem.Allocator, finals: []const i64, moved: []const bool) Error![]bool {
+    std.debug.assert(finals.len == moved.len);
     const keep = try arena.alloc(bool, finals.len);
     var last: i64 = std.math.minInt(i64);
     for (0..finals.len) |k| {
@@ -1894,6 +1895,8 @@ pub fn keptSlots(arena: std.mem.Allocator, finals: []const i64, moved: []const b
         keep[k] = finals[k] >= last and finals[k] <= next;
         if (keep[k]) last = finals[k];
     }
+    // Nothing the batch left alone is reordered.
+    for (moved, keep) |m, kept| std.debug.assert(m or kept);
     return keep;
 }
 
