@@ -297,112 +297,148 @@ pub fn timelineEncodedLen(d: *const Derived) usize {
 /// cannot hold the whole thing is `error.BufferTooSmall` and nothing is
 /// written, because half a timeline is a wrong timeline (pacer's meta
 /// zone degrades to an ABSENT blob for the same reason).
+///
+/// The header, then one section per non-empty list in the header's
+/// fixed order; each section helper takes the offset it starts at and
+/// returns the offset after it, so the stream is one straight line of
+/// `pos = …` and the sum is checked against `timelineEncodedLen` at the
+/// end.
 pub fn encodeTimeline(d: *const Derived, dest: []u8) Error![]u8 {
     if (dest.len < timelineEncodedLen(d)) return error.BufferTooSmall;
 
-    std.mem.writeInt(u32, dest[0..4], TIMELINE_MAGIC, .little);
-    std.mem.writeInt(u32, dest[4..8], TIMELINE_VERSION, .little);
-    std.mem.writeInt(i64, dest[8..16], d.map.length, .little);
-    writeF64(dest[16..24], d.map.loop_secs);
-    dest[24] = @intFromEnum(d.map.end);
-    dest[25] = @intFromBool(d.map.integral);
-    std.mem.writeInt(u16, dest[26..28], 0, .little);
-    std.mem.writeInt(u32, dest[28..32], 0, .little);
-    var pos: usize = TIMELINE_HEADER_LEN;
-
-    if (d.map.segments.len > 0) {
-        var body = openSection(dest, &pos, SEGMENTS_SECTION_ID, d.map.segments.len);
-        for (d.map.segments) |s| {
-            std.mem.writeInt(i64, dest[body..][0..8], s.tick, .little);
-            writeF64(dest[body + 8 ..][0..8], s.us);
-            writeF64(dest[body + 16 ..][0..8], s.tps);
-            writeF64(dest[body + 24 ..][0..8], s.start_sec);
-            body += SEGMENT_REC_LEN;
-        }
-        closeSection(dest, &pos, body);
-    }
-
-    if (d.map.meters.len > 0) {
-        var body = openSection(dest, &pos, METERS_SECTION_ID, d.map.meters.len);
-        for (d.map.meters) |m| {
-            std.mem.writeInt(i64, dest[body..][0..8], m.tick, .little);
-            std.mem.writeInt(i64, dest[body + 8 ..][0..8], m.first_bar, .little);
-            std.mem.writeInt(i64, dest[body + 16 ..][0..8], m.beats_before, .little);
-            dest[body + 24] = m.n;
-            dest[body + 25] = m.d;
-            @memset(dest[body + 26 ..][0..6], 0);
-            body += METER_REC_LEN;
-        }
-        closeSection(dest, &pos, body);
-    }
-
-    if (d.map.bars.len > 0) {
-        const body = pos + SECTION_HEADER_LEN;
-        std.mem.writeInt(u32, dest[pos..][0..4], BARS_SECTION_ID, .little);
-        std.mem.writeInt(u32, dest[pos + 4 ..][0..4], @intCast(BARS_PAYLOAD_LEN), .little);
-        std.mem.writeInt(u32, dest[body..][0..4], @intCast(d.map.bars.len), .little);
-        std.mem.writeInt(u32, dest[body + 4 ..][0..4], 0, .little);
-        std.mem.writeInt(i64, dest[body + 8 ..][0..8], d.map.bars[d.map.bars.len - 1], .little);
-        pos = body + BARS_PAYLOAD_LEN;
-    }
-
-    if (d.sections.len > 0) {
-        var body = openSection(dest, &pos, SECTIONS_SECTION_ID, d.sections.len);
-        for (d.sections) |s| {
-            std.mem.writeInt(i64, dest[body..][0..8], s.at, .little);
-            std.mem.writeInt(i64, dest[body + 8 ..][0..8], s.dur, .little);
-            body += writeName(dest, body + 16, s.name) + 16;
-        }
-        closeSection(dest, &pos, body);
-    }
-
-    if (d.cues.len > 0) {
-        var body = openSection(dest, &pos, CUES_SECTION_ID, d.cues.len);
-        for (d.cues) |c| {
-            std.mem.writeInt(i64, dest[body..][0..8], c.at, .little);
-            body += writeName(dest, body + 8, c.name) + 8;
-        }
-        closeSection(dest, &pos, body);
-    }
-
-    if (d.lanes.len > 0) {
-        var body = openSection(dest, &pos, LANES_SECTION_ID, d.lanes.len);
-        for (d.lanes) |l| {
-            dest[body] = @intFromEnum(l.kind);
-            dest[body + 1] = @intFromBool(l.bound);
-            std.mem.writeInt(u16, dest[body + 2 ..][0..2], @intCast(l.name.len), .little);
-            std.mem.writeInt(u32, dest[body + 4 ..][0..4], @intCast(l.onsets.len), .little);
-            std.mem.writeInt(u32, dest[body + 8 ..][0..4], @intCast(l.steps.len), .little);
-            const first: i64 = if (l.onsets.len == 0) 0 else l.onsets[0].tick;
-            const last: i64 = if (l.onsets.len == 0) 0 else l.onsets[l.onsets.len - 1].tick;
-            std.mem.writeInt(i64, dest[body + 12 ..][0..8], first, .little);
-            std.mem.writeInt(i64, dest[body + 20 ..][0..8], last, .little);
-            std.mem.writeInt(u32, dest[body + 28 ..][0..4], 0, .little);
-            @memcpy(dest[body + LANE_REC_LEN ..][0..l.name.len], l.name);
-            body += LANE_REC_LEN + l.name.len;
-        }
-        closeSection(dest, &pos, body);
-    }
+    var pos = writeTimelineHeader(dest, &d.map);
+    if (d.map.segments.len > 0) pos = writeSegments(dest, pos, d.map.segments);
+    if (d.map.meters.len > 0) pos = writeMeters(dest, pos, d.map.meters);
+    if (d.map.bars.len > 0) pos = writeBars(dest, pos, d.map.bars);
+    if (d.sections.len > 0) pos = writeSections(dest, pos, d.sections);
+    if (d.cues.len > 0) pos = writeCues(dest, pos, d.cues);
+    if (d.lanes.len > 0) pos = writeLanes(dest, pos, d.lanes);
 
     std.debug.assert(pos == timelineEncodedLen(d));
     return dest[0..pos];
 }
 
-/// Write a section's frame header and its `[count u32]`, and hand back
-/// the offset its first record starts at. `payload_len` is filled in by
-/// `closeSection`, which is what lets a variable-width section be
-/// written in one pass.
-fn openSection(dest: []u8, pos: *usize, id: u32, count: usize) usize {
-    std.mem.writeInt(u32, dest[pos.*..][0..4], id, .little);
-    std.mem.writeInt(u32, dest[pos.* + SECTION_HEADER_LEN ..][0..4], @intCast(count), .little);
-    return pos.* + SECTION_HEADER_LEN + 4;
+/// The fixed header: magic, version, the map's scalars and the reserved
+/// bytes zeroed. Returns the offset the section stream starts at.
+fn writeTimelineHeader(dest: []u8, map: *const time.TimeMap.TimeMap) usize {
+    std.mem.writeInt(u32, dest[0..4], TIMELINE_MAGIC, .little);
+    std.mem.writeInt(u32, dest[4..8], TIMELINE_VERSION, .little);
+    std.mem.writeInt(i64, dest[8..16], map.length, .little);
+    writeF64(dest[16..24], map.loop_secs);
+    dest[24] = @intFromEnum(map.end);
+    dest[25] = @intFromBool(map.integral);
+    std.mem.writeInt(u16, dest[26..28], 0, .little);
+    std.mem.writeInt(u32, dest[28..32], 0, .little);
+    return TIMELINE_HEADER_LEN;
 }
 
-/// Close the section `openSection` opened: the payload ran from just
-/// after the frame header to `end`.
-fn closeSection(dest: []u8, pos: *usize, end: usize) void {
-    std.mem.writeInt(u32, dest[pos.* + 4 ..][0..4], @intCast(end - pos.* - SECTION_HEADER_LEN), .little);
-    pos.* = end;
+/// `'TSEG'` at `at`: count × { tick i64, us f64, tps f64, start_sec f64 }.
+/// Returns the offset after the section.
+fn writeSegments(dest: []u8, at: usize, segments: []const time.TimeMap.Segment) usize {
+    var body = openSection(dest, at, SEGMENTS_SECTION_ID, segments.len);
+    for (segments) |s| {
+        std.mem.writeInt(i64, dest[body..][0..8], s.tick, .little);
+        writeF64(dest[body + 8 ..][0..8], s.us);
+        writeF64(dest[body + 16 ..][0..8], s.tps);
+        writeF64(dest[body + 24 ..][0..8], s.start_sec);
+        body += SEGMENT_REC_LEN;
+    }
+    return closeSection(dest, at, body);
+}
+
+/// `'TMET'` at `at`: count × { tick i64, first_bar i64, beats_before i64,
+/// n u8, d u8, rsv u8×6 }. Returns the offset after the section.
+fn writeMeters(dest: []u8, at: usize, meters: []const time.TimeMap.MeterSeg) usize {
+    var body = openSection(dest, at, METERS_SECTION_ID, meters.len);
+    for (meters) |m| {
+        std.mem.writeInt(i64, dest[body..][0..8], m.tick, .little);
+        std.mem.writeInt(i64, dest[body + 8 ..][0..8], m.first_bar, .little);
+        std.mem.writeInt(i64, dest[body + 16 ..][0..8], m.beats_before, .little);
+        dest[body + 24] = m.n;
+        dest[body + 25] = m.d;
+        @memset(dest[body + 26 ..][0..6], 0);
+        body += METER_REC_LEN;
+    }
+    return closeSection(dest, at, body);
+}
+
+/// `'TBAR'` at `at`: the table's SHAPE — its count and its last start —
+/// never its entries (the header says why). Returns the offset after it.
+fn writeBars(dest: []u8, at: usize, bars: []const i64) usize {
+    std.debug.assert(bars.len > 0);
+    const body = at + SECTION_HEADER_LEN;
+    std.mem.writeInt(u32, dest[at..][0..4], BARS_SECTION_ID, .little);
+    std.mem.writeInt(u32, dest[at + 4 ..][0..4], @intCast(BARS_PAYLOAD_LEN), .little);
+    std.mem.writeInt(u32, dest[body..][0..4], @intCast(bars.len), .little);
+    std.mem.writeInt(u32, dest[body + 4 ..][0..4], 0, .little);
+    std.mem.writeInt(i64, dest[body + 8 ..][0..8], bars[bars.len - 1], .little);
+    return body + BARS_PAYLOAD_LEN;
+}
+
+/// `'TSEC'` at `at`: count × { at i64, dur i64, name }. Returns the
+/// offset after the section.
+fn writeSections(dest: []u8, at: usize, sections: []const time.derive.Section) usize {
+    var body = openSection(dest, at, SECTIONS_SECTION_ID, sections.len);
+    for (sections) |s| {
+        std.mem.writeInt(i64, dest[body..][0..8], s.at, .little);
+        std.mem.writeInt(i64, dest[body + 8 ..][0..8], s.dur, .little);
+        body += writeName(dest, body + 16, s.name) + 16;
+    }
+    return closeSection(dest, at, body);
+}
+
+/// `'TCUE'` at `at`: count × { at i64, name }. Returns the offset after
+/// the section.
+fn writeCues(dest: []u8, at: usize, cues: []const time.derive.Cue) usize {
+    var body = openSection(dest, at, CUES_SECTION_ID, cues.len);
+    for (cues) |c| {
+        std.mem.writeInt(i64, dest[body..][0..8], c.at, .little);
+        body += writeName(dest, body + 8, c.name) + 8;
+    }
+    return closeSection(dest, at, body);
+}
+
+/// `'TLAN'` at `at`: count × the lane record and its name, with the
+/// extent (first and last onset tick, both 0 for a lane with none)
+/// computed here so a host never walks an onset list. Returns the offset
+/// after the section.
+fn writeLanes(dest: []u8, at: usize, lanes: []const time.derive.LaneIndex) usize {
+    var body = openSection(dest, at, LANES_SECTION_ID, lanes.len);
+    for (lanes) |l| {
+        dest[body] = @intFromEnum(l.kind);
+        dest[body + 1] = @intFromBool(l.bound);
+        std.mem.writeInt(u16, dest[body + 2 ..][0..2], @intCast(l.name.len), .little);
+        std.mem.writeInt(u32, dest[body + 4 ..][0..4], @intCast(l.onsets.len), .little);
+        std.mem.writeInt(u32, dest[body + 8 ..][0..4], @intCast(l.steps.len), .little);
+        const first: i64 = if (l.onsets.len == 0) 0 else l.onsets[0].tick;
+        const last: i64 = if (l.onsets.len == 0) 0 else l.onsets[l.onsets.len - 1].tick;
+        std.mem.writeInt(i64, dest[body + 12 ..][0..8], first, .little);
+        std.mem.writeInt(i64, dest[body + 20 ..][0..8], last, .little);
+        std.mem.writeInt(u32, dest[body + 28 ..][0..4], 0, .little);
+        @memcpy(dest[body + LANE_REC_LEN ..][0..l.name.len], l.name);
+        body += LANE_REC_LEN + l.name.len;
+    }
+    return closeSection(dest, at, body);
+}
+
+/// Write a section's frame header and its `[count u32]` at `at`, and
+/// hand back the offset its first record starts at. `payload_len` is
+/// filled in by `closeSection`, which is what lets a variable-width
+/// section be written in one pass.
+fn openSection(dest: []u8, at: usize, id: u32, count: usize) usize {
+    std.mem.writeInt(u32, dest[at..][0..4], id, .little);
+    std.mem.writeInt(u32, dest[at + SECTION_HEADER_LEN ..][0..4], @intCast(count), .little);
+    return at + SECTION_HEADER_LEN + 4;
+}
+
+/// Close the section `openSection` opened at `at`: the payload ran from
+/// just after the frame header to `end`, which is returned as the offset
+/// the next section starts at.
+fn closeSection(dest: []u8, at: usize, end: usize) usize {
+    std.debug.assert(end >= at + SECTION_HEADER_LEN + 4);
+    const payload_len = end - at - SECTION_HEADER_LEN;
+    std.mem.writeInt(u32, dest[at + 4 ..][0..4], @intCast(payload_len), .little);
+    return end;
 }
 
 /// `[name_len u16][rsv u16][name bytes]` at `at`; returns the bytes
