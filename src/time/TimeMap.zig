@@ -675,6 +675,20 @@ fn tempoTable(
                 continue;
             }
         }
+        // Every segment sits inside the grid, so a query's `tick_i +
+        // offset` stays inside i64. No reader places a point past the
+        // ceiling — a literal, an SMF pulse and an IT tick are each
+        // capped on the way in — but the map's contract is the value's.
+        if (p.tick > Grid.MAX_TICK) {
+            try diags.add(
+                .tick_overflow,
+                .err,
+                p.span,
+                "tempo point at tick {d} is past the grid ceiling {d}",
+                .{ p.tick, Grid.MAX_TICK },
+            );
+            continue;
+        }
         if (segs.items.len == MAX_TEMPO_SEGMENTS) {
             try diags.add(
                 .tempo_map_invalid,
@@ -736,6 +750,17 @@ fn meterTable(
                 p.span,
                 "meter point at tick {d} is not after the previous point at tick {d}",
                 .{ p.tick, prev.tick },
+            );
+            continue;
+        }
+        // Inside the grid, for the reason `tempoTable` gives.
+        if (p.tick > Grid.MAX_TICK) {
+            try diags.add(
+                .tick_overflow,
+                .err,
+                p.span,
+                "meter point at tick {d} is past the grid ceiling {d}",
+                .{ p.tick, Grid.MAX_TICK },
             );
             continue;
         }
@@ -1361,6 +1386,30 @@ test "TimeMap.derive: a bar table past MAX_TICK is tick_overflow" {
     try testing.expectEqual(@as(usize, 762_787), r.map.bars.len);
     try testing.expectEqual(@as(i64, 9_007_187_983_073_280), r.map.bars[r.map.bars.len - 1]);
     try testing.expect(r.map.bars[r.map.bars.len - 1] + 11_808_276_480 > Grid.MAX_TICK);
+}
+
+test "TimeMap.derive: a tempo or meter point past the grid ceiling is tick_overflow and dropped" {
+    // The ceiling itself is a position (`MAX_TICK` is the last tick the
+    // grid names) and one past it is not. 48 818 366 bars of [4 4] is
+    // the first bar line past the ceiling — the meter point sits on a
+    // bar line, so the ceiling is the only thing wrong with it.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 120 } },
+        .{ .tick = Grid.MAX_TICK, .tempo = .{ .qpm = 240 } },
+        .{ .tick = Grid.MAX_TICK + 1, .tempo = .{ .qpm = 60 }, .span = .{ .start = 3, .end = 9 } },
+    }, &.{
+        .{ .tick = 0, .n = 4, .d = 4 },
+        .{ .tick = 48_818_366 * (4 * Grid.TPQ), .n = 3, .d = 4, .span = .{ .start = 12, .end = 20 } },
+    }, 4 * Grid.TPQ, .hold);
+    defer r.deinit();
+
+    try testing.expect(48_818_366 * (4 * Grid.TPQ) > Grid.MAX_TICK);
+    try testing.expectEqual(@as(usize, 2), r.diags.count(.tick_overflow));
+    try testing.expectEqual(@as(u32, 3), r.diags.items()[0].span.start);
+    try testing.expectEqual(@as(u32, 12), r.diags.items()[1].span.start);
+    try testing.expectEqual(@as(usize, 2), r.map.segments.len);
+    try testing.expectEqual(Grid.MAX_TICK, r.map.segments[1].tick);
+    try testing.expectEqual(@as(usize, 1), r.map.meters.len);
 }
 
 test "TimeMap.tickFromSeconds: a non-finite clock is NonFiniteTime, a runaway one TickOverflow" {
