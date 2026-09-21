@@ -67,6 +67,32 @@ pub fn refuseOffGrid(b: *Plan.Builder, op: Op.Op) Error!bool {
     return true;
 }
 
+/// A number writer's answer as a plan step: running out of memory rides
+/// out, and a number JSON has no spelling for — an infinity in a form
+/// being copied (SJON reads `1e999` as one), or an f32 past its range —
+/// is a refusal at `span` rather than an action carrying `inf`, which
+/// the builder would accept and `apply` could not parse. True when the
+/// value was written.
+///
+/// Public for `refuseOffGrid`'s reason: both plan entries write values,
+/// and the rule is one either way.
+pub fn spelledOn(b: *Plan.Builder, written: value.NumberError!void, span: Diag.Span) Error!bool {
+    written catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NotFinite => {
+            try b.refuse(
+                .sjon_diagnostic,
+                span,
+                "this edit would carry a number JSON cannot spell (an infinity or a NaN); " ++
+                    "write a finite one first",
+                .{},
+            );
+            return false;
+        },
+    };
+    return true;
+}
+
 fn refuse(b: *Plan.Builder, tick: i64, verb: []const u8) Error!void {
     try b.refuse(
         .tick_overflow,
@@ -219,6 +245,10 @@ const Ctx = struct {
             "the document and its source tree disagree about the form at {d}..{d}",
             .{ span.start, span.end },
         );
+    }
+
+    fn spelled(self: *Ctx, written: value.NumberError!void, span: Diag.Span) Error!bool {
+        return spelledOn(self.b, written, span);
     }
 
     /// The selection's targets, or a refusal: bound content is not
@@ -448,7 +478,7 @@ const Ctx = struct {
             }
         }
 
-        var form = try self.newForm(x.what);
+        var form = (try self.newForm(x.what)) orelse return;
         defer form.deinit();
         try self.b.insertPositional(lane_where.site, index, try form.done());
     }
@@ -457,7 +487,7 @@ const Ctx = struct {
     /// where a reader expects it and which keeps the document's own
     /// grouping.
     fn insertRoot(self: *Ctx, what: Op.New) Error!void {
-        var form = try self.newForm(what);
+        var form = (try self.newForm(what)) orelse return;
         defer form.deinit();
         try self.insertRootAfterHead(what.head(), try form.done());
     }
@@ -527,8 +557,9 @@ const Ctx = struct {
         try self.b.insertRoot(at, json);
     }
 
-    /// The form an `insert` builds, key by key in the schema's own order.
-    fn newForm(self: *Ctx, what: Op.New) Error!value.Form {
+    /// The form an `insert` builds, key by key in the schema's own order,
+    /// or null after a refusal (a value JSON cannot spell).
+    fn newForm(self: *Ctx, what: Op.New) Error!?value.Form {
         var f = try value.Form.init(self.gpa, what.head());
         errdefer f.deinit();
         switch (what) {
@@ -542,7 +573,11 @@ const Ctx = struct {
             },
             .keyframe => |k| {
                 try f.position("at", self.map, k.at);
-                try f.components("value", k.value, k.ncomp);
+                const written = f.components("value", k.value, k.ncomp);
+                if (!try self.spelled(written, .{ .start = 0, .end = 0 })) {
+                    f.deinit();
+                    return null;
+                }
                 if (k.ease) |text| {
                     var out: value.Buf = .empty;
                     defer out.deinit(self.gpa);
@@ -757,7 +792,8 @@ const Ctx = struct {
             };
             var out: value.Buf = .empty;
             defer out.deinit(self.gpa);
-            try value.form(self.gpa, &out, self.tree, node, try self.writesFor(m));
+            const copied = value.form(self.gpa, &out, self.tree, node, try self.writesFor(m));
+            if (!try self.spelled(copied, m.t.span)) return;
             const index = slotAmong(rest.items, m.to);
             try rest.insert(self.gpa, index, m.to);
             try self.b.insertPositional(parent.?, index, out.items);
@@ -907,7 +943,8 @@ const Ctx = struct {
         defer r.deinit();
         var out: value.Buf = .empty;
         defer out.deinit(self.gpa);
-        try value.components(self.gpa, &out, x.value, x.ncomp);
+        const written = value.components(self.gpa, &out, x.value, x.ncomp);
+        if (!try self.spelled(written, r.targets[0].span)) return;
         for (r.targets) |t| {
             if (t.kind != .keyframe) continue;
             const w = (try self.where(t.span)) orelse return;
@@ -1120,11 +1157,12 @@ const Ctx = struct {
 
             var out: value.Buf = .empty;
             defer out.deinit(self.gpa);
-            try value.form(self.gpa, &out, self.tree, node, &.{
+            const copied = value.form(self.gpa, &out, self.tree, node, &.{
                 .{ .key = "at", .json = try self.positionJson(x.at) },
                 .{ .key = "offset", .json = try self.durationJson(clip.offset + left, x.at) },
                 .{ .key = "length", .json = try self.durationJson(t.dur - left, x.at) },
             });
+            if (!try self.spelled(copied, t.span)) return;
             try self.b.insertPositional(parent, w.slot + 1 + made, out.items);
             made += 1;
         }
@@ -1277,7 +1315,8 @@ const Ctx = struct {
         }
         var out: value.Buf = .empty;
         defer out.deinit(self.gpa);
-        try value.form(self.gpa, &out, self.tree, node, overrides.items);
+        const copied = value.form(self.gpa, &out, self.tree, node, overrides.items);
+        if (!try self.spelled(copied, t.span)) return null;
         return try self.arena.dupe(u8, out.items);
     }
 
@@ -1542,10 +1581,11 @@ const Ctx = struct {
         var f = try value.Form.init(self.gpa, "tempo-point");
         defer f.deinit();
         try f.position("at", self.map, x.point.tick);
-        switch (x.point.tempo) {
-            .us => |us| try f.integer("us", us),
-            .qpm => |qpm| try f.float("qpm", @floatCast(qpm)),
-        }
+        const written = switch (x.point.tempo) {
+            .us => |us| f.integer("us", us),
+            .qpm => |qpm| f.float("qpm", @floatCast(qpm)),
+        };
+        if (!try self.spelled(written, .{ .start = 0, .end = 0 })) return;
         try self.insertRootInOrder("tempo-point", x.point.tick, self.d.tempo, try f.done());
     }
 
@@ -3633,4 +3673,32 @@ test "ops: remove a clip whose window does not fit an i64, and the document relo
     var re = try test_support.Reloaded.init(gpa, fx.source, &p);
     defer re.deinit();
     try testing.expectEqual(@as(usize, 0), re.doc_().lanes[0].clips.len);
+}
+
+test "ops: a copy of a form holding an infinity is refused, never an action carrying inf" {
+    // SJON reads `1e999` as an infinity and the keyframe loads with it.
+    // `duplicate` copies the node through `value.form`, whose `{d}` used
+    // to print `inf`: the plan was accepted, and `apply` met an action
+    // that is not JSON as `unreachable`.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.initUnchecked(gpa,
+        \\(timeline :title "inf" :length 1bar)
+        \\(lane :name glow :kind curve :target glow
+        \\  (keyframe :at 0q :value 1e999))
+        \\
+    );
+    defer fx.deinit();
+
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{ .duplicate = .{
+        .sel = .{ .lanes = &.{"glow"}, .kinds = .{ .keyframe = true } },
+        .delta = TPQ,
+    } });
+    defer p.deinit();
+    try testing.expect(p.summary.refused);
+    try testing.expectEqual(@as(usize, 0), p.actions.len);
+    try testing.expect(p.findDiag(.sjon_diagnostic) != null);
+
+    var applied = try apply.apply(gpa, fx.source, &p);
+    defer applied.deinit();
+    try testing.expectEqualStrings(fx.source, applied.text);
 }

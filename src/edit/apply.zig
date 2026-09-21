@@ -61,17 +61,17 @@ pub const Applied = struct {
 /// A batch is all-or-nothing. An action SJON refuses aborts the whole
 /// apply, the document comes back untouched, and the refusal rides out
 /// as a `sjon_diagnostic` — SJON's complaint in SJON's words, which is
-/// how every other part of this repo carries one.
+/// how every other part of this repo carries one. An action that is not
+/// JSON at all is refused the same way (see `Actions.read`).
 pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Error!Applied {
     p.invariants();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
+    const whole: Diag.Span = .{ .start = 0, .end = @intCast(text.len) };
 
-    if (p.actions.len == 0) {
-        return .{ .text = try arena.allocator().dupeZ(u8, text), .diags = diags, .arena = arena };
-    }
+    if (p.actions.len == 0) return untouched(text, diags, &arena);
 
     const ordered = try gpa.dupe(Plan.Action, p.actions);
     defer gpa.free(ordered);
@@ -79,51 +79,31 @@ pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Er
     // sequencing does not separate in the order the plan put them.
     std.sort.insertion(Plan.Action, ordered, {}, before);
 
-    var parsed: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
-    defer {
-        for (parsed.items) |*one| one.deinit();
-        parsed.deinit(gpa);
-    }
-    var values: std.ArrayList(std.json.Value) = .empty;
-    defer values.deinit(gpa);
-    // Both lists are sized before the first parse, so a parsed action is
-    // on `parsed` — and freed by its `defer` — the moment it exists: an
-    // append that ran out of memory after a parse used to drop one.
-    try parsed.ensureTotalCapacity(gpa, ordered.len);
-    try values.ensureTotalCapacity(gpa, ordered.len);
-
-    for (ordered) |action| {
-        const one = std.json.parseFromSlice(std.json.Value, gpa, action.json, .{}) catch |e|
-            switch (e) {
-                error.OutOfMemory => return error.OutOfMemory,
-                // Every action is JSON: the builder writes it, and
-                // `fromActionsJson` keeps only text this same parse took.
-                else => unreachable,
-            };
-        parsed.appendAssumeCapacity(one);
-        values.appendAssumeCapacity(one.value);
+    var actions: Actions = .{};
+    defer actions.deinit(gpa);
+    if (try actions.read(gpa, ordered)) |bad| {
+        try diags.add(
+            .sjon_diagnostic,
+            .err,
+            whole,
+            "action {d} of the plan is not JSON ({s}); the document is left as it was",
+            .{ bad.index, bad.why },
+        );
+        return untouched(text, diags, &arena);
     }
 
     const edited = sjon.Edit.applyEdits(
         gpa,
         text,
-        values.items,
+        actions.values.items,
         .{ .layout = .preserve },
     ) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
-            try diags.add(
-                .sjon_diagnostic,
-                .err,
-                .{ .start = 0, .end = @intCast(text.len) },
-                "SJON refused the edit: {s}",
-                .{@errorName(e)},
-            );
-            return .{
-                .text = try arena.allocator().dupeZ(u8, text),
-                .diags = diags,
-                .arena = arena,
-            };
+            try diags.add(.sjon_diagnostic, .err, whole, "SJON refused the edit: {s}", .{
+                @errorName(e),
+            });
+            return untouched(text, diags, &arena);
         },
     };
     defer edited.deinit();
@@ -134,6 +114,58 @@ pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Er
         .arena = arena,
     };
 }
+
+/// The answer that leaves the document as it was: `text` copied into
+/// `arena`, which the returned value then owns with `diags`. On an
+/// allocation failure both are still `apply`'s, freed by its `errdefer`s.
+fn untouched(text: [:0]const u8, diags: Diag.List, arena: *std.heap.ArenaAllocator) Error!Applied {
+    const copy = try arena.allocator().dupeZ(u8, text);
+    return .{ .text = copy, .diags = diags, .arena = arena.* };
+}
+
+/// The plan's actions, parsed back into the values SJON's editor takes.
+/// Each `Parsed` owns its value's memory; `deinit` frees them all.
+const Actions = struct {
+    parsed: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty,
+    values: std.ArrayList(std.json.Value) = .empty,
+
+    /// The first action that did not parse: its place in the sequenced
+    /// order, and the name of what std.json said.
+    const Bad = struct { index: usize, why: []const u8 };
+
+    fn deinit(self: *Actions, gpa: std.mem.Allocator) void {
+        for (self.parsed.items) |*one| one.deinit();
+        self.parsed.deinit(gpa);
+        self.values.deinit(gpa);
+    }
+
+    /// Parse every action of `ordered`, or answer the first that is not
+    /// JSON.
+    ///
+    /// None should be: the builder writes each action, `value`'s writers
+    /// refuse a number JSON cannot spell rather than print `inf`, and
+    /// `fromActionsJson` keeps only text this same parse took. But a
+    /// `Plan` is a host's value too, and this used to be `unreachable` —
+    /// a `revalue` of `1e39` reached it through an f32 infinity — so a
+    /// text that does not parse gets the refusal every other defect gets.
+    fn read(self: *Actions, gpa: std.mem.Allocator, ordered: []const Plan.Action) Error!?Bad {
+        // Both lists are sized before the first parse, so a parsed action
+        // is on `parsed` — and freed by `deinit` — the moment it exists:
+        // an append that ran out of memory after a parse used to drop one.
+        try self.parsed.ensureTotalCapacity(gpa, ordered.len);
+        try self.values.ensureTotalCapacity(gpa, ordered.len);
+        for (ordered, 0..) |action, i| {
+            const one = std.json.parseFromSlice(std.json.Value, gpa, action.json, .{}) catch |e|
+                switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return .{ .index = i, .why = @errorName(e) },
+                };
+            self.parsed.appendAssumeCapacity(one);
+            self.values.appendAssumeCapacity(one.value);
+        }
+        return null;
+    }
+};
 
 /// Which pass an action belongs to. The order is the contract above.
 fn pass(kind: Plan.Kind) u8 {
@@ -323,6 +355,28 @@ test "apply: an action SJON refuses leaves the document alone and says so" {
     // Root 9 does not exist. Nothing in this repo plans one; a host that
     // hands `apply` a stale plan gets its document back untouched.
     try b.setKeyword(.{ .root = 9, .path = &.{} }, "at", "0");
+
+    var p = try b.finish();
+    defer p.deinit();
+
+    var applied = try apply(gpa, fixture, &p);
+    defer applied.deinit();
+
+    try testing.expect(applied.diags.hasErrors());
+    try testing.expectEqual(Diag.Code.sjon_diagnostic, applied.diags.items()[0].code);
+    try testing.expectEqualStrings(fixture, applied.text);
+}
+
+test "apply: an action that is not JSON leaves the document alone and says so" {
+    const gpa = testing.allocator;
+    var b: Plan.Builder = .init(gpa);
+    errdefer b.deinit();
+
+    // `inf` is what `{d}` used to print for an f32 infinity; the builder
+    // checks only that an action is one object, and this parse was
+    // `unreachable`. A later action that is fine does not rescue it.
+    try b.setKeyword(.{ .root = 1, .path = &.{0} }, "vel", "120");
+    try b.setKeyword(.{ .root = 1, .path = &.{1} }, "value", "inf");
 
     var p = try b.finish();
     defer p.deinit();

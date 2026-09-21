@@ -724,9 +724,10 @@ const Ctx = struct {
         for (relocated.items) |k| {
             var out: value.Buf = .empty;
             defer out.deinit(self.gpa);
-            try value.form(self.gpa, &out, self.tree, evs[k].node, &.{
+            const copied = value.form(self.gpa, &out, self.tree, evs[k].node, &.{
                 .{ .key = "at", .json = try self.intJson(landed.at[k]) },
             });
+            if (!try self.spelledAt(copied, evs[k].node)) return;
             const index = ops_native.slotAmong(rest.items, landed.at[k]);
             try rest.insert(self.gpa, index, landed.at[k]);
             try self.b.insertPositional(parent, index, out.items);
@@ -1165,7 +1166,7 @@ const Ctx = struct {
         for (order) |i| {
             const m = moves[i];
             const rows = try self.rowsOf(&patterns, m.pattern_slot, m.pattern_node, going.items);
-            const json = try self.cellJson(m);
+            const json = (try self.cellJson(m)) orelse return;
             const pattern_site = try (Site{ .root = root, .path = &.{} }).child(
                 arena,
                 m.pattern_slot,
@@ -1189,14 +1190,22 @@ const Ctx = struct {
         }
     }
 
-    /// The cell as JSON, its `:fx` as the move leaves it. Arena-owned.
-    fn cellJson(self: *Ctx, m: CellMove) Error![]const u8 {
+    /// The cell as JSON, its `:fx` as the move leaves it, or null after a
+    /// refusal (a number JSON cannot spell). Arena-owned.
+    fn cellJson(self: *Ctx, m: CellMove) Error!?[]const u8 {
         const overrides: [1]value.Override = .{.{ .key = "fx", .json = m.fx }};
         const applied: []const value.Override = if (m.keep) overrides[0..0] else overrides[0..1];
         var json: value.Buf = .empty;
         defer json.deinit(self.gpa);
-        try value.form(self.gpa, &json, self.tree, m.cell.node, applied);
-        return self.arena.dupe(u8, json.items);
+        const copied = value.form(self.gpa, &json, self.tree, m.cell.node, applied);
+        if (!try self.spelledAt(copied, m.cell.node)) return null;
+        return try self.arena.dupe(u8, json.items);
+    }
+
+    /// `ops_native.spelledOn`, refusing at `node`'s span: a number JSON
+    /// cannot spell is a refusal, never an action carrying `inf`.
+    fn spelledAt(self: *Ctx, written: value.NumberError!void, node: NodeIndex) Error!bool {
+        return ops_native.spelledOn(self.b, written, spanOf(self.tree, node));
     }
 
     /// `(row N …)` holding one relocated cell: the row a move creates
@@ -1376,7 +1385,8 @@ const Ctx = struct {
             for (try self.steps(evs, src.addr.ch, src.addr.curve.?)) |s| {
                 const at = Grid.smfToTicks(s.at, src.ppq);
                 if (!at.exact) inexact += 1;
-                try self.b.insertPositional(lane_site, index, try self.keyframeJson(at.tick, s.v));
+                const json = (try self.keyframeJson(at.tick, s.v, lane.span)) orelse return;
+                try self.b.insertPositional(lane_site, index, json);
                 try gone.append(self.gpa, s.slot);
                 index += 1;
             }
@@ -1542,13 +1552,17 @@ const Ctx = struct {
     }
 
     /// A `(keyframe …)` for one controller step, at the document's own
-    /// spelling of `at`. Arena-owned.
-    fn keyframeJson(self: *Ctx, at: i64, v: f32) Error![]const u8 {
+    /// spelling of `at`, or null after a refusal at `span` (a value JSON
+    /// cannot spell — no step's value is one, since each is a 7- or
+    /// 14-bit reading scaled, but the writer says so and this says it
+    /// out loud rather than asserting). Arena-owned.
+    fn keyframeJson(self: *Ctx, at: i64, v: f32, span: Diag.Span) Error!?[]const u8 {
         var form = try value.Form.init(self.gpa, "keyframe");
         defer form.deinit();
         try form.position("at", self.map, at);
-        try form.components("value", .{ v, 0, 0, 0 }, 1);
-        return self.arena.dupe(u8, try form.done());
+        const written = form.components("value", .{ v, 0, 0, 0 }, 1);
+        if (!try ops_native.spelledOn(self.b, written, span)) return null;
+        return try self.arena.dupe(u8, try form.done());
     }
 
     /// A `(note …)` for one paired note sounding from `at` to `end`.

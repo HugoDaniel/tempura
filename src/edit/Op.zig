@@ -660,7 +660,7 @@ const Reader = struct {
         const at = self.optInt(o.get("at")) orelse 0;
         const tempo: @FieldType(doc.TempoPoint, "tempo") = if (self.optInt(o.get("us"))) |us|
             .{ .us = @intCast(std.math.clamp(us, 1, 16_777_215)) }
-        else if (self.optFloat(o.get("qpm"))) |qpm|
+        else if (self.real(o.get("qpm"))) |qpm|
             .{ .qpm = qpm }
         else {
             try self.fail("insert-tempo wants a \"us\" or a \"qpm\"", .{});
@@ -1135,15 +1135,32 @@ const Reader = struct {
             .array => |arr| {
                 if (arr.items.len == 0 or arr.items.len > 4) return null;
                 for (arr.items, 0..) |item, i| {
-                    out[i] = @floatCast(self.optFloat(item) orelse return null);
+                    out[i] = @floatCast(self.real(item) orelse return null);
                 }
                 return .{ .value = out, .ncomp = @intCast(arr.items.len) };
             },
             else => |scalar| {
-                out[0] = @floatCast(self.optFloat(scalar) orelse return null);
+                out[0] = @floatCast(self.real(scalar) orelse return null);
                 return .{ .value = out, .ncomp = 1 };
             },
         }
+    }
+
+    /// One JSON number the document will spell as an f32 — a keyframe
+    /// component, a `:qpm` (`value.float` writes both). The number is
+    /// kept as read; what is checked is its f32. Past f32's range
+    /// (`1e39`), or not finite at all (`1e999`, which std.json reads as
+    /// an infinity), that f32 is an infinity, which prints `inf`: not
+    /// JSON, so the plan carrying it was accepted here and then met
+    /// `apply`'s re-parse as `unreachable`. Recorded in `out_of_range`
+    /// and refused once by `fromJson`, as `int` records a float past
+    /// `i64`.
+    fn real(self: *Reader, v: ?std.json.Value) ?f64 {
+        const x = self.optFloat(v) orelse return null;
+        const narrowed: f32 = @floatCast(x);
+        if (std.math.isFinite(narrowed)) return x;
+        if (self.out_of_range == null) self.out_of_range = x;
+        return null;
     }
 };
 
@@ -1530,6 +1547,44 @@ test "Op.fromJson: a number no field can hold is refused, never truncated" {
             p.diags.items()[p.diags.items().len - 1].code,
         );
     }
+}
+
+test "Op.fromJson: a value the document spells as an f32 is refused past f32's range" {
+    // A keyframe component and a `:qpm` are written by `value.float` as
+    // f32. `1e39` narrowed to an infinity, which printed as `inf` — not
+    // JSON — so the plan was accepted and `apply`'s re-parse of it was
+    // `unreachable`. `1e999` is an infinity already when std.json reads it.
+    const refused = [_][]const u8{
+        \\{"op":"revalue","sel":{},"value":1e39}
+        ,
+        \\{"op":"revalue","sel":{},"value":[0.5,-1e39]}
+        ,
+        \\{"op":"revalue","sel":{},"value":1e999}
+        ,
+        \\{"op":"insert","lane":"glow","keyframe":{"at":0,"value":1e39}}
+        ,
+        \\{"op":"insert-tempo","at":46126080,"qpm":1e39}
+        ,
+        \\{"op":"insert-tempo","at":46126080,"qpm":-1e999}
+        ,
+    };
+    for (refused) |text| {
+        var p = try fromJson(testing.allocator, text);
+        defer p.deinit();
+        if (p.op != null) {
+            std.debug.print("not refused: {s}\n", .{text});
+            return error.NumberNotRefused;
+        }
+        const last = p.diags.items()[p.diags.items().len - 1];
+        try testing.expectEqual(Diag.Code.sjon_diagnostic, last.code);
+    }
+
+    // A number near f32's own largest finite value still reads.
+    var p = try parsed(
+        \\{"op":"revalue","sel":{},"value":3.4e38}
+    );
+    defer p.deinit();
+    try testing.expectEqual(@as(f32, 3.4e38), p.op.?.revalue.value[0]);
 }
 
 test "Op.fromJson: a channel counted from 1 is clamped before it is made a wire number" {

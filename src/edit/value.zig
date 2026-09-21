@@ -27,7 +27,18 @@ const testing = std.testing;
 /// names they reuse.
 const vals = @This();
 
+/// Every writer can run out of memory, and that is all most of them can
+/// do: a position, a duration, a string or an integer always has a JSON
+/// spelling.
 pub const Error = error{OutOfMemory};
+
+/// What a writer that spells a NUMBER can also meet: an infinity or a
+/// NaN, which JSON has no spelling for — an f32 component past f32's
+/// range, or a SJON literal like `1e999` that the parser reads as an
+/// infinity. `{d}` would print `inf`, the builder would accept the plan,
+/// and `apply` would meet text that is not JSON; the planner turns this
+/// into a refusal instead (`ops_native.Ctx.spelled`).
+pub const NumberError = Error || error{NotFinite};
 
 /// The scratch buffer every writer appends to.
 pub const Buf = std.ArrayList(u8);
@@ -110,13 +121,16 @@ pub fn integer(gpa: std.mem.Allocator, out: *Buf, v: i64) Error!void {
 /// One f32 component, in the shortest decimal that reads back as itself.
 /// f32 and not f64 deliberately: the document's values ARE f32 (pacer's
 /// determinism seam), and widening one to print it would spell
-/// `0.20000000298023224` where the author wrote `0.2`.
-pub fn float(gpa: std.mem.Allocator, out: *Buf, v: f32) Error!void {
+/// `0.20000000298023224` where the author wrote `0.2`. `NotFinite` for an
+/// infinity or a NaN, which JSON cannot spell; `out` is untouched then.
+pub fn float(gpa: std.mem.Allocator, out: *Buf, v: f32) NumberError!void {
+    if (!std.math.isFinite(v)) return error.NotFinite;
     try out.print(gpa, "{d}", .{v});
 }
 
 /// A keyframe's value: a scalar, or a vector of `ncomp` components.
-pub fn components(gpa: std.mem.Allocator, out: *Buf, v: [4]f32, ncomp: u3) Error!void {
+/// `NotFinite` as `float` says, with `out` holding a prefix of the vector.
+pub fn components(gpa: std.mem.Allocator, out: *Buf, v: [4]f32, ncomp: u3) NumberError!void {
     if (ncomp <= 1) return float(gpa, out, v[0]);
     try out.append(gpa, '[');
     for (v[0..@min(ncomp, 4)], 0..) |c, i| {
@@ -144,22 +158,26 @@ pub const Override = struct { key: []const u8, json: ?[]const u8 };
 /// `Parser.MAX_PARSE_DEPTH` (1024 frames, `SJON/src/parser.zig`'s
 /// header), so the walk is at most that many levels deep, two frames a
 /// level. Plan 12 accepts the tree walks on exactly that bound.
+///
+/// `NotFinite` when a number under `idx` is an infinity — SJON reads
+/// `1e999` as one — which JSON cannot spell. `out` then holds a prefix of
+/// the node, which the caller discards with its refusal.
 pub fn node(
     gpa: std.mem.Allocator,
     out: *Buf,
     tree: *const sjon.Ast.Tree,
     idx: sjon.Ast.NodeIndex,
-) Error!void {
+) NumberError!void {
     switch (tree.tagOf(idx)) {
         .nil => try out.appendSlice(gpa, "null"),
         .boolean_true => try out.appendSlice(gpa, "true"),
         .boolean_false => try out.appendSlice(gpa, "false"),
-        .number => try out.print(gpa, "{d}", .{tree.numberOf(idx)}),
+        .number => try out.print(gpa, "{d}", .{try finite(tree.numberOf(idx))}),
         .number_i64 => try out.print(gpa, "{d}", .{tree.numberI64Of(idx)}),
         .number_u64 => try out.print(gpa, "{d}", .{tree.numberU64Of(idx)}),
         .number_with_unit => {
             const nu = tree.numberWithUnitOf(idx);
-            try out.print(gpa, "{{\"$num\":[{d},", .{nu.value});
+            try out.print(gpa, "{{\"$num\":[{d},", .{try finite(nu.value)});
             try string(gpa, out, nu.unit);
             try out.append(gpa, ']');
             try out.append(gpa, '}');
@@ -196,13 +214,14 @@ pub fn node(
 /// An override whose key the form already carries replaces that value in
 /// PLACE, so the key order the author chose survives the round trip; one
 /// it does not carry is appended. A null override drops the key.
+/// `NotFinite` as `node` says.
 pub fn form(
     gpa: std.mem.Allocator,
     out: *Buf,
     tree: *const sjon.Ast.Tree,
     idx: sjon.Ast.NodeIndex,
     overrides: []const Override,
-) Error!void {
+) NumberError!void {
     const hdr = tree.formHeader(idx);
     try out.appendSlice(gpa, "{\"$form\":");
     try string(gpa, out, hdr.head);
@@ -253,15 +272,30 @@ pub fn form(
 
 /// A fragment of SJON SOURCE — a pacer `ease-spec`, `in-cubic` or
 /// `(spring :damping 0.5)` — as JSON. False when the text is not one
-/// value; the caller refuses with the span it came from.
+/// value JSON can carry — two values, none, or one holding a number SJON
+/// reads as an infinity (`(spring :damping 1e999)`); the caller refuses
+/// with the span it came from, and `out` is left as it was.
 pub fn source(gpa: std.mem.Allocator, out: *Buf, text: []const u8) Error!bool {
     const owned = try gpa.dupeZ(u8, text);
     defer gpa.free(owned);
     var tree = try sjon.parse(gpa, owned);
     defer tree.deinit();
     if (tree.hasErrors() or tree.root.len != 1) return false;
-    try node(gpa, out, &tree, tree.root[0]);
+    const len = out.items.len;
+    node(gpa, out, &tree, tree.root[0]) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NotFinite => {
+            out.shrinkRetainingCapacity(len);
+            return false;
+        },
+    };
     return true;
+}
+
+/// `v` when JSON can spell it; `NotFinite` for an infinity or a NaN.
+fn finite(v: f64) NumberError!f64 {
+    if (!std.math.isFinite(v)) return error.NotFinite;
+    return v;
 }
 
 /// A form, built key by key in the order the schema declares them.
@@ -337,12 +371,12 @@ pub const Form = struct {
         try vals.integer(self.gpa, &self.buf, v);
     }
 
-    pub fn float(self: *Form, name: []const u8, v: f32) Error!void {
+    pub fn float(self: *Form, name: []const u8, v: f32) NumberError!void {
         try self.key(name);
         try vals.float(self.gpa, &self.buf, v);
     }
 
-    pub fn components(self: *Form, name: []const u8, v: [4]f32, ncomp: u3) Error!void {
+    pub fn components(self: *Form, name: []const u8, v: [4]f32, ncomp: u3) NumberError!void {
         try self.key(name);
         try vals.components(self.gpa, &self.buf, v, ncomp);
     }
@@ -449,4 +483,36 @@ test "value: strings escape, symbols carry, f32 keeps the author's decimal" {
     out.clearRetainingCapacity();
     try components(gpa, &out, .{ 0.1, 0.2, 0.3, 0 }, 3);
     try testing.expectEqualStrings("[0.1,0.2,0.3]", out.items);
+}
+
+test "value: a number JSON cannot spell is NotFinite, never the text inf" {
+    // `{d}` printed an infinity as `inf`, which the builder accepted and
+    // `apply`'s JSON parse then met as `unreachable`.
+    const gpa = testing.allocator;
+    var out: Buf = .empty;
+    defer out.deinit(gpa);
+
+    try testing.expectError(error.NotFinite, float(gpa, &out, std.math.inf(f32)));
+    try testing.expectError(error.NotFinite, float(gpa, &out, std.math.nan(f32)));
+    try testing.expectError(
+        error.NotFinite,
+        components(gpa, &out, .{ 0.5, -std.math.inf(f32), 0, 0 }, 2),
+    );
+
+    // SJON reads `1e999` as an infinity; a form holding one is not copied.
+    var tree = try sjon.parse(gpa, "(keyframe :at 0q :value 1e999)");
+    defer tree.deinit();
+    out.clearRetainingCapacity();
+    try testing.expectError(error.NotFinite, form(gpa, &out, &tree, tree.root[0], &.{}));
+    var unit = try sjon.parse(gpa, "[1e999q]");
+    defer unit.deinit();
+    out.clearRetainingCapacity();
+    try testing.expectError(error.NotFinite, node(gpa, &out, &unit, unit.root[0]));
+
+    // …and an easing holding one is "not one value JSON can carry".
+    out.clearRetainingCapacity();
+    try out.appendSlice(gpa, "kept");
+    try testing.expect(!try source(gpa, &out, "(spring :damping 1e999)"));
+    try testing.expectEqualStrings("kept", out.items);
+    try testing.expect(try source(gpa, &out, "(spring :damping 0.5)"));
 }
