@@ -47,26 +47,34 @@ pub const Result = union(enum) {
 /// caller spans `[pos, pos+1)` for the first and `[pos, pos)` for the
 /// second without re-deriving anything.
 pub fn read(bytes: []const u8, pos: *usize) Result {
+    std.debug.assert(pos.* <= bytes.len);
     var value: u32 = 0;
     var i = pos.*;
-    var taken: u8 = 0;
-    while (true) {
+    // At most `MAX_LEN` groups are ever taken: the loop is bounded by
+    // the domain, not by the input.
+    for (0..MAX_LEN) |_| {
         if (i >= bytes.len) {
             pos.* = i;
             return .{ .err = .smf_track_truncated };
         }
-        if (taken == MAX_LEN) {
-            pos.* = i;
-            return .{ .err = .vlq_too_long };
-        }
         const b = bytes[i];
         value = (value << 7) | (b & 0x7F);
         i += 1;
-        taken += 1;
         if (b & 0x80 == 0) {
+            // Four 7-bit groups never exceed the domain, and the cursor
+            // moved by the bytes it took.
+            std.debug.assert(value <= MAX);
+            std.debug.assert(i - pos.* >= 1);
+            std.debug.assert(i - pos.* <= MAX_LEN);
             pos.* = i;
             return .{ .ok = value };
         }
+    } else {
+        // Four continuation bytes and no last one. A fifth byte that is
+        // there is one too many; one that is not is a run cut short —
+        // the cursor sits on it either way.
+        pos.* = i;
+        return .{ .err = if (i >= bytes.len) .smf_track_truncated else .vlq_too_long };
     }
 }
 
@@ -86,6 +94,8 @@ pub fn write(w: *std.Io.Writer, value: u32) Error!void {
     std.debug.assert(value <= MAX);
     var buf: [MAX_LEN]u8 = undefined;
     const n = len(value);
+    std.debug.assert(n >= 1);
+    std.debug.assert(n <= MAX_LEN);
     var v = value;
     var i: u8 = n;
     while (i > 0) {
@@ -93,6 +103,12 @@ pub fn write(w: *std.Io.Writer, value: u32) Error!void {
         buf[i] = @as(u8, @truncate(v & 0x7F)) | (if (i == n - 1) @as(u8, 0) else 0x80);
         v >>= 7;
     }
+    // Every group was consumed, the last byte ends the run, and a run of
+    // more than one byte starts with a non-zero group — the encoding is
+    // minimal, never `80 00`.
+    std.debug.assert(v == 0);
+    std.debug.assert(buf[n - 1] & 0x80 == 0);
+    std.debug.assert(n == 1 or buf[0] & 0x7F != 0);
     try w.writeAll(buf[0..n]);
 }
 
