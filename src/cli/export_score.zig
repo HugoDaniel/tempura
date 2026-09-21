@@ -64,6 +64,11 @@ const exporter = tempura.exporter;
 const pipeline = tempura.doc.pipeline;
 
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
+    // Read ONCE, then decide, and the bytes go to whichever half wants
+    // them. `Ctx.loadDoc` would read the path again, and for `-` on a
+    // pipe the second read of stdin is EOF — an empty document,
+    // `timeline_missing` on stderr, and the placeholder's transport
+    // already out on stdout.
     const bytes = Cli.load(ctx.a, ctx.io, ctx.cmd.path) catch |e|
         return Cli.reportLoadFailure(ctx, e);
 
@@ -72,7 +77,7 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     // call an empty `.sjon` nothing at all, and a document is what a
     // document verb should assume when the bytes say nothing.
     if (nativeKind(bytes)) |kind| return fromFile(ctx, bytes, kind);
-    return fromDocument(ctx);
+    return fromDocument(ctx, bytes);
 }
 
 /// The native format these bytes ARE, by magic alone. The extension gets
@@ -86,11 +91,8 @@ fn nativeKind(bytes: []const u8) ?tempura.doc.AnchorKind {
     return null;
 }
 
-fn fromDocument(ctx: *const Cli.Ctx) Cli.Error!u8 {
-    var loaded = switch (try ctx.loadDoc()) {
-        .failed => |code| return code,
-        .ok => |l| l,
-    };
+fn fromDocument(ctx: *const Cli.Ctx, source: [:0]u8) Cli.Error!u8 {
+    var loaded = try ctx.loadDocFrom(source);
     defer loaded.deinit();
 
     var derived = try tempura.time.derive.derive(ctx.gpa, &loaded.result.doc);

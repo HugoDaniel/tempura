@@ -240,7 +240,21 @@ pub const Ctx = struct {
     pub fn loadDoc(self: *const Ctx) Error!union(enum) { ok: Loaded, failed: u8 } {
         const source = Cli.load(self.a, self.io, self.cmd.path) catch |e|
             return .{ .failed = try reportLoadFailure(self, e) };
+        return .{ .ok = try self.loadDocFrom(source) };
+    }
 
+    /// `loadDoc` over bytes already read. A verb that has to LOOK at its
+    /// input before it knows it is a document (`export-score` sniffs for
+    /// a `.mid` or a `.it` first) reads once and hands the bytes here,
+    /// because a second `Cli.load` of the same path is a second read —
+    /// and for `-` on a pipe the second read of stdin is EOF: the empty
+    /// document that then loads has no `(timeline …)`, and the user is
+    /// blamed for a document they piped in whole.
+    ///
+    /// `source` is `Cli.load`'s: arena-allocated with `self.a` and
+    /// NUL-terminated. `Loaded` keeps it for the invocation and never
+    /// frees it — the arena does, with everything else.
+    pub fn loadDocFrom(self: *const Ctx, source: [:0]u8) Error!Loaded {
         var loaded: Loaded = .{
             .a = self.a,
             .source = source,
@@ -263,7 +277,7 @@ pub const Ctx = struct {
             source,
             loaded.store.resolver(),
         );
-        return .{ .ok = loaded };
+        return loaded;
     }
 
     /// The input's directory, for an anchor's `:file` — plan 02 resolves
