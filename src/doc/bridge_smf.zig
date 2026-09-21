@@ -535,11 +535,15 @@ const Reader = struct {
         for (children) |child| {
             if (self.tree.tagOf(child) != .form) continue;
             const kind = kindOfHead(self.tree.formHeader(child).head) orelse continue;
-            const at = castInt(
+            // `smf-tick` is `:min 0` in the manifest, so a negative `:at`
+            // is already refused; lowered anyway, it floors at 0, which
+            // keeps every tick a bound lane pairs and converts inside
+            // `[0, maxInt(i64)]` — the one range whose differences fit.
+            const at = @max(0, castInt(
                 i64,
                 kvNumber(self.tree, self.tree.formHeader(child).children, "at"),
                 0,
-            );
+            ));
 
             if (count > 0 and at < last_at) try self.diags.add(
                 .at_not_monotone,
@@ -923,7 +927,7 @@ const Pairing = struct {
         const retrigger = held.* != null;
         // A second on over a held key ends the first HERE, with no
         // release velocity: none was sent (midi 04's rule).
-        if (held.*) |i| self.notes.items[i].dur = at - self.notes.items[i].at;
+        if (held.*) |i| self.notes.items[i].dur = heldFor(self.notes.items[i].at, at);
         held.* = self.notes.items.len;
         try self.notes.append(arena, .{
             .at = at,
@@ -945,7 +949,7 @@ const Pairing = struct {
             self.orphan_offs += 1;
             return;
         };
-        self.notes.items[i].dur = at - self.notes.items[i].at;
+        self.notes.items[i].dur = heldFor(self.notes.items[i].at, at);
         self.notes.items[i].off_vel = @intCast(@min(n.vel, 127));
         held.* = null;
     }
@@ -954,10 +958,18 @@ const Pairing = struct {
     /// or the last event's when the track has none.
     fn closeAll(self: *Pairing, track_end: i64) void {
         for (self.open) |maybe| {
-            if (maybe) |i| self.notes.items[i].dur = track_end - self.notes.items[i].at;
+            if (maybe) |i| self.notes.items[i].dur = heldFor(self.notes.items[i].at, track_end);
         }
     }
 };
+
+/// How long a note that sounded from `from` holds when it ends at `to`:
+/// never backwards (an off behind its on, `at_not_monotone`, holds for
+/// nothing) and never past `i64` — a `Sequence` carries whatever tick
+/// its builder was handed, so the distance saturates rather than wraps.
+fn heldFor(from: i64, to: i64) i64 {
+    return @max(0, to -| from);
+}
 
 /// One track's events by 1-BASED index, or nothing when the document
 /// names a track the file does not have.
@@ -1566,6 +1578,55 @@ test "bridge_smf.pairNotes: retriggers, orphan offs and the unclosed note" {
     // The warning is the PAIRING's, once, however many keys retriggered.
     try testing.expectEqual(@as(usize, 1), paired.diags.count(.note_retrigger));
     try testing.expect(!paired.diags.hasErrors());
+}
+
+test "bridge_smf.pairNotes: ticks at i64's ends pair without overflowing, never backwards" {
+    // A `Sequence` holds any `i64` tick its builder was handed. `at -
+    // notes[i].at` and `track_end - …` were plain subtractions: an
+    // unclosed note-on at `minInt(i64)` overflowed at the end-of-track,
+    // and an off behind its on made a negative duration.
+    const gpa = testing.allocator;
+    var b: smf.Builder = .init(gpa);
+    errdefer b.deinit();
+    b.division = .{ .ppq = 480 };
+    const t = try b.addTrack();
+    const min = std.math.minInt(i64);
+    const max = std.math.maxInt(i64);
+    try b.addEvent(t, min, .note_on, .{ .note = .{ .ch = 0, .key = 36, .vel = 100 } });
+    try b.addEvent(t, max, .note_on, .{ .note = .{ .ch = 0, .key = 38, .vel = 100 } });
+    try b.addEvent(t, 0, .note_off, .{ .note = .{ .ch = 0, .key = 38, .vel = 64 } });
+    try b.addEvent(t, min, .note_on, .{ .note = .{ .ch = 0, .key = 40, .vel = 100 } });
+    try b.addEvent(t, max, .note_on, .{ .note = .{ .ch = 0, .key = 40, .vel = 100 } });
+    try b.addEvent(t, 0, .end_of_track, .empty);
+    var seq = try b.finish();
+    defer seq.deinit();
+
+    var paired = try pairNotes(gpa, &seq, 1, .single(0), null);
+    defer paired.deinit();
+    try testing.expectEqual(@as(usize, 4), paired.notes.len);
+    for (paired.notes) |n| try testing.expect(n.dur >= 0);
+    // The on at `minInt` held to the track's end saturates; the off
+    // behind its on holds for nothing; the retrigger's span saturates.
+    try testing.expectEqual(@as(i64, max), paired.notes[0].dur);
+    try testing.expectEqual(@as(i64, 0), paired.notes[1].dur);
+    try testing.expectEqual(@as(i64, max), paired.notes[2].dur);
+}
+
+test "bridge_smf: a negative :at reads as tick 0 — the manifest refuses it, the reader floors it" {
+    // `smf-tick` is `:min 0` in `schema/midi.sjon`, so the document is
+    // already refused; lowering it anyway (an unvalidated tree) keeps a
+    // bound lane's arithmetic on non-negative ticks.
+    const gpa = testing.allocator;
+    var p = try parse(gpa,
+        \\(midi/smf :format 1 :division 480)
+        \\(midi/mtrk
+        \\  (note-on :at -1e30 :ch 1 :key 36 :vel 100)
+        \\  (end-of-track :at 0))
+    );
+    defer p.deinit();
+    var read = try formsToSequence(gpa, &p.tree, p.roots);
+    defer read.deinit();
+    try testing.expectEqual(@as(i64, 0), read.sequence.tracks[0].events[0].at);
 }
 
 test "bridge_smf.pairNotes: :key narrows the address to one drum" {

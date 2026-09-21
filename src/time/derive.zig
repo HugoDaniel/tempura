@@ -92,9 +92,11 @@ pub const LaneIndex = struct {
     /// A lane's OWN content — the document's positions, which only ever
     /// come from `TimeMap.tickFromLiteral`, and a clip's placements, which
     /// `placedTick` bounds — also never sits before tick 0. A BOUND lane
-    /// is held to less: its ticks are the anchor's, an inline SMF dump
-    /// keeps an event behind tick 0 with `at_not_monotone` rather than drop
-    /// it, and `Grid.smfToTicks` bounds only its magnitude.
+    /// is held to less: its ticks are the anchor's, and `Grid.smfToTicks`
+    /// bounds only their magnitude. (Its readers keep them at or after 0
+    /// — a `.mid`'s deltas cannot step below it, and `bridge_smf` floors
+    /// a negative inline `:at` the manifest has already refused — but
+    /// that is theirs to promise, not the lane table's.)
     fn invariants(self: *const LaneIndex) void {
         const floor: i64 = if (self.bound) -Grid.MAX_TICK else 0;
         for (self.onsets, 0..) |o, i| {
@@ -554,7 +556,9 @@ fn conductorWalk(
 /// converted span, and a note carries its channel and release velocity.
 fn smfOnset(n: bridge_smf.PairedNote, ppq: u15) Onset {
     const at = Grid.smfToTicks(n.at, ppq).tick;
-    const end = Grid.smfToTicks(n.at + @max(n.dur, 0), ppq).tick;
+    // Saturating: a `Sequence` carries any `i64` tick, and past the
+    // ceiling `smfToTicks` answers `MAX_TICK` either way.
+    const end = Grid.smfToTicks(n.at +| @max(n.dur, 0), ppq).tick;
     // The conversion is monotone, so a note never ends before it starts.
     std.debug.assert(end >= at);
     return .{
@@ -571,7 +575,7 @@ fn smfOnset(n: bridge_smf.PairedNote, ppq: u15) Onset {
 /// ceiling; a note that ENDS past it is cut at the ceiling.
 fn itOnset(n: bridge_smf.PairedNote) ?Onset {
     const at = itToTicks(n.at) orelse return null;
-    const end = itToTicks(n.at + @max(n.dur, 0)) orelse Grid.MAX_TICK;
+    const end = itToTicks(n.at +| @max(n.dur, 0)) orelse Grid.MAX_TICK;
     std.debug.assert(end >= at);
     return .{ .tick = at, .dur = end - at, .key = n.key, .vel = n.vel };
 }
@@ -1785,6 +1789,40 @@ test "derive: a bound SMF notes lane, paired and converted to the grid" {
     try testing.expectEqual(@as(f32, 0), cutoff.steps[0].value[0]);
     try testing.expectEqual(@as(i64, 23_063_040), cutoff.steps[1].tick);
     try testing.expectEqual(@as(f32, 1), cutoff.steps[1].value[0]);
+}
+
+test "derive: a bound SMF lane over ticks at i64's ends derives, and its onsets hold" {
+    // `:at -1e30` saturated to `minInt(i64)` and the pairing's
+    // `track_end - at` overflowed on every derive of this document; a
+    // note-on at `1e30` is `maxInt(i64)`, where `at + dur` has no room.
+    // The reader floors a negative tick at 0 (the manifest has refused
+    // it already), the pairing saturates, and the conversion caps at the
+    // grid's ceiling.
+    const gpa = testing.allocator;
+    var loaded = try test_support.load(gpa,
+        \\(timeline :title "edges")
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\(midi/smf :format 0 :division 480)
+        \\(midi/mtrk
+        \\  (note-on      :at -1e30 :ch 1 :key 36 :vel 100)
+        \\  (note-on      :at 1e30  :ch 1 :key 38 :vel 100)
+        \\  (note-off     :at 1e30  :ch 1 :key 38 :vel 64)
+        \\  (end-of-track :at 1e30))
+        \\(lane :name kick :kind notes :from song :track 1 :ch 1)
+    );
+    defer loaded.deinit();
+    try testing.expect(loaded.diags.hasErrors());
+
+    var d = try derive(gpa, &loaded.doc);
+    defer d.deinit();
+    const kick = d.laneByName("kick").?;
+    try testing.expectEqual(@as(usize, 2), kick.onsets.len);
+    try testing.expectEqual(@as(i64, 0), kick.onsets[0].tick);
+    try testing.expectEqual(Grid.MAX_TICK, kick.onsets[0].dur);
+    try testing.expectEqual(Grid.MAX_TICK, kick.onsets[1].tick);
+    try testing.expectEqual(@as(i64, 0), kick.onsets[1].dur);
 }
 
 test "derive: a bound IT notes lane reads the module through the walk" {
