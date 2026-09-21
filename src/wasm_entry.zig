@@ -603,8 +603,8 @@ export fn tpr_at(seconds: f64) u32 {
     const s = live() orelse return 0;
     var pos = Playhead.at(gpa, &s.derived, seconds) catch |err| switch (err) {
         error.OutOfMemory => return 0,
-        else => {
-            const blob = TprAbi.encodeRefusal(.of(err), &playhead_buffer) catch return 0;
+        error.TickOverflow, error.NonFiniteTime => |guard| {
+            const blob = TprAbi.encodeRefusal(.of(guard), &playhead_buffer) catch return 0;
             return @intCast(blob.len);
         },
     };

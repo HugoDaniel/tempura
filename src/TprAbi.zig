@@ -204,13 +204,19 @@ pub const Refusal = enum(u8) {
     tick_overflow,
     non_finite_time,
 
-    /// The guard `Playhead.at` raised, as this enum spells it. The
-    /// allocation failure is not a refusal: a host sees status 3.
-    pub fn of(err: Playhead.Error) Refusal {
+    /// `Playhead.Error` without its allocation failure: the two host
+    /// guards, the only errors that ARE a refusal.
+    pub const Guard = error{ TickOverflow, NonFiniteTime };
+
+    /// The guard `Playhead.at` raised, as this enum spells it. Takes the
+    /// two guards and nothing else: running out of memory is not a
+    /// refusal (a host sees status 3), so a caller handles
+    /// `error.OutOfMemory` first — and the parameter's type is what makes
+    /// forgetting to a compile error rather than undefined behaviour.
+    pub fn of(err: Guard) Refusal {
         return switch (err) {
             error.TickOverflow => .tick_overflow,
             error.NonFiniteTime => .non_finite_time,
-            error.OutOfMemory => unreachable,
         };
     }
 };
