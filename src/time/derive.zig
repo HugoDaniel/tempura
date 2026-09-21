@@ -157,27 +157,27 @@ pub const Derived = struct {
 /// a diagnostic on the returned value and the derivation is still built,
 /// because an editor has to show something.
 pub fn derive(gpa: std.mem.Allocator, doc: *const Doc) Error!Derived {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
     var diags: Diag.List = .init(gpa);
     var rowmap: ?walk.RowMap = null;
     errdefer {
         if (rowmap) |*r| r.deinit();
-        arena.deinit();
+        arena_state.deinit();
         diags.deinit();
     }
-    const a = arena.allocator();
+    const arena = arena_state.allocator();
 
-    const conducted = try conduct(gpa, a, doc, &diags, &rowmap);
+    const conducted = try conduct(gpa, arena, doc, &diags, &rowmap);
 
-    const sections = try a.alloc(Section, doc.sections.len);
+    const sections = try arena.alloc(Section, doc.sections.len);
     for (doc.sections, sections) |src, *dst| {
-        dst.* = .{ .name = try a.dupe(u8, src.name), .at = src.at, .dur = src.dur };
+        dst.* = .{ .name = try arena.dupe(u8, src.name), .at = src.at, .dur = src.dur };
     }
-    const cues = try a.alloc(Cue, doc.cues.len);
+    const cues = try arena.alloc(Cue, doc.cues.len);
     for (doc.cues, cues) |src, *dst| {
-        dst.* = .{ .name = try a.dupe(u8, src.name), .at = src.at };
+        dst.* = .{ .name = try arena.dupe(u8, src.name), .at = src.at };
     }
-    const lanes = try laneTable(gpa, a, doc, &diags, &rowmap);
+    const lanes = try laneTable(gpa, arena, doc, &diags, &rowmap);
 
     // Plan 02's `:length` default — "the end of the last event or clip,
     // rounded up to a bar" — in the document layer's own two terms: what
@@ -206,7 +206,7 @@ pub fn derive(gpa: std.mem.Allocator, doc: *const Doc) Error!Derived {
         .lanes = lanes,
         .rowmap = rowmap,
         .diags = diags,
-        .arena = arena,
+        .arena = arena_state,
     };
 }
 
@@ -240,7 +240,7 @@ const seed_meter = [_]tm.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
 /// with it, and is what `Playhead.orderRowAt` and a bound IT lane read.
 fn conduct(
     gpa: std.mem.Allocator,
-    a: std.mem.Allocator,
+    arena: std.mem.Allocator,
     doc: *const Doc,
     diags: *Diag.List,
     rowmap: *?walk.RowMap,
@@ -309,8 +309,8 @@ fn conduct(
     // Copied out: the conductor's arena dies with this call and the
     // tables outlive it.
     return .{
-        .tempo = try a.dupe(tm.TempoPoint, built.tempo),
-        .meter = try a.dupe(tm.MeterPoint, built.meter),
+        .tempo = try arena.dupe(tm.TempoPoint, built.tempo),
+        .meter = try arena.dupe(tm.MeterPoint, built.meter),
         .end = built.end,
     };
 }
@@ -342,20 +342,20 @@ fn roundUpToBar(
 /// One `LaneIndex` per lane, in document order.
 fn laneTable(
     gpa: std.mem.Allocator,
-    a: std.mem.Allocator,
+    arena: std.mem.Allocator,
     doc: *const Doc,
     diags: *Diag.List,
     rowmap: *?walk.RowMap,
 ) Error![]LaneIndex {
-    const out = try a.alloc(LaneIndex, doc.lanes.len);
+    const out = try arena.alloc(LaneIndex, doc.lanes.len);
     for (doc.lanes, out) |*src, *dst| {
         var onsets: std.ArrayList(Onset) = .empty;
         var steps: std.ArrayList(Step) = .empty;
 
         if (src.binding) |binding| {
-            try bound(gpa, a, doc, src, binding, &onsets, &steps, diags, rowmap);
+            try bound(gpa, arena, doc, src, binding, &onsets, &steps, diags, rowmap);
         } else {
-            for (src.notes) |n| try onsets.append(a, .{
+            for (src.notes) |n| try onsets.append(arena, .{
                 .tick = n.at,
                 .dur = n.dur,
                 .key = n.key,
@@ -363,23 +363,23 @@ fn laneTable(
                 .ch = n.ch,
                 .off_vel = n.off_vel,
             });
-            for (src.keyframes) |k| try steps.append(a, .{
+            for (src.keyframes) |k| try steps.append(arena, .{
                 .tick = k.at,
                 .value = k.value,
                 .ncomp = k.ncomp,
-                .ease_src = try a.dupe(u8, k.ease_src),
+                .ease_src = try arena.dupe(u8, k.ease_src),
             });
-            for (src.clips) |c| try place(a, doc, src, c, &onsets, &steps, diags);
+            for (src.clips) |c| try place(arena, doc, src, c, &onsets, &steps, diags);
         }
 
         std.mem.sort(Onset, onsets.items, {}, onsetBefore);
         std.mem.sort(Step, steps.items, {}, stepBefore);
         dst.* = .{
-            .name = try a.dupe(u8, src.name),
+            .name = try arena.dupe(u8, src.name),
             .kind = src.kind,
             .bound = src.binding != null,
-            .onsets = try onsets.toOwnedSlice(a),
-            .steps = try steps.toOwnedSlice(a),
+            .onsets = try onsets.toOwnedSlice(arena),
+            .steps = try steps.toOwnedSlice(arena),
         };
     }
     return out;
@@ -394,7 +394,7 @@ fn laneTable(
 /// stays normalised: `:range` scales it at export, not here.
 fn bound(
     gpa: std.mem.Allocator,
-    a: std.mem.Allocator,
+    arena: std.mem.Allocator,
     doc: *const Doc,
     lane: *const value.Lane,
     binding: value.Binding,
@@ -417,7 +417,7 @@ fn bound(
                     for (paired.notes) |n| {
                         const at = Grid.smfToTicks(n.at, ppq).tick;
                         const end = Grid.smfToTicks(n.at + @max(n.dur, 0), ppq).tick;
-                        try onsets.append(a, .{
+                        try onsets.append(arena, .{
                             .tick = at,
                             .dur = end - at,
                             .key = n.key,
@@ -431,7 +431,10 @@ fn bound(
                     const address = addr.curve orelse return;
                     const read = try bridge_smf.curveSteps(gpa, &tier.sequence, addr.track, addr.ch, address);
                     defer gpa.free(read);
-                    for (read) |s| try steps.append(a, normalised(Grid.smfToTicks(s.at, ppq).tick, s.value));
+                    for (read) |s| {
+                        const at = Grid.smfToTicks(s.at, ppq).tick;
+                        try steps.append(arena, normalised(at, s.value));
+                    }
                 },
                 // A `query` or a `formula` lane cannot bind
                 // (`bound_kind_invalid`, the document's own check).
@@ -461,7 +464,7 @@ fn bound(
                     for (notes) |n| {
                         const at = itToTicks(n.at) orelse continue;
                         const end = itToTicks(n.at + @max(n.dur, 0)) orelse Grid.MAX_TICK;
-                        try onsets.append(a, .{
+                        try onsets.append(arena, .{
                             .tick = at,
                             .dur = end - at,
                             .key = n.key,
@@ -475,7 +478,7 @@ fn bound(
                     defer gpa.free(read);
                     for (read) |s| {
                         const at = itToTicks(s.at) orelse continue;
-                        try steps.append(a, normalised(at, s.value));
+                        try steps.append(arena, normalised(at, s.value));
                     }
                 },
                 .query, .formula => {},
@@ -534,7 +537,7 @@ fn itTier(doc: *const Doc, id: value.AnchorId) ?*const value.ItTier {
 /// loop runs once per repeat that places something and never once per
 /// repeat the document asked for.
 fn place(
-    a: std.mem.Allocator,
+    arena: std.mem.Allocator,
     doc: *const Doc,
     lane: *const value.Lane,
     clip: value.Clip,
@@ -578,7 +581,7 @@ fn place(
         const base = phrase.length * r;
         for (from.notes) |n| {
             const at = placedTick(base + n.at, clip, window_end) orelse continue;
-            try onsets.append(a, .{
+            try onsets.append(arena, .{
                 .tick = at,
                 .dur = n.dur,
                 .key = transposed(n.key, clip.transpose),
@@ -589,11 +592,11 @@ fn place(
         }
         for (from.keyframes) |k| {
             const at = placedTick(base + k.at, clip, window_end) orelse continue;
-            try steps.append(a, .{
+            try steps.append(arena, .{
                 .tick = at,
                 .value = k.value,
                 .ncomp = k.ncomp,
-                .ease_src = try a.dupe(u8, k.ease_src),
+                .ease_src = try arena.dupe(u8, k.ease_src),
             });
         }
     }
@@ -1147,14 +1150,15 @@ test "derive.echo: the map, then the sections, the cues and the lanes" {
 /// 60 000 000 / 125 = 480 000 microseconds per quarter note, / 150 =
 /// 400 000 and / 200 = 300 000 — all three integers, so the map takes
 /// the integer path whichever conductor built it.
-fn nativeThreeSegments(gpa: std.mem.Allocator) Doc {
+fn nativeThreeSegments(gpa: std.mem.Allocator) !Doc {
     var doc: Doc = .empty(gpa);
-    const a = doc.arena.allocator();
-    const tempo = a.alloc(tm.TempoPoint, 3) catch unreachable;
+    errdefer doc.deinit();
+    const arena = doc.arena.allocator();
+    const tempo = try arena.alloc(tm.TempoPoint, 3);
     tempo[0] = .{ .tick = 0, .tempo = .{ .us = 480_000 } };
     tempo[1] = .{ .tick = TPQ, .tempo = .{ .us = 400_000 } };
     tempo[2] = .{ .tick = 2 * TPQ, .tempo = .{ .us = 300_000 } };
-    const meter = a.alloc(tm.MeterPoint, 1) catch unreachable;
+    const meter = try arena.alloc(tm.MeterPoint, 1);
     meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
     doc.tempo = tempo;
     doc.meter = meter;
@@ -1163,9 +1167,9 @@ fn nativeThreeSegments(gpa: std.mem.Allocator) Doc {
 }
 
 /// One anchor, by id, of the kind the tier that follows it carries.
-fn anchorsOf(doc: *Doc, kind: value.AnchorKind) []value.Anchor {
-    const a = doc.arena.allocator();
-    const out = a.alloc(value.Anchor, 1) catch unreachable;
+fn anchorsOf(doc: *Doc, kind: value.AnchorKind) ![]value.Anchor {
+    const arena = doc.arena.allocator();
+    const out = try arena.alloc(value.Anchor, 1);
     out[0] = .{
         .id = "song",
         .kind = kind,
@@ -1202,10 +1206,10 @@ test "derive: an SMF conductor — set-tempo on track 2, merged by tick" {
     try b.addEvent(1, 1920, .end_of_track, .empty);
     const seq = try b.finish();
 
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.SmfTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.SmfTier, 1);
     tiers[0] = .{ .anchor = "song", .sequence = seq };
-    doc.anchors = anchorsOf(&doc, .smf);
+    doc.anchors = try anchorsOf(&doc, .smf);
     doc.conductor = "song";
     doc.midi = tiers;
     doc.length = bar44;
@@ -1213,7 +1217,7 @@ test "derive: an SMF conductor — set-tempo on track 2, merged by tick" {
     var d = try derive(gpa, &doc);
     defer d.deinit();
 
-    var native = nativeThreeSegments(gpa);
+    var native = try nativeThreeSegments(gpa);
     defer native.deinit();
     var n = try derive(gpa, &native);
     defer n.deinit();
@@ -1239,10 +1243,10 @@ test "derive: an IT conductor — Txx rows through the timing walk" {
     defer doc.deinit();
 
     const module = try test_support.threeSegmentModule(gpa);
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.ItTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.ItTier, 1);
     tiers[0] = .{ .anchor = "song", .module = module };
-    doc.anchors = anchorsOf(&doc, .it);
+    doc.anchors = try anchorsOf(&doc, .it);
     doc.conductor = "song";
     doc.it = tiers;
     doc.length = bar44;
@@ -1250,7 +1254,7 @@ test "derive: an IT conductor — Txx rows through the timing walk" {
     var d = try derive(gpa, &doc);
     defer d.deinit();
 
-    var native = nativeThreeSegments(gpa);
+    var native = try nativeThreeSegments(gpa);
     defer native.deinit();
     var n = try derive(gpa, &native);
     defer n.deinit();
@@ -1291,10 +1295,10 @@ test "derive: an IT T0x slide yields one tempo segment per tick" {
     tail.at(0, 0).* = .{ .fx = 'B' - '@', .param = 1 };
     const module = b.finish();
 
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.ItTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.ItTier, 1);
     tiers[0] = .{ .anchor = "song", .module = module };
-    doc.anchors = anchorsOf(&doc, .it);
+    doc.anchors = try anchorsOf(&doc, .it);
     doc.conductor = "song";
     doc.it = tiers;
     doc.length = bar44;
@@ -1316,14 +1320,14 @@ test "derive: conductor_conflict — one owner of time per document" {
     var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
-    const a = doc.arena.allocator();
-    const tempo = try a.alloc(tm.TempoPoint, 1);
+    const arena = doc.arena.allocator();
+    const tempo = try arena.alloc(tm.TempoPoint, 1);
     tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 }, .span = .{ .start = 12, .end = 40 } };
-    const meter = try a.alloc(tm.MeterPoint, 1);
+    const meter = try arena.alloc(tm.MeterPoint, 1);
     meter[0] = .{ .tick = 0, .n = 3, .d = 4, .span = .{ .start = 41, .end = 70 } };
     doc.tempo = tempo;
     doc.meter = meter;
-    doc.anchors = anchorsOf(&doc, .it);
+    doc.anchors = try anchorsOf(&doc, .it);
     doc.conductor = "song";
     doc.length = bar44;
 
@@ -1355,10 +1359,10 @@ test "derive: an SMF conductor with SMPTE division is one 120 qpm segment" {
     try b.addEvent(0, 500, .end_of_track, .empty);
     const seq = try b.finish();
 
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.SmfTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.SmfTier, 1);
     tiers[0] = .{ .anchor = "song", .sequence = seq };
-    doc.anchors = anchorsOf(&doc, .smf);
+    doc.anchors = try anchorsOf(&doc, .smf);
     doc.conductor = "song";
     doc.midi = tiers;
     doc.length = bar44;
@@ -1386,10 +1390,10 @@ test "derive: an SMF division that does not divide TPQ says division_inexact onc
     try b.addEvent(0, 3, .end_of_track, .empty);
     const seq = try b.finish();
 
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.SmfTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.SmfTier, 1);
     tiers[0] = .{ .anchor = "song", .sequence = seq };
-    doc.anchors = anchorsOf(&doc, .smf);
+    doc.anchors = try anchorsOf(&doc, .smf);
     doc.conductor = "song";
     doc.midi = tiers;
     doc.length = bar44;
@@ -1422,10 +1426,10 @@ test "derive: equal SMF ticks keep file order and the last set-tempo wins" {
     try b.addEvent(1, 0, .end_of_track, .empty);
     const seq = try b.finish();
 
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.SmfTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.SmfTier, 1);
     tiers[0] = .{ .anchor = "song", .sequence = seq };
-    doc.anchors = anchorsOf(&doc, .smf);
+    doc.anchors = try anchorsOf(&doc, .smf);
     doc.conductor = "song";
     doc.midi = tiers;
     doc.length = bar44;
@@ -1451,10 +1455,10 @@ test "derive: an SMF time-signature is the meter map" {
     try b.addEvent(0, 2880, .end_of_track, .empty);
     const seq = try b.finish();
 
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.SmfTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.SmfTier, 1);
     tiers[0] = .{ .anchor = "song", .sequence = seq };
-    doc.anchors = anchorsOf(&doc, .smf);
+    doc.anchors = try anchorsOf(&doc, .smf);
     doc.conductor = "song";
     doc.midi = tiers;
 
@@ -1486,10 +1490,10 @@ test "derive: an IT highlight becomes the meter, [major/minor 4]" {
     _ = try b.addPattern(4);
     const module = b.finish();
 
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.ItTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.ItTier, 1);
     tiers[0] = .{ .anchor = "song", .module = module };
-    doc.anchors = anchorsOf(&doc, .it);
+    doc.anchors = try anchorsOf(&doc, .it);
     doc.conductor = "song";
     doc.it = tiers;
 
@@ -1519,10 +1523,10 @@ test "derive: a highlight that does not divide truncates, as the document layer 
     _ = try b.addPattern(4);
     const module = b.finish();
 
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.ItTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.ItTier, 1);
     tiers[0] = .{ .anchor = "song", .module = module };
-    doc.anchors = anchorsOf(&doc, .it);
+    doc.anchors = try anchorsOf(&doc, .it);
     doc.conductor = "song";
     doc.it = tiers;
 
@@ -1554,10 +1558,10 @@ test "derive: a bound SMF notes lane, paired and converted to the grid" {
     try b.addEvent(0, 960, .end_of_track, .empty);
     const seq = try b.finish();
 
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.SmfTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.SmfTier, 1);
     tiers[0] = .{ .anchor = "song", .sequence = seq };
-    const lanes = try a.alloc(value.Lane, 2);
+    const lanes = try arena.alloc(value.Lane, 2);
     const span: Diag.Span = .{ .start = 0, .end = 1 };
     lanes[0] = .{
         .name = "lead",
@@ -1591,7 +1595,7 @@ test "derive: a bound SMF notes lane, paired and converted to the grid" {
         .expr_src = null,
         .span = span,
     };
-    doc.anchors = anchorsOf(&doc, .smf);
+    doc.anchors = try anchorsOf(&doc, .smf);
     doc.conductor = "song";
     doc.midi = tiers;
     doc.lanes = lanes;
@@ -1635,10 +1639,10 @@ test "derive: a bound IT notes lane reads the module through the walk" {
     pat.at(2, 1).* = .{ .note = Module.note_off, .ins = 0 };
     const module = b.finish();
 
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.ItTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.ItTier, 1);
     tiers[0] = .{ .anchor = "song", .module = module };
-    const lanes = try a.alloc(value.Lane, 1);
+    const lanes = try arena.alloc(value.Lane, 1);
     lanes[0] = .{
         .name = "bass",
         .kind = .notes,
@@ -1655,7 +1659,7 @@ test "derive: a bound IT notes lane reads the module through the walk" {
         .expr_src = null,
         .span = .{ .start = 0, .end = 1 },
     };
-    doc.anchors = anchorsOf(&doc, .it);
+    doc.anchors = try anchorsOf(&doc, .it);
     doc.conductor = "song";
     doc.it = tiers;
     doc.lanes = lanes;
@@ -1680,16 +1684,16 @@ test "derive: a clip whose repeats overflow the grid places its window and stops
     var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
-    const a = doc.arena.allocator();
+    const arena = doc.arena.allocator();
     const span: Diag.Span = .{ .start = 0, .end = 1 };
-    const tempo = try a.alloc(tm.TempoPoint, 1);
+    const tempo = try arena.alloc(tm.TempoPoint, 1);
     tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
-    const meter = try a.alloc(tm.MeterPoint, 1);
+    const meter = try arena.alloc(tm.MeterPoint, 1);
     meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
 
-    const phrase_notes = try a.alloc(value.Note, 1);
+    const phrase_notes = try arena.alloc(value.Note, 1);
     phrase_notes[0] = .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 0, .off_vel = null, .span = span };
-    const phrase_lanes = try a.alloc(value.Lane, 1);
+    const phrase_lanes = try arena.alloc(value.Lane, 1);
     phrase_lanes[0] = .{
         .name = "flash",
         .kind = .notes,
@@ -1703,10 +1707,10 @@ test "derive: a clip whose repeats overflow the grid places its window and stops
         .expr_src = null,
         .span = span,
     };
-    const phrases = try a.alloc(value.Phrase, 1);
+    const phrases = try arena.alloc(value.Phrase, 1);
     phrases[0] = .{ .name = "fill", .length = 1 << 40, .lanes = phrase_lanes, .span = span };
 
-    const clips = try a.alloc(value.Clip, 1);
+    const clips = try arena.alloc(value.Clip, 1);
     clips[0] = .{
         .at = 0,
         .phrase = "fill",
@@ -1716,7 +1720,7 @@ test "derive: a clip whose repeats overflow the grid places its window and stops
         .transpose = 0,
         .span = span,
     };
-    const lanes = try a.alloc(value.Lane, 1);
+    const lanes = try arena.alloc(value.Lane, 1);
     lanes[0] = .{
         .name = "flash",
         .kind = .notes,
@@ -1755,16 +1759,16 @@ test "derive: a clip that would place content past the grid ceiling says so" {
     var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
-    const a = doc.arena.allocator();
+    const arena = doc.arena.allocator();
     const span: Diag.Span = .{ .start = 0, .end = 1 };
-    const tempo = try a.alloc(tm.TempoPoint, 1);
+    const tempo = try arena.alloc(tm.TempoPoint, 1);
     tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
-    const meter = try a.alloc(tm.MeterPoint, 1);
+    const meter = try arena.alloc(tm.MeterPoint, 1);
     meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
 
-    const phrase_notes = try a.alloc(value.Note, 1);
+    const phrase_notes = try arena.alloc(value.Note, 1);
     phrase_notes[0] = .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 0, .off_vel = null, .span = span };
-    const phrase_lanes = try a.alloc(value.Lane, 1);
+    const phrase_lanes = try arena.alloc(value.Lane, 1);
     phrase_lanes[0] = .{
         .name = "flash",
         .kind = .notes,
@@ -1778,10 +1782,10 @@ test "derive: a clip that would place content past the grid ceiling says so" {
         .expr_src = null,
         .span = span,
     };
-    const phrases = try a.alloc(value.Phrase, 1);
+    const phrases = try arena.alloc(value.Phrase, 1);
     phrases[0] = .{ .name = "fill", .length = bar44, .lanes = phrase_lanes, .span = span };
 
-    const clips = try a.alloc(value.Clip, 1);
+    const clips = try arena.alloc(value.Clip, 1);
     clips[0] = .{
         .at = Grid.MAX_TICK - bar44,
         .phrase = "fill",
@@ -1791,7 +1795,7 @@ test "derive: a clip that would place content past the grid ceiling says so" {
         .transpose = 0,
         .span = span,
     };
-    const lanes = try a.alloc(value.Lane, 1);
+    const lanes = try arena.alloc(value.Lane, 1);
     lanes[0] = .{
         .name = "flash",
         .kind = .notes,
@@ -1826,13 +1830,13 @@ test "derive.echo: a cue name's quotes and backslashes are escaped" {
     var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
-    const a = doc.arena.allocator();
+    const arena = doc.arena.allocator();
     const span: Diag.Span = .{ .start = 0, .end = 1 };
-    const tempo = try a.alloc(tm.TempoPoint, 1);
+    const tempo = try arena.alloc(tm.TempoPoint, 1);
     tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
-    const meter = try a.alloc(tm.MeterPoint, 1);
+    const meter = try arena.alloc(tm.MeterPoint, 1);
     meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
-    const cues = try a.alloc(value.Cue, 1);
+    const cues = try arena.alloc(value.Cue, 1);
     cues[0] = .{ .name = "say \"hi\" \\ bye", .at = 0, .span = span };
     doc.tempo = tempo;
     doc.meter = meter;
@@ -1867,17 +1871,17 @@ test "derive: one clip with :repeat, :offset, :length and :transpose at once" {
     var doc: Doc = .empty(gpa);
     defer doc.deinit();
 
-    const a = doc.arena.allocator();
+    const arena = doc.arena.allocator();
     const span: Diag.Span = .{ .start = 0, .end = 1 };
-    const tempo = try a.alloc(tm.TempoPoint, 1);
+    const tempo = try arena.alloc(tm.TempoPoint, 1);
     tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
-    const meter = try a.alloc(tm.MeterPoint, 1);
+    const meter = try arena.alloc(tm.MeterPoint, 1);
     meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
 
-    const phrase_notes = try a.alloc(value.Note, 2);
+    const phrase_notes = try arena.alloc(value.Note, 2);
     phrase_notes[0] = .{ .at = 0, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 0, .off_vel = null, .span = span };
     phrase_notes[1] = .{ .at = TPQ / 2, .dur = TPQ / 4, .key = 38, .vel = 80, .ch = 0, .off_vel = null, .span = span };
-    const phrase_lanes = try a.alloc(value.Lane, 1);
+    const phrase_lanes = try arena.alloc(value.Lane, 1);
     phrase_lanes[0] = .{
         .name = "flash",
         .kind = .notes,
@@ -1891,10 +1895,10 @@ test "derive: one clip with :repeat, :offset, :length and :transpose at once" {
         .expr_src = null,
         .span = span,
     };
-    const phrases = try a.alloc(value.Phrase, 1);
+    const phrases = try arena.alloc(value.Phrase, 1);
     phrases[0] = .{ .name = "fill", .length = TPQ, .lanes = phrase_lanes, .span = span };
 
-    const clips = try a.alloc(value.Clip, 1);
+    const clips = try arena.alloc(value.Clip, 1);
     clips[0] = .{
         .at = 3 * bar44,
         .phrase = "fill",
@@ -1904,7 +1908,7 @@ test "derive: one clip with :repeat, :offset, :length and :transpose at once" {
         .transpose = -2,
         .span = span,
     };
-    const lanes = try a.alloc(value.Lane, 1);
+    const lanes = try arena.alloc(value.Lane, 1);
     lanes[0] = .{
         .name = "flash",
         .kind = .notes,

@@ -591,20 +591,20 @@ pub fn derive(
     length: i64,
     end: End,
 ) error{OutOfMemory}!Result {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
     var diags: Diag.List = .init(gpa);
     errdefer {
-        arena.deinit();
+        arena_state.deinit();
         diags.deinit();
     }
-    const a = arena.allocator();
+    const arena = arena_state.allocator();
 
-    const segments = try tempoTable(a, &diags, tempo);
+    const segments = try tempoTable(arena, &diags, tempo);
     const integral = isIntegral(segments);
     fillOrigins(segments, integral);
 
-    const meters = try meterTable(a, &diags, meter);
-    const bars = try barTable(a, &diags, meters, length);
+    const meters = try meterTable(arena, &diags, meter);
+    const bars = try barTable(arena, &diags, meters, length);
 
     var map: TimeMap = .{
         .segments = segments,
@@ -614,7 +614,7 @@ pub fn derive(
         .end = end,
         .integral = integral,
         .loop_secs = 0,
-        .arena = arena,
+        .arena = arena_state,
     };
     // The loop point is the map's own answer for `:length`, computed once
     // (pacer's compile-time constant): `wrapSeconds` runs on it per call.
@@ -626,7 +626,7 @@ pub fn derive(
 /// The tempo points, validated into `{tick, us}` pairs. `tps`,
 /// `start_sec` and `t_i` are filled afterwards, once the path is known.
 fn tempoTable(
-    a: std.mem.Allocator,
+    arena: std.mem.Allocator,
     diags: *Diag.List,
     tempo: []const TempoPoint,
 ) error{OutOfMemory}![]Segment {
@@ -650,7 +650,7 @@ fn tempoTable(
                 .{DEFAULT_US},
             );
         }
-        try segs.append(a, blank(0, DEFAULT_US));
+        try segs.append(arena, blank(0, DEFAULT_US));
     }
 
     for (tempo) |p| {
@@ -701,16 +701,16 @@ fn tempoTable(
             );
             break;
         }
-        try segs.append(a, blank(p.tick, us));
+        try segs.append(arena, blank(p.tick, us));
     }
 
-    return segs.toOwnedSlice(a);
+    return segs.toOwnedSlice(arena);
 }
 
 /// The meter points, validated into segments that carry the bar number
 /// and the cumulative beat count each one starts at.
 fn meterTable(
-    a: std.mem.Allocator,
+    arena: std.mem.Allocator,
     diags: *Diag.List,
     meter: []const MeterPoint,
 ) error{OutOfMemory}![]MeterSeg {
@@ -724,7 +724,7 @@ fn meterTable(
             "a meter map needs a point at tick 0; assuming [4 4]",
             .{},
         );
-        try mets.append(a, .{ .tick = 0, .n = 4, .d = 4, .first_bar = 0, .beats_before = 0 });
+        try mets.append(arena, .{ .tick = 0, .n = 4, .d = 4, .first_bar = 0, .beats_before = 0 });
     }
 
     for (meter) |p| {
@@ -741,7 +741,13 @@ fn meterTable(
         if (mets.items.len == 0) {
             // Reachable only for a valid point at tick 0 — otherwise the
             // default above already filled the slot.
-            try mets.append(a, .{ .tick = p.tick, .n = p.n, .d = p.d, .first_bar = 0, .beats_before = 0 });
+            try mets.append(arena, .{
+                .tick = p.tick,
+                .n = p.n,
+                .d = p.d,
+                .first_bar = 0,
+                .beats_before = 0,
+            });
             continue;
         }
         const prev = mets.items[mets.items.len - 1];
@@ -782,7 +788,7 @@ fn meterTable(
             continue;
         }
         const nbars = @divExact(delta, bar_len);
-        try mets.append(a, .{
+        try mets.append(arena, .{
             .tick = p.tick,
             .n = p.n,
             .d = p.d,
@@ -791,7 +797,7 @@ fn meterTable(
         });
     }
 
-    return mets.toOwnedSlice(a);
+    return mets.toOwnedSlice(arena);
 }
 
 /// `n` is 1..64 and `d` is a power of two up to 32 (plan 03, "Meter":
@@ -809,7 +815,7 @@ fn meterOk(p: MeterPoint) bool {
 /// `bar_start(m)` for every bar up to `:length`, built once per derive
 /// (plan 03, "Meter"): the index IS the bar number.
 fn barTable(
-    a: std.mem.Allocator,
+    arena: std.mem.Allocator,
     diags: *Diag.List,
     meters: []const MeterSeg,
     length: i64,
@@ -820,7 +826,7 @@ fn barTable(
     var mi: usize = 0;
     while (true) {
         while (mi + 1 < meters.len and meters[mi + 1].tick <= tick) mi += 1;
-        try bars.append(a, tick);
+        try bars.append(arena, tick);
         if (tick >= end_tick) break;
 
         const next = tick + Grid.barTicks(meters[mi].n, meters[mi].d);
@@ -846,7 +852,7 @@ fn barTable(
         }
         tick = next;
     }
-    return bars.toOwnedSlice(a);
+    return bars.toOwnedSlice(arena);
 }
 
 /// A float as the 16 hex digits of its IEEE-754 bits — the corpus's

@@ -344,35 +344,36 @@ const bar34 = 3 * TPQ;
 ///   bar 3 → 507 386 880  bar 4 → 645 765 120
 ///
 /// and the seconds at those ticks are 0, 2, 3, 3.75 and 4.5.
-fn fixture(gpa: std.mem.Allocator, end: tm.End) Doc {
+fn fixture(gpa: std.mem.Allocator, end: tm.End) !Doc {
     var doc: Doc = .empty(gpa);
-    const a = doc.arena.allocator();
+    errdefer doc.deinit();
+    const arena = doc.arena.allocator();
     const span: Diag.Span = .{ .start = 0, .end = 1 };
 
-    const tempo = a.alloc(tm.TempoPoint, 2) catch unreachable;
+    const tempo = try arena.alloc(tm.TempoPoint, 2);
     tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
     tempo[1] = .{ .tick = 184_504_320, .tempo = .{ .us = 250_000 } };
-    const meter = a.alloc(tm.MeterPoint, 2) catch unreachable;
+    const meter = try arena.alloc(tm.MeterPoint, 2);
     meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
     meter[1] = .{ .tick = 369_008_640, .n = 3, .d = 4 };
 
-    const sections = a.alloc(value.Section, 2) catch unreachable;
+    const sections = try arena.alloc(value.Section, 2);
     sections[0] = .{ .name = "intro", .at = 0, .dur = 2 * bar44, .span = span };
     sections[1] = .{ .name = "drop", .at = bar44, .dur = 2 * bar44, .span = span };
-    const cues = a.alloc(value.Cue, 2) catch unreachable;
+    const cues = try arena.alloc(value.Cue, 2);
     cues[0] = .{ .name = "a", .at = 184_504_320, .span = span };
     cues[1] = .{ .name = "b", .at = 507_386_880, .span = span };
 
-    const notes = a.alloc(value.Note, 3) catch unreachable;
+    const notes = try arena.alloc(value.Note, 3);
     notes[0] = .{ .at = 0, .dur = TPQ, .key = 36, .vel = 100, .ch = 0, .off_vel = null, .span = span };
     notes[1] = .{ .at = TPQ, .dur = 2 * TPQ, .key = 38, .vel = 90, .ch = 0, .off_vel = null, .span = span };
     notes[2] = .{ .at = 2 * TPQ, .dur = TPQ / 2, .key = 42, .vel = 80, .ch = 0, .off_vel = null, .span = span };
-    const keys = a.alloc(value.Keyframe, 3) catch unreachable;
+    const keys = try arena.alloc(value.Keyframe, 3);
     keys[0] = .{ .at = 0, .value = .{ 0.2, 0, 0, 0 }, .ncomp = 1, .ease_src = "hold", .span = span };
     keys[1] = .{ .at = 184_504_320, .value = .{ 0.9, 0, 0, 0 }, .ncomp = 1, .ease_src = "in-cubic", .span = span };
     keys[2] = .{ .at = 369_008_640, .value = .{ 0.1, 0, 0, 0 }, .ncomp = 1, .ease_src = "linear", .span = span };
 
-    const lanes = a.alloc(value.Lane, 2) catch unreachable;
+    const lanes = try arena.alloc(value.Lane, 2);
     lanes[0] = .{
         .name = "kick",
         .kind = .notes,
@@ -412,7 +413,7 @@ fn fixture(gpa: std.mem.Allocator, end: tm.End) Doc {
 
 test "Playhead.at: tick 0 — the first section, no cue behind, the first ahead" {
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
@@ -435,7 +436,7 @@ test "Playhead.at: two seconds in — bar 1, both sections, the cue behind" {
     // Two quarters a second, so 2 s is 4 quarters: tick 184 504 320,
     // which is bar 1's line, cue `a`'s tick and the start of `drop`.
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
@@ -456,7 +457,7 @@ test "Playhead.at: inside a bar under the second tempo — beat and seconds into
     // 2.5 s is half a second past bar 1's line, and the second segment
     // runs at four quarters a second: two quarters in, beat 2.
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
@@ -474,7 +475,7 @@ test "Playhead.at: inside a bar under the second tempo — beat and seconds into
 test "Playhead.at: hold clamps at the length, loop wraps in seconds first" {
     const gpa = testing.allocator;
     {
-        var doc = fixture(gpa, .hold);
+        var doc = try fixture(gpa, .hold);
         defer doc.deinit();
         var d = try derive_file.derive(gpa, &doc);
         defer d.deinit();
@@ -486,7 +487,7 @@ test "Playhead.at: hold clamps at the length, loop wraps in seconds first" {
         try testing.expectEqual(@as(i64, 4), p.bar);
     }
     {
-        var doc = fixture(gpa, .loop);
+        var doc = try fixture(gpa, .loop);
         defer doc.deinit();
         var d = try derive_file.derive(gpa, &doc);
         defer d.deinit();
@@ -505,7 +506,7 @@ test "Playhead.at: hold clamps at the length, loop wraps in seconds first" {
 
 test "Playhead.secondsOf: the inverse of at, exact at a segment start" {
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
@@ -521,7 +522,7 @@ test "Playhead.snap: the nearest line, ties down" {
     // is exactly halfway and the tie resolves DOWN; 6 000 000 is nearer
     // the line above.
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
@@ -538,7 +539,7 @@ test "Playhead.snap: the nearest line, ties down" {
 
 test "Playhead.snap: bar and beat lines come from the meter in force" {
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
@@ -559,7 +560,7 @@ test "Playhead.snap: swing offsets every second line" {
     // 30 000 000 is 6 936 960 past the straight line 1 and 4 594 560
     // before the swung one.
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
@@ -572,7 +573,7 @@ test "Playhead.snap: swing offsets every second line" {
 
 test "Playhead.sounding: the notes whose window contains the tick, in onset order" {
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
@@ -608,7 +609,7 @@ test "Playhead.sounding: the notes whose window contains the tick, in onset orde
 
 test "Playhead.onsets: the census of a window, half-open" {
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
@@ -622,7 +623,7 @@ test "Playhead.onsets: the census of a window, half-open" {
 
 test "Playhead.curveAt: the two keyframes around a tick and the easing between" {
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
@@ -663,10 +664,10 @@ test "Playhead.orderRowAt: the tracker position, against the walk's row map" {
     defer doc.deinit();
 
     const module = try test_support.threeSegmentModule(gpa);
-    const a = doc.arena.allocator();
-    const tiers = try a.alloc(value.ItTier, 1);
+    const arena = doc.arena.allocator();
+    const tiers = try arena.alloc(value.ItTier, 1);
     tiers[0] = .{ .anchor = "song", .module = module };
-    const anchors = try a.alloc(value.Anchor, 1);
+    const anchors = try arena.alloc(value.Anchor, 1);
     anchors[0] = .{
         .id = "song",
         .kind = .it,
@@ -705,7 +706,7 @@ test "Playhead.orderRowAt: the tracker position, against the walk's row map" {
 
 test "Playhead.orderRowAt: a document no IT anchor conducts has none" {
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
@@ -725,7 +726,7 @@ test "Playhead.snap: swing under a meter change, and a swung tie resolves down" 
     // above beat 0, so the swung line wins — and bar 1's own beats, a
     // [4 4] bar away, are further still.
     const gpa = testing.allocator;
-    var doc = fixture(gpa, .hold);
+    var doc = try fixture(gpa, .hold);
     defer doc.deinit();
     var d = try derive_file.derive(gpa, &doc);
     defer d.deinit();
