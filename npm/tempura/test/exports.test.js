@@ -377,6 +377,38 @@ test('exportScore(): a pacer score, and the velocity switch reaches it', async (
   assert.match(t.exportScore({ velocity: true }), /flash-vel/);
 });
 
+test('exportScore(): a conducted document whose file is not here yields nothing, and says why', async () => {
+  // The CLI's refusal (`src/cli/export_score.zig`), in the wasm: a score
+  // IS its transport, and the placeholder's `:bpm 120` under a header
+  // naming the conductor is a wrong score, not a score with a warning.
+  // Before this was pinned the module handed that score out AND replaced
+  // the load's `anchor_unavailable` with the exporter's empty list — a
+  // clean score, as far as a host could tell.
+  const text = readFileSync(fromRepo('src/cli/testdata/conducted-absent.sjon'), 'utf8');
+  const t = await Tempura.load(wasmBytes, text);
+  assert.equal(t.ok, false, 'the load says the conductor is not here');
+  assert.ok(t.diagnostics.some((d) => d.code === diagCode('anchor_unavailable')));
+
+  assert.equal(t.exportScore(), null, 'no score leaves the module');
+  assert.deepEqual(
+    t.diagnostics.map((d) => [d.stage, d.severity, d.code]),
+    [['operation', 'error', diagCode('anchor_unavailable')]],
+  );
+  assert.match(t.diagnostics[0].message, /tpr_attachAnchor/, 'and it names the way out');
+  assert.equal(t.text, text, 'the document stands');
+
+  // …and the way out works. The fixture declares the :size and :sha256
+  // of `corpus/tempo-by-reference-conductor/song.mid`; attached, the
+  // conductor is read and the transport is the FILE's 125, not 120.
+  const bytes = readFileSync(fromRepo('corpus/tempo-by-reference-conductor/song.mid'));
+  const attached = t.attachAnchor(bytes);
+  assert.equal(attached.ok, true, JSON.stringify(attached.diagnostics));
+  const score = t.exportScore();
+  assert.ok(score !== null, 'a score, once the conductor is here');
+  assert.match(score, /\(transport :bpm 125/);
+  assert.deepEqual(t.diagnostics, []);
+});
+
 test('build(): both kinds, and a document with no anchor builds either', async () => {
   const t = await Tempura.load(wasmBytes, DOC);
   const mid = t.build('mid');

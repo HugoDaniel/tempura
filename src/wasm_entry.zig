@@ -803,8 +803,18 @@ export fn tpr_apply(len: u32) u32 {
 /// switches: bit 0 `--velocity`, bit 1 `--ease linear`, bit 2
 /// `--no-hints`, bit 3 `--section-markers`. Everything else keeps
 /// `export/score.zig`'s defaults, which are the ones the CLI prints.
+///
+/// Returns the text's length; 0 when nothing is loaded, the score was
+/// refused, or the text is over `tpr_outCap` — the `'TPDG'` blob says
+/// which. The one refusal is the CLI's (`cli/export_score.zig`): a
+/// conducted document whose file is not here answers every position
+/// with plan 03's placeholder, and `(transport :bpm 120)` under a header
+/// naming the conductor is a wrong score, not a score with a warning —
+/// nothing downstream could tell it from a piece that really is at 120.
+/// `tpr_attachAnchor` is the way out in the browser.
 export fn tpr_exportScore(flags: u32) u32 {
     const s = live() orelse return 0;
+    if (doc.conductedPlaceholder(&s.result.doc)) return refuseScore(s);
     var result = exporter.exportScore(gpa, &s.result.doc, &s.derived, &.{}, .{
         .velocity = flags & 1 != 0,
         .ease_linear = flags & 2 != 0,
@@ -813,7 +823,39 @@ export fn tpr_exportScore(flags: u32) u32 {
     }) catch return 0;
     defer result.deinit();
     publishDiags(.operation, &result.diags);
-    return fill(&out_buffer, result.text);
+    return fillOrSay(&out_buffer, result.text, "score");
+}
+
+/// `tpr_exportScore`'s refusal, said: one `anchor_unavailable` at the
+/// conductor's own `(anchor …)`, in the CLI's words, with the browser's
+/// way out named beside the CLI's. Stage `.operation`, because this is
+/// the CALL's verdict and not the load's — the load said its own
+/// `anchor_unavailable` at status 1, and that report is what a host
+/// reads again once `tpr_attachAnchor` reloads the document. Before this
+/// existed the placeholder score went out AND the exporter's empty list
+/// overwrote the load's report: a clean score, as far as a host could
+/// tell.
+fn refuseScore(s: *const State) u32 {
+    const d = &s.result.doc;
+    // `conductedPlaceholder` answered true, so the conductor and its
+    // anchor are both here; the fallbacks keep a broken invariant a
+    // diagnostic rather than a trap.
+    const id: []const u8 = d.conductor orelse "";
+    const anchor = d.anchorById(id);
+    const file: []const u8 = if (anchor) |a| a.file else "";
+    const span: Diag.Span = if (anchor) |a| a.span else .{ .start = 0, .end = 0 };
+
+    var report: Diag.List = .init(gpa);
+    defer report.deinit();
+    report.add(
+        .anchor_unavailable,
+        .err,
+        span,
+        "the anchor '{s}' conducts this document and its file ({s}) is not here, so the score's transport would be the placeholder's 120 quarter notes per minute in [4 4] under a header naming the conductor; nothing was written — attach the file (`tpr_attachAnchor`) or inline the tier (`tempura inline`)",
+        .{ id, file },
+    ) catch return 0;
+    publishDiags(.operation, &report);
+    return 0;
 }
 
 /// The document as a file at `tpr_outPtr`, residue attached — plan 10's
@@ -821,6 +863,15 @@ export fn tpr_exportScore(flags: u32) u32 {
 /// count; 0 when nothing is loaded, the kind is unknown, the build was
 /// refused (a cross-kind ask), or the bytes are over `tpr_outCap` — the
 /// `'TPDG'` blob says which.
+///
+/// A conducted document whose file is not here still BUILDS here, where
+/// `tpr_exportScore` refuses. The CLI's `build` gates on the load's
+/// verdict as a whole ("a defective document does not get to produce
+/// bytes"); this surface leaves that gate to the host, which had status
+/// 1 at load, and the blob carries `missingTier`'s `anchor_unavailable`
+/// naming the anchor whose content the bytes lack. A score's one line is
+/// a claim about the conductor's time; a fresh file of the document's
+/// own lanes claims nothing about a file it does not contain.
 export fn tpr_build(kind: u32) u32 {
     const s = live() orelse return 0;
     const anchor_kind = kindOf(kind) orelse return 0;

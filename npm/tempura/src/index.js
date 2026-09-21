@@ -312,7 +312,11 @@ export class Tempura {
   }
 
   /**
-   * The document as a pacer score. Null when nothing is loaded.
+   * The document as a pacer score. Null when nothing is loaded or the
+   * score was refused — `diagnostics` says which. The one refusal is the
+   * CLI's: a conducted document whose file is not here would say the
+   * placeholder's `:bpm 120` under a header naming the conductor, so
+   * nothing comes back until `attachAnchor()` hands over the bytes.
    * @param {ScoreOptions} [opts]
    * @returns {string | null}
    */
