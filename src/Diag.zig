@@ -286,6 +286,24 @@ pub const List = struct {
         });
     }
 
+    /// Append every entry of `from` in order, copying each message into
+    /// this list's arena: how a producer folds a sub-producer's report
+    /// into its own. `from` is borrowed; its list may be freed afterwards.
+    pub fn extend(self: *List, from: []const Diagnostic) Error!void {
+        for (from) |d| try self.add(d.code, d.severity, d.span, "{s}", .{d.message});
+    }
+
+    /// `extend`, with every span moved `base` bytes on: a sub-producer
+    /// that spanned a slice of the input (a pattern's packed bytes, a
+    /// chunk's body) reports in the whole input's coordinates. Saturates,
+    /// so a span never wraps past the u32 range it lives in.
+    pub fn extendAt(self: *List, from: []const Diagnostic, base: u32) Error!void {
+        for (from) |d| {
+            const span: Span = .{ .start = d.span.start +| base, .end = d.span.end +| base };
+            try self.add(d.code, d.severity, span, "{s}", .{d.message});
+        }
+    }
+
     /// The report so far, in insertion order. Borrowed from the list.
     pub fn items(self: *const List) []const Diagnostic {
         return self.entries.items;
@@ -548,6 +566,29 @@ test "Diag.List: invariants hold on an empty list, a full one and a joined slice
     try joined.appendSlice(testing.allocator, list.items());
     invariantsOf(joined.items);
     try testing.expectEqual(@as(usize, 4), joined.items.len);
+}
+
+test "Diag.List: extend copies another list's report, in order, into its own arena" {
+    const gpa = std.testing.allocator;
+    var into = List.init(gpa);
+    defer into.deinit();
+    try into.add(.tick_overflow, .err, .{ .start = 0, .end = 1 }, "first", .{});
+    {
+        var from = List.init(gpa);
+        defer from.deinit();
+        try from.add(.tick_overflow, .warning, .{ .start = 2, .end = 3 }, "second", .{});
+        try from.add(.tick_overflow, .info, .{ .start = 4, .end = 5 }, "third", .{});
+        try into.extend(from.items());
+        try into.extendAt(from.items()[0..1], 10);
+    }
+    // `from` is gone; the copies are the list's own.
+    const got = into.items();
+    try std.testing.expectEqual(@as(usize, 4), got.len);
+    try std.testing.expectEqualStrings("second", got[1].message);
+    try std.testing.expectEqual(Severity.info, got[2].severity);
+    try std.testing.expectEqual(@as(u32, 12), got[3].span.start);
+    try std.testing.expectEqual(@as(u32, 13), got[3].span.end);
+    into.invariants();
 }
 
 test "Diag.List: hasErrors reflects severity and count is per code" {
