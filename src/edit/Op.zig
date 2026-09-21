@@ -453,6 +453,39 @@ const Reader = struct {
         try self.diags.add(.sjon_diagnostic, .err, self.span, fmt, args);
     }
 
+    /// One operation's reader: the JSON object under `"op"` to the
+    /// payload that name means, or null after a `fail`.
+    const ReadFn = *const fn (*Reader, std.json.ObjectMap) Error!?Op;
+
+    /// Plan 07's table, one row per name the grammar spells. `op` walks
+    /// it and nothing else decides which reader a name has; the names
+    /// are distinct, so the order is the header's and not a precedence.
+    const readers = [_]struct { name: []const u8, read: ReadFn }{
+        .{ .name = "insert", .read = &insert },
+        .{ .name = "remove", .read = &remove },
+        .{ .name = "retime", .read = &retime },
+        .{ .name = "revalue", .read = &revalue },
+        .{ .name = "ease", .read = &ease },
+        .{ .name = "resize", .read = &resize },
+        .{ .name = "velocity", .read = &velocity },
+        .{ .name = "split", .read = &split },
+        .{ .name = "merge", .read = &merge },
+        .{ .name = "duplicate", .read = &duplicate },
+        .{ .name = "quantize", .read = &quantize },
+        .{ .name = "nudge", .read = &nudge },
+        .{ .name = "transpose", .read = &transpose },
+        .{ .name = "stretch", .read = &stretch },
+        .{ .name = "insert-tempo", .read = &insertTempo },
+        .{ .name = "insert-meter", .read = &insertMeter },
+        .{ .name = "rename", .read = &rename },
+        .{ .name = "bind", .read = &bind },
+        .{ .name = "unbind", .read = &unbind },
+        .{ .name = "materialize", .read = &materialize },
+    };
+
+    /// The dispatch: the object, its `"op"`, and the one reader that
+    /// name has. Every reader takes the whole object, because each
+    /// operation's keys sit beside `"op"` and not under it.
     fn op(self: *Reader, v: std.json.Value) Error!?Op {
         const o = switch (v) {
             .object => |o| o,
@@ -468,235 +501,330 @@ const Reader = struct {
             try self.fail("\"op\" is the operation's name, as a string", .{});
             return null;
         };
+        for (readers) |r| {
+            if (eql(name, r.name)) return try r.read(self, o);
+        }
+        try self.fail("no operation is called {s}", .{name});
+        return null;
+    }
 
-        if (eql(name, "insert")) return try self.insert(o);
-        if (eql(name, "remove")) return .{ .remove = .{
+    // ---- one reader per operation ----
+
+    fn remove(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        return .{ .remove = .{
             .sel = try self.select(o.get("sel")),
             .allow_shared = self.optBool(o.get("allow-shared")) orelse false,
         } };
-        if (eql(name, "retime")) {
-            const sel = try self.select(o.get("sel"));
-            const delta = self.optInt(o.get("delta"));
-            const to = self.optInt(o.get("to"));
-            if (delta == null and to == null) {
-                try self.fail("retime wants a \"delta\" or a \"to\", in ticks", .{});
-                return null;
-            }
-            return .{ .retime = .{
-                .sel = sel,
-                .delta = delta,
-                .to = to,
-                .allow_shared = self.optBool(o.get("allow-shared")) orelse false,
-            } };
+    }
+
+    fn retime(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        const sel = try self.select(o.get("sel"));
+        const delta = self.optInt(o.get("delta"));
+        const to = self.optInt(o.get("to"));
+        if (delta == null and to == null) {
+            try self.fail("retime wants a \"delta\" or a \"to\", in ticks", .{});
+            return null;
         }
-        if (eql(name, "revalue")) {
-            const got = self.components(o.get("value")) orelse {
-                try self.fail("revalue wants a \"value\": a number or one to four of them", .{});
-                return null;
-            };
-            return .{ .revalue = .{ .sel = try self.select(o.get("sel")), .value = got.value, .ncomp = got.ncomp } };
-        }
-        if (eql(name, "ease")) return .{ .ease = .{
+        return .{ .retime = .{
+            .sel = sel,
+            .delta = delta,
+            .to = to,
+            .allow_shared = self.optBool(o.get("allow-shared")) orelse false,
+        } };
+    }
+
+    fn revalue(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        const got = self.components(o.get("value")) orelse {
+            try self.fail("revalue wants a \"value\": a number or one to four of them", .{});
+            return null;
+        };
+        return .{ .revalue = .{
+            .sel = try self.select(o.get("sel")),
+            .value = got.value,
+            .ncomp = got.ncomp,
+        } };
+    }
+
+    fn ease(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        return .{ .ease = .{
             .sel = try self.select(o.get("sel")),
             .ease = try self.str(o.get("ease") orelse .null) orelse {
                 try self.fail("ease wants an \"ease\": a pacer easing, as SJON text", .{});
                 return null;
             },
         } };
-        if (eql(name, "resize")) return .{ .resize = .{
-            .sel = try self.select(o.get("sel")),
-            .dur = self.optInt(o.get("dur")),
-            .repeat = if (self.optInt(o.get("repeat"))) |r| self.narrow(u32, @max(1, r), 1) else null,
+    }
+
+    fn resize(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        const sel = try self.select(o.get("sel"));
+        const dur = self.optInt(o.get("dur"));
+        const repeat = self.optInt(o.get("repeat"));
+        return .{ .resize = .{
+            .sel = sel,
+            .dur = dur,
+            .repeat = if (repeat) |r| self.narrow(u32, @max(1, r), 1) else null,
         } };
-        if (eql(name, "velocity")) return .{ .velocity = .{
+    }
+
+    fn velocity(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        return .{ .velocity = .{
             .sel = try self.select(o.get("sel")),
             .vel = @intCast(std.math.clamp(self.optInt(o.get("vel")) orelse 100, 1, 127)),
             .allow_shared = self.optBool(o.get("allow-shared")) orelse false,
         } };
-        if (eql(name, "split")) return .{ .split = .{
+    }
+
+    fn split(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        return .{ .split = .{
             .sel = try self.select(o.get("sel")),
             .at = self.optInt(o.get("at")) orelse {
                 try self.fail("split wants an \"at\": the tick to split at", .{});
                 return null;
             },
         } };
-        if (eql(name, "merge")) return .{ .merge = .{ .sel = try self.select(o.get("sel")) } };
-        if (eql(name, "duplicate")) {
-            const sel = try self.select(o.get("sel"));
-            const delta = self.optInt(o.get("delta"));
-            const to = self.optInt(o.get("to"));
-            if (delta == null and to == null) {
-                try self.fail("duplicate wants a \"delta\" or a \"to\", in ticks", .{});
-                return null;
-            }
-            return .{ .duplicate = .{ .sel = sel, .delta = delta, .to = to } };
+    }
+
+    fn merge(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        return .{ .merge = .{ .sel = try self.select(o.get("sel")) } };
+    }
+
+    fn duplicate(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        const sel = try self.select(o.get("sel"));
+        const delta = self.optInt(o.get("delta"));
+        const to = self.optInt(o.get("to"));
+        if (delta == null and to == null) {
+            try self.fail("duplicate wants a \"delta\" or a \"to\", in ticks", .{});
+            return null;
         }
-        if (eql(name, "quantize")) return .{ .quantize = .{
+        return .{ .duplicate = .{ .sel = sel, .delta = delta, .to = to } };
+    }
+
+    fn quantize(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        return .{ .quantize = .{
             .sel = try self.select(o.get("sel")),
             .grid = try self.grid(o.get("grid")) orelse return null,
             .strength = self.fraction(o.get("strength"), 1, 0, 1),
             .swing = self.fraction(o.get("swing"), 0, -1, 1),
             .dur_too = self.optBool(o.get("dur-too")) orelse false,
         } };
-        if (eql(name, "nudge")) {
-            const sel = try self.select(o.get("sel"));
-            if (self.optInt(o.get("ticks"))) |ticks| {
-                return .{ .nudge = .{ .sel = sel, .delta = .{ .ticks = ticks } } };
-            }
-            const g = try self.grid(o.get("grid")) orelse return null;
-            const count = self.narrow(i32, self.optInt(o.get("count")) orelse 1, 1);
-            // The bound is the walk's, not the field's (`Delta.max_steps`);
-            // a number the field cannot hold went through `out_of_range`
-            // above and is refused by the funnel in `fromJson`.
-            if (count > Delta.max_steps or count < -Delta.max_steps) {
-                try self.fail(
-                    "a nudge of {d} steps is refused: the walk counts grid lines one by one and stops at {d} either way",
-                    .{ count, Delta.max_steps },
-                );
-                return null;
-            }
-            return .{ .nudge = .{ .sel = sel, .delta = .{ .steps = .{
-                .grid = g,
-                .count = count,
-            } } } };
+    }
+
+    fn nudge(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        const sel = try self.select(o.get("sel"));
+        if (self.optInt(o.get("ticks"))) |ticks| {
+            return .{ .nudge = .{ .sel = sel, .delta = .{ .ticks = ticks } } };
         }
-        if (eql(name, "transpose")) return .{ .transpose = .{
-            .sel = try self.select(o.get("sel")),
-            .semitones = @intCast(std.math.clamp(self.optInt(o.get("semitones")) orelse 0, -127, 127)),
+        const g = try self.grid(o.get("grid")) orelse return null;
+        const count = self.narrow(i32, self.optInt(o.get("count")) orelse 1, 1);
+        // The bound is the walk's, not the field's (`Delta.max_steps`);
+        // a number the field cannot hold went through `out_of_range`
+        // above and is refused by the funnel in `fromJson`.
+        if (count > Delta.max_steps or count < -Delta.max_steps) {
+            try self.fail(
+                "a nudge of {d} steps is refused: the walk counts grid lines one by one " ++
+                    "and stops at {d} either way",
+                .{ count, Delta.max_steps },
+            );
+            return null;
+        }
+        return .{ .nudge = .{ .sel = sel, .delta = .{ .steps = .{
+            .grid = g,
+            .count = count,
+        } } } };
+    }
+
+    fn transpose(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        const sel = try self.select(o.get("sel"));
+        const semitones = self.optInt(o.get("semitones")) orelse 0;
+        return .{ .transpose = .{
+            .sel = sel,
+            .semitones = @intCast(std.math.clamp(semitones, -127, 127)),
         } };
-        if (eql(name, "stretch")) return .{ .stretch = .{
+    }
+
+    fn stretch(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        return .{ .stretch = .{
             .from = self.optInt(o.get("from")) orelse 0,
             .to = self.optInt(o.get("to")) orelse 0,
             .p = self.narrow(u32, @max(0, self.optInt(o.get("p")) orelse 0), 0),
             .q = self.narrow(u32, @max(0, self.optInt(o.get("q")) orelse 0), 0),
         } };
-        if (eql(name, "insert-tempo")) {
-            const at = self.optInt(o.get("at")) orelse 0;
-            const tempo: @FieldType(doc.TempoPoint, "tempo") = if (self.optInt(o.get("us"))) |us|
-                .{ .us = @intCast(std.math.clamp(us, 1, 16_777_215)) }
-            else if (self.optFloat(o.get("qpm"))) |qpm|
-                .{ .qpm = qpm }
-            else {
-                try self.fail("insert-tempo wants a \"us\" or a \"qpm\"", .{});
+    }
+
+    fn insertTempo(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        const at = self.optInt(o.get("at")) orelse 0;
+        const tempo: @FieldType(doc.TempoPoint, "tempo") = if (self.optInt(o.get("us"))) |us|
+            .{ .us = @intCast(std.math.clamp(us, 1, 16_777_215)) }
+        else if (self.optFloat(o.get("qpm"))) |qpm|
+            .{ .qpm = qpm }
+        else {
+            try self.fail("insert-tempo wants a \"us\" or a \"qpm\"", .{});
+            return null;
+        };
+        const mode = try self.str(o.get("mode") orelse .null) orelse "musical";
+        return .{ .insert_tempo = .{
+            .point = .{ .tick = at, .tempo = tempo },
+            .mode = if (eql(mode, "wall-clock")) .wall_clock else .musical,
+        } };
+    }
+
+    fn insertMeter(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        const sig = self.pair(o.get("sig")) orelse {
+            try self.fail("insert-meter wants a \"sig\": [n d]", .{});
+            return null;
+        };
+        return .{ .insert_meter = .{ .point = .{
+            .tick = self.optInt(o.get("at")) orelse 0,
+            .n = @intCast(std.math.clamp(sig[0], 1, 64)),
+            .d = @intCast(std.math.clamp(sig[1], 1, 64)),
+        } } };
+    }
+
+    fn rename(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        const what = try self.str(o.get("what") orelse .null) orelse "";
+        const which = std.meta.stringToEnum(Renamed, what) orelse {
+            try self.fail(
+                "rename wants a \"what\": lane, section, phrase, target or anchor",
+                .{},
+            );
+            return null;
+        };
+        return .{ .rename = .{
+            .what = which,
+            .from = try self.str(o.get("from") orelse .null) orelse {
+                try self.fail("rename wants a \"from\" and a \"to\"", .{});
                 return null;
-            };
-            const mode = try self.str(o.get("mode") orelse .null) orelse "musical";
-            return .{ .insert_tempo = .{
-                .point = .{ .tick = at, .tempo = tempo },
-                .mode = if (eql(mode, "wall-clock")) .wall_clock else .musical,
-            } };
-        }
-        if (eql(name, "insert-meter")) {
-            const sig = self.pair(o.get("sig")) orelse {
-                try self.fail("insert-meter wants a \"sig\": [n d]", .{});
+            },
+            .to = try self.str(o.get("to") orelse .null) orelse {
+                try self.fail("rename wants a \"from\" and a \"to\"", .{});
                 return null;
-            };
-            return .{ .insert_meter = .{ .point = .{
-                .tick = self.optInt(o.get("at")) orelse 0,
-                .n = @intCast(std.math.clamp(sig[0], 1, 64)),
-                .d = @intCast(std.math.clamp(sig[1], 1, 64)),
-            } } };
-        }
-        if (eql(name, "rename")) {
-            const what = try self.str(o.get("what") orelse .null) orelse "";
-            const which = std.meta.stringToEnum(Renamed, what) orelse {
-                try self.fail("rename wants a \"what\": lane, section, phrase, target or anchor", .{});
-                return null;
-            };
-            return .{ .rename = .{
-                .what = which,
-                .from = try self.str(o.get("from") orelse .null) orelse {
-                    try self.fail("rename wants a \"from\" and a \"to\"", .{});
-                    return null;
-                },
-                .to = try self.str(o.get("to") orelse .null) orelse {
-                    try self.fail("rename wants a \"from\" and a \"to\"", .{});
-                    return null;
-                },
-            } };
-        }
-        if (eql(name, "bind")) {
-            const lane = try self.str(o.get("lane") orelse .null) orelse {
-                try self.fail("bind wants a \"lane\"", .{});
-                return null;
-            };
-            const anchor = try self.str(o.get("anchor") orelse .null) orelse {
-                try self.fail("bind wants an \"anchor\"", .{});
-                return null;
-            };
-            const where = try self.address(o) orelse return null;
-            return .{ .bind = .{ .lane = lane, .anchor = anchor, .address = where } };
-        }
-        if (eql(name, "unbind")) return .{ .unbind = .{
+            },
+        } };
+    }
+
+    fn bind(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        const lane = try self.str(o.get("lane") orelse .null) orelse {
+            try self.fail("bind wants a \"lane\"", .{});
+            return null;
+        };
+        const anchor = try self.str(o.get("anchor") orelse .null) orelse {
+            try self.fail("bind wants an \"anchor\"", .{});
+            return null;
+        };
+        const where = try self.address(o) orelse return null;
+        return .{ .bind = .{ .lane = lane, .anchor = anchor, .address = where } };
+    }
+
+    fn unbind(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        return .{ .unbind = .{
             .lane = try self.str(o.get("lane") orelse .null) orelse {
                 try self.fail("unbind wants a \"lane\"", .{});
                 return null;
             },
         } };
-        if (eql(name, "materialize")) return .{ .materialize = .{
+    }
+
+    fn materialize(self: *Reader, o: std.json.ObjectMap) Error!?Op {
+        return .{ .materialize = .{
             .lane = try self.str(o.get("lane") orelse .null) orelse {
                 try self.fail("materialize wants a \"lane\"", .{});
                 return null;
             },
         } };
-
-        try self.fail("no operation is called {s}", .{name});
-        return null;
     }
+
+    // ---- insert, and one reader per thing it can put somewhere ----
 
     fn insert(self: *Reader, o: std.json.ObjectMap) Error!?Op {
         const lane = try self.str(o.get("lane") orelse .null);
         inline for (@typeInfo(New).@"union".fields) |field| {
             if (o.get(field.name)) |v| {
-                const what = try self.newOf(field.name, v) orelse return null;
+                const what = try self.newOf(@field(NewTag, field.name), v) orelse return null;
                 return .{ .insert = .{ .lane = lane, .what = what } };
             }
         }
-        try self.fail("insert wants one of: note, keyframe, clip, section, cue, lane, phrase", .{});
+        try self.fail(
+            "insert wants one of: note, keyframe, clip, section, cue, lane, phrase",
+            .{},
+        );
         return null;
     }
 
-    fn newOf(self: *Reader, comptime name: []const u8, v: std.json.Value) Error!?New {
+    const NewTag = std.meta.Tag(New);
+
+    /// The thing an `insert` carries, by the key it came under. The
+    /// object check is here, once; each shape's own reader takes the
+    /// object.
+    fn newOf(self: *Reader, comptime tag: NewTag, v: std.json.Value) Error!?New {
         const o = switch (v) {
             .object => |o| o,
             else => {
-                try self.fail("a {s} to insert is a JSON object", .{name});
+                try self.fail("a {s} to insert is a JSON object", .{@tagName(tag)});
                 return null;
             },
         };
-        if (comptime eql(name, "note")) return .{
-            .note = .{
-                .at = self.optInt(o.get("at")) orelse 0,
-                .dur = self.optInt(o.get("dur")) orelse 0,
-                .key = @intCast(std.math.clamp(self.optInt(o.get("key")) orelse 60, 0, 127)),
-                .vel = if (self.optInt(o.get("vel"))) |x| @intCast(std.math.clamp(x, 1, 127)) else null,
-                // `:ch 1` is channel 0 — the wire numbering a `Doc` keeps.
-                .ch = if (self.optInt(o.get("ch"))) |x| @intCast(std.math.clamp(x - 1, 0, 15)) else null,
-                .off_vel = if (self.optInt(o.get("off-vel"))) |x| @intCast(std.math.clamp(x, 0, 127)) else null,
-            },
+        return switch (tag) {
+            .note => try self.newNote(o),
+            .keyframe => try self.newKeyframe(o),
+            .clip => try self.newClip(o),
+            .section => try self.newSection(o),
+            .cue => try self.newCue(o),
+            .lane => try self.newLane(o),
+            .phrase => try self.newPhrase(o),
         };
-        if (comptime eql(name, "keyframe")) {
-            const got: Reader.Components = self.components(o.get("value")) orelse
-                .{ .value = .{ 0, 0, 0, 0 }, .ncomp = 1 };
-            return .{ .keyframe = .{
-                .at = self.optInt(o.get("at")) orelse 0,
-                .value = got.value,
-                .ncomp = got.ncomp,
-                .ease = try self.str(o.get("ease") orelse .null),
-            } };
-        }
-        if (comptime eql(name, "clip")) return .{ .clip = .{
-            .at = self.optInt(o.get("at")) orelse 0,
-            .phrase = try self.str(o.get("phrase") orelse .null) orelse {
-                try self.fail("a clip names its \"phrase\"", .{});
-                return null;
-            },
-            .repeat = if (self.optInt(o.get("repeat"))) |x| self.narrow(u32, @max(1, x), 1) else null,
-            .offset = self.optInt(o.get("offset")),
-            .length = self.optInt(o.get("length")),
-            .transpose = if (self.optInt(o.get("transpose"))) |x| @intCast(std.math.clamp(x, -120, 120)) else null,
+    }
+
+    fn newNote(self: *Reader, o: std.json.ObjectMap) Error!?New {
+        const at = self.optInt(o.get("at")) orelse 0;
+        const dur = self.optInt(o.get("dur")) orelse 0;
+        const key = self.optInt(o.get("key")) orelse 60;
+        const vel = self.optInt(o.get("vel"));
+        // `:ch 1` is channel 0 — the wire numbering a `Doc` keeps.
+        const ch = self.optInt(o.get("ch"));
+        const off_vel = self.optInt(o.get("off-vel"));
+        return .{ .note = .{
+            .at = at,
+            .dur = dur,
+            .key = @intCast(std.math.clamp(key, 0, 127)),
+            .vel = if (vel) |x| @intCast(std.math.clamp(x, 1, 127)) else null,
+            .ch = if (ch) |x| @intCast(std.math.clamp(x - 1, 0, 15)) else null,
+            .off_vel = if (off_vel) |x| @intCast(std.math.clamp(x, 0, 127)) else null,
         } };
-        if (comptime eql(name, "section")) return .{ .section = .{
+    }
+
+    fn newKeyframe(self: *Reader, o: std.json.ObjectMap) Error!?New {
+        const got: Reader.Components = self.components(o.get("value")) orelse
+            .{ .value = .{ 0, 0, 0, 0 }, .ncomp = 1 };
+        return .{ .keyframe = .{
+            .at = self.optInt(o.get("at")) orelse 0,
+            .value = got.value,
+            .ncomp = got.ncomp,
+            .ease = try self.str(o.get("ease") orelse .null),
+        } };
+    }
+
+    fn newClip(self: *Reader, o: std.json.ObjectMap) Error!?New {
+        const at = self.optInt(o.get("at")) orelse 0;
+        const phrase = try self.str(o.get("phrase") orelse .null) orelse {
+            try self.fail("a clip names its \"phrase\"", .{});
+            return null;
+        };
+        const repeat = self.optInt(o.get("repeat"));
+        const offset = self.optInt(o.get("offset"));
+        const length = self.optInt(o.get("length"));
+        const shift = self.optInt(o.get("transpose"));
+        return .{ .clip = .{
+            .at = at,
+            .phrase = phrase,
+            .repeat = if (repeat) |x| self.narrow(u32, @max(1, x), 1) else null,
+            .offset = offset,
+            .length = length,
+            .transpose = if (shift) |x| @intCast(std.math.clamp(x, -120, 120)) else null,
+        } };
+    }
+
+    fn newSection(self: *Reader, o: std.json.ObjectMap) Error!?New {
+        return .{ .section = .{
             .name = try self.str(o.get("name") orelse .null) orelse {
                 try self.fail("a section has a \"name\"", .{});
                 return null;
@@ -704,22 +832,33 @@ const Reader = struct {
             .at = self.optInt(o.get("at")) orelse 0,
             .dur = self.optInt(o.get("dur")) orelse 0,
         } };
-        if (comptime eql(name, "cue")) return .{ .cue = .{
+    }
+
+    fn newCue(self: *Reader, o: std.json.ObjectMap) Error!?New {
+        return .{ .cue = .{
             .name = try self.str(o.get("name") orelse .null) orelse {
                 try self.fail("a cue has a \"name\"", .{});
                 return null;
             },
             .at = self.optInt(o.get("at")) orelse 0,
         } };
-        if (comptime eql(name, "lane")) return .{ .lane = .{
-            .name = try self.str(o.get("name") orelse .null) orelse {
-                try self.fail("a lane has a \"name\"", .{});
-                return null;
-            },
-            .kind = std.meta.stringToEnum(doc.LaneKind, try self.str(o.get("kind") orelse .null) orelse "notes") orelse .notes,
+    }
+
+    fn newLane(self: *Reader, o: std.json.ObjectMap) Error!?New {
+        const name = try self.str(o.get("name") orelse .null) orelse {
+            try self.fail("a lane has a \"name\"", .{});
+            return null;
+        };
+        const kind = try self.str(o.get("kind") orelse .null) orelse "notes";
+        return .{ .lane = .{
+            .name = name,
+            .kind = std.meta.stringToEnum(doc.LaneKind, kind) orelse .notes,
             .target = try self.str(o.get("target") orelse .null),
         } };
-        if (comptime eql(name, "phrase")) return .{ .phrase = .{
+    }
+
+    fn newPhrase(self: *Reader, o: std.json.ObjectMap) Error!?New {
+        return .{ .phrase = .{
             .name = try self.str(o.get("name") orelse .null) orelse {
                 try self.fail("a phrase has a \"name\"", .{});
                 return null;
@@ -727,7 +866,6 @@ const Reader = struct {
             .length = self.optInt(o.get("length")) orelse 0,
             .lanes = try self.strings(o.get("lanes")),
         } };
-        unreachable;
     }
 
     fn address(self: *Reader, o: std.json.ObjectMap) Error!?doc.Address {
