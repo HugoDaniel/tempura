@@ -282,6 +282,38 @@ corpus/edit-insert/doc.sjon
 --op
 {\"op\":\"rewind\"}"
 
+# BOUND content, through the verb and not only through the engine: the
+# two `edit-bound-*` cases whose anchor's file is beside them (so they
+# load clean), one per format. The SMF pair moves both events; the IT
+# cell is delayed inside its own row with `SDx`.
+run_case edit-bound-smf 0 "edit
+corpus/edit-bound-smf-pair/doc.sjon
+--op
+{\"op\":\"retime\",\"sel\":{\"lanes\":[\"kick\"],\"kinds\":[\"note\"],\"range\":[0,1]},\"delta\":92252160}"
+
+run_case edit-bound-it 0 "edit
+corpus/edit-bound-it-cell/doc.sjon
+--op
+{\"op\":\"retime\",\"sel\":{\"lanes\":[\"lead\"],\"kinds\":[\"note\"],\"range\":[92252160,92252161]},\"delta\":5765760}"
+
+# …and the shared-pattern refusal, over a document whose anchor's file is
+# NOT beside it: `anchor_unavailable` rides on stderr and does not stop
+# the verb, which is the narrowing `src/cli/edit.zig`'s `blocksEdit`
+# documents.
+run_case edit-bound-shared-refused 1 "edit
+corpus/edit-bound-it-shared/doc.sjon
+--op
+{\"op\":\"velocity\",\"sel\":{\"lanes\":[\"lead\"]},\"vel\":64}"
+
+# ---- build: the section markers plan 08 gives the .mid render --------
+
+run_case build-section-markers 0 "build
+corpus/playhead-sections-cues/doc.sjon
+--kind
+mid
+--no-residue
+--section-markers" hash
+
 # ---- check-residue: one case per rule of plan 04's reconciliation ----
 
 run_case check-residue-smf 0 "check-residue
