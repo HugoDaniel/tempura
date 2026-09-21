@@ -524,7 +524,13 @@ const Ctx = struct {
         off_grid: ?i64 = null,
 
         /// One event's move to SMF tick `to`, checked against the grid.
-        fn move(self: *SmfEdits, arena: std.mem.Allocator, slot: u32, to: i64, ppq: u15) Error!void {
+        fn move(
+            self: *SmfEdits,
+            arena: std.mem.Allocator,
+            slot: u32,
+            to: i64,
+            ppq: u15,
+        ) Error!void {
             if (self.off_grid == null and Grid.smfToTicks(to, ppq).overflow) self.off_grid = to;
             try self.moves.append(arena, .{ .slot = slot, .to = to });
         }
