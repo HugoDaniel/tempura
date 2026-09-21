@@ -56,6 +56,11 @@
 //!   * `residue.it.parseChunk` / `parseTail` / `splitMessage` — total;
 //!     the split's two halves are slices of the message it was given; a
 //!     parsed tail is never longer than the text it came from.
+//!   * `doc.fromSource`, then everything downstream of it — the load
+//!     returns and `mapOf` agrees with its map; `time.derive`,
+//!     `Playhead.at`/`atTick` at NaN, the infinities and both ends of
+//!     i64, and `exportScore` all return, so no text reaches one of plan
+//!     12's `invariants()` assertions.
 //!   * `doc.pipeline.dump`, both kinds — total; the document text is
 //!     NUL-terminated, the rule is one of plan 04's five, every verdict
 //!     is findable by its own name, and every diagnostic's span is
@@ -87,6 +92,8 @@ const Doc = @import("doc/Value.zig");
 /// value file's.
 const doc_part = @import("doc/doc.zig");
 const edit = @import("edit/edit.zig");
+const time = @import("time/time.zig");
+const exporter = @import("export/export.zig");
 /// The edit part's own fixtures — a test-only file, imported by a
 /// test-only target, so an operation harness plans over the same
 /// document the edit tests do.
@@ -1223,7 +1230,40 @@ fn checkFromSource(schema: *const Schema, input: [:0]const u8) !Seen {
     if (doc_part.conductedPlaceholder(&res.doc)) {
         try testing.expect(res.diags.count(.anchor_unavailable) > 0);
     }
+
+    try checkDownstream(gpa, &res.doc);
     return seen;
+}
+
+/// Everything a host can do with a document once it has loaded, with or
+/// without errors: derive it, ask the playhead where a second or a tick
+/// falls (`tpr_at` and `tpr_atTick` hand a host's number straight in,
+/// NaN and the ends of i64 included), and export the pacer score. Each of
+/// these asserts plan 12's invariants at its entry and on its answer;
+/// this is the gate that proves no document reaches one of them — in the
+/// ReleaseSmall wasm a violated assertion is undefined behaviour.
+fn checkDownstream(gpa: std.mem.Allocator, doc: *const Doc.Doc) !void {
+    var derived = try time.derive.derive(gpa, doc);
+    defer derived.deinit();
+
+    const seconds = [_]f64{ -1.0, 0.0, 0.5, 7.25, 1e9, std.math.inf(f64), std.math.nan(f64) };
+    for (seconds) |s| {
+        var pos = time.Playhead.at(gpa, &derived, s) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            error.TickOverflow, error.NonFiniteTime => continue,
+        };
+        pos.deinit(gpa);
+    }
+    const ticks = [_]i64{
+        std.math.minInt(i64), -1, 0, 1449, time.Grid.MAX_TICK, std.math.maxInt(i64),
+    };
+    for (ticks) |t| {
+        var pos = try time.Playhead.atTick(gpa, &derived, t);
+        pos.deinit(gpa);
+    }
+
+    var score = try exporter.exportScore(gpa, doc, &derived, &.{}, .{});
+    score.deinit();
 }
 
 fn fuzzFromSource(schema: *const Schema, smith: *Smith) anyerror!void {
