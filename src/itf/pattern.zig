@@ -53,8 +53,9 @@ const disk_note_off: u8 = 255;
 /// ITTECH's on-disk note cut.
 const disk_note_cut: u8 = 254;
 /// The highest command byte ITTECH's range admits; 27–31 name no letter
-/// (it 04 §"Pattern unpacking").
-const cmd_max: u8 = 26;
+/// (it 04 §"Pattern unpacking"). Public so the reader can assert that
+/// every command it kept is one of these.
+pub const cmd_max: u8 = 26;
 
 /// What one channel remembers between rows, on both sides of the stream.
 const Cache = struct {

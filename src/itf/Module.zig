@@ -255,7 +255,8 @@ pub const Pattern = struct {
     /// The cell at `(row, channel)`. Callers stay inside `rows` and
     /// `channels`; this is an internal invariant, not user input.
     pub fn at(self: Pattern, row: usize, channel: usize) *Cell {
-        std.debug.assert(row < self.rows and channel < channels);
+        std.debug.assert(row < self.rows);
+        std.debug.assert(channel < channels);
         return &self.cells[row * channels + channel];
     }
 
@@ -413,6 +414,20 @@ pub const Module = struct {
     /// must come from here.
     pub fn allocator(self: *Module) std.mem.Allocator {
         return self.arena.allocator();
+    }
+
+    /// What holds of EVERY `Module`, whoever built it — the reader, a
+    /// `Builder`, the document bridge: each pattern's cell grid is dense,
+    /// exactly `rows × 64`, so `at` indexes and never decodes. Asserted
+    /// at the end of the reader and the entry of the writer and the walk
+    /// (plan 12, "The invariants"). Nothing about the VALUES is claimed:
+    /// a builder may add 300 orders, a 0-row pattern or a two-byte MIDI
+    /// configuration, and the writer diagnoses each of them; what the
+    /// READER establishes beyond this is asserted in `read.zig`.
+    pub fn invariants(self: *const Module) void {
+        for (self.patterns) |p| {
+            std.debug.assert(p.cells.len == @as(usize, p.rows) * channels);
+        }
     }
 };
 
@@ -677,6 +692,21 @@ test "Module.Builder: a fresh module carries tempura's Cwt/v and IT's defaults" 
     try testing.expectEqual(@as(usize, 64 * 64), m.patterns[0].cells.len);
     try testing.expectEqual(@as(u8, 60), m.patterns[0].at(3, 5).note);
     try testing.expect(m.patterns[0].at(0, 0).isEmpty());
+}
+
+test "Module.invariants: a built module holds, pattern by pattern" {
+    // Exercised on purpose: a 0-row pattern and a 200-row one are both
+    // dense, and the check walks them without complaint.
+    var b: Builder = .init(testing.allocator);
+    defer b.deinit();
+    _ = try b.addPattern(0);
+    _ = try b.addPattern(200);
+    try b.addOrder(1);
+    var m = b.finish();
+    defer m.deinit();
+    m.invariants();
+    try testing.expectEqual(@as(usize, 0), m.patterns[0].cells.len);
+    try testing.expectEqual(@as(usize, 200 * channels), m.patterns[1].cells.len);
 }
 
 test "Module.Builder: a MIDI configuration is copied whole into the arena" {

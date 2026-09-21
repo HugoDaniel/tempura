@@ -127,11 +127,42 @@ pub fn read(gpa: std.mem.Allocator, bytes: []const u8) Error!Result {
     };
     try r.run();
 
-    return .{
+    const result: Result = .{
         .module = module,
         .source_map = .{ .entries = map.items },
         .diags = diags,
     };
+    result.module.invariants();
+    postconditions(&result, src.len);
+    return result;
+}
+
+/// What the READER establishes over and above `Module.invariants()`,
+/// asserted once per `read` (plan 12, "The invariants"): the record
+/// counts are inside the reader's caps; every pattern is 1..1024 rows (a
+/// height the header could not be trusted on became the empty 64);
+/// every cell's note is a pitch or one of tempura's four sentinels and
+/// its command one ITTECH names (`pattern.unpack`'s tables); a MIDI
+/// configuration the module carries is the block's whole 4896 bytes;
+/// and every region on the map lies inside the bytes that were read.
+/// Properties of the reader's own clamps and tables, never of the file:
+/// random bytes satisfy them.
+fn postconditions(result: *const Result, len: usize) void {
+    const m = &result.module;
+    std.debug.assert(m.orders.len <= max_orders);
+    std.debug.assert(m.instruments.len <= max_instruments);
+    std.debug.assert(m.samples.len <= max_samples);
+    std.debug.assert(m.patterns.len <= max_patterns);
+    for (m.patterns) |p| {
+        std.debug.assert(p.rows >= 1);
+        std.debug.assert(p.rows <= max_pattern_rows);
+        for (p.cells) |c| {
+            std.debug.assert(c.note <= model.note_max or c.note >= model.note_fade);
+            std.debug.assert(c.fx <= pattern.cmd_max);
+        }
+    }
+    if (m.midi_config_bytes) |block| std.debug.assert(block.len == model.midi_config_size);
+    for (result.source_map.entries) |e| std.debug.assert(e.region.end() <= len);
 }
 
 /// The parse in progress. Every read goes through the bounded accessors

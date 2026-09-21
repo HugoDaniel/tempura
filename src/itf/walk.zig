@@ -134,6 +134,7 @@ pub const order_end: u8 = 255;
 /// (plan 06: "the walk reads `Module` and nothing else"), so the same
 /// module always gives the same map.
 pub fn derive(gpa: std.mem.Allocator, module: *const Module, opts: Options) Error!RowMap {
+    module.invariants();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);
