@@ -1,0 +1,16 @@
+; pacer's `(transport …)` carries a SINGLE `:meter`, so a document whose
+; meter CHANGES cannot be spelled: the score keeps the first one, says so
+; as a warning comment and as `export_meter_unsupported`, and every
+; position stays exact — under the fallback a pacer beat is a quarter, so
+; only the bar and phase lanes drift.
+(timeline :title "meter change" :length 2bar)
+
+(tempo-point :at 0q :qpm 120)
+(meter-point :at 0bar :sig [4 4])
+(meter-point :at 1bar :sig [3 4])
+
+(lane :name hit :kind notes :target hit
+  (note :at 0q :dur 0.5q :key 60 :vel 100)
+  (note :at 4q :dur 0.5q :key 62 :vel 100))
+
+(target :name hit :arity 4)

@@ -175,10 +175,36 @@ corpus/tempo-three-conductors-smf/doc.sjon
 mid
 --no-residue" hash
 
-run_case build-native-refused 2 "build
-corpus/tempo-three-conductors-native/doc.sjon
+# A NATIVE document goes through plan 08's renderers and plan 04's
+# carriers — the two halves this verb refused until E3 — so the same
+# document is pinned in both kinds, with the residue attached.
+run_case build-native-mid 0 "build
+corpus/render-smf/doc.sjon
 --kind
-mid"
+mid
+--cc
+74" hash
+
+run_case build-native-it 0 "build
+corpus/render-it/doc.sjon
+--kind
+it" hash
+
+# `export` IS `build --no-residue` (plan 10), so the same document
+# through both verbs is two digests a reviewer compares at a glance.
+run_case export-native-mid 0 "export
+corpus/render-smf/doc.sjon
+--kind
+mid
+--cc
+74" hash
+
+# Plan 04's rule 3 — a newer tempura's payload kept where it is, with
+# `residue_newer_kept` said out loud — is NOT a case here: it needs the
+# dump of a residue-carrying file as its document, which means a temp
+# directory, which a golden with a fixed `# argv:` line cannot have.
+# `src/cli/build.zig`'s own test walks it end to end instead, both
+# branches (kept, and `--force-residue`).
 
 run_case build-cross-kind 1 "build
 corpus/tempo-three-conductors-it/doc.sjon
@@ -188,6 +214,108 @@ mid"
 run_case build-compress-refused 2 "build
 corpus/tempo-three-conductors-smf/doc.sjon
 --compress"
+
+# ---- export-score: the pacer skeleton, and one of its flags ----------
+
+run_case export-score 0 "export-score
+corpus/export-quintuplets/doc.sjon"
+
+run_case export-score-velocity 0 "export-score
+corpus/render-smf/doc.sjon
+--velocity
+--section-markers"
+
+# The 512 fallback's whole report: the warning comment, the dropped
+# tempo table and every position in seconds.
+run_case export-score-512 0 "export-score
+corpus/export-512/doc.sjon"
+
+# ---- at: the two spellings of one question, and a refusal ------------
+
+run_case at-seconds 0 "at
+corpus/playhead-sections-cues/doc.sjon
+--seconds
+1.5"
+
+# Under an IT conductor the answer carries the tracker position.
+run_case at-pos-it 0 "at
+corpus/tempo-three-conductors-it/doc.sjon
+--pos
+1q"
+
+run_case at-refused 2 "at
+corpus/playhead-sections-cues/doc.sjon
+--pos
+17"
+
+# ---- inline: a by-reference anchor's tier, dumped in ------------------
+
+run_case inline 0 "inline
+src/cli/testdata/by-ref.sjon"
+
+# …and the second run, which has nothing to do and says so.
+run_case inline-nothing 0 "inline
+corpus/tempo-three-conductors-smf/doc.sjon"
+
+# ---- edit: the rehearsal, the edit and the refusal -------------------
+
+run_case edit-dry-run 0 "edit
+corpus/edit-transpose/doc.sjon
+--dry-run
+--op
+{\"op\":\"transpose\",\"semitones\":12}
+--select
+{\"lanes\":[\"flash\"],\"kinds\":[\"note\"]}"
+
+run_case edit-applied 0 "edit
+corpus/edit-velocity/doc.sjon
+--op
+{\"op\":\"velocity\",\"sel\":{\"lanes\":[\"flash\"],\"keys\":[36]},\"vel\":64}"
+
+run_case edit-refused 1 "edit
+corpus/edit-insert-meter/doc.sjon
+--op
+{\"op\":\"insert-meter\",\"at\":46126080,\"sig\":[3,4]}"
+
+run_case edit-not-an-op 2 "edit
+corpus/edit-insert/doc.sjon
+--op
+{\"op\":\"rewind\"}"
+
+# ---- check-residue: one case per rule of plan 04's reconciliation ----
+
+run_case check-residue-smf 0 "check-residue
+corpus/residue-smf-exact/song.mid"
+
+run_case check-residue-it 0 "check-residue
+corpus/residue-it-exact/song.it"
+
+run_case check-residue-stale 0 "check-residue
+corpus/residue-stale-lane/song.mid"
+
+run_case check-residue-newer 0 "check-residue
+corpus/residue-newer-version/song.it"
+
+run_case check-residue-corrupt 0 "check-residue
+corpus/residue-corrupt/song.mid"
+
+run_case check-residue-tail 0 "check-residue
+corpus/residue-tail-only/song.it"
+
+run_case check-residue-none 0 "check-residue
+corpus/skeleton-smf/song.mid"
+
+# ---- dump through the reconciliation --------------------------------
+
+# Rule 2's second branch, whole: the essence restores the document and
+# the edited lane comes back BOUND, with `residue_stale` naming the loss.
+run_case dump-residue-stale 0 "dump
+corpus/residue-stale-lane/song.mid"
+
+# Rule 3: the payload is a newer version, so the tier is derived and the
+# first line of the document says which rule ran.
+run_case dump-residue-newer 0 "dump
+corpus/residue-newer-version/song.it"
 
 # ---- the invocation surface itself ------------------------------------
 

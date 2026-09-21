@@ -9,6 +9,10 @@
   (lane :name ch1 :kind notes :onsets 6 :first 0 :last 553512960)
   (lane :name ch1-vol :kind curve :onsets 0 :first 0 :last 0)
   (lane :name ch2 :kind notes :onsets 4 :first 0 :last 553512960))
+(reconciled :rule derived :conductor none
+  (verdict :lane ch1 :hash-ok false :action skeleton)
+  (verdict :lane ch1-vol :hash-ok false :action skeleton)
+  (verdict :lane ch2 :hash-ok false :action skeleton))
 (read
   (it :title "skeleton" :speed 6 :tempo 125 :orders 2 :patterns 1 :instruments 0 :samples 0 :message-len 0 :tmpu false))
 (dump :bytes 326 :sha256 "94ca96ea0072b0ad9a6a43f2dea4108626fb93d8a3224a511a30191cf8a1b422")

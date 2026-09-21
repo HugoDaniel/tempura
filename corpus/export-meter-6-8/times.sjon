@@ -1,0 +1,2 @@
+; The transport line is the whole point: `(transport :bpm 250 :meter [6 8])`.
+(export-score)

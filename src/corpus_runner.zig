@@ -38,28 +38,33 @@
 //! a bit pattern, which verbs a case's fixture makes meaningful, and "at
 //! least one directive".
 //!
-//! The three the manifest still declares and nothing implements (`plan`,
-//! `export-score`, `timing`) belong to the edit engine and the exporter:
-//! meeting one is `UNRUN <directive>` and a FAILED case. An unrun case is
-//! never reported green.
+//!     (plan retime :args (a :sel (s :lanes [flash]) :delta 46126080))
+//!     (export-score :lines 12)
+//!
+//! `timing` is the one directive the manifest declares and nothing
+//! implements — it existed for the studio's timing provider, and pstudio
+//! is not a host — so meeting it is `UNRUN <directive>` and a FAILED
+//! case. An unrun case is never reported green.
 //!
 //! ## The document
 //!
-//! The five verbs below `(write …)` ask about a DOCUMENT, and a case
-//! loads one only when its harness asks — so the cores' own goldens,
-//! which ask about bytes and nothing else, carry no timeline they never
-//! mention. Where the document comes from is the input's business:
+//! The verbs below `(write …)` ask about a DOCUMENT, and a case loads one
+//! only when its harness asks — so the cores' own goldens, which ask
+//! about bytes and nothing else, carry no timeline they never mention.
+//! Where the document comes from is the input's business:
 //!
 //!   - `doc.sjon` IS one, read through `doc/fromSjon.zig` with a resolver
 //!     rooted at the case's own directory (an anchor's `:file` is
 //!     resolved relative to the document, plan 02);
-//!   - `song.mid` / `song.it` is WRAPPED in the smallest document that
-//!     can hold it — an `(anchor …)` with the bytes' own `:size` and
-//!     `:sha256`, the core's own dump of them, and `:conductor` naming
-//!     that anchor — and then given the timeline tier plan 04's rule 1
-//!     derives for a file with no residue. The wrapper is written from
-//!     the bytes on every run and is never committed, so it cannot drift
-//!     from them.
+//!   - `song.mid` / `song.it` goes through `doc/pipeline.zig`'s `dump` —
+//!     the same function `tempura dump` runs — so the timeline tier it
+//!     gets is the one plan 04's five reconciliation rules produced for
+//!     it: the author's own restored text when the file carries an
+//!     essence its hashes still agree with, and the skeleton rule 1
+//!     derives when it carries nothing. The rule, the conductor's
+//!     verdict and one verdict per lane record then ride in the golden as
+//!     `(reconciled …)`, which is what lets a `residue-*` case be a
+//!     corpus case at all.
 //!
 //! The derivation's own canonical text is then printed ONCE, at the top,
 //! as `(echo …)`: the tempo segments with their exact bit patterns, the
@@ -167,6 +172,8 @@ const Schema = @import("Schema.zig");
 const smf = @import("smf/smf.zig");
 const itf = @import("itf/itf.zig");
 const doc = @import("doc/doc.zig");
+const edit_engine = @import("edit/edit.zig");
+const exporter = @import("export/export.zig");
 const time = @import("time/time.zig");
 
 const Grid = time.Grid;
@@ -402,6 +409,10 @@ const BuildKind = enum { mid, it };
 /// lane has no controller to render onto and says `render_cc_missing`).
 const BuildAsk = struct { kind: BuildKind, cc: ?u7 };
 
+/// What an `(export-score …)` asks for: how much of the text to show,
+/// and the key budget to show it under.
+const ScoreAsk = struct { lines: u32, max_keys: u32 };
+
 /// One directive, executed in document order against the case's fixture.
 const Directive = union(enum) {
     /// What the core made of the bytes, and everything it complained of.
@@ -424,6 +435,12 @@ const Directive = union(enum) {
     /// writer, or — for a NATIVE document — plan 08's renderers and plan
     /// 04's carriers through `doc/pipeline.zig`'s `build`.
     build: BuildAsk,
+    /// One edit operation planned and applied: the operation as the
+    /// edit engine's own `--op` JSON, built from the harness's `:args`.
+    plan: []const u8,
+    /// The document as a pacer score: how many lines to show, and the
+    /// key budget to show them under.
+    export_score: ScoreAsk,
     /// A head the manifest declares and this half does not implement.
     /// It carries the head so the report can name it.
     unrun: []const u8,
@@ -434,7 +451,7 @@ const Directive = union(enum) {
     /// own goldens say nothing about one.
     fn needsDocument(self: Directive) bool {
         return switch (self) {
-            .times, .at, .snap, .dump, .build => true,
+            .times, .at, .snap, .dump, .build, .plan, .export_score => true,
             .read, .roundtrip, .walk, .write, .unrun => false,
         };
     }
@@ -530,6 +547,14 @@ fn parseHarness(
             });
         } else if (std.mem.eql(u8, hdr.head, "dump")) {
             try directives.append(a, .dump);
+        } else if (std.mem.eql(u8, hdr.head, "plan")) {
+            const json = (try opJson(a, tree, idx, out, name)) orelse return null;
+            try directives.append(a, .{ .plan = json });
+        } else if (std.mem.eql(u8, hdr.head, "export-score")) {
+            try directives.append(a, .{ .export_score = .{
+                .lines = @intCast(effInt(&view, tree, idx, "lines")),
+                .max_keys = @intCast(effInt(&view, tree, idx, "max-keys")),
+            } });
         } else if (std.mem.eql(u8, hdr.head, "build")) {
             try directives.append(a, .{ .build = .{
                 .kind = std.meta.stringToEnum(BuildKind, effSym(&view, tree, idx, "kind")).?,
@@ -663,6 +688,124 @@ fn effBool(
             else => unreachable,
         },
     };
+}
+
+/// A `(plan <op> :args (a …))` directive as the edit engine's own `--op`
+/// JSON.
+///
+/// The harness spells an operation in SJON and the engine reads it as
+/// JSON (`edit/edit.zig`'s header is the grammar), so one of the two has
+/// to be translated and this is the seam. SJON is the harness's language
+/// — a case is hand-authored and `sjon fmt` has to leave it alone — and
+/// JSON is the engine's, because that is the spelling a CLI passes on
+/// `--op` and the one a host would send. Nothing is INTERPRETED here: the
+/// keys, the numbers and the symbols cross unchanged and the engine
+/// answers for every one of them, with spans.
+///
+/// The `:args` form's HEAD is a marker and is dropped — the schema
+/// declares `:args` opaque, so it needs a head to be a form at all and
+/// nothing reads it. Null = the case is void (already reported).
+fn opJson(
+    a: Allocator,
+    tree: *const Ast.Tree,
+    form: NodeIndex,
+    out: *Io.Writer,
+    name: []const u8,
+) Error!?[]const u8 {
+    const hdr = tree.formHeader(form);
+
+    var op: ?[]const u8 = null;
+    var args: ?NodeIndex = null;
+    for (hdr.children) |child| switch (tree.tagOf(child)) {
+        .symbol => if (op == null) {
+            op = tree.symbolText(child);
+        },
+        .kvpair => {
+            const kv = tree.kvpairHeader(child);
+            if (std.mem.eql(u8, kv.key, "args")) args = kv.value;
+        },
+        else => {},
+    };
+
+    const head = op orelse {
+        out.print("corpus: {s}: times.sjon: (plan …) names no operation\n", .{name}) catch {};
+        return null;
+    };
+
+    var buf: Io.Writer.Allocating = .init(a);
+    try p(&buf.writer, "{{\"op\":\"{s}\"", .{head});
+    if (args) |node| {
+        if (tree.tagOf(node) != .form) {
+            out.print("corpus: {s}: times.sjon: (plan …)'s :args is a form of keys\n", .{name}) catch {};
+            return null;
+        }
+        for (tree.formHeader(node).children) |child| {
+            if (tree.tagOf(child) != .kvpair) continue;
+            const kv = tree.kvpairHeader(child);
+            try p(&buf.writer, ",\"{s}\":", .{kv.key});
+            try jsonOfNode(&buf.writer, tree, kv.value);
+        }
+    }
+    try pw(&buf.writer, "}");
+    return buf.toOwnedSlice() catch return error.OutOfMemory;
+}
+
+/// One SJON value as JSON. A symbol becomes a string, because every
+/// symbol the operation grammar takes (`"kinds":["note"]`, `"what":
+/// "lane"`, a lane's name) is a string there; a united number would be a
+/// position, and the grammar takes TICKS, so a unit is refused rather
+/// than silently dropped.
+fn jsonOfNode(w: *Io.Writer, tree: *const Ast.Tree, node: NodeIndex) Error!void {
+    switch (tree.tagOf(node)) {
+        .number => try p(w, "{d}", .{tree.numberOf(node)}),
+        .number_i64 => try p(w, "{d}", .{tree.numberI64Of(node)}),
+        .number_u64 => try p(w, "{d}", .{tree.numberU64Of(node)}),
+        .boolean_true => try pw(w, "true"),
+        .boolean_false => try pw(w, "false"),
+        .string => try jsonString(w, tree.stringText(node)),
+        .symbol => try jsonString(w, tree.symbolText(node)),
+        .keyword => try jsonString(w, tree.keywordText(node)),
+        .vector => {
+            try pw(w, "[");
+            for (tree.vectorElements(node), 0..) |item, i| {
+                if (i > 0) try pw(w, ",");
+                try jsonOfNode(w, tree, item);
+            }
+            try pw(w, "]");
+        },
+        .form => {
+            // A nested form is a nested OBJECT — which is how a `"sel"`
+            // is spelled: `(plan remove :args (a :sel (s :lanes [flash])))`.
+            try pw(w, "{");
+            var first = true;
+            for (tree.formHeader(node).children) |child| {
+                if (tree.tagOf(child) != .kvpair) continue;
+                const kv = tree.kvpairHeader(child);
+                if (!first) try pw(w, ",");
+                first = false;
+                try p(w, "\"{s}\":", .{kv.key});
+                try jsonOfNode(w, tree, kv.value);
+            }
+            try pw(w, "}");
+        },
+        // Everything else — a united number above all — is not part of
+        // the operation grammar, and `null` is what the engine will
+        // complain about, by name and with a span.
+        else => try pw(w, "null"),
+    }
+}
+
+fn jsonString(w: *Io.Writer, text: []const u8) Error!void {
+    try pw(w, "\"");
+    for (text) |c| switch (c) {
+        '"' => try pw(w, "\\\""),
+        '\\' => try pw(w, "\\\\"),
+        '\n' => try pw(w, "\\n"),
+        '\r' => try pw(w, "\\r"),
+        '\t' => try pw(w, "\\t"),
+        else => if (c < 0x20) try p(w, "\\u{x:0>4}", .{c}) else try pw(w, &[_]u8{c}),
+    };
+    try pw(w, "\"");
 }
 
 // ---------------------------------------------------------------------------
@@ -1290,18 +1433,21 @@ const Env = struct {
 const Loaded = struct {
     /// The anchor resolver's store, rooted at the case's directory.
     store: doc.Fs,
-    result: doc.Result,
-    /// The skeleton a file with no residue derives (plan 04, rule 1),
-    /// for a case whose input IS a file; its lanes and cues are grafted
-    /// onto the document before it is derived or printed.
-    skeleton: ?doc.skeleton.Result,
+    /// A `doc.sjon` case: the document as the author wrote it.
+    result: ?doc.Result,
+    /// A `song.mid` / `song.it` case: the file DUMPED, through the very
+    /// pipeline `tempura dump` runs — plan 04's five rules and all. That
+    /// is what lets a residue case be a corpus case at all: the timeline
+    /// tier a fixture gets is the one reconciliation produced for it, and
+    /// the verdicts that produced it ride here beside the document.
+    dumped: ?doc.pipeline.Dumped,
     derived: time.derive.Derived,
     /// The bytes an IT tier's opaque regions are offsets into, when this
     /// host could produce them. Null for every other document.
     it_source: ?[]const u8,
-    /// The document's own SOURCE — `doc.sjon` itself, or the wrapper the
-    /// runner wrote around a file. `build` packs the essence out of it,
-    /// so it is the text and not a re-print (plan 04).
+    /// The document's own SOURCE — `doc.sjon` itself, or the text the
+    /// dump produced. `build` packs the essence out of it, so it is the
+    /// text and not a re-print (plan 04).
     source: [:0]const u8,
     /// The timeline bundle, for the `build` and `dump` a `(build …)`
     /// over a native document runs.
@@ -1309,22 +1455,50 @@ const Loaded = struct {
 
     fn deinit(self: *Loaded) void {
         self.derived.deinit();
-        if (self.skeleton) |*s| s.deinit();
-        self.result.deinit();
+        if (self.result) |*r| r.deinit();
+        if (self.dumped) |*d| d.deinit();
         self.store.deinit();
         self.* = undefined;
+    }
+
+    /// The document, whichever of the two produced it.
+    fn doc_(self: *Loaded) *doc.Doc {
+        if (self.result) |*r| return &r.doc;
+        return &self.dumped.?.doc;
+    }
+
+    /// What LOADING it had to say — the walk's diagnostics for a
+    /// `doc.sjon`, and the read's, the carrier's, the reconciliation's
+    /// and the re-load's for a file.
+    fn loadDiags(self: *const Loaded) *const Diag.List {
+        if (self.result) |*r| return &r.diags;
+        return &self.dumped.?.diags;
+    }
+
+    /// The map the document layer derived — the one the printer spells
+    /// positions with.
+    fn map(self: *const Loaded) *const time.TimeMap.TimeMap {
+        if (self.result) |*r| return &r.map;
+        return &self.dumped.?.map;
     }
 };
 
 /// Load the case's document and derive it. Null = the case is void
 /// (already reported).
 ///
-/// Three inputs, one document. A `doc.sjon` IS one. A `song.mid` or a
-/// `song.it` is wrapped in the smallest document that can hold it — an
-/// anchor, the core's own dump of the bytes, and `:conductor` naming that
-/// anchor — and then given the timeline tier plan 04's rule 1 derives for
-/// a file with no residue. That wrapper is the runner's, not a fixture's:
-/// it is written from the bytes every time, so it cannot drift from them.
+/// Two inputs, one document. A `doc.sjon` IS one, read through
+/// `doc/fromSjon.zig` with a resolver rooted at the case's directory (an
+/// anchor's `:file` is resolved relative to the document, plan 02). A
+/// `song.mid` or a `song.it` goes through `doc/pipeline.zig`'s `dump` —
+/// the same function `tempura dump` runs, plan 04's five reconciliation
+/// rules and all — so the timeline tier a fixture gets is the one the
+/// file's own residue produced, or the skeleton plan 04's rule 1 derives
+/// when there is none.
+///
+/// That is the whole reason the residue cases can be corpus cases: the
+/// rule that ran, the verdict per lane and the verdict on the conductor
+/// are facts about the fixture, and they land in the golden beside the
+/// tier they produced.
 fn loadDocument(
     gpa: Allocator,
     a: Allocator,
@@ -1332,34 +1506,29 @@ fn loadDocument(
     fixture: Fixture,
     rep: Report,
 ) Error!?Loaded {
+    _ = rep;
     const case_dir = try std.fs.path.join(a, &.{ env.root, env.name });
     var store = doc.fs(gpa, env.io, case_dir);
     errdefer store.deinit();
 
-    const source: [:0]const u8 = switch (fixture.kind) {
-        .doc => fixture.bytes,
-        .smf, .it => (try wrapFixture(gpa, a, fixture)) orelse {
-            rep.say("the fixture could not be dumped into a document\n", .{});
-            store.deinit();
-            return null;
-        },
-    };
+    var result: ?doc.Result = null;
+    errdefer if (result) |*r| r.deinit();
+    var dumped: ?doc.pipeline.Dumped = null;
+    errdefer if (dumped) |*d| d.deinit();
 
-    var result = try doc.fromSource(gpa, env.schema, source, store.resolver());
-    errdefer result.deinit();
-
-    // Rule 1's tier, for a case whose input is a file: one bound lane per
-    // address the file uses, the file's own markers as cues, and the
-    // anchor as the conductor. A `doc.sjon` states its own tier and is
-    // left exactly as written.
-    var skel: ?doc.skeleton.Result = null;
-    errdefer if (skel) |*sk| sk.deinit();
-    if (fixture.kind != .doc) {
-        skel = try doc.skeleton.derive(gpa, &result.doc, .{});
-        result.doc.lanes = skel.?.lanes;
-        result.doc.cues = skel.?.cues;
-        if (skel.?.conductor) |c| result.doc.conductor = c;
+    switch (fixture.kind) {
+        .doc => result = try doc.fromSource(gpa, env.schema, fixture.bytes, store.resolver()),
+        .smf, .it => dumped = try doc.pipeline.dump(
+            gpa,
+            env.schema,
+            fixture.bytes,
+            if (fixture.kind == .smf) .smf else .it,
+            .{ .file = fixture.file },
+        ),
     }
+
+    const document: *doc.Doc = if (result) |*r| &r.doc else &dumped.?.doc;
+    const source: [:0]const u8 = if (result != null) fixture.bytes else dumped.?.text;
 
     const it_source: ?[]const u8 = switch (fixture.kind) {
         .it => fixture.bytes,
@@ -1367,78 +1536,24 @@ fn loadDocument(
             // A `doc.sjon` with an inline IT dump: its `(bin …)` regions
             // are offsets into the anchor's file, so the store is asked
             // for exactly the file the anchor names.
-            for (result.doc.it) |tier| {
-                const anchor = result.doc.anchorById(tier.anchor) orelse continue;
+            for (document.it) |tier| {
+                const anchor = document.anchorById(tier.anchor) orelse continue;
                 if (store.resolver().read(anchor.file)) |bytes| break :blk bytes;
             }
             break :blk null;
         },
     };
 
-    const derived = try time.derive.derive(gpa, &result.doc);
+    const derived = try time.derive.derive(gpa, document);
     return .{
         .store = store,
         .result = result,
-        .skeleton = skel,
+        .dumped = dumped,
         .derived = derived,
         .it_source = it_source,
         .source = source,
         .schema = env.schema,
     };
-}
-
-/// The smallest document that can hold a file: the anchor, the core's own
-/// dump, and `:conductor` naming the anchor. Null when the bytes cannot
-/// be dumped at all.
-///
-/// `:size` and `:sha256` are written FROM the bytes, so the two can never
-/// disagree — and an anchor that carries an inline dump is never re-read
-/// from disk (`doc/checks.zig`), which is exactly what makes the golden a
-/// statement about the committed fixture rather than about a lookup.
-fn wrapFixture(gpa: Allocator, a: Allocator, fixture: Fixture) Error!?[:0]const u8 {
-    var body: Io.Writer.Allocating = .init(a);
-    switch (fixture.kind) {
-        .smf => {
-            var r = try smf.read(gpa, fixture.bytes);
-            defer r.deinit();
-            const text = try doc.bridge_smf.sequenceToForms(gpa, &r.sequence, &r.source_map, .{});
-            defer gpa.free(text);
-            try pw(&body.writer, text);
-        },
-        .it => {
-            var r = try itf.read.read(gpa, fixture.bytes);
-            defer r.deinit();
-            const text = try doc.bridge_it.moduleToForms(gpa, &r.module, .{});
-            defer gpa.free(text);
-            try pw(&body.writer, text);
-        },
-        .doc => return null,
-    }
-
-    var digest: [Sha256.digest_length]u8 = undefined;
-    Sha256.hash(fixture.bytes, &digest, .{});
-
-    var out: Io.Writer.Allocating = .init(a);
-    try p(&out.writer,
-        \\; corpus: the document the runner wrapped this fixture in — the anchor,
-        \\; the core's own dump of the committed bytes, and the conductor that
-        \\; names it. Written from the bytes on every run, never committed.
-        \\(timeline :conductor song)
-        \\
-        \\(anchor :id song :kind {s} :file "{s}" :size {d} :sha256 "
-    , .{
-        switch (fixture.kind) {
-            .smf => "smf",
-            .it => "it",
-            .doc => unreachable,
-        },
-        fixture.file,
-        fixture.bytes.len,
-    });
-    for (digest) |b| try p(&out.writer, "{x:0>2}", .{b});
-    try pw(&out.writer, "\")\n\n");
-    try pw(&out.writer, body.written());
-    return out.toOwnedSliceSentinel(0) catch return error.OutOfMemory;
 }
 
 /// The derivation's own canonical text, once, at the top of the case:
@@ -1461,8 +1576,36 @@ fn renderEcho(a: Allocator, w: *Io.Writer, loaded: *const Loaded, rep: Report) E
     // The document's report and the derivation's, in that order: a
     // document that does not load is still a case, and the golden says
     // why rather than the case simply vanishing.
-    if (!try renderDiags(w, "  ", &loaded.result.diags, rep)) return false;
+    if (!try renderDiags(w, "  ", loaded.loadDiags(), rep)) return false;
     if (!try renderDiags(w, "  ", &loaded.derived.diags, rep)) return false;
+    try pw(w, ")\n");
+    return try renderReconciled(w, loaded);
+}
+
+/// What plan 04's reconciliation made of a FILE fixture: which of the
+/// five rules produced the timeline tier, what the conductor record said
+/// and what each lane record said.
+///
+/// Nothing for a `doc.sjon` case, which has no carrier and no verdicts —
+/// the three `tempo-three-conductors*` cases are documents, so this line
+/// never disturbs the echo they agree on.
+///
+/// The rule NAME and the verdicts are the whole content of a residue
+/// case: `(reconciled :rule restored)` with every hash matching is a file
+/// nobody has touched, and `:action bound` beside `:hash-ok false` is the
+/// DAW's edit winning over a stale essence, which is the sentence plan 04
+/// exists to make true.
+fn renderReconciled(w: *Io.Writer, loaded: *const Loaded) Error!bool {
+    const d = if (loaded.dumped) |*x| x else return true;
+    try p(w, "(reconciled :rule {t}", .{d.rule});
+    if (d.conductor) |c| try p(w, " :conductor-hash-ok {} :file-conducts {}", .{
+        c.hash_ok,
+        c.file_conducts,
+    }) else try pw(w, " :conductor none");
+    for (d.verdicts) |v| {
+        try p(w, "\n  (verdict :lane {s} :hash-ok {} :action {t})", .{ v.lane, v.hash_ok, v.action });
+        for (v.hints) |h| try p(w, "\n    (hint :from {d} :to {d} :ease {s})", .{ h.from, h.to, h.ease });
+    }
     try pw(w, ")\n");
     return true;
 }
@@ -1524,10 +1667,10 @@ fn renderDocDirective(
             // the grouping (which blank line separates what) is the
             // printer's rule and stays its own. The copy is never
             // deinitialised — the arena it names is still the original's.
-            var tier_free = loaded.result.doc;
+            var tier_free = loaded.doc_().*;
             tier_free.midi = &.{};
             tier_free.it = &.{};
-            const text = try doc.print(gpa, &tier_free, &loaded.result.map, .{});
+            const text = try doc.print(gpa, &tier_free, loaded.map(), .{});
             defer gpa.free(text);
             try p(w, "(dump :bytes {d} :sha256 \"", .{text.len});
             try writeDigest(w, text);
@@ -1547,6 +1690,12 @@ fn renderDocDirective(
         },
         .build => |ask| {
             if (!try renderBuild(gpa, w, ask, loaded, rep)) return false;
+        },
+        .plan => |op_json| {
+            if (!try renderPlan(gpa, w, op_json, loaded, rep)) return false;
+        },
+        .export_score => |ask| {
+            if (!try renderScore(gpa, w, ask, loaded, rep)) return false;
         },
         // Everything `needsDocument` answers false for; the assertion
         // above is what makes this arm unreachable rather than a silent
@@ -1618,6 +1767,145 @@ fn renderOptIndex(w: *Io.Writer, index: ?u32) Error!void {
     if (index) |i| try p(w, "{d}", .{i}) else try pw(w, "none");
 }
 
+/// One edit operation, planned and applied — plan 07's contract as a
+/// golden.
+///
+/// Both halves are pinned because both are the contract: the ACTIONS are
+/// what a host sends to SJON and what `edit --dry-run` prints, and the
+/// APPLIED DOCUMENT is what comes back with `layout = .preserve`, which
+/// is the claim a diff can actually check ("trivia outside the touched
+/// sub-trees survives"). A plan whose actions were right and whose
+/// splice was not would pass on the first half alone.
+///
+/// A refusal is an outcome, not a defect: `(planned :refused true)` with
+/// its diagnostic is exactly what plan 07 promises for an operation that
+/// cannot be done, and several cases exist for it.
+fn renderPlan(
+    gpa: Allocator,
+    w: *Io.Writer,
+    op_json: []const u8,
+    loaded: *Loaded,
+    rep: Report,
+) Error!bool {
+    var parsed = try edit_engine.fromJson(gpa, op_json);
+    defer parsed.deinit();
+
+    const op = parsed.op orelse {
+        try pw(w, "(planned :read false");
+        if (!try renderDiags(w, "  ", &parsed.diags, rep)) return false;
+        try pw(w, ")\n");
+        return true;
+    };
+
+    var tree = try sjon.parse(gpa, loaded.source);
+    defer tree.deinit();
+
+    var plan = try edit_engine.planWith(gpa, loaded.doc_(), &tree, loaded.map(), op);
+    defer plan.deinit();
+
+    const sum = plan.summary;
+    try p(
+        w,
+        "(planned :targets {d} :set {d} :inserted {d} :removed {d} :replaced {d} :inexact {d} :refused {}",
+        .{ sum.targets, sum.set, sum.inserted, sum.removed, sum.replaced, sum.inexact, sum.refused },
+    );
+    if (!try renderDiags(w, "  ", &plan.diags, rep)) return false;
+    try pw(w, ")\n");
+
+    const actions = try plan.text(gpa);
+    defer gpa.free(actions);
+    if (!try renderRaw(w, actions, rep)) return false;
+
+    var applied = try edit_engine.apply(gpa, loaded.source, &plan);
+    defer applied.deinit();
+    try p(w, "(applied :bytes {d} :sha256 \"", .{applied.text.len});
+    try writeDigest(w, applied.text);
+    try pw(w, "\"");
+    if (!try renderDiags(w, "  ", &applied.diags, rep)) return false;
+    try pw(w, ")\n");
+    return renderRaw(w, applied.text, rep);
+}
+
+/// The document as a pacer score — plan 08's `exportScore`, hashed and
+/// with its first lines shown.
+///
+/// The hash is the determinism claim (the same document gives the same
+/// score on every host) and the lines are what makes a diff readable:
+/// the header comment counts the roundings and the aggregations, and the
+/// transport is the first form, so the first dozen lines are where a
+/// change in the conversion actually shows.
+///
+/// The EASING HINTS come from the reconciliation when the fixture is a
+/// file: plan 04's rule 2 keeps a stale curve lane's easing "verified
+/// against the steps and dropped where it disagrees", and this is the
+/// one place both halves — the verdict and the score it shapes — are
+/// pinned together.
+fn renderScore(
+    gpa: Allocator,
+    w: *Io.Writer,
+    ask: ScoreAsk,
+    loaded: *Loaded,
+    rep: Report,
+) Error!bool {
+    var hints: std.ArrayList(exporter.score.EaseHint) = .empty;
+    defer hints.deinit(gpa);
+    if (loaded.dumped) |*d| {
+        for (d.verdicts) |v| {
+            for (v.hints) |h| try hints.append(gpa, .{
+                .lane = v.lane,
+                .from = h.from,
+                .to = h.to,
+                .ease = h.ease,
+            });
+        }
+    }
+
+    var res = try exporter.exportScore(gpa, loaded.doc_(), &loaded.derived, hints.items, .{
+        .max_keys_per_track = ask.max_keys,
+    });
+    defer res.deinit();
+
+    try p(w, "(score :bytes {d} :sha256 \"", .{res.text.len});
+    try writeDigest(w, res.text);
+    try p(w, "\" :meter [{d} {d}] :seconds-mode {} :aggregated {d} :hints {d}", .{
+        res.meter[0],
+        res.meter[1],
+        res.seconds_mode,
+        res.aggregated,
+        hints.items.len,
+    });
+    if (!try renderDiags(w, "  ", &res.diags, rep)) return false;
+    try pw(w, ")\n");
+
+    var it = std.mem.splitScalar(u8, res.text, '\n');
+    var n: u32 = 0;
+    while (it.next()) |line| : (n += 1) {
+        if (n >= ask.lines) break;
+        if (line.len == 0 and it.peek() == null) break;
+        if (line.len == 0) {
+            try pw(w, ";|\n");
+            continue;
+        }
+        if (!try renderRawLine(w, line, rep)) return false;
+    }
+    return true;
+}
+
+/// A whole text behind the `;| ` marker, one line at a time — what keeps
+/// a golden ONE SJON document while still showing a person the bytes.
+fn renderRaw(w: *Io.Writer, text: []const u8, rep: Report) Error!bool {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 and lines.peek() == null) break;
+        if (line.len == 0) {
+            try pw(w, ";|\n");
+            continue;
+        }
+        if (!try renderRawLine(w, line, rep)) return false;
+    }
+    return true;
+}
+
 /// The document as a file, and rung 1 over what came out.
 ///
 /// Two paths, one verb. An ANCHORED document is its inline tier through
@@ -1634,7 +1922,7 @@ fn renderBuild(
     loaded: *Loaded,
     rep: Report,
 ) Error!bool {
-    const d = &loaded.result.doc;
+    const d = loaded.doc_();
     switch (ask.kind) {
         .mid => {
             if (d.midi.len == 0) return try renderRendered(gpa, w, ask, loaded, .smf, rep);
@@ -1683,7 +1971,7 @@ fn renderRendered(
         gpa,
         loaded.schema,
         loaded.source,
-        &loaded.result.doc,
+        loaded.doc_(),
         &loaded.derived,
         kind,
         .{ .cc = ask.cc },
@@ -1742,7 +2030,7 @@ fn rung3Of(gpa: Allocator, loaded: *Loaded, kind: doc.AnchorKind, bytes: []const
     tier_free.anchors = &.{};
     tier_free.midi = &.{};
     tier_free.it = &.{};
-    return tier_free.eql(&loaded.result.doc);
+    return tier_free.eql(loaded.doc_());
 }
 
 fn renderBuilt(
@@ -1920,24 +2208,55 @@ test "corpus harness: what a schema cannot see stays the runner's" {
     }
 }
 
-test "corpus harness: a directive no part implements yet is UNRUN, never a pass" {
+test "corpus harness: `timing` is the one directive no part implements" {
     var arena = std.heap.ArenaAllocator.init(t_.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    // The edit engine's and the exporter's verbs validate — they are the
-    // same vocabulary — and come back as `unrun`, which fails the case.
+    // `plan` and `export-score` are this task's, and a harness that asks
+    // for them now gets the edit engine and the exporter. `timing` is
+    // the row plan 10 has and this CLI does not (pstudio is not a host),
+    // so it validates — it is the same vocabulary — and comes back
+    // `unrun`, which FAILS the case rather than passing it silently.
     const d = (try testParse(a,
         \\(read)
-        \\(plan transpose)
+        \\(plan transpose :args (a :semitones 12))
         \\(export-score)
         \\(timing)
     )).directives.?;
     try t_.expectEqual(@as(usize, 4), d.len);
     try t_.expectEqual(Directive.read, d[0]);
-    try t_.expectEqualStrings("plan", d[1].unrun);
-    try t_.expectEqualStrings("export-score", d[2].unrun);
+    try t_.expectEqualStrings("{\"op\":\"transpose\",\"semitones\":12}", d[1].plan);
+    try t_.expectEqual(@as(u32, 12), d[2].export_score.lines);
+    try t_.expectEqual(@as(u32, 512), d[2].export_score.max_keys);
     try t_.expectEqualStrings("timing", d[3].unrun);
+}
+
+test "corpus harness: an operation's :args cross into the engine's JSON unchanged" {
+    // The one translation in this file, and the whole of it: SJON is the
+    // harness's language and JSON is the engine's, so the keys, the
+    // numbers, the symbols, the vectors and the nested forms cross and
+    // nothing is interpreted on the way.
+    var arena = std.heap.ArenaAllocator.init(t_.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const d = (try testParse(a,
+        \\(plan retime :args (a :sel (s :lanes [flash glow] :kinds [note] :range [0 46126080]) :delta -120 :allow-shared true))
+        \\(plan rename :args (a :what lane :from "old name" :to roll))
+        \\(plan merge)
+    )).directives.?;
+    try t_.expectEqualStrings(
+        "{\"op\":\"retime\",\"sel\":{\"lanes\":[\"flash\",\"glow\"],\"kinds\":[\"note\"]," ++
+            "\"range\":[0,46126080]},\"delta\":-120,\"allow-shared\":true}",
+        d[0].plan,
+    );
+    try t_.expectEqualStrings(
+        "{\"op\":\"rename\",\"what\":\"lane\",\"from\":\"old name\",\"to\":\"roll\"}",
+        d[1].plan,
+    );
+    // An operation with no arguments at all is still an operation.
+    try t_.expectEqualStrings("{\"op\":\"merge\"}", d[2].plan);
 }
 
 test "corpus verdict: byte-equal is silence, and a difference names the first line" {
@@ -2337,13 +2656,13 @@ test "corpus: fromSjon's conductor map and derive's agree on the three conductor
         for ([_]?SourceEdit{ null, strip }) |edit| {
             var loaded = try loadCaseDoc(gpa, &schema, case, edit);
             defer loaded.deinit();
-            try t_.expect(!loaded.result.diags.hasErrors());
+            try t_.expect(!loaded.loadDiags().hasErrors());
 
             var from_source: Io.Writer.Allocating = .init(gpa);
             defer from_source.deinit();
             var from_derive: Io.Writer.Allocating = .init(gpa);
             defer from_derive.deinit();
-            try loaded.result.map.echo(&from_source.writer);
+            try loaded.map().echo(&from_source.writer);
             try loaded.derived.map.echo(&from_derive.writer);
 
             t_.expectEqualStrings(from_source.written(), from_derive.written()) catch |err| {
@@ -2364,8 +2683,8 @@ test "corpus: fromSjon's conductor map and derive's agree on the three conductor
             // conductor keeps time, and the claim here is only that the
             // two layers say the same thing about it.
             if (edit != null) {
-                try t_.expect(loaded.result.doc.length == null);
-                try t_.expectEqual(loaded.result.map.length, loaded.derived.map.length);
+                try t_.expect(loaded.doc_().length == null);
+                try t_.expectEqual(loaded.map().length, loaded.derived.map.length);
             }
         }
     }
@@ -2460,6 +2779,20 @@ const LoadedCase = struct {
         self.derived.deinit();
         self.result.deinit();
     }
+
+    // The three questions `Loaded` answers, spelled the same way, so a
+    // test reads the same whichever of the two it holds.
+    fn doc_(self: *LoadedCase) *doc.Doc {
+        return &self.result.doc;
+    }
+
+    fn loadDiags(self: *const LoadedCase) *const Diag.List {
+        return &self.result.diags;
+    }
+
+    fn map(self: *const LoadedCase) *const time.TimeMap.TimeMap {
+        return &self.result.map;
+    }
 };
 
 /// One literal substitution over a case's source, so a test can ask the
@@ -2546,7 +2879,7 @@ test "corpus: the two position queries agree wherever the seconds seam is exact"
     for (cases) |c| {
         var loaded = try loadCaseDoc(gpa, &schema, c.name, null);
         defer loaded.deinit();
-        try t_.expect(!loaded.result.diags.hasErrors());
+        try t_.expect(!loaded.loadDiags().hasErrors());
         // A document worth asking: more than one segment, or a meter that
         // changes. A fixture that quietly became trivial would make every
         // comparison below vacuous.

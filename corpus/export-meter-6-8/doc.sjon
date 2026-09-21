@@ -1,0 +1,18 @@
+; `:bpm` is `qpm · d / 4`, because pacer's beat is a `4 / d` note and
+; tempura's tempo is per quarter: 125 quarter notes a minute in [6 8] is
+; 250 pacer beats a minute (plan 08). The factor is written the right way
+; up here and nowhere else — midi 05 wrote it inverted once.
+;
+; Three eighths of content, so the trigger's positions are eighth-note
+; beats and the bar lines are pacer's own.
+(timeline :title "six-eight" :length 1bar)
+
+(tempo-point :at 0q :qpm 125)
+(meter-point :at 0bar :sig [6 8])
+
+(lane :name hit :kind notes :target hit
+  (note :at 0q :dur 0.5q :key 60 :vel 100)
+  (note :at 0.5q :dur 0.5q :key 62 :vel 100)
+  (note :at 1q :dur 0.5q :key 64 :vel 100))
+
+(target :name hit :arity 4)

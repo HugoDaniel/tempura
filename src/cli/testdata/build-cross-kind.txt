@@ -3,6 +3,6 @@
 exit: 1
 --- stdout (0 bytes)
 
---- stderr (192 bytes)
-corpus/tempo-three-conductors-it/doc.sjon:25:1: error build_cross_kind: this document carries no `smf` anchor (it has: song=it); building it as `mid` is refused (plan 08, "Cross-kind builds")
+--- stderr (245 bytes)
+corpus/tempo-three-conductors-it/doc.sjon:0x000004C6: error build_cross_kind: this document is arranged around a it anchor and a smf file was asked for; v1 builds a document into its own anchor's kind, or a native document into either (plan 08)
 

@@ -1,0 +1,17 @@
+; Plan 04's RULE 2, second branch: the conductor record still matches and
+; the LANE record does not.
+;
+; `tools/gen_fixtures.zig` re-velocities one rendered note the way a DAW
+; would and writes the file back with the residue untouched (the payloads
+; are `sequencer-specific` meta events, which a sequencer respecting
+; RP-001 carries through). So the file's events are no longer tempura's
+; rendering, the native events win for what they can say, and the lane
+; comes back BOUND at its address with `residue_stale` naming what was
+; dropped.
+;
+; `(export-score)` is here for the other half of that rule: a stale
+; curve lane keeps the easing its record hinted at where the file's own
+; steps confirm it, and the score is where those hints are spent. This
+; lane is a notes lane, so the count is zero and the seam is still walked.
+(dump)
+(export-score)

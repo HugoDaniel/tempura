@@ -9,6 +9,10 @@
   (lane :name t2-ch1 :kind notes :onsets 2 :first 0 :last 92252160)
   (lane :name t2-ch1-cc7 :kind curve :onsets 0 :first 0 :last 0)
   (lane :name t2-ch1-bend :kind curve :onsets 0 :first 0 :last 0))
+(reconciled :rule derived :conductor none
+  (verdict :lane t2-ch1 :hash-ok false :action skeleton)
+  (verdict :lane t2-ch1-cc7 :hash-ok false :action skeleton)
+  (verdict :lane t2-ch1-bend :hash-ok false :action skeleton))
 (read
   (smf :format 1 :division 960 :smpte none :tracks 2 :events 16 :running-status 1 :foreign 0))
 (dump :bytes 389 :sha256 "c1be9b5d2cd31ead8f865a1d03a7e9b9073194149f0e4056fd6fb276dcb45156")

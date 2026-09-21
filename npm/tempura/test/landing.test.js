@@ -159,6 +159,16 @@ function registriesOf(text) {
   return [targets];
 }
 
+/**
+ * Every golden score `exportScore` produces, through the real driver.
+ *
+ * The list is `tools/gen_landing.zig`'s: the three conductors of plan
+ * 03, the `--velocity` variant, the 512-segment seconds fallback, and
+ * `examples/native.sjon` — the SHIPPED example, compiled from its own
+ * bytes. That last one is why this loop is worth more than a Zig test:
+ * an example nobody compiles is an example nobody can trust, and the
+ * one it caught was a three-component keyframe on an arity-1 target.
+ */
 test('scores: every golden skeleton loads clean through pacer.wasm', async () => {
   assert.ok(Array.isArray(landing.scores) && landing.scores.length > 0, 'no golden scores — run `zig build landing`');
 

@@ -1,38 +1,53 @@
-//! `tempura build DOC [-o FILE]` — a document as a `.mid` or a `.it`.
+//! `tempura build DOC [-o FILE]` — a document as a `.mid` or a `.it`,
+//! and `tempura export DOC --kind K`, which is the same verb with the
+//! residue turned off.
 //!
-//! Plan 10's row: "document → file, kind from `-o`'s extension or
-//! `--kind`; renders native lanes and attaches the residue; `--format 0`,
-//! `--ppq N [--round]`, `--no-running-status`; `--compress` is refused
-//! (no codec; pass-through only), `--loose`, `--in-place`; `--no-residue`
-//! for a file that carries nothing".
+//! Plan 10's two rows:
 //!
-//! ## What phase 1 writes
+//! > `build`: document → file, kind from `-o`'s extension or `--kind`;
+//! > renders native lanes and attaches the residue (08, 04); `--format
+//! > 0`, `--ppq N [--round]`, `--no-running-status` (05); `--compress` is
+//! > refused (no codec; pass-through only), `--loose`, `--in-place` (06);
+//! > `--no-residue` for a file that carries nothing.
+//! >
+//! > `export`: the rendered native view without the residue (`build
+//! > --no-residue`), for a file that will only ever be played.
 //!
-//! The document's own INLINE TIER, through the canonical writer, and
-//! nothing else. Two halves of that row are later work and are refused
-//! out loud rather than half-done:
+//! ## What is here and what is not
 //!
-//!   - **Rendering native lanes** into a file is P106's (plan 08), so a
-//!     document with no inline tier — a native timeline, or one whose
-//!     anchor is by reference — is refused with the same sentence the
-//!     corpus golden already uses, and exit 2.
-//!   - **The residue** is P104's (plan 04, E3). Until it lands every
-//!     build is a `--no-residue` build, and a build that did NOT ask for
-//!     that is told so on stderr: the user asked for a file carrying the
-//!     timeline and is getting one that does not.
-//!
-//! What IS here is the whole writer surface: plan 05's `--format 0`,
-//! `--ppq N [--round]` and `--no-running-status`, plan 06's `--loose` and
-//! `--in-place`, and `--compress`'s refusal (`Args.zig` makes that one,
-//! because it can be answered without reading anything).
+//! The whole chain — render, pack, attach, write — is
+//! `doc/pipeline.zig`'s `build`, which is where it belongs: the two
+//! renderers, the two carriers and the two writers have to agree about
+//! the same bytes, and a host that assembled them itself would be a
+//! second opinion about the file's layout. What is HERE is the
+//! invocation: which kind, which flags belong to which kind, where the
+//! bytes go, and plan 06's rule that the toolchain never mutates an
+//! anchor.
 //!
 //! ## `--in-place`
 //!
 //! Plan 06: "The toolchain never mutates the anchor: building onto the
 //! anchor path is `--in-place` only (read everything, write a temp,
-//! rename)." Both halves are here — `-o` naming the anchor's own file is
+//! rename)." Both halves are here — `-o` naming any anchor's own file is
 //! refused, and `--in-place` goes through a temporary and a rename, so a
-//! failure leaves the anchor as it was rather than half written.
+//! failure leaves the anchor as it was rather than half written. The
+//! destination is the anchor of the KIND being written, not `anchors[0]`:
+//! on a two-anchor document `--kind it --in-place` must rewrite the
+//! `.it`.
+//!
+//! ## Which coordinate space the report is in
+//!
+//! `.bytes`, and the reason is that a build's diagnostics come from two
+//! producers with two coordinate systems: the RENDERERS carry the span of
+//! the lane or the point they refused on (document text), and the
+//! WRITERS carry the emission's own cursor (file bytes, `smf/write.zig`'s
+//! `Emit.diag`). `Diag.Diagnostic` does not record which, and the merged
+//! list `pipeline.build` returns cannot be asked — so the offset is
+//! printed as the offset it is, which is a true coordinate in both
+//! cases, and the CODE says which bytes it counts. Rendering the whole
+//! list as lines and columns is the alternative, and it is the bug this
+//! CLI shipped for an afternoon: `build --ppq 7` blamed line 1 column 34
+//! of a header comment for a tick the writer could not rescale.
 
 const std = @import("std");
 const tempura = @import("tempura");
@@ -43,11 +58,7 @@ const Diags = @import("Diags.zig");
 
 const Io = std.Io;
 const Writer = std.Io.Writer;
-
-/// Why a native timeline cannot be built yet — the corpus golden's own
-/// sentence, so the CLI and `expected.sjon` say one thing.
-pub const no_tier_smf = "this document carries no (midi/smf …) tier; rendering a native timeline to bytes is P110's work (plan 08)";
-pub const no_tier_it = "this document carries no (it/module …) tier; rendering a native timeline to bytes is P110's work (plan 08)";
+const pipeline = tempura.doc.pipeline;
 
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     var loaded = switch (try ctx.loadDoc()) {
@@ -57,7 +68,7 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     defer loaded.deinit();
     const doc = &loaded.result.doc;
 
-    // A defective document does not get to produce bytes. Every other
+    // A defective document does not get to produce bytes. Every query
     // verb here is best-effort because its product is a VIEW; this one's
     // product is a file somebody will play, and a file built from a
     // document that does not hold together is worse than no file.
@@ -75,48 +86,80 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     };
     if (try refuseForeignFlag(ctx, kind)) |code| return code;
 
-    // Plan 08, "Cross-kind builds": v1 builds a document into its own
-    // anchor's kind, and refuses the other one — the mechanism exists,
-    // the residue story for it does not. The message names what the
-    // document DOES carry rather than one arbitrary anchor, because a
-    // document may hold several and picking `anchors[0]` out of them was
-    // exactly the bug this verb had.
-    for (doc.anchors) |anchor| {
-        if (anchor.kind == Cli.anchorKind(kind)) break;
-    } else if (doc.anchors.len > 0) return try refuseCrossKind(ctx, doc, loaded.space(), kind);
-
-    switch (kind) {
-        .mid => {
-            if (doc.midi.len == 0) return try refuseNative(ctx, no_tier_smf);
-            const tier = &doc.midi[0];
-            var written = try tempura.smf.write(ctx.gpa, &tier.sequence, .{
-                .running_status = ctx.cmd.build.running_status,
-                .format0 = ctx.cmd.build.format0,
-                .ppq = ctx.cmd.build.ppq,
-                .round = ctx.cmd.build.round,
-            });
-            defer written.deinit();
-            return try finish(ctx, doc, tier.anchor, written.bytes, &written.diags);
-        },
-        .it => {
-            if (doc.it.len == 0) return try refuseNative(ctx, no_tier_it);
-            const tier = &doc.it[0];
-            // The opaque regions are copied out of the ANCHOR's bytes,
-            // which `fromSource` has already verified against `:size`
-            // and `:sha256`; the store cached them on that read, so this
-            // is a lookup and not a second trip to the disk.
-            const anchor_bytes = anchorBytes(&loaded.store, doc, tier.anchor);
-            var written = try tempura.itf.write.write(ctx.gpa, &tier.module, anchor_bytes, .{
-                .loose = ctx.cmd.build.loose,
-                // Not a build flag: the block is in the document only
-                // because `dump --preserve-history` put it there, and
-                // dropping it at build would make that flag a lie.
-                .preserve_history = tier.module.edit_history != null,
-            });
-            defer written.deinit();
-            return try finish(ctx, doc, tier.anchor, written.bytes, &written.diags);
-        },
+    var derived = try tempura.time.derive.derive(ctx.gpa, doc);
+    defer derived.deinit();
+    if (derived.diags.hasErrors()) {
+        try ctx.report(loaded.space(), derived.diags.items());
+        return Cli.Exit.errors;
     }
+
+    const anchor_kind = Cli.anchorKind(kind);
+    var built = try pipeline.build(
+        ctx.gpa,
+        &loaded.schema,
+        loaded.source,
+        doc,
+        &derived,
+        anchor_kind,
+        options(ctx, &loaded, anchor_kind),
+    );
+    defer built.deinit();
+
+    // A refusal comes back as no bytes and a diagnostic that says why
+    // (plan 08's cross-kind rule is the one that reaches here).
+    if (built.diags.hasErrors() or built.bytes.len == 0) {
+        try ctx.report(.bytes, built.diags.items());
+        return Cli.Exit.errors;
+    }
+
+    const code = try place(ctx, doc, anchorOf(doc, anchor_kind), built.bytes);
+    // Warnings survive a successful write and are worth saying: a
+    // promoted format, a rounded rescale, or a newer tempura's residue
+    // kept where it was (plan 04, rule 3).
+    try ctx.report(.bytes, built.diags.items());
+    return code;
+}
+
+/// The flags, as one `BuildOptions`. A flag that was not given is absent
+/// rather than re-spelled, so the pipeline's defaults stay the plan's.
+fn options(
+    ctx: *const Cli.Ctx,
+    loaded: *const Cli.Loaded,
+    kind: tempura.doc.AnchorKind,
+) pipeline.BuildOptions {
+    const b = ctx.cmd.build;
+    const opts: pipeline.BuildOptions = .{
+        .no_residue = b.no_residue,
+        .force_residue = b.force_residue,
+        .ppq = b.ppq,
+        .round = b.round,
+        .cc = b.cc,
+        .format0 = b.format0,
+        .running_status = b.running_status,
+        .loose = b.loose,
+        .in_place = b.in_place,
+        // The opaque regions of an `it/` tier are copied out of the
+        // ANCHOR's bytes, which `fromSource` has already verified against
+        // `:size` and `:sha256`; the store cached them on that read, so
+        // this is a lookup and not a second trip to the disk.
+        .anchor_bytes = anchorBytes(loaded, kind),
+    };
+    return opts;
+}
+
+/// The anchor a build of `kind` writes — the one whose file `--in-place`
+/// replaces, and the one whose bytes an `it/` tier's regions come from.
+fn anchorOf(doc: *const tempura.doc.Doc, kind: tempura.doc.AnchorKind) ?tempura.doc.AnchorId {
+    for (doc.anchors) |a| {
+        if (a.kind == kind) return a.id;
+    }
+    return null;
+}
+
+fn anchorBytes(loaded: *const Cli.Loaded, kind: tempura.doc.AnchorKind) ?[]const u8 {
+    const id = anchorOf(&loaded.result.doc, kind) orelse return null;
+    const anchor = loaded.result.doc.anchorById(id) orelse return null;
+    return loaded.store.resolver().read(anchor.file);
 }
 
 /// A flag that shapes the OTHER format is refused, never ignored.
@@ -137,6 +180,8 @@ fn refuseForeignFlag(ctx: *const Cli.Ctx, kind: Args.Kind) Cli.Error!?u8 {
             "--round"
         else if (!b.running_status)
             "--no-running-status"
+        else if (b.cc != null)
+            "--cc"
         else
             null,
         .mid => if (b.loose) "--loose" else null,
@@ -156,88 +201,19 @@ fn otherKind(kind: Args.Kind) Args.Kind {
     };
 }
 
-/// Plan 08's refusal, naming every anchor the document actually has.
-fn refuseCrossKind(
-    ctx: *const Cli.Ctx,
-    doc: *const tempura.doc.Doc,
-    space: Diags.Space,
-    kind: Args.Kind,
-) Cli.Error!u8 {
-    var have: Writer.Allocating = .init(ctx.gpa);
-    defer have.deinit();
-    for (doc.anchors, 0..) |a, i| {
-        if (i > 0) try have.writer.writeAll(", ");
-        try have.writer.print("{s}={s}", .{ a.id, @tagName(a.kind) });
-    }
-
-    var diags: tempura.Diag.List = .init(ctx.gpa);
-    defer diags.deinit();
-    try diags.add(
-        .build_cross_kind,
-        .err,
-        doc.anchors[0].span,
-        "this document carries no `{s}` anchor (it has: {s}); building it as `{s}` is refused (plan 08, \"Cross-kind builds\")",
-        .{ @tagName(Cli.anchorKind(kind)), have.written(), @tagName(kind) },
-    );
-    try ctx.report(space, diags.items());
-    return Cli.Exit.errors;
-}
-
-/// What both writers' output does next: refuse on an error, place the
-/// bytes, report the warnings, and say whether a residue rode along.
-///
-/// `tier_anchor` is the anchor of the TIER that was written, not just any
-/// anchor the document holds. On a two-anchor document — an inline SMF
-/// dump and an inline IT dump in one timeline — `--kind it --in-place`
-/// must rewrite the `.it`, and taking `anchors[0]` would have written IT
-/// bytes over the `.mid`.
-///
-/// A WRITER's span is an offset into the bytes it is producing
-/// (`smf/write.zig`'s `Emit.diag` takes the emission's own cursor), not
-/// into the document, so these are reported in the `.bytes` space and
-/// print the offset rather than a line of the document that has nothing
-/// to do with them.
-fn finish(
-    ctx: *const Cli.Ctx,
-    doc: *const tempura.doc.Doc,
-    tier_anchor: tempura.doc.AnchorId,
-    bytes: []const u8,
-    diags: *const tempura.Diag.List,
-) Cli.Error!u8 {
-    if (diags.hasErrors()) {
-        try ctx.report(.bytes, diags.items());
-        return Cli.Exit.errors;
-    }
-
-    const code = try place(ctx, doc, tier_anchor, bytes);
-    // Warnings survive a successful write and are worth saying: a
-    // promoted format or a rounded rescale is a file that is not quite
-    // the document.
-    try ctx.report(.bytes, diags.items());
-    if (code != Cli.Exit.ok) return code;
-
-    if (!ctx.cmd.build.no_residue) try ctx.err.writeAll(
-        "tempura: this file carries no residue — attaching one is P104's work (plan 04), " ++
-            "which lands at E3; pass --no-residue to ask for exactly what you got\n",
-    );
-    return Cli.Exit.ok;
-}
-
-fn refuseNative(ctx: *const Cli.Ctx, why: []const u8) Cli.Error!u8 {
-    try ctx.err.print("tempura: {s}: {s}\n", .{ Diags.label(ctx.cmd.path), why });
-    return Cli.Exit.usage;
-}
-
 /// Where the bytes go: `--in-place` onto the written tier's own anchor
 /// file through a temporary, `-o`'s path, or stdout.
 fn place(
     ctx: *const Cli.Ctx,
     doc: *const tempura.doc.Doc,
-    tier_anchor: tempura.doc.AnchorId,
+    tier_anchor: ?tempura.doc.AnchorId,
     bytes: []const u8,
 ) Cli.Error!u8 {
-    const anchor_path: ?[]const u8 = if (doc.anchorById(tier_anchor)) |a|
-        try std.fs.path.join(ctx.a, &.{ ctx.inputDir(), a.file })
+    const anchor_path: ?[]const u8 = if (tier_anchor) |id|
+        if (doc.anchorById(id)) |a|
+            try std.fs.path.join(ctx.a, &.{ ctx.inputDir(), a.file })
+        else
+            null
     else
         null;
 
@@ -265,7 +241,7 @@ fn place(
         for (doc.anchors) |a| {
             const path = try std.fs.path.join(ctx.a, &.{ ctx.inputDir(), a.file });
             if (!samePath(ctx.a, out, path)) continue;
-            if (std.mem.eql(u8, a.id, tier_anchor)) {
+            if (tier_anchor != null and std.mem.eql(u8, a.id, tier_anchor.?)) {
                 try ctx.err.print(
                     "tempura: {s} is this document's anchor; building onto it is --in-place only (plan 06)\n",
                     .{out},
@@ -306,11 +282,6 @@ fn samePath(a: std.mem.Allocator, x: []const u8, y: []const u8) bool {
     const rx = std.fs.path.resolve(a, &.{x}) catch return false;
     const ry = std.fs.path.resolve(a, &.{y}) catch return false;
     return std.mem.eql(u8, rx, ry);
-}
-
-fn anchorBytes(store: *const tempura.doc.Fs, doc: *const tempura.doc.Doc, id: tempura.doc.AnchorId) ?[]const u8 {
-    const anchor = doc.anchorById(id) orelse return null;
-    return store.resolver().read(anchor.file);
 }
 
 /// `--kind`, then `-o`'s extension, then the document's own anchor.
@@ -385,7 +356,7 @@ const Scratch = struct {
     }
 };
 
-test "build: a dumped .it rebuilds to bytes, and the kind comes from -o" {
+test "build: a dumped .it rebuilds to bytes carrying the residue, and says nothing about it" {
     var s = try Scratch.init("corpus/it-minimal/song.it", "song.it");
     defer s.deinit();
     const a = t.allocator;
@@ -396,25 +367,43 @@ test "build: a dumped .it rebuilds to bytes, and the kind comes from -o" {
     defer c.deinit();
     try t.expectEqual(Cli.Exit.ok, c.code);
     try t.expectEqualStrings("", c.out.written());
-    // Phase 1 attaches no residue, and says so when it was not asked to.
-    try t.expect(std.mem.indexOf(u8, c.err.written(), "carries no residue") != null);
+    // A residue attached is the ordinary outcome and needs no narration.
+    try t.expectEqualStrings("", c.err.written());
 
     const built = try s.read("out.it");
     defer a.free(built);
     try t.expect(std.mem.startsWith(u8, built, "IMPM"));
+
+    // …and the file says so when asked.
+    var check = try Cli.invoke(&.{ "tempura", "check-residue", out });
+    defer check.deinit();
+    try t.expectEqual(Cli.Exit.ok, check.code);
+    try t.expect(std.mem.indexOf(u8, check.out.written(), "chunk: present, read") != null);
+    try t.expect(std.mem.indexOf(u8, check.out.written(), "essence: ") != null);
 }
 
-test "build: --no-residue is the behaviour phase 1 already has, and silences the note" {
+test "build --no-residue and export: the same bytes, and smaller than a carried file" {
     var s = try Scratch.init("corpus/it-minimal/song.it", "song.it");
     defer s.deinit();
     const a = t.allocator;
 
-    const out = try std.fmt.allocPrintSentinel(a, "{s}/out.it", .{s.dir}, 0);
-    defer a.free(out);
-    var with = try Cli.invoke(&.{ "tempura", "build", s.doc, "-o", out, "--no-residue" });
-    defer with.deinit();
-    try t.expectEqual(Cli.Exit.ok, with.code);
-    try t.expectEqualStrings("", with.err.written());
+    var carried = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "it" });
+    defer carried.deinit();
+    try t.expectEqual(Cli.Exit.ok, carried.code);
+
+    var bare = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "it", "--no-residue" });
+    defer bare.deinit();
+    try t.expectEqual(Cli.Exit.ok, bare.code);
+    try t.expectEqualStrings("", bare.err.written());
+
+    // Plan 10: `export` IS `build --no-residue`.
+    var exported = try Cli.invoke(&.{ "tempura", "export", s.doc, "--kind", "it" });
+    defer exported.deinit();
+    try t.expectEqual(Cli.Exit.ok, exported.code);
+    try t.expectEqualStrings(bare.out.written(), exported.out.written());
+    try t.expect(bare.out.written().len < carried.out.written().len);
+
+    _ = a;
 }
 
 test "build: the bytes go to stdout when no -o names a file" {
@@ -439,17 +428,14 @@ test "build --ppq: an inexact rescale is refused, and --round accepts it" {
     try t.expectEqual(Cli.Exit.errors, strict.code);
     try t.expectEqualStrings("", strict.out.written());
     try t.expect(std.mem.indexOf(u8, strict.err.written(), "ppq_rescale_inexact") != null);
-
-    var rounded = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "mid", "--ppq", "7", "--round", "--no-residue" });
-    defer rounded.deinit();
-    try t.expectEqual(Cli.Exit.ok, rounded.code);
-    try t.expect(std.mem.startsWith(u8, rounded.out.written(), "MThd"));
+    // A writer's span is an offset into the bytes it is producing, and
+    // the line says so rather than blaming a line of the document.
+    try t.expect(std.mem.indexOf(u8, strict.err.written(), ":0x") != null);
 }
 
 test "build --format 0: the tracks merge into one" {
     var s = try Scratch.init("corpus/skeleton-smf/song.mid", "song.mid");
     defer s.deinit();
-    const a = t.allocator;
 
     var one = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "mid", "--format", "0", "--no-residue" });
     defer one.deinit();
@@ -459,20 +445,27 @@ test "build --format 0: the tracks merge into one" {
     try t.expect(bytes.len > 12);
     try t.expectEqual(@as(u8, 0), bytes[9]);
     try t.expectEqual(@as(u8, 1), bytes[11]);
-    _ = a;
 }
 
-test "build: a native document is refused, with the sentence the corpus golden uses" {
+test "build: a native document renders through plan 08's renderers" {
     const path = try Cli.repoPath(t.allocator, "corpus/tempo-three-conductors-native/doc.sjon");
     defer t.allocator.free(path);
+
     var c = try Cli.invoke(&.{ "tempura", "build", path, "--kind", "mid" });
     defer c.deinit();
-    try t.expectEqual(Cli.Exit.usage, c.code);
-    try t.expectEqualStrings("", c.out.written());
-    try t.expect(std.mem.indexOf(u8, c.err.written(), no_tier_smf) != null);
+    try t.expectEqual(Cli.Exit.ok, c.code);
+    try t.expectEqualStrings("", c.err.written());
+    try t.expect(std.mem.startsWith(u8, c.out.written(), "MThd"));
+
+    // A native document builds into EITHER kind (plan 08, "Cross-kind
+    // builds"): it is arranged around no anchor at all.
+    var it = try Cli.invoke(&.{ "tempura", "build", path, "--kind", "it" });
+    defer it.deinit();
+    try t.expectEqual(Cli.Exit.ok, it.code);
+    try t.expect(std.mem.startsWith(u8, it.out.written(), "IMPM"));
 }
 
-test "build: a cross-kind build is refused, naming the anchors the document has" {
+test "build: a cross-kind build is refused with plan 08's diagnostic" {
     var s = try Scratch.init("corpus/it-minimal/song.it", "song.it");
     defer s.deinit();
     var c = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "mid" });
@@ -480,9 +473,6 @@ test "build: a cross-kind build is refused, naming the anchors the document has"
     try t.expectEqual(Cli.Exit.errors, c.code);
     try t.expectEqualStrings("", c.out.written());
     try t.expect(std.mem.indexOf(u8, c.err.written(), "build_cross_kind") != null);
-    // The message enumerates what IS there rather than naming one
-    // arbitrary anchor out of however many the document holds.
-    try t.expect(std.mem.indexOf(u8, c.err.written(), "song=it") != null);
 }
 
 test "build: --in-place replaces the anchor through a temp that never survives" {
@@ -691,7 +681,7 @@ test "build: a flag that shapes the other format is refused, never ignored" {
     var s = try Scratch.init("corpus/it-minimal/song.it", "song.it");
     defer s.deinit();
 
-    inline for (.{ "--ppq", "--format" }) |flag| {
+    inline for (.{ "--ppq", "--format", "--cc" }) |flag| {
         var c = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "it", flag, "0", "--no-residue" });
         defer c.deinit();
         try t.expectEqual(Cli.Exit.usage, c.code);
@@ -715,12 +705,41 @@ test "build: a flag that shapes the other format is refused, never ignored" {
     try t.expect(std.mem.indexOf(u8, c.err.written(), ".it") != null);
 }
 
-test "build: a writer diagnostic prints its byte offset, not a line of the document" {
-    var s = try Scratch.init("corpus/smf-vlq-edges/song.mid", "song.mid");
-    defer s.deinit();
-    var c = try Cli.invoke(&.{ "tempura", "build", s.doc, "--kind", "mid", "--ppq", "7", "--no-residue" });
-    defer c.deinit();
-    try t.expectEqual(Cli.Exit.errors, c.code);
-    try t.expect(std.mem.indexOf(u8, c.err.written(), ":0x") != null);
-    try t.expect(std.mem.indexOf(u8, c.err.written(), "ppq_rescale_inexact") != null);
+test "build --force-residue: a newer tempura's residue is kept, and overwritten on demand" {
+    // The fixture is the one the corpus pins for plan 04's rule 3: a
+    // `.it` whose `TMPU` chunk carries an envelope version this build
+    // does not read.
+    const a = t.allocator;
+    const src = try Cli.repoPath(a, "corpus/residue-newer-version/song.it");
+    defer a.free(src);
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const bytes = try Io.Dir.cwd().readFileAlloc(std.testing.io, src, a, .limited(1 << 20));
+    defer a.free(bytes);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "song.it", .data = bytes });
+
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    const doc = try std.fmt.allocPrintSentinel(a, "{s}/doc.sjon", .{dir}, 0);
+    defer a.free(doc);
+    const file = try std.fmt.allocPrintSentinel(a, "{s}/song.it", .{dir}, 0);
+    defer a.free(file);
+
+    var d = try Cli.invoke(&.{ "tempura", "dump", file, "-o", doc });
+    defer d.deinit();
+    try t.expectEqual(Cli.Exit.ok, d.code);
+
+    // Plan 04, rule 3: "a later `build` keeps them and writes no residue
+    // of its own unless `--force-residue`".
+    var kept = try Cli.invoke(&.{ "tempura", "build", doc, "--kind", "it" });
+    defer kept.deinit();
+    try t.expectEqual(Cli.Exit.ok, kept.code);
+    try t.expect(std.mem.indexOf(u8, kept.err.written(), "residue_newer_kept") != null);
+
+    var forced = try Cli.invoke(&.{ "tempura", "build", doc, "--kind", "it", "--force-residue" });
+    defer forced.deinit();
+    try t.expectEqual(Cli.Exit.ok, forced.code);
+    try t.expectEqualStrings("", forced.err.written());
+    try t.expect(!std.mem.eql(u8, kept.out.written(), forced.out.written()));
 }

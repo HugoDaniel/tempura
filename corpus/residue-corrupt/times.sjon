@@ -1,0 +1,15 @@
+; Plan 04's RULE 4: the essence says it is part 1 of 2 and is the only
+; part there is.
+;
+; "A split body with a missing part" is the plan's own example of a
+; corrupt payload, and it is what a sequencer that dropped one meta event
+; leaves behind: every surviving byte is well formed and the essence
+; still cannot be put back together. The skeleton is derived, the header
+; says "the residue would not decode", and `residue_corrupt` names it.
+;
+; The LANE and CONDUCTOR records survive the same file — they are one
+; event each and were never split — so the verdict table still shows them
+; matching. That is the honest reading: the file's records are intact and
+; the document they described is gone.
+(read)
+(dump)

@@ -1,0 +1,30 @@
+; A document whose one anchor is an INLINE `.mid` — the shape every bound
+; SMF operation is exercised against (plan 07, "Bound content,
+; precisely"). The anchor carries its dump, so no file is read and the
+; case is one text.
+;
+; One track at 480 PPQ with three notes on channel 1 and a controller the
+; `filter` lane reads: a note whose neighbours leave it room to move in
+; place, one that has to cross the controller to reach its destination,
+; and two `(control-change …)` events so a curve lane has steps of its
+; own. `spare` is native and empty, which is what a `bind` needs.
+(timeline :title "bound" :conductor song :length 2bar)
+
+(anchor :id song :kind smf :file "x.mid")
+(midi/smf :format 0 :division 480)
+(midi/mtrk
+  (set-tempo      :at 0    :us 500000)
+  (control-change :at 0    :ch 1 :num 74 :val 10)
+  ; the downbeat
+  (note-on        :at 0    :ch 1 :key 36 :vel 100)
+  (note-off       :at 240  :ch 1 :key 36 :vel 64)
+  (note-on        :at 480  :ch 1 :key 38 :vel 90)
+  (note-off       :at 720  :ch 1 :key 38 :vel 64)
+  (control-change :at 960  :ch 1 :num 74 :val 100)
+  (note-on        :at 960  :ch 1 :key 41 :vel 80)
+  (note-off       :at 1200 :ch 1 :key 41 :vel 64)
+  (end-of-track   :at 1920))
+
+(lane :name kick :kind notes :from song :track 1 :ch 1)
+(lane :name filter :kind curve :from song :track 1 :ch 1 :cc 74)
+(lane :name spare :kind notes :target spare)

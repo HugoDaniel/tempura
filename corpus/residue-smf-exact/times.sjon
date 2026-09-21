@@ -1,0 +1,14 @@
+; Plan 04's RULE 2 in a `.mid`, with every hash agreeing.
+;
+; `song.mid` was written by `tempura build` from a one-lane native
+; document (`tools/gen_fixtures.zig`, `residue_doc`) and nothing has
+; touched it since, so the dump restores the AUTHOR's text — comment,
+; title, `:qpm 120` spelling and all — rather than deriving a skeleton
+; from what the file uses.
+;
+; `(reconciled …)` in the golden is the verdict table: the rule that ran,
+; the conductor record's hash and one line per lane record. `restored`
+; with `:hash-ok true` everywhere is what "the file and the document were
+; written together" looks like.
+(read)
+(dump)

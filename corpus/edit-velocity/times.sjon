@@ -1,0 +1,3 @@
+; `velocity`: the two notes on key 36 and not the one on key 60 — a
+; selection's `keys` narrows notes and nothing else.
+(plan velocity :args (a :sel (s :lanes [flash] :keys [36]) :vel 64))

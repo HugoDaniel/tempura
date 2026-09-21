@@ -122,9 +122,11 @@
       :description "The operation's arguments, in the edit engine's own vocabulary. Opaque to this schema: the engine checks them, with spans."))
 
   (form :name export-score
-    :description "Export the case's document as a pacer score and render the text's hash and its first lines. Takes no rows — the whole document is the input."
+    :description "Export the case's document as a pacer score and render the text's hash and its first lines. Takes no rows — the whole document is the input. The easing hints a stale curve lane kept (plan 04, rule 2) come from the case's own reconciliation when its fixture is a file."
     (key :name lines :type tick-value :optional true :default 12
-      :description "How many leading lines of the exported score to render beside the hash."))
+      :description "How many leading lines of the exported score to render beside the hash.")
+    (key :name max-keys :type tick-value :optional true :default 512
+      :description "The per-track share of pacer's key budget (plan 08, \"The key budget\"; the CLI's --max-keys-per-track). The default is the exporter's own, and a case lowers it so the budget warning can be pinned over a lane a reviewer can read rather than over six hundred keyframes nobody will."))
 
   (form :name timing
     :description "Echo the derived TimeMap: the tempo segments, the meter and bar tables, the sections and cues in ticks, the per-lane onsets, the length and the loop point. For an IT conductor it also echoes the timing walk's (order, row) -> tick map. Takes no rows."

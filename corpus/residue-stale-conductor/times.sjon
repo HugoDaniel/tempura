@@ -1,0 +1,9 @@
+; Plan 04's RULE 2 on the TIMING CONTEXT: somebody dragged the tempo in
+; the DAW, so the conductor record's hash no longer matches the file.
+;
+; The file wins: the document is restored WITH `:conductor` set to the
+; anchor and without its own tempo points, meters and cues, and
+; `residue_stale` lists what that cost — the authored `:qpm` spelling
+; among them. The lane record still matches, so the lane itself comes
+; back native.
+(dump)

@@ -5,43 +5,43 @@
 //! as comments; `--patterns=bin`, `--preserve-foreign`,
 //! `--preserve-history`; `--cues` emits a cue per played order".
 //!
-//! ## What phase 1 does, and what it does not
+//! ## The whole dump is `doc/pipeline.zig`
 //!
-//! **Reconciliation is P104's** (plan 04, "Reconciliation", and Task 15).
-//! Until it lands, `dump` takes rule 1's branch every time: the timeline
-//! tier is DERIVED from what the file uses — `doc.skeleton.derive` — and
-//! the document opens with `skeleton.header_comment`, in as many words,
-//! so nobody mistakes an inference for a restoration. A file that DOES
-//! carry an essence gets the same treatment for now, and `inspect` is
-//! where you can see that it had one.
+//! Read, detach or choose the carrier, bridge the file into its tier,
+//! reconcile plan 04's five rules, splice, and load the result back as a
+//! document — one function, `pipeline.dump`, because the assembly needs
+//! every layer at once and a host that did it itself would be a second
+//! opinion about what a file means. This verb is the invocation: which
+//! bytes, which switches, where the text goes, and who hears about what.
 //!
-//! ## The shape of the assembly
+//! The rule that ran is visible in the FIRST LINE of what comes back:
+//! a restored document opens with the author's own text, and an inferred
+//! one opens with `; skeleton: derived, …` naming why (no residue, a
+//! newer version, a payload that would not decode) or `; partial: …` for
+//! the IT message tail alone.
 //!
-//! Three pieces, and each is produced by exactly one thing:
+//! ## `--spans` is the CLI's, and stays the CLI's
 //!
-//!   1. the FILE TIER, `bridge_smf.sequenceToForms` or
-//!      `bridge_it.moduleToForms`, which is also the only place it 03's
-//!      three switches have any meaning;
-//!   2. the TIMELINE TIER, `skeleton.derive` over the document those
-//!      forms lower back to;
-//!   3. the canonical TEXT, `doc.toSjon.print`.
+//! The annotated offsets are a READING AID — a comment block naming
+//! where in the file each chunk, event or region came from — and no
+//! document was ever meant to carry them: they are not part of the
+//! dumped value, `build` ignores them, and a second reader would have to
+//! strip them. So they are produced here, from a second read of the same
+//! bytes, and spliced in front of the tier the pipeline already placed.
+//! The second read costs one pass over a file the user asked to have
+//! annotated; the alternative is a source map threaded through an
+//! assembly that has no other use for one.
 //!
-//! The round trip in the middle is deliberate, not incidental: the forms
-//! are read back through `doc.fromSource` before anything is printed, so
-//! a dump that does not parse as a document fails HERE, on the way out,
-//! rather than in the user's editor. It is also what resolves the `(bin
-//! :at :len)` regions an `it/` dump keeps — the reader's bytes are handed
-//! back through an in-memory resolver, so nothing touches the disk twice.
+//! ## Two coordinate spaces, one report
 //!
-//! **The printer's tier is bypassed.** `toSjon.print` re-prints an inline
-//! dump with the bridge's DEFAULT switches, which would undo
-//! `--patterns=bin`, `--preserve-foreign`, `--preserve-history` and
-//! `--spans`. So the tier is taken out of the document for the print and
-//! the text produced in step 1 is spliced back in at the place the
-//! printer left for it — straight after the `(anchor …)` it pairs with,
-//! because that pairing is positional (plan 02). An ask for Task 15's
-//! `pipeline.zig`: `toSjon.Options` should carry the bridge's switches,
-//! and then this splice is one line of options instead.
+//! `pipeline.dump` returns "everything the read, the carrier, the
+//! reconciliation and the re-load had to say, in that order". The first
+//! three count the FILE's bytes; the last counts the assembled text, and
+//! can only ever mean a tempura defect (a dump that does not read back as
+//! a document). `Diag.Diagnostic` records no space, so the whole report
+//! is rendered in the file's — an offset is a true coordinate for the
+//! three that matter, and the CODE says which bytes any given line
+//! counts.
 
 const std = @import("std");
 const tempura = @import("tempura");
@@ -51,10 +51,11 @@ const Cli = @import("Cli.zig");
 const Diags = @import("Diags.zig");
 
 const Writer = std.Io.Writer;
+const pipeline = tempura.doc.pipeline;
 
 /// The anchor id every dumped document uses. One file per dump, so one
 /// name, and it is the one every corpus fixture already spells.
-pub const anchor_id = "song";
+pub const anchor_id = pipeline.anchor_id;
 
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     const bytes = Cli.load(ctx.a, ctx.io, ctx.cmd.path) catch |e|
@@ -62,178 +63,92 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
 
     const kind = try ctx.sniffKind(bytes) orelse return Cli.Exit.usage;
 
-    var file_diags: tempura.Diag.List = .init(ctx.gpa);
-    defer file_diags.deinit();
-
-    const tier = switch (kind) {
-        .mid => try smfTier(ctx, bytes, &file_diags),
-        .it => try itTier(ctx, bytes, &file_diags),
-    };
-    defer ctx.gpa.free(tier.text);
-    defer ctx.gpa.free(tier.spans);
-
-    const file_name = anchorFile(ctx, kind);
-    const assembled = try std.fmt.allocPrintSentinel(
-        ctx.a,
-        "(timeline :conductor {s})\n\n(anchor :id {0s} :kind {1s} :file \"{2s}\" :size {3d} :sha256 \"{4s}\")\n{5s}",
-        .{ anchor_id, @tagName(Cli.anchorKind(kind)), file_name, bytes.len, &hexDigest(bytes), tier.text },
-        0,
-    );
-
     var schema = try tempura.Schema.load(ctx.gpa);
     defer schema.deinit();
 
-    // The reader's OWN bytes, handed back by name: the anchor's `:size`
-    // and `:sha256` were computed from them a moment ago, so they verify
-    // by construction and every `(bin :at :len)` resolves without a
-    // second read of anything.
-    const table: tempura.doc.Memory = .{ .entries = &.{.{ .path = file_name, .bytes = bytes }} };
-
-    var res = try tempura.doc.fromSource(ctx.gpa, &schema, assembled, tempura.doc.memory(&table));
-    defer res.deinit();
-
-    var sk = try tempura.doc.skeleton.derive(ctx.gpa, &res.doc, .{ .cues = ctx.cmd.dump.cues });
-    defer sk.deinit();
-    // Borrowed from `sk`'s arena, which outlives the print below. The
-    // document's own arena never sees them, and `Doc.deinit` frees an
-    // arena rather than these slices, so the borrow is sound.
-    res.doc.lanes = sk.lanes;
-    res.doc.cues = sk.cues;
-
-    var derived = try tempura.time.derive.derive(ctx.gpa, &res.doc);
-    defer derived.deinit();
-
-    const head = blk: {
-        // See the header: the printer would re-render the tier with the
-        // bridge's defaults, so it is taken out for the print and the
-        // text spliced back into the gap the printer leaves.
-        const saved_midi = res.doc.midi;
-        const saved_it = res.doc.it;
-        res.doc.midi = &.{};
-        res.doc.it = &.{};
-        defer {
-            res.doc.midi = saved_midi;
-            res.doc.it = saved_it;
-        }
-        break :blk try tempura.doc.print(ctx.gpa, &res.doc, &derived.map, .{});
-    };
-    defer ctx.gpa.free(head);
-
-    var art: Writer.Allocating = .init(ctx.gpa);
-    defer art.deinit();
-    try art.writer.writeAll(tempura.doc.skeleton.header_comment);
-    try art.writer.writeAll("\n");
-    try spliceAfterAnchor(&art.writer, head, tier.spans, tier.text);
-
-    if (!try ctx.emit(art.written())) return Cli.Exit.usage;
-
-    // Two reports in two coordinate spaces, and each line says which:
-    // the FILE's diagnostics count bytes of the file and print the
-    // offset, and the assembled document's count characters of the text
-    // the bridge just produced and print a line and a column. The second
-    // set can only ever mean a tempura defect, so it is labelled
-    // `<dump>` and never swallowed.
-    try Diags.render(ctx.err, ctx.cmd.path, .bytes, file_diags.items(), ctx.style);
-    var doc_index = try Diags.LineIndex.build(ctx.a, assembled);
-    defer doc_index.deinit(ctx.a);
-    try Diags.render(ctx.err, "<dump>", .{ .text = &doc_index }, res.diags.items(), ctx.style);
-
-    return @max(Diags.exitCode(file_diags.items()), Diags.exitCode(res.diags.items()));
-}
-
-/// The tier's text, and the `--spans` comment block that goes before it
-/// (empty when `--spans` was not asked for). Both owned by the caller.
-const Tier = struct { text: []u8, spans: []u8 };
-
-fn smfTier(ctx: *const Cli.Ctx, bytes: []const u8, diags: *tempura.Diag.List) Cli.Error!Tier {
-    var res = try tempura.smf.read(ctx.gpa, bytes);
-    defer res.deinit();
-    for (res.diags.items()) |d| try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-
-    const text = try tempura.doc.bridge_smf.sequenceToForms(
-        ctx.gpa,
-        &res.sequence,
-        &res.source_map,
-        .{ .qualify = true },
-    );
-    errdefer ctx.gpa.free(text);
-
-    var spans: Writer.Allocating = .init(ctx.gpa);
-    errdefer spans.deinit();
-    if (ctx.cmd.dump.spans) {
-        const w = &spans.writer;
-        try w.print("; spans: the reader's byte offsets into \"{s}\"\n", .{
-            anchorFile(ctx, .mid),
-        });
-        for (res.source_map.chunks, 0..) |c, i| {
-            try w.print(";   chunk {d}  {s}  at 0x{X:0>8}  body {d}\n", .{
-                i, Cli.printableTag(&c.tag), c.offset, c.len,
-            });
-        }
-        for (res.source_map.tracks, res.sequence.tracks, 0..) |tm, tr, ti| {
-            for (tm.events, tr.events, 0..) |site, ev, ei| {
-                try w.print(";   track {d} event {d}  at 0x{X:0>8}  tick {d}  {s}{s}\n", .{
-                    ti + 1,                                              ei, site.offset, ev.at, @tagName(ev.kind),
-                    if (site.running_status) "  running-status" else "",
-                });
-            }
-        }
-    }
-    return .{ .text = text, .spans = try spans.toOwnedSlice() };
-}
-
-fn itTier(ctx: *const Cli.Ctx, bytes: []const u8, diags: *tempura.Diag.List) Cli.Error!Tier {
-    var res = try tempura.itf.read.read(ctx.gpa, bytes);
-    defer res.deinit();
-    for (res.diags.items()) |d| try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-
-    const text = try tempura.doc.bridge_it.moduleToForms(ctx.gpa, &res.module, .{
-        .qualify = true,
+    var dumped = try pipeline.dump(ctx.gpa, &schema, bytes, Cli.anchorKind(kind), .{
+        .file = anchorFile(ctx, kind),
+        .cues = ctx.cmd.dump.cues,
         .patterns_bin = ctx.cmd.dump.patterns_bin,
         .preserve_foreign = ctx.cmd.dump.preserve_foreign,
         .preserve_history = ctx.cmd.dump.preserve_history,
-        .source_map = &res.source_map,
-        .diags = diags,
     });
-    errdefer ctx.gpa.free(text);
+    defer dumped.deinit();
 
-    var spans: Writer.Allocating = .init(ctx.gpa);
-    errdefer spans.deinit();
+    var art: Writer.Allocating = .init(ctx.gpa);
+    defer art.deinit();
     if (ctx.cmd.dump.spans) {
-        const w = &spans.writer;
-        try w.print("; spans: the reader's byte offsets into \"{s}\"\n", .{anchorFile(ctx, .it)});
-        for (res.source_map.entries) |e| {
-            try w.print(";   {s: <14} #{d}  at 0x{X:0>8}  len {d}\n", .{
-                @tagName(e.kind), e.index, e.region.off, e.region.len,
-            });
-        }
+        const block = try spansBlock(ctx, kind, bytes);
+        defer ctx.gpa.free(block);
+        try spliceAfterAnchor(&art.writer, dumped.text, block);
+    } else {
+        try art.writer.writeAll(dumped.text);
     }
-    return .{ .text = text, .spans = try spans.toOwnedSlice() };
+
+    if (!try ctx.emit(art.written())) return Cli.Exit.usage;
+
+    try Diags.render(ctx.err, ctx.cmd.path, .bytes, dumped.diags.items(), ctx.style);
+    return Diags.exitCode(dumped.diags.items());
 }
 
-/// Write `head` with `spans` and `tier` inserted straight after its
-/// `(anchor …)` line.
+/// The `--spans` comment block: one line per thing the reader placed,
+/// with the offset it was placed at. Owned by the caller.
+fn spansBlock(ctx: *const Cli.Ctx, kind: Args.Kind, bytes: []const u8) Cli.Error![]u8 {
+    var out: Writer.Allocating = .init(ctx.gpa);
+    errdefer out.deinit();
+    const w = &out.writer;
+    try w.print("; spans: the reader's byte offsets into \"{s}\"\n", .{anchorFile(ctx, kind)});
+
+    switch (kind) {
+        .mid => {
+            var res = try tempura.smf.read(ctx.gpa, bytes);
+            defer res.deinit();
+            for (res.source_map.chunks, 0..) |c, i| {
+                try w.print(";   chunk {d}  {s}  at 0x{X:0>8}  body {d}\n", .{
+                    i, Cli.printableTag(&c.tag), c.offset, c.len,
+                });
+            }
+            for (res.source_map.tracks, res.sequence.tracks, 0..) |tm, tr, ti| {
+                for (tm.events, tr.events, 0..) |site, ev, ei| {
+                    try w.print(";   track {d} event {d}  at 0x{X:0>8}  tick {d}  {s}{s}\n", .{
+                        ti + 1,                                              ei, site.offset, ev.at, @tagName(ev.kind),
+                        if (site.running_status) "  running-status" else "",
+                    });
+                }
+            }
+        },
+        .it => {
+            var res = try tempura.itf.read.read(ctx.gpa, bytes);
+            defer res.deinit();
+            for (res.source_map.entries) |e| {
+                try w.print(";   {s: <14} #{d}  at 0x{X:0>8}  len {d}\n", .{
+                    @tagName(e.kind), e.index, e.region.off, e.region.len,
+                });
+            }
+        },
+    }
+    return out.toOwnedSlice();
+}
+
+/// Write `text` with `block` inserted straight after its `(anchor …)`
+/// line — in front of the tier the pipeline spliced there.
 ///
-/// The printer emits an anchor on ONE line and leaves the inline dump's
-/// place directly after it, because plan 02's anchor/dump pairing is
-/// positional — a tier that landed anywhere else would read back as
-/// belonging to no anchor. When there is no anchor at all (nothing in
-/// this verb produces that, but a renderer must not be the thing that
-/// panics), the pieces are appended in the same order, which is still the
-/// order they were written in.
-pub fn spliceAfterAnchor(w: *Writer, head: []const u8, spans: []const u8, tier: []const u8) Writer.Error!void {
-    const at = std.mem.indexOf(u8, head, "(anchor ") orelse {
-        try w.writeAll(head);
-        try w.writeAll(spans);
-        try w.writeAll(tier);
+/// The printer emits an anchor on ONE line and the tier follows it,
+/// because plan 02's anchor/dump pairing is positional. When there is no
+/// anchor at all (nothing in this verb produces that, but a renderer must
+/// not be the thing that panics), the block is appended, which is still
+/// the order it was written in.
+pub fn spliceAfterAnchor(w: *Writer, text: []const u8, block: []const u8) Writer.Error!void {
+    const at = std.mem.indexOf(u8, text, "(anchor ") orelse {
+        try w.writeAll(text);
+        try w.writeAll(block);
         return;
     };
-    const eol = std.mem.indexOfScalarPos(u8, head, at, '\n') orelse head.len;
-    const cut = @min(eol + 1, head.len);
-    try w.writeAll(head[0..cut]);
-    try w.writeAll(spans);
-    try w.writeAll(tier);
-    try w.writeAll(head[cut..]);
+    const eol = std.mem.indexOfScalarPos(u8, text, at, '\n') orelse text.len;
+    const cut = @min(eol + 1, text.len);
+    try w.writeAll(text[0..cut]);
+    try w.writeAll(block);
+    try w.writeAll(text[cut..]);
 }
 
 /// What the dumped anchor's `:file` says.
@@ -250,31 +165,18 @@ fn anchorFile(ctx: *const Cli.Ctx, kind: Args.Kind) []const u8 {
     return std.fs.path.basename(ctx.cmd.path);
 }
 
-fn hexDigest(bytes: []const u8) [64]u8 {
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    const alphabet = "0123456789abcdef";
-    var out: [64]u8 = undefined;
-    for (digest, 0..) |b, i| {
-        out[i * 2] = alphabet[b >> 4];
-        out[i * 2 + 1] = alphabet[b & 0xf];
-    }
-    return out;
-}
-
 const t = std.testing;
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-test "spliceAfterAnchor: the tier lands on the line after the anchor, never elsewhere" {
+test "spliceAfterAnchor: the block lands on the line after the anchor, never elsewhere" {
     var out: Writer.Allocating = .init(t.allocator);
     defer out.deinit();
     try spliceAfterAnchor(
         &out.writer,
-        "(timeline :conductor song)\n\n(anchor :id song :kind it :file \"x.it\")\n\n(lane :name a)\n",
+        "(timeline :conductor song)\n\n(anchor :id song :kind it :file \"x.it\")\n(it/module)\n",
         "; spans\n",
-        "(it/module)\n",
     );
     try t.expectEqualStrings(
         \\(timeline :conductor song)
@@ -283,28 +185,17 @@ test "spliceAfterAnchor: the tier lands on the line after the anchor, never else
         \\; spans
         \\(it/module)
         \\
-        \\(lane :name a)
-        \\
     , out.written());
 }
 
 test "spliceAfterAnchor: no anchor appends rather than panicking" {
     var out: Writer.Allocating = .init(t.allocator);
     defer out.deinit();
-    try spliceAfterAnchor(&out.writer, "(timeline)\n", "", "(it/module)\n");
-    try t.expectEqualStrings("(timeline)\n(it/module)\n", out.written());
+    try spliceAfterAnchor(&out.writer, "(timeline)\n", "; spans\n");
+    try t.expectEqualStrings("(timeline)\n; spans\n", out.written());
 }
 
-test "hexDigest: the digest the anchor carries is sha256, lowercase, 64 digits" {
-    const got = hexDigest("impulse");
-    var want: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash("impulse", &want, .{});
-    var expect: [64]u8 = undefined;
-    _ = try std.fmt.bufPrint(&expect, "{x}", .{&want});
-    try t.expectEqualStrings(&expect, &got);
-}
-
-test "dump: an SMF becomes a document with the header comment, an anchor and the tier" {
+test "dump: an SMF with no residue derives its tier and says so on the first line" {
     const path = try Cli.repoPath(t.allocator, "corpus/skeleton-smf/song.mid");
     defer t.allocator.free(path);
     var c = try Cli.invoke(&.{ "tempura", "dump", path });
@@ -313,12 +204,40 @@ test "dump: an SMF becomes a document with the header comment, an anchor and the
     try t.expectEqualStrings("", c.err.written());
 
     const text = c.out.written();
-    try t.expect(std.mem.startsWith(u8, text, "; skeleton: derived, no residue found\n(timeline"));
+    try t.expect(std.mem.startsWith(u8, text, "; skeleton: derived, no residue found\n"));
     try t.expect(std.mem.indexOf(u8, text, ":conductor song") != null);
     try t.expect(std.mem.indexOf(u8, text, "(anchor :id song :kind smf :file \"song.mid\" :size ") != null);
     try t.expect(std.mem.indexOf(u8, text, "(midi/smf ") != null);
     // Rule 1's derived tier: a bound lane per address the file uses.
     try t.expect(std.mem.indexOf(u8, text, ":from song") != null);
+}
+
+test "dump: a file that carries a residue comes back as the document that was written" {
+    // Round trip through the CLI: a native document built with the
+    // residue attached, dumped back. Plan 04's rule 2 restores the
+    // AUTHOR's text, not a re-derivation of it, so the header comment is
+    // the document's own and not the skeleton's.
+    const a = t.allocator;
+    const src = try Cli.repoPath(a, "corpus/tempo-three-conductors-native/doc.sjon");
+    defer a.free(src);
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    const built = try std.fmt.allocPrintSentinel(a, "{s}/song.mid", .{dir}, 0);
+    defer a.free(built);
+
+    var b = try Cli.invoke(&.{ "tempura", "build", src, "-o", built });
+    defer b.deinit();
+    try t.expectEqual(Cli.Exit.ok, b.code);
+
+    var d = try Cli.invoke(&.{ "tempura", "dump", built });
+    defer d.deinit();
+    try t.expectEqual(Cli.Exit.ok, d.code);
+    try t.expect(std.mem.indexOf(u8, d.out.written(), "; skeleton:") == null);
+    // The document's own first line, restored verbatim.
+    try t.expect(std.mem.indexOf(u8, d.out.written(), "; The three-segment map of plan 03") != null);
 }
 
 test "dump: an IT becomes a document, and --patterns=bin swaps rows for a ref" {

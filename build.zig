@@ -241,9 +241,19 @@ pub fn build(b: *std.Build) void {
     const landing_root = blk: {
         const wf = b.addWriteFiles();
         _ = wf.addCopyDirectory(b.path("src"), ".", .{});
+        // The exporter, and the three surfaces a document has to pass
+        // through to reach it: the landing tool renders one golden score
+        // from `examples/native.sjon`, which is SOURCE and not a
+        // hand-built `Doc`, so it needs the schema, the document layer
+        // and the time model beside the exporter.
         break :blk wf.add(
             "_export_root.zig",
-            "pub const exporter = @import(\"export/export.zig\");\n",
+            \\pub const exporter = @import("export/export.zig");
+            \\pub const Schema = @import("Schema.zig");
+            \\pub const doc = @import("doc/doc.zig");
+            \\pub const time = @import("time/time.zig");
+            \\
+            ,
         );
     };
     const landing_src_mod = b.createModule(.{
@@ -258,6 +268,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "tempura_export", .module = landing_src_mod }},
+    });
+    // `examples/native.sjon` as bytes, so the landing proof can compile
+    // the SHIPPED example through the real `pacer.wasm` rather than a
+    // copy of it that could drift (the schemas arrive the same way, and
+    // for the same reason).
+    landing_mod.addAnonymousImport("example_native", .{
+        .root_source_file = b.path("examples/native.sjon"),
     });
     const landing_exe = b.addExecutable(.{ .name = "gen-landing", .root_module = landing_mod });
     const run_landing = b.addRunArtifact(landing_exe);

@@ -1,0 +1,15 @@
+; Two ADJACENT clips of one phrase, and an empty native lane — the two
+; shapes the native fixture has no room for: a `merge` needs neighbours
+; that meet, and a `split` needs a clip long enough to cut in two.
+(timeline :length 4bar)
+(tempo-point :at 0q :qpm 120)
+(meter-point :at 0bar :sig [4 4])
+
+(lane :name flash
+  (clip :at 0bar :phrase fill :length 1bar)
+  (clip :at 1bar :phrase fill :offset 1bar :length 1bar))
+(lane :name spare)
+
+(phrase :name fill :length 1bar
+  (lane :name flash
+    (note :at 0q :dur 0.25q :key 38 :vel 100)))

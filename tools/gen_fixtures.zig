@@ -89,6 +89,13 @@ const cases = [_]Case{
     .{ .name = "walk-skip-end", .file = "song.it", .build = walkSkipEnd },
     .{ .name = "walk-t0x-slide", .file = "song.it", .build = walkT0xSlide },
     .{ .name = "walk-txx-memory", .file = "song.it", .build = walkTxxMemory },
+    .{ .name = "residue-smf-exact", .file = "song.mid", .build = residueSmfExact },
+    .{ .name = "residue-it-exact", .file = "song.it", .build = residueItExact },
+    .{ .name = "residue-newer-version", .file = "song.it", .build = residueNewerVersion },
+    .{ .name = "residue-corrupt", .file = "song.mid", .build = residueCorrupt },
+    .{ .name = "residue-stale-lane", .file = "song.mid", .build = residueStaleLane },
+    .{ .name = "residue-stale-conductor", .file = "song.mid", .build = residueStaleConductor },
+    .{ .name = "residue-tail-only", .file = "song.it", .build = residueTailOnly },
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -781,6 +788,257 @@ fn walkCxxPastEnd(gpa: Allocator) ![]u8 {
     _ = try b.addPattern(2);
     p0.at(0, 0).* = .{ .fx = fx_c, .param = 5 };
     return finishIt(gpa, &b, null, walk_opts);
+}
+
+// ---------------------------------------------------------------------------
+// The residue fixtures — one file per rule of plan 04's reconciliation
+// ---------------------------------------------------------------------------
+//
+// These five (in two kinds) are the only fixtures here that are not a
+// `Builder` and a writer: a file that CARRIES a residue is one tempura
+// built, and building it is `doc/pipeline.zig`'s whole chain. So the
+// document below is rendered, packed, attached and written exactly as
+// `tempura build` would write it — and then, for the rules that are
+// about a file somebody else touched, the bytes are edited the way a DAW
+// or a tracker would have edited them.
+//
+// Each mutation is the smallest one that reaches its rule, and each is
+// spelled against the file rather than against a builder, because what
+// the rule reacts to IS the file.
+
+/// The document every residue fixture is built from: one native notes
+/// lane over its own tempo and meter, so the file carries exactly one
+/// lane record, one conductor record and one essence.
+const residue_doc: [:0]const u8 =
+    \\; residue — the corpus's reconciliation fixture
+    \\(timeline :title "residue" :length 1bar)
+    \\
+    \\(tempo-point :at 0bar :qpm 120)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(lane :name kick :kind notes :target kick
+    \\  (note :at 0bar :dur 1q :key 36 :vel 100)
+    \\  (note :at 2q :dur 1q :key 36 :vel 80))
+    \\
+;
+
+/// The document, loaded and derived — what every builder below starts
+/// from.
+const Ready = struct {
+    schema: tempura.Schema,
+    loaded: tempura.doc.Result,
+    derived: tempura.time.derive.Derived,
+
+    fn init(gpa: Allocator) !Ready {
+        var schema = try tempura.Schema.load(gpa);
+        errdefer schema.deinit();
+        var loaded = try tempura.doc.fromSource(gpa, &schema, residue_doc, null);
+        errdefer loaded.deinit();
+        if (loaded.diags.hasErrors()) return Error.FixtureWriterRefused;
+        const derived = try tempura.time.derive.derive(gpa, &loaded.doc);
+        return .{ .schema = schema, .loaded = loaded, .derived = derived };
+    }
+
+    fn deinit(self: *Ready) void {
+        self.derived.deinit();
+        self.loaded.deinit();
+        self.schema.deinit();
+    }
+};
+
+/// `residue_doc` built into `kind`, residue attached — plan 04's rule 2,
+/// with every hash agreeing because nothing has touched the file since.
+fn residueExact(gpa: Allocator, kind: tempura.doc.AnchorKind) ![]u8 {
+    var r = try Ready.init(gpa);
+    defer r.deinit();
+
+    var built = try tempura.doc.pipeline.build(
+        gpa,
+        &r.schema,
+        residue_doc,
+        &r.loaded.doc,
+        &r.derived,
+        kind,
+        .{},
+    );
+    defer built.deinit();
+    if (built.diags.hasErrors()) return Error.FixtureWriterRefused;
+    return gpa.dupe(u8, built.bytes);
+}
+
+/// `residue-smf-exact` — rule 2 in a `.mid`: the essence restores, the
+/// conductor record matches and the lane record matches, so the lane
+/// comes back NATIVE and the rendered events are not imported.
+fn residueSmfExact(gpa: Allocator) ![]u8 {
+    return residueExact(gpa, .smf);
+}
+
+/// `residue-it-exact` — the same in a `.it`, through the `TMPU` chunk
+/// and the message tail.
+fn residueItExact(gpa: Allocator) ![]u8 {
+    return residueExact(gpa, .it);
+}
+
+/// `residue-newer-version` — rule 3: a `.it` whose `TMPU` chunk carries
+/// an envelope version this build does not read, and no message tail to
+/// fall back on.
+///
+/// Two edits, and both are needed for the rule to be the one that runs.
+/// EVERY record's version byte is bumped — one record left at version 1
+/// would still be read, and a chunk with records and no essence is rule
+/// 4's orphan case, not rule 3. And the message TAIL is taken off,
+/// because plan 04's rule 5 prefers a readable tail over a chunk this
+/// build cannot parse (`residue/it.zig`, `choose`), which would make this
+/// a second copy of `residue-tail-only`.
+///
+/// What is left is the rule: the payload stays in the file exactly as it
+/// is, the timeline tier is derived, and a later `build` keeps the
+/// payload and writes none of its own unless `--force-residue`.
+fn residueNewerVersion(gpa: Allocator) ![]u8 {
+    const bytes = try residueExact(gpa, .it);
+    defer gpa.free(bytes);
+
+    var read = try itf.read.read(gpa, bytes);
+    defer read.deinit();
+    const region = read.module.tmpu orelse return Error.FixtureWriterRefused;
+    const payload = try gpa.dupe(u8, region.slice(bytes) orelse return Error.FixtureWriterRefused);
+    defer gpa.free(payload);
+
+    // The record framing is eight head bytes, a four-byte length and the
+    // body (`residue/it.zig`, `appendRecord`); the version is the fifth.
+    const head_len = 8;
+    var at: usize = 0;
+    var seen: usize = 0;
+    while (at + head_len + 4 <= payload.len) {
+        if (!std.mem.eql(u8, payload[at..][0..4], "\x7Dtem")) return Error.FixtureWriterRefused;
+        if (payload[at + 4] != tempura.residue.records.version) return Error.FixtureWriterRefused;
+        payload[at + 4] = tempura.residue.records.version + 1;
+        const len = std.mem.readInt(u32, payload[at + head_len ..][0..4], .little);
+        at += head_len + 4 + len;
+        seen += 1;
+    }
+    // The essence, the lane record and the conductor record: a fixture
+    // that quietly lost one would be a weaker case than it claims.
+    if (at != payload.len or seen != 3) return Error.FixtureWriterRefused;
+
+    var module = read.module;
+    module.message = tempura.residue.it.splitMessage(module.message).human;
+
+    var file = try itf.write.write(gpa, &module, bytes, .{ .tmpu = payload });
+    defer file.deinit();
+    if (file.diags.hasErrors()) return Error.FixtureWriterRefused;
+    return gpa.dupe(u8, file.bytes);
+}
+
+/// `residue-corrupt` — rule 4: a `.mid` whose essence says it is part 1
+/// of 2 and is the only part there is.
+///
+/// "A split body with a missing part" is plan 04's own example of a
+/// corrupt payload, and it is the mutation a sequencer that dropped one
+/// meta event would leave: the surviving bytes are perfectly well formed
+/// and the essence still cannot be put back together.
+fn residueCorrupt(gpa: Allocator) ![]u8 {
+    const bytes = try residueExact(gpa, .smf);
+    errdefer gpa.free(bytes);
+
+    // The ESSENCE record's head, found by its kind byte — the marker
+    // alone could in principle occur inside a packed body.
+    var i: usize = 0;
+    while (i + 8 <= bytes.len) : (i += 1) {
+        if (!std.mem.eql(u8, bytes[i..][0..4], "\x7Dtem")) continue;
+        if (bytes[i + 5] != 1) continue;
+        // `total`, the eighth byte: one part became two.
+        bytes[i + 7] = 2;
+        return bytes;
+    }
+    return Error.FixtureWriterRefused;
+}
+
+/// The built `.mid`, with one event changed the way a DAW would have
+/// changed it, and written back.
+///
+/// The residue rides as `sequencer-specific` meta events, so reading and
+/// re-writing carries it through untouched — which is exactly what a
+/// sequencer that respects RP-001 does, and exactly what makes the hash
+/// disagree afterwards.
+fn editedSmf(gpa: Allocator, comptime what: enum { lane, conductor }) ![]u8 {
+    const bytes = try residueExact(gpa, .smf);
+    defer gpa.free(bytes);
+
+    var read = try smf.read(gpa, bytes);
+    defer read.deinit();
+
+    var touched = false;
+    for (read.sequence.tracks) |track| {
+        for (track.events) |*e| {
+            switch (what) {
+                // A quantiser moved the second note: its velocity is the
+                // smallest field a hash still sees.
+                .lane => if (e.kind == .note_on and e.payload.note.vel == 80) {
+                    e.payload.note.vel = 64;
+                    touched = true;
+                },
+                // Somebody dragged the tempo in the DAW: 120 became 140.
+                .conductor => if (e.kind == .set_tempo) {
+                    e.payload.tempo = 428_571;
+                    touched = true;
+                },
+            }
+            if (touched) break;
+        }
+        if (touched) break;
+    }
+    if (!touched) return Error.FixtureWriterRefused;
+
+    var file = try smf.write(gpa, &read.sequence, .{});
+    defer file.deinit();
+    if (file.diags.hasErrors()) return Error.FixtureWriterRefused;
+    return gpa.dupe(u8, file.bytes);
+}
+
+/// `residue-stale-lane` — rule 2's second branch: the conductor record
+/// still matches and the LANE record does not, so the lane comes back
+/// BOUND at its address and `residue_stale` names what was dropped.
+fn residueStaleLane(gpa: Allocator) ![]u8 {
+    return editedSmf(gpa, .lane);
+}
+
+/// `residue-stale-conductor` — the same rule on the timing context: the
+/// file's tempo is not the one tempura wrote, so the FILE conducts and
+/// the document comes back with `:conductor` set to the anchor.
+fn residueStaleConductor(gpa: Allocator) ![]u8 {
+    return editedSmf(gpa, .conductor);
+}
+
+/// `residue-tail-only` — rule 5: a `.it` with the message tail and no
+/// `TMPU` chunk at all.
+///
+/// The tail is what survives a tracker that rewrote the module, and it
+/// "carries no native content and no records, so no hash check runs and
+/// every rendered lane stays bound" (plan 04, rule 5). Written by
+/// rendering the document and handing the writer the tail alone.
+fn residueTailOnly(gpa: Allocator) ![]u8 {
+    var r = try Ready.init(gpa);
+    defer r.deinit();
+
+    var rendered = try tempura.exporter.renderIt(gpa, &r.loaded.doc, &r.derived, null, .{});
+    defer rendered.deinit();
+    if (rendered.diags.hasErrors()) return Error.FixtureWriterRefused;
+
+    var tail = try tempura.residue.it.tail(gpa, &r.loaded.doc, &r.derived.map);
+    defer tail.deinit(gpa);
+    if (tail.diags.hasErrors()) return Error.FixtureWriterRefused;
+
+    const human = rendered.module.message;
+    const whole = try tempura.residue.it.appendTail(gpa, human, tail.bytes);
+    defer gpa.free(whole);
+
+    var file = try itf.write.write(gpa, &rendered.module, null, .{
+        .message_tail = whole[human.len..],
+    });
+    defer file.deinit();
+    if (file.diags.hasErrors()) return Error.FixtureWriterRefused;
+    return gpa.dupe(u8, file.bytes);
 }
 
 // ---------------------------------------------------------------------------

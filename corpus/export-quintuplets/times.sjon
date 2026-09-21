@@ -1,0 +1,3 @@
+; The score, and the twelve lines that carry the transport and the one
+; trigger whose positions are the claim.
+(export-score)

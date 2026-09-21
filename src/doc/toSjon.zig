@@ -869,8 +869,8 @@ test "toSjon: the golden — plan 02's own example, canonically spelled" {
         \\  (note :at 1q :dur 0.5q :key 60 :vel 90)
         \\  (clip :at 8bar :phrase fill :repeat 2))
         \\(lane :name glow :kind curve
-        \\  (keyframe :at 0bar :value 0.2 :ease hold)
-        \\  (keyframe :at 1bar :value 0.9 :ease in-cubic)
+        \\  (keyframe :at 0bar :value [0.2 0.2 0.2] :ease hold)
+        \\  (keyframe :at 1bar :value [0.9 0.9 0.9] :ease in-cubic)
         \\  (keyframe :at 2bar :value [0.1 0.2 0.3] :ease (spring :damping 0.5)))
         \\(lane :name hats :kind query :query (euclid 3 8 1))
         \\(lane :name pulse :kind formula :expr (sin (* beat 6.2832)))
@@ -882,7 +882,21 @@ test "toSjon: the golden — plan 02's own example, canonically spelled" {
         \\
         \\(control :id glow-amt :type slider :min 0 :max 1 :value 0.5 :target glow-amt)
         \\; pacer's form, pass-through
-        \\(target :name glow :arity 1)
+        \\; pacer's compose-mode declarations, one per target this document drives —
+        \\; a score is COMPOSE-CLEAN when it declares every one of them, and then it
+        \\; loads through `pacer.wasm` with no host registry at all. A notes lane
+        \\; drives a `(trigger …)`, which writes four components; a curve, a query
+        \\; and a formula lane write one each — except `glow`, whose keyframes are
+        \\; three-component vectors, so its target is arity 3. A value with more
+        \\; components than its target is a pacer error (`value has 3 component(s);
+        \\; target expects 1`), which is exactly what this example used to be.
+        \\(target :name kick :arity 4)
+        \\(target :name flash :arity 4)
+        \\(target :name bass-vol :arity 1)
+        \\(target :name glow :arity 3)
+        \\(target :name hats :arity 1)
+        \\(target :name pulse :arity 1)
+        \\(target :name glow-amt :arity 1)
     ++ "\n";
     try testing.expectEqualStrings(golden, fx.text);
 }

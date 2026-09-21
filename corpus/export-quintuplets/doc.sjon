@@ -1,0 +1,42 @@
+; Twenty notes across one bar — five to the quarter, which is where plan
+; 08's floor-interval rule earns its keep.
+;
+; A pacer bar is PPC = 720 720 ticks and a [4 4] beat is 180 180 of them,
+; and 5 divides both, so a quintuplet LANDS on pacer's lattice. What does
+; not come free is the DECIMAL: 7/5 of a beat is pacer tick 252 252, and
+; the shortest decimal that names it, `1.4b`, is read back by pacer's
+; `mul + floor` as 252 251 — one tick short. The exporter prints the
+; shortest decimal in the floor INTERVAL instead, and this golden is
+; where that choice is pinned; `npm/tempura/test/landing.test.js` is
+; where the real `pacer.wasm` reads it back.
+;
+; The ticks are spelled `Nt` because a fifth of a quarter has no short
+; decimal in quarters: 9225216 · 5 = 46126080 = TPQ exactly.
+(timeline :title "quintuplets" :length 1bar)
+
+(tempo-point :at 0q :qpm 120)
+(meter-point :at 0bar :sig [4 4])
+
+(lane :name hit :kind notes :target hit
+  (note :at 0t :dur 9225216t :key 60 :vel 100)
+  (note :at 9225216t :dur 9225216t :key 61 :vel 100)
+  (note :at 18450432t :dur 9225216t :key 62 :vel 100)
+  (note :at 27675648t :dur 9225216t :key 63 :vel 100)
+  (note :at 36900864t :dur 9225216t :key 64 :vel 100)
+  (note :at 46126080t :dur 9225216t :key 65 :vel 100)
+  (note :at 55351296t :dur 9225216t :key 66 :vel 100)
+  (note :at 64576512t :dur 9225216t :key 67 :vel 100)
+  (note :at 73801728t :dur 9225216t :key 68 :vel 100)
+  (note :at 83026944t :dur 9225216t :key 69 :vel 100)
+  (note :at 92252160t :dur 9225216t :key 70 :vel 100)
+  (note :at 101477376t :dur 9225216t :key 71 :vel 100)
+  (note :at 110702592t :dur 9225216t :key 60 :vel 100)
+  (note :at 119927808t :dur 9225216t :key 61 :vel 100)
+  (note :at 129153024t :dur 9225216t :key 62 :vel 100)
+  (note :at 138378240t :dur 9225216t :key 63 :vel 100)
+  (note :at 147603456t :dur 9225216t :key 64 :vel 100)
+  (note :at 156828672t :dur 9225216t :key 65 :vel 100)
+  (note :at 166053888t :dur 9225216t :key 66 :vel 100)
+  (note :at 175279104t :dur 9225216t :key 67 :vel 100))
+
+(target :name hit :arity 4)

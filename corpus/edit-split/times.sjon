@@ -1,0 +1,4 @@
+; `split`: one clip becomes two at the tick asked for, the second
+; carrying the `:offset` that keeps the phrase playing from where the
+; first left off.
+(plan split :args (a :sel (s :kinds [clip] :range [0 1]) :at 92252160))

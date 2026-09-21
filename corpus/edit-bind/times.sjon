@@ -1,0 +1,10 @@
+; `bind`: a native lane gains an address in the anchor's file. The lane
+; must be empty — a lane with content and a binding would give one music
+; two homes (`edit_would_duplicate`, plan 04).
+; The echo carries `anchor_unavailable`: the anchor names a file that is
+; not beside this document, and plan 02 says so out loud rather than
+; silently honouring an offset. Nothing here depends on it — the tier is
+; INLINE and every event the plan touches is in the text above — and the
+; diagnostic is in the golden because a document that claims a file it
+; does not have is a fact worth seeing.
+(plan bind :args (a :lane spare :anchor song :track 1 :ch 1))

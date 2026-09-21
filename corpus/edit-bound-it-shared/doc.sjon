@@ -1,0 +1,14 @@
+; An inline `.it` whose one pattern is played TWICE, with a cell in it:
+; every edit to that cell changes both occurrences, which is plan 07's
+; `edit_pattern_shared` whatever the operation — and the refusal is the
+; case.
+(timeline :title "shared" :conductor mod :length 2bar)
+
+(anchor :id mod :kind it :file "y.it")
+(it/module :title "shared"
+  (it/timing :speed 24 :tempo 125)
+  (it/orders 0 0 end)
+  (it/pattern 0 :rows 4
+    (row 0 (ev 1 "C-5" :ins 1))))
+
+(lane :name lead :kind notes :from mod :channel 1)

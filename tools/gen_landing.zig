@@ -30,7 +30,8 @@
 //! exhaustive fixture for anyone who wants the whole forty megabytes.
 
 const std = @import("std");
-const exporter = @import("tempura_export").exporter;
+const tempura = @import("tempura_export");
+const exporter = tempura.exporter;
 
 const pos = exporter.pos;
 const support = exporter.test_support;
@@ -98,7 +99,42 @@ const cases = [_]Case{
     // `ticks_per_second` path, and nothing on this side can prove the
     // two implementations of that expression agree.
     .{ .file = "slide-seconds.pacer", .build = support.slideConducted, .opts = .{ .source_name = "slide.sjon" } },
+    // The SHIPPED example, `examples/native.sjon`, from its own bytes:
+    // an example nobody compiles is an example nobody can trust, and
+    // this is the one case whose input is a file in the repository
+    // rather than a fixture built in Zig.
+    .{ .file = "example-native.pacer", .build = exampleNative, .opts = .{ .source_name = "native.sjon" } },
 };
+
+/// `examples/native.sjon`, loaded and derived.
+///
+/// The resolver is NULL, deliberately: the example's anchor names a
+/// module that is not shipped beside it, and plan 10 says a host with no
+/// filesystem meets exactly that ("anchors by reference are unresolved
+/// in wasm … so a browser host inlines first"). With no resolver nothing
+/// is asked of anybody, which is plan 02's own silence — so the load is
+/// clean and the two bound lanes resolve to no content, as they would in
+/// a browser.
+fn exampleNative(gpa: Allocator) !support.Fixture {
+    var schema = try tempura.Schema.load(gpa);
+    defer schema.deinit();
+
+    var loaded = try tempura.doc.fromSource(gpa, &schema, @embedFile("example_native"), null);
+    errdefer loaded.deinit();
+    if (loaded.diags.hasErrors()) {
+        for (loaded.diags.items()) |d| std.debug.print("examples/native.sjon: {t}: {s}\n", .{ d.code, d.message });
+        return error.ExampleDoesNotLoad;
+    }
+    // The map `fromSource` returns is the bridge's; `derive` builds its
+    // own from the same points, and that is the one the exporter reads.
+    loaded.map.deinit();
+    loaded.diags.deinit();
+
+    var d = loaded.doc;
+    errdefer d.deinit();
+    const derived = try tempura.time.derive.derive(gpa, &d);
+    return .{ .doc = d, .derived = derived };
+}
 
 /// One rendered artifact, on its way to disk or to a comparison.
 const Artifact = struct { path: []const u8, data: []const u8 };

@@ -11065,6 +11065,7 @@
     { "file": "native-velocity.pacer", "landings": [{ "target": "kick", "ticks": [0, 180180, 1441440, 1531530, 2162160, 2252250] }] },
     { "file": "smf-conducted.pacer", "landings": [{ "target": "kick", "ticks": [0, 90090] }] },
     { "file": "it-conducted.pacer", "landings": [{ "target": "bass", "ticks": [0, 180180, 360360, 540540] }] },
-    { "file": "slide-seconds.pacer", "landings": [{ "target": "hit", "ticks": [0, 123354, 193884, 243489, 281785, 312984, 339309, 362079] }] }
+    { "file": "slide-seconds.pacer", "landings": [{ "target": "hit", "ticks": [0, 123354, 193884, 243489, 281785, 312984, 339309, 362079] }] },
+    { "file": "example-native.pacer", "landings": [{ "target": "flash", "ticks": [0, 180180, 5765760, 5855850, 6486480, 6576570] }] }
   ]
 }

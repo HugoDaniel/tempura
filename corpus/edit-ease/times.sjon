@@ -1,0 +1,4 @@
+; `ease`: pacer's `ease-spec` is a name OR a form, and the form arrives
+; as the source text it was written in — tempura carries that vocabulary
+; and does not re-spell it.
+(plan ease :args (a :sel (s :lanes [glow] :kinds [keyframe]) :ease "(spring :damping 0.5)"))

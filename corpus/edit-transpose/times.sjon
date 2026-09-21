@@ -1,0 +1,3 @@
+; `transpose`: every selected note's key, by semitones. A key written as
+; a number stays a number.
+(plan transpose :args (a :sel (s :lanes [flash] :kinds [note]) :semitones 12))

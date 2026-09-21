@@ -1,0 +1,4 @@
+; …and the refusal: the same operation one quarter note later. A refusal
+; is an empty action list and a diagnostic with the span of the form it
+; refused on (plan 07, "The contract").
+(plan insert-meter :args (a :at 46126080 :sig [3 4]))

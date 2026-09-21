@@ -1,0 +1,3 @@
+; `rename`: a lane's name, and every cross-reference that named it — the
+; operation follows the references rather than leaving them dangling.
+(plan rename :args (a :what lane :from flash :to strobe))

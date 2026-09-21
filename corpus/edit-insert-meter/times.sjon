@@ -1,0 +1,3 @@
+; `insert-meter` ON a bar line. Off one it is `edit_off_bar` — a meter
+; that changed mid-bar would make every bar number after it a guess.
+(plan insert-meter :args (a :at 184504320 :sig [3 4]))

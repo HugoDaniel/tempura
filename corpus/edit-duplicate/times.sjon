@@ -1,0 +1,4 @@
+; `duplicate`: every selected child is copied a delta later, in one
+; batch, and the inserts land at the indices they occupy in the document
+; the plan produces.
+(plan duplicate :args (a :sel (s :lanes [flash] :kinds [note]) :delta 184504320))

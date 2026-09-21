@@ -3,17 +3,23 @@
 exit: 2
 --- stdout (0 bytes)
 
---- stderr (1935 bytes)
+--- stderr (3552 bytes)
 tempura: unknown verb `timing`
 
 tempura — the timeline as a value: SJON documents, `.mid` and `.it`.
 
 Usage:
-  tempura dump FILE [-o DOC]      A .mid or .it as a timeline document.
-  tempura build DOC [-o FILE]     A document as a .mid or .it.
-  tempura validate DOC            Schema and host checks, with spans.
-  tempura inspect FILE            The annotated byte map of a .mid or .it.
-  tempura timeline DOC [-o MAP]   The TimeMap as data.
+  tempura dump FILE [-o DOC]       A .mid or .it as a timeline document.
+  tempura build DOC [-o FILE]      A document as a .mid or .it, residue attached.
+  tempura export DOC --kind K      The same file with no residue, for playing.
+  tempura validate DOC             Schema and host checks, with spans.
+  tempura inspect FILE             The annotated byte map of a .mid or .it.
+  tempura timeline DOC [-o MAP]    The TimeMap as data.
+  tempura export-score DOC [-o S]  The pacer score skeleton.
+  tempura inline DOC [-o DOC]      An anchor's tiers, dumped into the document.
+  tempura edit DOC --op JSON       Plan and apply one operation.
+  tempura at DOC --seconds S       One playhead answer, decoded.
+  tempura check-residue FILE       What a file carries, and whether it still agrees.
 
 `-` reads stdin. Artifacts go to stdout unless `-o` names a file;
 diagnostics always go to stderr.
@@ -25,20 +31,43 @@ Options for dump:
   --preserve-history      Keep the .it edit-history block.
   --cues                  One cue per played order (.it).
 
-Options for build:
+Options for build and export:
   --kind mid|it           The format to write; the default comes from -o.
   --format 0              Merge every track into one (.mid).
   --ppq N                 Rescale onto an N-pulse division (.mid).
   --round                 Accept an inexact rescale, rounding half to even.
   --no-running-status     Write every status byte (.mid).
+  --cc N                  The controller a native curve lane renders onto (.mid).
   --loose                 OpenMPT's itEx bounds instead of IT's clamps (.it).
   --in-place              Write back onto the anchor's own file.
   --no-residue            Write a file that carries no timeline.
+  --force-residue         Overwrite a newer tempura's residue (plan 04, rule 3).
 
 Options for timeline:
   --json                  The same data as JSON.
 
-  -o PATH                 Where the artifact goes (dump, build, timeline).
+Options for export-score:
+  --velocity              A sibling <lane>-vel track per notes lane.
+  --ease linear           A bound curve lane's steps as ramps, not stairs.
+  --eps F                 The simplification tolerance (default 1/127).
+  --no-hints              Ignore every easing hint.
+  --tempo-eps F           How close two tempo segments coalesce, in pacer bpm.
+  --max-keys-per-track N  The per-track share of pacer's key budget.
+  --section-markers       Carried through to a .mid build's section markers.
+
+Options for at:
+  --seconds F             Where on the clock.
+  --pos P                 Where on the grid — 17bar, 2.5q, 1t, 0.5b, 12.5s.
+
+Options for inline:
+  --anchor ID             Which anchor to dump in; the default is the only one.
+
+Options for edit:
+  --op JSON               The operation (see `edit/edit.zig`'s header).
+  --select JSON           A selection object, merged into the operation's :sel.
+  --dry-run               Print the actions instead of the edited document.
+
+  -o PATH                 Where the artifact goes.
   -h, --help              Show this help.
   -V, --version           Show the version.
 

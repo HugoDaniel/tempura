@@ -1,0 +1,10 @@
+; Plan 04's RULE 5: the message tail alone.
+;
+; The file carries no `TMPU` chunk — a tracker rewrote the module and
+; kept only the song message — so the tail is what survived. It carries
+; "the timeline's shape … and no native content and no records, so no
+; hash check runs and every rendered lane stays bound" (`residue_partial`),
+; and the document opens with the `; partial:` header that says exactly
+; that.
+(read)
+(dump)

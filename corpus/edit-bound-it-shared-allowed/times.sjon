@@ -1,0 +1,9 @@
+; …and the same ask with `allow-shared`: every occurrence changes, which
+; is what the tracker would have done and what the flag means.
+; The echo carries `anchor_unavailable`: the anchor names a file that is
+; not beside this document, and plan 02 says so out loud rather than
+; silently honouring an offset. Nothing here depends on it — the tier is
+; INLINE and every event the plan touches is in the text above — and the
+; diagnostic is in the golden because a document that claims a file it
+; does not have is a fact worth seeing.
+(plan velocity :args (a :sel (s :lanes [lead]) :vel 64 :allow-shared true))

@@ -1,0 +1,3 @@
+; `insert-tempo`: a root goes in after the last root of the same head, so
+; the tempo points stay together and in order.
+(plan insert-tempo :args (a :at 184504320 :qpm 140))

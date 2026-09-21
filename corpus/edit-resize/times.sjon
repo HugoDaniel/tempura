@@ -1,0 +1,3 @@
+; `resize`: a note's `:dur`, measured from its own `:at`, so the printer's
+; duration rule decides the spelling.
+(plan resize :args (a :sel (s :lanes [flash] :kinds [note]) :dur 46126080))

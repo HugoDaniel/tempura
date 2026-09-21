@@ -1,0 +1,20 @@
+; pacer holds a fixed number of keys, and plan 08 gives each track a
+; share of it (`--max-keys-per-track`). Past the share the exporter warns
+; and prints every key anyway: a NATIVE lane is never simplified, so the
+; budget is a thing to know about and not a thing to silently trim.
+;
+; Four keyframes here, and the harness asks for a budget of two — the
+; warning over a lane a reviewer can read rather than over six hundred
+; keyframes nobody will.
+(timeline :title "budget" :length 1bar)
+
+(tempo-point :at 0q :qpm 120)
+(meter-point :at 0bar :sig [4 4])
+
+(lane :name glow :kind curve :target glow
+  (keyframe :at 0q :value 0 :ease linear)
+  (keyframe :at 1q :value 0.5 :ease linear)
+  (keyframe :at 2q :value 1 :ease linear)
+  (keyframe :at 3q :value 0 :ease linear))
+
+(target :name glow :arity 1)

@@ -1,0 +1,12 @@
+; Three notes NOT on any grid line — the only document a quantize or a
+; nudge has anything to say about. 0.4q, 1.6q and 2.9q are freely played
+; positions, and each moves to a different line under a different rule.
+(timeline :title "off grid" :length 1bar)
+
+(tempo-point :at 0q :qpm 120)
+(meter-point :at 0bar :sig [4 4])
+
+(lane :name flash :target flash
+  (note :at 0.4q :dur 0.25q :key 36 :vel 100)
+  (note :at 1.6q :dur 0.25q :key 38 :vel 100)
+  (note :at 2.9q :dur 0.25q :key 40 :vel 100))

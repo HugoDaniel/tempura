@@ -1,0 +1,4 @@
+; `retime` by a delta that keeps the sorted order: `set_keyword :at`, so
+; the node keeps the comment above it. The remove-and-insert branch is
+; what `edit-duplicate` and `edit-quantize` reach.
+(plan retime :args (a :sel (s :lanes [flash] :kinds [note] :range [0 1]) :delta 11531520))

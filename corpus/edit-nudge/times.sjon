@@ -1,0 +1,4 @@
+; `nudge`: one counted step of a grid, which is the arrow-key edit. A
+; sixteenth forward from wherever each note is — so an off-grid note
+; lands on the next line rather than on its own position plus a step.
+(plan nudge :args (a :sel (s :lanes [flash] :kinds [note]) :grid "1/16" :count 1))

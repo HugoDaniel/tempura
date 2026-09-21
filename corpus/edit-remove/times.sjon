@@ -1,0 +1,4 @@
+; `remove`: the targets go right to left, so each index is still valid
+; when it is reached, and a lane emptied of notes stays (an empty lane is
+; legal).
+(plan remove :args (a :sel (s :lanes [flash] :kinds [note] :range [0 92252160])))

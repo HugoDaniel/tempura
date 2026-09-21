@@ -1,0 +1,12 @@
+; Plan 04's RULE 3: the chunk's first record carries envelope version 2
+; and this build reads version 1.
+;
+; One byte of `residue-it-exact`'s file is different (`tools/gen_fixtures.zig`
+; re-stamps the head), and that byte changes everything: the payload is
+; not parsed at all, the timeline tier is DERIVED, and the document opens
+; with "the residue is a newer version and was left in the file". A
+; `build` of that document keeps the payload where it is and writes none
+; of its own unless `--force-residue` — which is `residue_newer_kept`,
+; pinned by the CLI's own tests.
+(read)
+(dump)

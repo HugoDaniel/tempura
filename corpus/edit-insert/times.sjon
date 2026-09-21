@@ -1,0 +1,5 @@
+; plan 07's table, `insert`: a child goes in at the SORTED index of its
+; lane, so a note at 3q lands between the note at 2q and the clip at 4q
+; and the document stays readable. Every position is a TICK on the wire
+; (3q = 3 · 46 126 080).
+(plan insert :args (a :lane flash :note (n :at 138378240 :dur 23063040 :key 40 :vel 100)))

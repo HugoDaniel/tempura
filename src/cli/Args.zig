@@ -15,16 +15,49 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// Phase 1 of plan 10's table. The remaining verbs (`export-score`,
-/// `export`, `inline`, `edit`, `at`, `check-residue`) land at E2/E3 and
-/// are deliberately absent rather than stubbed: an unknown verb with a
-/// usage message says more than a verb that exists and does nothing.
+/// Every row of plan 10's table.
 ///
-/// `timing` is absent for a different reason and for good: it existed for
-/// the studio's timing provider, and pstudio is not a host (the ruling of
+/// `timing` is the one absence, and it is deliberate: it existed for the
+/// studio's timing provider, and pstudio is not a host (the ruling of
 /// 2026-09-20), so its payload has no consumer. The golden case
 /// `unknown-verb` asks for it by name, which is how that stays true.
-pub const Verb = enum { dump, build, validate, inspect, timeline };
+///
+/// Two fields are spelled with Zig's escape because the verb IS a Zig
+/// keyword, and two carry an underscore where the verb carries a dash —
+/// `verbName` is the one translation, and `verbFromName` its inverse, so
+/// a verb never has two spellings anywhere else.
+pub const Verb = enum {
+    dump,
+    build,
+    validate,
+    inspect,
+    timeline,
+    export_score,
+    @"export",
+    @"inline",
+    edit,
+    at,
+    check_residue,
+};
+
+/// What a verb is CALLED on the command line.
+pub fn verbName(verb: Verb) []const u8 {
+    return switch (verb) {
+        .export_score => "export-score",
+        .check_residue => "check-residue",
+        else => @tagName(verb),
+    };
+}
+
+/// The verb `name` names, or null. `std.meta.stringToEnum` cannot do it:
+/// two of the names carry a dash the enum field spells as an underscore.
+pub fn verbFromName(name: []const u8) ?Verb {
+    inline for (@typeInfo(Verb).@"enum".fields) |f| {
+        const verb: Verb = @enumFromInt(f.value);
+        if (eq(name, verbName(verb))) return verb;
+    }
+    return null;
+}
 
 /// Which native format a `build` writes.
 pub const Kind = enum { mid, it };
@@ -62,11 +95,62 @@ pub const BuildOpts = struct {
     /// `--in-place`: write back onto the anchor's own file, through a
     /// temporary and a rename (plan 06, "The binary model").
     in_place: bool = false,
-    /// `--no-residue`: a file that carries nothing. Phase 1 writes no
-    /// residue at all, so this is the only behaviour there is — it is
-    /// accepted now so a script written today keeps working when P104
-    /// lands.
+    /// `--no-residue`: a file that carries nothing the format cannot say
+    /// itself. `export` is this switch with a verb of its own (plan 10).
     no_residue: bool = false,
+    /// `--force-residue`: write this build's own residue even over one a
+    /// NEWER tempura left in the anchor (plan 04, rule 3).
+    force_residue: bool = false,
+    /// `--cc N`: which controller a native curve lane renders onto
+    /// (plan 08). A native lane carries no `:cc` of its own, so a `.mid`
+    /// build of one has to be told.
+    cc: ?u7 = null,
+};
+
+/// `export-score`'s switches — plan 10's row, over plan 08's exporter.
+pub const ScoreOpts = struct {
+    /// `--velocity`: a sibling `<name>-vel` track per notes lane.
+    velocity: bool = false,
+    /// `--ease linear`: a bound curve lane's steps as ramps, not stairs.
+    ease_linear: bool = false,
+    /// `--eps F`: the simplification tolerance. Null keeps the
+    /// exporter's own default, which is the CC quantum.
+    eps: ?f32 = null,
+    /// `--no-hints`: ignore every easing hint, verified or not.
+    no_hints: bool = false,
+    /// `--tempo-eps F`: how close two tempo segments coalesce under the
+    /// 512 cap.
+    tempo_eps: ?f64 = null,
+    /// `--max-keys-per-track N`: the per-track share of pacer's MAX_KEYS.
+    max_keys_per_track: ?u32 = null,
+    /// `--section-markers`: also carried by `build`'s renderer, where it
+    /// writes a `marker` per section start.
+    section_markers: bool = false,
+};
+
+/// `at`'s two spellings of one question — plan 10's row,
+/// `--seconds 12.5 | --pos 17bar`. Exactly one is required.
+pub const AtOpts = struct {
+    seconds: ?f64 = null,
+    /// A position LITERAL, `Pos.parse`'s grammar: `17bar`, `2.5q`,
+    /// `1t`, `0.5b`, `12.5s`. Aliases argv.
+    pos: ?[]const u8 = null,
+};
+
+/// `inline`'s row: which anchor's tiers to dump into the document.
+pub const InlineOpts = struct {
+    /// `--anchor id`. Null takes the document's one by-reference anchor.
+    anchor: ?[]const u8 = null,
+};
+
+/// `edit`'s row: the operation, the selection and the rehearsal.
+pub const EditOpts = struct {
+    /// `--op '<json>'` — the spelling `edit/edit.zig`'s header documents.
+    op: ?[]const u8 = null,
+    /// `--select '<json>'` — a `"sel"` object, merged into the operation.
+    select: ?[]const u8 = null,
+    /// `--dry-run`: print the actions instead of the edited document.
+    dry_run: bool = false,
 };
 
 pub const Command = struct {
@@ -79,6 +163,10 @@ pub const Command = struct {
     json: bool = false,
     dump: DumpOpts = .{},
     build: BuildOpts = .{},
+    score: ScoreOpts = .{},
+    at: AtOpts = .{},
+    inl: InlineOpts = .{},
+    edit: EditOpts = .{},
 };
 
 pub const Action = union(enum) {
@@ -102,30 +190,77 @@ pub fn kindFromPath(path: []const u8) ?Kind {
     return null;
 }
 
-/// Which verb owns a flag. A flag is never silently ignored by the verb
+/// Which VERBS may carry a flag.
+///
+/// A group and not one verb, because plan 10 gives one row's switches to
+/// two rows: `export` is `build --no-residue` and takes every writer
+/// switch `build` does. The prose name is what a refusal prints.
+const Group = enum {
+    dump,
+    build,
+    timeline,
+    score,
+    at,
+    anchor,
+    edit,
+
+    fn says(self: Group) []const u8 {
+        return switch (self) {
+            .dump => "dump",
+            .build => "build and export",
+            .timeline => "timeline",
+            .score => "export-score",
+            .at => "at",
+            .anchor => "inline",
+            .edit => "edit",
+        };
+    }
+
+    fn covers(self: Group, verb: Verb) bool {
+        return switch (self) {
+            .dump => verb == .dump,
+            .build => verb == .build or verb == .@"export",
+            .timeline => verb == .timeline,
+            .score => verb == .export_score,
+            .at => verb == .at,
+            .anchor => verb == .@"inline",
+            .edit => verb == .edit,
+        };
+    }
+};
+
+/// Which verbs own a flag. A flag is never silently ignored by the verb
 /// that does not have it: `build --cues` would produce a file the user
 /// asked to have cues in and does not, and that is the one outcome a CLI
 /// must never have.
-fn owner(flag: []const u8) ?Verb {
+fn owner(flag: []const u8) ?Group {
     if (eq(flag, "--spans") or eq(flag, "--patterns") or eq(flag, "--preserve-foreign") or
         eq(flag, "--preserve-history") or eq(flag, "--cues")) return .dump;
     if (eq(flag, "--kind") or eq(flag, "--format") or eq(flag, "--ppq") or eq(flag, "--round") or
         eq(flag, "--no-running-status") or eq(flag, "--loose") or eq(flag, "--in-place") or
-        eq(flag, "--no-residue") or eq(flag, "--compress")) return .build;
+        eq(flag, "--no-residue") or eq(flag, "--force-residue") or eq(flag, "--cc") or
+        eq(flag, "--compress")) return .build;
     if (eq(flag, "--json")) return .timeline;
+    if (eq(flag, "--velocity") or eq(flag, "--ease") or eq(flag, "--eps") or
+        eq(flag, "--no-hints") or eq(flag, "--tempo-eps") or
+        eq(flag, "--max-keys-per-track") or eq(flag, "--section-markers")) return .score;
+    if (eq(flag, "--seconds") or eq(flag, "--pos")) return .at;
+    if (eq(flag, "--anchor")) return .anchor;
+    if (eq(flag, "--op") or eq(flag, "--select") or eq(flag, "--dry-run")) return .edit;
     return null;
 }
 
 /// Whether a verb's product is an ARTIFACT, which `-o` may name a file
-/// for. Plan 10's table gives `-o` to exactly three rows: `dump`,
-/// `build` and `timeline` make a thing you keep. `validate`'s product is
-/// its diagnostics, which go to stderr by the same table's rule, and
-/// `inspect`'s annotated map is a report you read or pipe — a shell
-/// redirect is the whole of what `-o` would add, so neither takes one.
+/// for. Plan 10's table gives `-o` to the rows that make a thing you
+/// keep: `dump`, `build`, `timeline`, `export-score`, `export`, `inline`
+/// and `edit`. `validate`'s product is its diagnostics, which go to
+/// stderr by the same table's rule; `inspect`'s annotated map, `at`'s one
+/// answer and `check-residue`'s verdict table are reports you read or
+/// pipe — a shell redirect is the whole of what `-o` would add.
 fn takesOutput(verb: Verb) bool {
     return switch (verb) {
-        .dump, .build, .timeline => true,
-        .validate, .inspect => false,
+        .dump, .build, .timeline, .export_score, .@"export", .@"inline", .edit => true,
+        .validate, .inspect, .at, .check_residue => false,
     };
 }
 
@@ -139,7 +274,7 @@ pub fn parse(a: Allocator, argv: []const [:0]const u8) Action {
     }
     if (argv.len < 2) return .{ .usage = "expected a verb" };
 
-    const verb = std.meta.stringToEnum(Verb, argv[1]) orelse
+    const verb = verbFromName(argv[1]) orelse
         return .{ .usage = say(a, "unknown verb `{s}`", .{argv[1]}, "unknown verb") };
 
     var out: Command = .{ .verb = verb, .path = undefined };
@@ -166,10 +301,10 @@ pub fn parse(a: Allocator, argv: []const [:0]const u8) Action {
         }
 
         if (owner(name)) |who| {
-            if (who != verb) return .{ .usage = say(
+            if (!who.covers(verb)) return .{ .usage = say(
                 a,
                 "`{s}` is only valid for {s}",
-                .{ name, @tagName(who) },
+                .{ name, who.says() },
                 "flag belongs to another verb",
             ) };
         }
@@ -177,7 +312,11 @@ pub fn parse(a: Allocator, argv: []const [:0]const u8) Action {
         // A flag that takes a value: the glued half, or the next argv.
         var value: ?[]const u8 = glued;
         const wants_value = eq(name, "-o") or eq(name, "--patterns") or
-            eq(name, "--kind") or eq(name, "--format") or eq(name, "--ppq");
+            eq(name, "--kind") or eq(name, "--format") or eq(name, "--ppq") or
+            eq(name, "--cc") or eq(name, "--ease") or eq(name, "--eps") or
+            eq(name, "--tempo-eps") or eq(name, "--max-keys-per-track") or
+            eq(name, "--seconds") or eq(name, "--pos") or eq(name, "--anchor") or
+            eq(name, "--op") or eq(name, "--select");
         if (wants_value and value == null) {
             i += 1;
             if (i >= argv.len) return .{ .usage = say(a, "`{s}` requires a value", .{name}, "flag requires a value") };
@@ -247,6 +386,78 @@ pub fn parse(a: Allocator, argv: []const [:0]const u8) Action {
             out.build.in_place = true;
         } else if (eq(name, "--no-residue")) {
             out.build.no_residue = true;
+        } else if (eq(name, "--force-residue")) {
+            // `export` writes no residue at all, so insisting on one is
+            // a contradiction and not a stronger ask.
+            if (verb == .@"export") return .{ .usage = "`--force-residue` asks for a residue and " ++
+                "`export` is `build --no-residue` (plan 10); use `build --force-residue`" };
+            out.build.force_residue = true;
+        } else if (eq(name, "--cc")) {
+            out.build.cc = std.fmt.parseInt(u7, value.?, 10) catch return .{ .usage = say(
+                a,
+                "`--cc` takes a controller 0..127, got `{s}`",
+                .{value.?},
+                "--cc takes a controller 0..127",
+            ) };
+        } else if (eq(name, "--velocity")) {
+            out.score.velocity = true;
+        } else if (eq(name, "--ease")) {
+            // pacer's easing vocabulary is a lane's, not a document-wide
+            // switch; `linear` is the one answer plan 10's row spells.
+            if (!eq(value.?, "linear")) return .{ .usage = say(
+                a,
+                "`--ease` takes `linear` (the only whole-document easing plan 10 gives it), got `{s}`",
+                .{value.?},
+                "--ease takes linear",
+            ) };
+            out.score.ease_linear = true;
+        } else if (eq(name, "--eps")) {
+            out.score.eps = parseFloat(f32, value.?) orelse return .{ .usage = say(
+                a,
+                "`--eps` takes a positive tolerance, got `{s}`",
+                .{value.?},
+                "--eps takes a positive tolerance",
+            ) };
+        } else if (eq(name, "--no-hints")) {
+            out.score.no_hints = true;
+        } else if (eq(name, "--tempo-eps")) {
+            out.score.tempo_eps = parseFloat(f64, value.?) orelse return .{ .usage = say(
+                a,
+                "`--tempo-eps` takes a positive tolerance in pacer bpm, got `{s}`",
+                .{value.?},
+                "--tempo-eps takes a positive tolerance",
+            ) };
+        } else if (eq(name, "--max-keys-per-track")) {
+            const n = std.fmt.parseInt(u32, value.?, 10) catch 0;
+            if (n == 0) return .{ .usage = say(
+                a,
+                "`--max-keys-per-track` takes a positive count, got `{s}`",
+                .{value.?},
+                "--max-keys-per-track takes a positive count",
+            ) };
+            out.score.max_keys_per_track = n;
+        } else if (eq(name, "--section-markers")) {
+            out.score.section_markers = true;
+        } else if (eq(name, "--seconds")) {
+            // A finite second, because the two host guards belong to the
+            // playhead and a NaN on the command line is a typo.
+            const secs = parseFloat(f64, value.?) orelse return .{ .usage = say(
+                a,
+                "`--seconds` takes a finite number of seconds, got `{s}`",
+                .{value.?},
+                "--seconds takes a finite number of seconds",
+            ) };
+            out.at.seconds = secs;
+        } else if (eq(name, "--pos")) {
+            out.at.pos = value.?;
+        } else if (eq(name, "--anchor")) {
+            out.inl.anchor = value.?;
+        } else if (eq(name, "--op")) {
+            out.edit.op = value.?;
+        } else if (eq(name, "--select")) {
+            out.edit.select = value.?;
+        } else if (eq(name, "--dry-run")) {
+            out.edit.dry_run = true;
         } else if (eq(name, "--compress")) {
             // Plan 10: refused, with the reason. tempura has no sample
             // codec and never will — bulk bytes are copied from the
@@ -264,10 +475,40 @@ pub fn parse(a: Allocator, argv: []const [:0]const u8) Action {
     out.path = path orelse return .{ .usage = say(
         a,
         "{s} requires a path (use `-` for stdin)",
-        .{@tagName(verb)},
+        .{verbName(verb)},
         "missing path",
     ) };
+
+    // The two verbs whose whole question rides on a flag. A missing one
+    // is answered here rather than in the verb, so the message is a
+    // usage message and the exit code is a usage code.
+    switch (verb) {
+        .at => {
+            if (out.at.seconds == null and out.at.pos == null)
+                return .{ .usage = "at asks one question: `--seconds 12.5` or `--pos 17bar`" };
+            if (out.at.seconds != null and out.at.pos != null)
+                return .{ .usage = "`--seconds` and `--pos` are two questions; ask one" };
+        },
+        .edit => {
+            if (out.edit.op == null)
+                return .{ .usage = "edit needs an operation: `--op '<json>'` (the spelling is in `edit/edit.zig`'s header)" };
+        },
+        // Plan 10: `export` IS `build --no-residue`, "for a file that
+        // will only ever be played". One verb, one behaviour, decided
+        // here so nothing downstream has to ask which verb it is.
+        .@"export" => out.build.no_residue = true,
+        else => {},
+    }
     return .{ .command = out };
+}
+
+/// A finite, non-negative float, or null. `--eps`, `--tempo-eps` and
+/// `--seconds` all mean a magnitude, and a NaN or a negative one is a
+/// typo rather than a question.
+fn parseFloat(comptime T: type, text: []const u8) ?T {
+    const x = std.fmt.parseFloat(T, text) catch return null;
+    if (!std.math.isFinite(x) or x < 0) return null;
+    return x;
 }
 
 /// A bare `-` is deliberately NOT a flag: it is the stdin path and must
@@ -347,8 +588,130 @@ test "parse: no arguments, an unknown verb and a missing path are usage errors" 
     _ = try usageMessage(a, &.{"tempura"});
     try t.expect(std.mem.indexOf(u8, try usageMessage(a, &.{ "tempura", "wat", "x" }), "wat") != null);
     try t.expect(std.mem.indexOf(u8, try usageMessage(a, &.{ "tempura", "dump" }), "dump") != null);
-    // A verb of a LATER phase is an unknown verb, not a silent no-op.
-    try t.expect(std.mem.indexOf(u8, try usageMessage(a, &.{ "tempura", "edit", "x" }), "edit") != null);
+    // `timing` is the one row of plan 10 this CLI does not have, and it
+    // is an unknown verb rather than a silent no-op.
+    try t.expect(std.mem.indexOf(u8, try usageMessage(a, &.{ "tempura", "timing", "x" }), "timing") != null);
+}
+
+test "parse: every verb of plan 10's table answers to its own name" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The dashed spellings are the point: `std.meta.stringToEnum` would
+    // miss both, and a verb with two spellings is a verb with none.
+    try t.expectEqual(@as(?Verb, .export_score), verbFromName("export-score"));
+    try t.expectEqual(@as(?Verb, .check_residue), verbFromName("check-residue"));
+    try t.expectEqual(@as(?Verb, null), verbFromName("export_score"));
+    try t.expectEqual(@as(?Verb, null), verbFromName("timing"));
+
+    inline for (@typeInfo(Verb).@"enum".fields) |f| {
+        const verb: Verb = @enumFromInt(f.value);
+        try t.expectEqual(@as(?Verb, verb), verbFromName(verbName(verb)));
+    }
+
+    // …and each of them parses a path, with the one flag it cannot do
+    // without.
+    try t.expectEqual(Verb.export_score, (try parseOk(a, &.{ "tempura", "export-score", "d.sjon" })).verb);
+    try t.expectEqual(Verb.@"export", (try parseOk(a, &.{ "tempura", "export", "d.sjon", "--kind", "mid" })).verb);
+    try t.expectEqual(Verb.@"inline", (try parseOk(a, &.{ "tempura", "inline", "d.sjon" })).verb);
+    try t.expectEqual(Verb.check_residue, (try parseOk(a, &.{ "tempura", "check-residue", "s.it" })).verb);
+    try t.expectEqual(Verb.at, (try parseOk(a, &.{ "tempura", "at", "d.sjon", "--seconds", "1.5" })).verb);
+    try t.expectEqual(Verb.edit, (try parseOk(a, &.{ "tempura", "edit", "d.sjon", "--op", "{}" })).verb);
+}
+
+test "parse: export-score's seven switches" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cmd = try parseOk(a, &.{
+        "tempura",    "export-score",      "d.sjon", "--velocity",
+        "--ease",     "linear",            "--eps",  "0.01",
+        "--no-hints", "--tempo-eps",       "0.5",    "--max-keys-per-track",
+        "128",        "--section-markers",
+    });
+    try t.expectEqual(ScoreOpts{
+        .velocity = true,
+        .ease_linear = true,
+        .eps = 0.01,
+        .no_hints = true,
+        .tempo_eps = 0.5,
+        .max_keys_per_track = 128,
+        .section_markers = true,
+    }, cmd.score);
+    // `--ease` is the one whose value is closed, and `--eps` the one
+    // whose value is a magnitude.
+    try t.expect(std.mem.indexOf(u8, try usageMessage(a, &.{ "tempura", "export-score", "d.sjon", "--ease", "in-cubic" }), "linear") != null);
+    for ([_][:0]const u8{ "-1", "nan", "x", "" }) |bad| {
+        _ = usageMessage(a, &.{ "tempura", "export-score", "d.sjon", "--eps", bad }) catch |e| {
+            std.debug.print("expected a usage error for --eps {s}\n", .{bad});
+            return e;
+        };
+    }
+}
+
+test "parse: at takes exactly one question, and edit needs its operation" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try t.expectEqual(@as(?f64, 12.5), (try parseOk(a, &.{ "tempura", "at", "d.sjon", "--seconds", "12.5" })).at.seconds);
+    try t.expectEqualStrings("17bar", (try parseOk(a, &.{ "tempura", "at", "d.sjon", "--pos=17bar" })).at.pos.?);
+    try t.expect(std.mem.indexOf(u8, try usageMessage(a, &.{ "tempura", "at", "d.sjon" }), "--seconds") != null);
+    try t.expect(std.mem.indexOf(u8, try usageMessage(a, &.{
+        "tempura", "at", "d.sjon", "--seconds", "1", "--pos", "1bar",
+    }), "two questions") != null);
+
+    const e = try parseOk(a, &.{
+        "tempura", "edit", "d.sjon", "--op", "{\"op\":\"remove\"}", "--select", "{\"lanes\":[\"a\"]}", "--dry-run",
+    });
+    try t.expectEqualStrings("{\"op\":\"remove\"}", e.edit.op.?);
+    try t.expectEqualStrings("{\"lanes\":[\"a\"]}", e.edit.select.?);
+    try t.expect(e.edit.dry_run);
+    try t.expect(std.mem.indexOf(u8, try usageMessage(a, &.{ "tempura", "edit", "d.sjon" }), "--op") != null);
+}
+
+test "parse: export is build --no-residue, and refuses the contradiction" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The verb IS the switch (plan 10), so nothing downstream asks which
+    // verb it was.
+    const cmd = try parseOk(a, &.{ "tempura", "export", "d.sjon", "--kind", "it", "--loose" });
+    try t.expect(cmd.build.no_residue);
+    try t.expect(cmd.build.loose);
+    try t.expectEqual(@as(?Kind, .it), cmd.build.kind);
+
+    try t.expect(std.mem.indexOf(u8, try usageMessage(a, &.{
+        "tempura", "export", "d.sjon", "--kind", "mid", "--force-residue",
+    }), "--no-residue") != null);
+
+    // …and `build` takes both halves of plan 04's rule 3, plus plan 08's
+    // controller.
+    const b = try parseOk(a, &.{ "tempura", "build", "d.sjon", "--force-residue", "--cc", "74" });
+    try t.expect(b.build.force_residue);
+    try t.expectEqual(@as(?u7, 74), b.build.cc);
+    try t.expect(std.mem.indexOf(u8, try usageMessage(a, &.{ "tempura", "build", "d.sjon", "--cc", "128" }), "0..127") != null);
+}
+
+test "parse: inline takes an anchor by id, and the report verbs take no -o" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try t.expectEqualStrings("song", (try parseOk(a, &.{ "tempura", "inline", "d.sjon", "--anchor", "song" })).inl.anchor.?);
+    // `at` and `check-residue` are reports, like `validate` and
+    // `inspect`: a shell redirect is the whole of what `-o` would add.
+    _ = try usageMessage(a, &.{ "tempura", "at", "d.sjon", "--seconds", "1", "-o", "x" });
+    _ = try usageMessage(a, &.{ "tempura", "check-residue", "s.it", "-o", "x" });
+    // …and the four artifact verbs of this phase do take one.
+    inline for (.{
+        [_][:0]const u8{ "export-score", "d.sjon" },
+        [_][:0]const u8{ "inline", "d.sjon" },
+    }) |argv| {
+        const cmd = try parseOk(a, &.{ "tempura", argv[0], argv[1], "-o", "out" });
+        try t.expectEqualStrings("out", cmd.out.?);
+    }
 }
 
 test "parse: -o takes the artifact's path, spelled either way" {

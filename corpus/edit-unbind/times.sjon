@@ -1,0 +1,10 @@
+; `unbind`: the binding and every address key come off, and only the keys
+; the document actually wrote. The lane keeps its name and its target and
+; is left empty — the file's events are still the file's.
+; The echo carries `anchor_unavailable`: the anchor names a file that is
+; not beside this document, and plan 02 says so out loud rather than
+; silently honouring an offset. Nothing here depends on it — the tier is
+; INLINE and every event the plan touches is in the text above — and the
+; diagnostic is in the golden because a document that claims a file it
+; does not have is a fact worth seeing.
+(plan unbind :args (a :lane kick))

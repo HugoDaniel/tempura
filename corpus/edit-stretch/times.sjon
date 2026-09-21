@@ -1,0 +1,4 @@
+; `stretch` by 3/2 over the first bar: positions inside the range scale
+; from its start, positions after it move by the growth, and every tick
+; that did not land exactly is counted (`edit_inexact`).
+(plan stretch :args (a :from 0 :to 184504320 :p 3 :q 2))

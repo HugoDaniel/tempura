@@ -1,0 +1,23 @@
+; A document whose one anchor is an INLINE `.it`, with a SHARED pattern:
+; the order list plays pattern 2 twice, so a cell moved into it would
+; sound at both places — plan 07's `edit_pattern_shared`.
+;
+; Speed 24 makes a row one quarter note exactly (24 IT ticks · 1 921 920 =
+; TPQ), so every position a case asks for is a round musical number. The
+; first cell carries an effect and the second carries none: one has no
+; room for the `SDx` a sub-row move needs and the other has.
+(timeline :title "bound" :conductor mod :length 4bar)
+
+(anchor :id mod :kind it :file "x.it")
+(it/module :title "bound"
+  (it/timing :speed 24 :tempo 125)
+  (it/orders 0 1 2 2 end)
+  (it/pattern 0 :rows 4
+    (row 0 (ev 1 "C-5" :ins 1 :vol 64 :fx "G01"))
+    (row 2 (ev 1 "E-5" :ins 1)))
+  (it/pattern 1 :rows 4
+    (row 0 (ev 1 "G-5" :ins 1)))
+  (it/pattern 2 :rows 4))
+
+(lane :name lead :kind notes :from mod :channel 1)
+(lane :name loud :kind curve :from mod :channel 1 :column vol)

@@ -1,0 +1,2 @@
+; `export_key_budget`, with every key still printed.
+(export-score :max-keys 2)

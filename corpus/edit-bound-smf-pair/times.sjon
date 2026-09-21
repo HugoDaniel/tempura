@@ -1,0 +1,12 @@
+; Plan 07, "Bound content, precisely": an SMF note is the `(note-on,
+; note-off)` PAIR the bridge paired, and a retime moves both by the delta.
+; This one moves the first note far enough to cross the controller and
+; the second note, so the plan is remove-and-insert at the sorted index
+; and the comment above the downbeat travels with neither.
+; The echo carries `anchor_unavailable`: the anchor names a file that is
+; not beside this document, and plan 02 says so out loud rather than
+; silently honouring an offset. Nothing here depends on it — the tier is
+; INLINE and every event the plan touches is in the text above — and the
+; diagnostic is in the golden because a document that claims a file it
+; does not have is a fact worth seeing.
+(plan retime :args (a :sel (s :lanes [kick] :kinds [note] :range [0 1]) :delta 92252160))

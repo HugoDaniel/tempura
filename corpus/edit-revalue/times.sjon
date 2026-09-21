@@ -1,0 +1,3 @@
+; `revalue`: a keyframe's `:value`, set. A one-component value stays a
+; number; a vector would stay a vector.
+(plan revalue :args (a :sel (s :lanes [glow] :kinds [keyframe] :range [0 1]) :value [0.5]))

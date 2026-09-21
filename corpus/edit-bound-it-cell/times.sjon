@@ -1,0 +1,12 @@
+; Plan 07, "IT, inline": a cell moved to a tick that is not a row start
+; uses `SDx` — delay x ticks — when the delta fits and the cell has no
+; effect column. The cell at row 2 carries none, and 5 765 760 ticks is
+; three of the twenty-four a row holds at speed 24, so the move is `SD3`
+; in the row it already sits in.
+; The echo carries `anchor_unavailable`: the anchor names a file that is
+; not beside this document, and plan 02 says so out loud rather than
+; silently honouring an offset. Nothing here depends on it — the tier is
+; INLINE and every event the plan touches is in the text above — and the
+; diagnostic is in the golden because a document that claims a file it
+; does not have is a fact worth seeing.
+(plan retime :args (a :sel (s :lanes [lead] :kinds [note] :range [92252160 92252161]) :delta 5765760))

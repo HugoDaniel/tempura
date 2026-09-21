@@ -1,0 +1,9 @@
+; The same rule 2 through the OTHER carrier pair: a `.it` whose `TMPU`
+; chunk holds the essence and the records, and whose song message carries
+; the tail summary beside them (plan 04, "The IT carriers").
+;
+; The chunk wins when it is readable, so the tail is present and unused —
+; `check-residue` is where both are visible at once, and here the golden
+; shows what the chunk restored.
+(read)
+(dump)
