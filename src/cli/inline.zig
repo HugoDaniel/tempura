@@ -5,45 +5,16 @@
 //! so its content becomes editable (07, "Bound content"); writes the
 //! document back with layout preserved".
 //!
-//! ## Why it goes through the edit engine
+//! ## The verb is the choosing, the reading and the printing
 //!
-//! Layout. A document is a person's text — comments, blank lines, the
-//! spelling of every number — and re-printing it to add one root would
-//! rewrite all of it. So the tier is added the way every other change to
-//! a document is made: as SJON edit actions, applied with `layout =
-//! .preserve`, which splices each action's own span and leaves every
-//! other byte exactly as the author wrote it (plan 07, "The contract";
-//! `SJON/docs/LANGUAGE.md` §11.5). One `insert_root` per root of the
-//! dump.
-//!
-//! ## Where the tier lands
-//!
-//! Directly after the `(anchor …)` it pairs with, because that pairing is
-//! POSITIONAL (plan 02): an `(it/module …)` belongs to the anchor above
-//! it, and a tier that landed anywhere else would read back as belonging
-//! to a different anchor or to none. The anchor's own root index is found
-//! by matching the span the document layer recorded for it against the
-//! roots of a fresh parse — the same span-to-address join the edit engine
-//! makes, minus the paths, because a root needs none.
-//!
-//! ## The tier's own layout is SJON's, not the bridge's
-//!
-//! The forms are the bridge's and the LAYOUT is SJON's printer's: an
-//! action carries a JSON value, and SJON's canonical encoding of a form
-//! puts its keywords before its positional children, so a tier that the
-//! `dump` verb would write as `(it/pattern 0 :rows 64 …)` lands here as
-//! `(it/pattern :rows 64 0 …)`. The same form, the same value, the same
-//! document — and the author's own bytes, which are the ones this verb
-//! promises to leave alone, are untouched either way.
-//!
-//! ## What it does NOT do
-//!
-//! Inlining does not free a document from its file (plan 10's own risk
-//! note): an inline `it/` dump keeps its `:raw` and `data` regions as
-//! `(bin :at :len)` references into the anchor's bytes, because bytes are
-//! sacred (plan 06) and a base64 copy of a 12 MB sample bank is not a
-//! document. What becomes editable is the MUSIC — the patterns, the
-//! orders, the events — which is what plan 07's bound operations act on.
+//! The computation — the anchor's file read and printed as its tier, the
+//! root the tier lands after, the `insert_root` plan — is the core's:
+//! `edit.inlineAnchor`, one pure function a wasm host can call as well.
+//! Its header says why the tier goes in as a plan applied with the layout
+//! kept, why it lands straight after its anchor, why its own layout is
+//! SJON's printer's, and why an `it/` tier still names its file. What
+//! stays here is the invocation: which anchor, its bytes from the store
+//! the load already read them through, the messages and the exit code.
 //!
 //! ## Idempotent
 //!
@@ -53,15 +24,19 @@
 //! is what makes it safe in a script.
 
 const std = @import("std");
-const sjon = @import("sjon");
 const tempura = @import("tempura");
 
 const Cli = @import("Cli.zig");
 const Diags = @import("Diags.zig");
 
-const Allocator = std.mem.Allocator;
 const edit = tempura.edit;
 
+/// The verb: choose the anchor, take its bytes from the load's store,
+/// plan the inline in the core, apply it with the layout kept and emit
+/// the document. Every value it builds is freed before it returns; the
+/// exit code is `Diags.exitCode` over what the reader said about the
+/// FILE, `Exit.usage` for a bad `--anchor` or an unwritable `-o`, and
+/// `Exit.internal` for a tempura defect.
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     var loaded = switch (try ctx.loadDoc()) {
         .failed => |code| return code,
@@ -99,23 +74,14 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
         return Cli.Exit.errors;
     };
 
-    var file_diags: tempura.Diag.List = .init(ctx.gpa);
-    defer file_diags.deinit();
-    const tier = try tierText(ctx, anchor.kind, bytes, &file_diags);
-    defer ctx.gpa.free(tier);
-
-    const at = try rootIndexOf(ctx, loaded.source, anchor.span) orelse {
-        try ctx.err.writeAll("tempura: the anchor is not a root of this document\n");
-        return Cli.Exit.errors;
+    var inlined = try edit.inlineAnchor(ctx.gpa, loaded.source, anchor, bytes);
+    defer inlined.deinit();
+    const plan = switch (inlined.outcome) {
+        .plan => |*p| p,
+        else => return refused(ctx, &inlined.outcome),
     };
 
-    var plan = switch (try planInsert(ctx, tier, at + 1)) {
-        .ok => |p| p,
-        .failed => |code| return code,
-    };
-    defer plan.deinit();
-
-    var applied = try edit.apply(ctx.gpa, loaded.source, &plan);
+    var applied = try edit.apply(ctx.gpa, loaded.source, plan);
     defer applied.deinit();
     if (applied.diags.hasErrors()) {
         try ctx.report(loaded.space(), applied.diags.items());
@@ -125,8 +91,46 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     if (!try ctx.emit(applied.text)) return Cli.Exit.usage;
     // The reader's complaints about the FILE, in the file's own
     // coordinate space — the document's spans are somebody else's.
-    try Diags.render(ctx.err, anchor.file, .bytes, file_diags.items(), ctx.style);
-    return Diags.exitCode(file_diags.items());
+    const file_diags = inlined.file_diags.items();
+    try Diags.render(ctx.err, anchor.file, .bytes, file_diags, ctx.style);
+    return Diags.exitCode(file_diags);
+}
+
+/// Why there is no plan, said on stderr, and the exit code it earns. An
+/// anchor that is not a root and a text past SJON's ceiling are about the
+/// input (`Exit.errors`); the other three are tempura's own defects
+/// (`Exit.internal`), and say so rather than blame a document that did
+/// nothing wrong. `.plan` never reaches here: `run` takes it first.
+fn refused(ctx: *const Cli.Ctx, outcome: *const edit.inline_anchor.Outcome) Cli.Error!u8 {
+    switch (outcome.*) {
+        .plan, .not_a_root => {
+            try ctx.err.writeAll("tempura: the anchor is not a root of this document\n");
+            return Cli.Exit.errors;
+        },
+        .too_large => |n| {
+            try ctx.err.print(
+                "tempura: {d} bytes is past SJON's file ceiling; the anchor's dump cannot be " ++
+                    "spliced\n",
+                .{n},
+            );
+            return Cli.Exit.errors;
+        },
+        .unparsed => try ctx.err.writeAll(
+            "tempura: the anchor's dump did not parse back (a tempura defect)\n",
+        ),
+        .unencoded => |name| try ctx.err.print(
+            "tempura: the anchor's dump did not encode ({s})\n",
+            .{name},
+        ),
+        .unread => |*p| {
+            try Diags.render(ctx.err, "<inline>", .bytes, p.diags.items(), ctx.style);
+            try ctx.err.writeAll(
+                "tempura: the anchor's dump did not read back as an action list " ++
+                    "(a tempura defect)\n",
+            );
+        },
+    }
+    return Cli.Exit.internal;
 }
 
 const Chosen = union(enum) { ok: *const tempura.doc.Anchor, nothing, failed: u8 };
@@ -165,155 +169,6 @@ fn choose(ctx: *const Cli.Ctx, doc: *const tempura.doc.Doc) Cli.Error!Chosen {
     return if (found) |a| .{ .ok = a } else .nothing;
 }
 
-/// The anchor's file, as the tier forms it dumps to. The `dump` verb's
-/// own bridges, with the bridges' default switches: `inline` is about
-/// making content EDITABLE, and it 03's three compaction switches all
-/// take content away.
-fn tierText(
-    ctx: *const Cli.Ctx,
-    kind: tempura.doc.AnchorKind,
-    bytes: []const u8,
-    diags: *tempura.Diag.List,
-) Cli.Error![]u8 {
-    switch (kind) {
-        .smf => {
-            var res = try tempura.smf.read(ctx.gpa, bytes);
-            defer res.deinit();
-            for (res.diags.items()) |d| try diags.add(
-                d.code,
-                d.severity,
-                d.span,
-                "{s}",
-                .{d.message},
-            );
-            return tempura.doc.bridge_smf.sequenceToForms(
-                ctx.gpa,
-                &res.sequence,
-                null,
-                .{ .qualify = true },
-            );
-        },
-        .it => {
-            var res = try tempura.itf.read.read(ctx.gpa, bytes);
-            defer res.deinit();
-            for (res.diags.items()) |d| try diags.add(
-                d.code,
-                d.severity,
-                d.span,
-                "{s}",
-                .{d.message},
-            );
-            return tempura.doc.bridge_it.moduleToForms(ctx.gpa, &res.module, .{
-                .qualify = true,
-                .source_map = &res.source_map,
-                .diags = diags,
-            });
-        },
-    }
-}
-
-/// Which root of `source` has exactly this span.
-///
-/// The document layer recorded the anchor's span when it walked the
-/// tree; a fresh parse of the same bytes gives the same spans, so the
-/// match is a lookup and not a search for something like it.
-fn rootIndexOf(ctx: *const Cli.Ctx, source: [:0]const u8, span: tempura.Diag.Span) Cli.Error!?u32 {
-    var tree = try sjon.parse(ctx.gpa, source);
-    defer tree.deinit();
-    for (tree.root, 0..) |node, i| {
-        const s = tree.spanOf(node);
-        if (s.start == span.start and s.end == span.end) return @intCast(i);
-    }
-    return null;
-}
-
-const Planned = union(enum) { ok: edit.Plan, failed: u8 };
-
-/// The tier's roots as `insert_root` actions, starting at root `at`.
-///
-/// The bridge produces SJON TEXT and an action carries a JSON VALUE, so
-/// the text is parsed and encoded through SJON's own JSON bridge (§9) —
-/// the encoding SJON decodes and prints on the way back in, which is why
-/// the tier lands as the forms it was rather than as a string.
-///
-/// There is no OPERATION here, because `inline` is not one of plan 07's:
-/// it changes what the document HOLDS rather than what it says about the
-/// music, and no selection resolves against a file that is not in the
-/// document yet. So the actions are written straight and handed to
-/// `edit.fromActionsJson`, which is the engine's own reader for exactly
-/// this — a host that has actions and wants a plan.
-fn planInsert(ctx: *const Cli.Ctx, tier: []const u8, at: u32) Cli.Error!Planned {
-    const text = try ctx.arena.dupeZ(u8, tier);
-    var tree = try sjon.parse(ctx.gpa, text);
-    defer tree.deinit();
-    if (tree.hasErrors()) {
-        try ctx.err.writeAll("tempura: the anchor's dump did not parse back (a tempura defect)\n");
-        return .{ .failed = Cli.Exit.internal };
-    }
-
-    var encoded = sjon.toJsonRoots(ctx.gpa, tree, .{}) catch |e| switch (e) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => {
-            try ctx.err.print(
-                "tempura: the anchor's dump did not encode ({s})\n",
-                .{@errorName(e)},
-            );
-            return .{ .failed = Cli.Exit.internal };
-        },
-    };
-    defer encoded.deinit();
-
-    const roots = switch (encoded.value) {
-        .object => |o| switch (o.get("$roots") orelse .null) {
-            .array => |xs| xs.items,
-            else => &.{},
-        },
-        else => &.{},
-    };
-
-    // The action LIST as text, then the engine's own reader. `Plan` is a
-    // value with public fields and building one by hand would work — and
-    // it would be a second author of the action grammar, which is
-    // exactly the thing `Plan.fromActionsJson` exists to stop being
-    // necessary (`edit/Plan.zig`: "`fromActionsJson(p.text())` gives
-    // `p.text()` again"). So the JSON goes through the front door: the
-    // engine parses each action, decides its kind, its site and its
-    // slot, and refuses anything that is not an action list.
-    var list: std.Io.Writer.Allocating = .init(ctx.arena);
-    const w = &list.writer;
-    // `Plan.text` spells an empty plan `[]`, and so does this: a tier
-    // with no roots is not a thing this verb produces, and the reader
-    // should not have to take a list that is only whitespace.
-    if (roots.len == 0) {
-        try w.writeAll("[]\n");
-    } else {
-        try w.writeAll("[\n");
-        for (roots, 0..) |value, i| {
-            if (i > 0) try w.writeAll(",\n");
-            try w.print(
-                "{{\"op\":\"insert_root\",\"index\":{d},\"value\":",
-                .{at + @as(u32, @intCast(i))},
-            );
-            std.json.Stringify.value(value, .{}, w) catch |e| switch (e) {
-                error.WriteFailed => return error.WriteFailed,
-            };
-            try w.writeAll("}");
-        }
-        try w.writeAll("\n]\n");
-    }
-
-    var plan = try edit.fromActionsJson(ctx.gpa, list.written());
-    errdefer plan.deinit();
-    if (plan.summary.refused or plan.actions.len != roots.len) {
-        try Diags.render(ctx.err, "<inline>", .bytes, plan.diags.items(), ctx.style);
-        try ctx.err.writeAll(
-            "tempura: the anchor's dump did not read back as an action list (a tempura defect)\n",
-        );
-        return .{ .failed = Cli.Exit.internal };
-    }
-    return .{ .ok = plan };
-}
-
 const t = std.testing;
 // ---------------------------------------------------------------------------
 // Tests
@@ -327,14 +182,15 @@ const ByRef = struct {
     doc: [:0]u8,
 
     fn init(rel_file: []const u8, name: []const u8, kind: []const u8) !ByRef {
-        const a = t.allocator;
-        const src = try Cli.repoPath(a, rel_file);
-        defer a.free(src);
+        const gpa = t.allocator;
+        const src = try Cli.repoPath(gpa, rel_file);
+        defer gpa.free(src);
 
         var tmp = t.tmpDir(.{});
         errdefer tmp.cleanup();
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, src, a, .limited(1 << 20));
-        defer a.free(bytes);
+        const cwd = std.Io.Dir.cwd();
+        const bytes = try cwd.readFileAlloc(std.testing.io, src, gpa, .limited(1 << 20));
+        defer gpa.free(bytes);
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
 
         // `:size` and `:sha256` are the file's own: a by-reference
@@ -342,7 +198,7 @@ const ByRef = struct {
         // resolver reads it (plan 02, "(anchor …)").
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-        const text = try std.fmt.allocPrint(a,
+        const text = try std.fmt.allocPrint(gpa,
             \\; a document arranged around a file it does not carry
             \\(timeline :length 1bar)
             \\
@@ -356,15 +212,15 @@ const ByRef = struct {
             \\  (note :at 0q :dur 0.5q :key 36 :vel 110))
             \\
         , .{ kind, name, bytes.len, &digest });
-        defer a.free(text);
+        defer gpa.free(text);
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "doc.sjon", .data = text });
 
-        const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-        errdefer a.free(dir);
+        const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        errdefer gpa.free(dir);
         return .{
             .tmp = tmp,
             .dir = dir,
-            .doc = try std.fmt.allocPrintSentinel(a, "{s}/doc.sjon", .{dir}, 0),
+            .doc = try std.fmt.allocPrintSentinel(gpa, "{s}/doc.sjon", .{dir}, 0),
         };
     }
 

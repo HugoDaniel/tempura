@@ -168,6 +168,13 @@ pub const fromActionsJson = plan_file.fromActionsJson;
 pub const apply = apply_file.apply;
 /// What `apply` returns.
 pub const Applied = apply_file.Applied;
+/// Inline an anchor: its file's tier as `insert_root` actions straight
+/// after its `(anchor …)` — what `tempura inline` plans, callable by any
+/// host holding the bytes (`inline_anchor.zig`, the one file here that
+/// reads a file's bytes, and says why).
+pub const inline_anchor = @import("inline_anchor.zig");
+/// `inline_anchor.inlineAnchor`: the anchor's bytes in, an `Inlined` out.
+pub const inlineAnchor = inline_anchor.inlineAnchor;
 
 // ---- the grid ----
 
@@ -196,4 +203,5 @@ test {
     _ = ops_native;
     _ = ops_bound;
     _ = ops_quantize;
+    _ = inline_anchor;
 }
