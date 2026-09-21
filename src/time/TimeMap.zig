@@ -334,10 +334,12 @@ pub const TimeMap = struct {
     /// through `Pos.tickFromQuarters` (half to even) and seconds through
     /// `tickFromSeconds` (floor).
     ///
-    /// A duration is never negative, and the one spelling that could ask
-    /// for one — a whole-bar or whole-beat count from an anchor that
-    /// sits INSIDE a bar, whose landing line is therefore behind it — is
-    /// answered as 0 rather than as a distance backwards.
+    /// A duration is never negative. Two spellings could ask for one — a
+    /// whole-bar or whole-beat count from an anchor that sits INSIDE a
+    /// bar, whose landing line is therefore behind it, and a seconds
+    /// count so small that the clock floor of `seconds(at)` lands a tick
+    /// short of `at` itself (the header's ulp) — and both are answered
+    /// as 0 rather than as a distance backwards.
     pub fn durationTicks(self: *const TimeMap, lit: Pos.Literal, at: i64) Error!Resolved {
         if (!std.math.isFinite(lit.value)) return error.NonFiniteTime;
         if (lit.value < 0) return .{ .err = .position_negative };
@@ -356,7 +358,7 @@ pub const TimeMap = struct {
                     error.TickOverflow => return .{ .err = .tick_overflow },
                     error.NonFiniteTime => return e,
                 };
-                return .{ .tick = abs - anchor };
+                return .{ .tick = @max(0, abs - anchor) };
             },
             .bar => {
                 const whole = @trunc(lit.value);
@@ -1712,6 +1714,32 @@ test "TimeMap.durationTicks: a duration is never negative, and the document's ru
     try testing.expectEqual(Diag.Code.position_negative, (try map.durationTicks(.{ .value = -1, .unit = .bar }, 0)).err);
     try testing.expectEqual(Diag.Code.position_not_integer, (try map.durationTicks(.{ .value = 1.5, .unit = .t }, 0)).err);
     try testing.expectEqual(Diag.Code.tick_overflow, (try map.durationTicks(.{ .value = 1e30, .unit = .bar }, 0)).err);
+}
+
+test "TimeMap.durationTicks: a seconds duration from an interior anchor is never negative" {
+    // `seconds(anchor)` at an interior tick may sit an ulp below the
+    // anchor's true start (the header's clock rule), so the clock floor
+    // of that same second lands on `anchor − 1`, and `0s` read back as
+    // one tick BACKWARDS — which no duration is. Both paths, every
+    // seventh tick of the first quarter: enough anchors for the ulp to
+    // bite on each.
+    var floating = try threeSegmentMap();
+    defer floating.deinit();
+    var integral = try twoSegmentMap(.hold);
+    defer integral.deinit();
+    try testing.expectEqual(false, floating.map.integral);
+    try testing.expectEqual(true, integral.map.integral);
+
+    for ([_]*const TimeMap{ &floating.map, &integral.map }) |m| {
+        for (0..1_000_000) |i| {
+            const at: i64 = @as(i64, @intCast(i)) * 7;
+            const zero = (try m.durationTicks(.{ .value = 0, .unit = .s }, at)).tick;
+            if (zero != 0) {
+                std.debug.print("0s from tick {d} read back as {d}\n", .{ at, zero });
+                return error.TestDurationRanBackwards;
+            }
+        }
+    }
 }
 
 test "TimeMap.durationTicks: under ONE meter the anchor changes nothing, bit for bit" {
