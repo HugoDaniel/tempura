@@ -169,24 +169,27 @@ pub const Builder = struct {
     pub fn setKeyword(self: *Builder, site: Site, key: []const u8, value_json: []const u8) Error!void {
         if (self.summary.refused) return;
         var out = try self.head(.set_keyword, site);
+        defer out.deinit(self.gpa);
         try out.print(self.gpa, ",\"key\":\"{s}\",\"value\":{s}}}", .{ key, value_json });
-        try self.push(.set_keyword, site, null, &out);
+        try self.push(.set_keyword, site, null, out.items);
         self.summary.set += 1;
     }
 
     pub fn removeKeyword(self: *Builder, site: Site, key: []const u8) Error!void {
         if (self.summary.refused) return;
         var out = try self.head(.remove_keyword, site);
+        defer out.deinit(self.gpa);
         try out.print(self.gpa, ",\"key\":\"{s}\"}}", .{key});
-        try self.push(.remove_keyword, site, null, &out);
+        try self.push(.remove_keyword, site, null, out.items);
         self.summary.set += 1;
     }
 
     pub fn replace(self: *Builder, site: Site, value_json: []const u8) Error!void {
         if (self.summary.refused) return;
         var out = try self.head(.replace, site);
+        defer out.deinit(self.gpa);
         try out.print(self.gpa, ",\"value\":{s}}}", .{value_json});
-        try self.push(.replace, site, null, &out);
+        try self.push(.replace, site, null, out.items);
         self.summary.replaced += 1;
     }
 
@@ -196,16 +199,18 @@ pub const Builder = struct {
     pub fn insertPositional(self: *Builder, parent: Site, index: u32, value_json: []const u8) Error!void {
         if (self.summary.refused) return;
         var out = try self.head(.insert_positional, parent);
+        defer out.deinit(self.gpa);
         try out.print(self.gpa, ",\"index\":{d},\"value\":{s}}}", .{ index, value_json });
-        try self.push(.insert_positional, parent, index, &out);
+        try self.push(.insert_positional, parent, index, out.items);
         self.summary.inserted += 1;
     }
 
     pub fn removePositional(self: *Builder, parent: Site, index: u32) Error!void {
         if (self.summary.refused) return;
         var out = try self.head(.remove_positional, parent);
+        defer out.deinit(self.gpa);
         try out.print(self.gpa, ",\"index\":{d}}}", .{index});
-        try self.push(.remove_positional, parent, index, &out);
+        try self.push(.remove_positional, parent, index, out.items);
         self.summary.removed += 1;
     }
 
@@ -214,20 +219,20 @@ pub const Builder = struct {
     pub fn insertRoot(self: *Builder, index: ?u32, value_json: []const u8) Error!void {
         if (self.summary.refused) return;
         var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(self.gpa);
+        defer out.deinit(self.gpa);
         try out.appendSlice(self.gpa, "{\"op\":\"insert_root\"");
         if (index) |i| try out.print(self.gpa, ",\"index\":{d}", .{i});
         try out.print(self.gpa, ",\"value\":{s}}}", .{value_json});
-        try self.push(.insert_root, .{ .root = 0, .path = &.{} }, index, &out);
+        try self.push(.insert_root, .{ .root = 0, .path = &.{} }, index, out.items);
         self.summary.inserted += 1;
     }
 
     pub fn removeRoot(self: *Builder, index: u32) Error!void {
         if (self.summary.refused) return;
         var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(self.gpa);
+        defer out.deinit(self.gpa);
         try out.print(self.gpa, "{{\"op\":\"remove_root\",\"index\":{d}}}", .{index});
-        try self.push(.remove_root, .{ .root = 0, .path = &.{} }, index, &out);
+        try self.push(.remove_root, .{ .root = 0, .path = &.{} }, index, out.items);
         self.summary.removed += 1;
     }
 
@@ -279,13 +284,14 @@ pub const Builder = struct {
         return out;
     }
 
-    /// Move the finished text into the arena and record the action. Frees
-    /// the scratch buffer either way.
-    fn push(self: *Builder, kind: Kind, site: Site, slot: ?u32, out: *std.ArrayList(u8)) Error!void {
-        defer out.deinit(self.gpa);
+    /// Copy the finished text into the arena and record the action. The
+    /// scratch buffer the text lives in stays the CALLER's, freed by its
+    /// own `defer` on every path: one owner, so no path leaks it and no
+    /// path frees it twice.
+    fn push(self: *Builder, kind: Kind, site: Site, slot: ?u32, text: []const u8) Error!void {
         const arena = self.allocator();
         try self.actions.append(arena, .{
-            .json = try arena.dupe(u8, out.items),
+            .json = try arena.dupe(u8, text),
             .kind = kind,
             .site = .{ .root = site.root, .path = try arena.dupe(u32, site.path) },
             .slot = slot,
