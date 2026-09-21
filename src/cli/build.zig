@@ -249,7 +249,7 @@ fn place(
     if (ctx.cmd.out) |out| {
         for (doc.anchors) |a| {
             const path = try std.fs.path.join(ctx.arena, &.{ ctx.inputDir(), a.file });
-            if (!samePath(ctx.arena, out, path)) continue;
+            if (!try samePath(ctx.arena, out, path)) continue;
             if (tier_anchor != null and std.mem.eql(u8, a.id, tier_anchor.?)) {
                 try ctx.err.print(
                     "tempura: {s} is this document's anchor; building onto it is --in-place " ++
@@ -288,9 +288,13 @@ fn writeThroughTemp(ctx: *const Cli.Ctx, dest: []const u8, bytes: []const u8) Cl
 /// which is the mistake plan 06's rule is about. A symlink or a hard
 /// link pointing at the anchor under another name is not caught, and
 /// nothing short of opening both files would catch it.
-fn samePath(arena: std.mem.Allocator, x: []const u8, y: []const u8) bool {
-    const rx = std.fs.path.resolve(arena, &.{x}) catch return false;
-    const ry = std.fs.path.resolve(arena, &.{y}) catch return false;
+///
+/// `resolve` fails only by running out of memory, and that is an error
+/// here too, never an answer: "could not tell" read as "not the anchor"
+/// is how `-o` would overwrite the file plan 06 says is never mutated.
+fn samePath(arena: std.mem.Allocator, x: []const u8, y: []const u8) std.mem.Allocator.Error!bool {
+    const rx = try std.fs.path.resolve(arena, &.{x});
+    const ry = try std.fs.path.resolve(arena, &.{y});
     return std.mem.eql(u8, rx, ry);
 }
 
@@ -365,6 +369,20 @@ const Scratch = struct {
         self.tmp.cleanup();
     }
 };
+
+test "samePath: running out of memory is an error, never \"not the anchor\"" {
+    // The guard in `place` asks this once per anchor before `-o` writes;
+    // an answer of false on a failed allocation would let the write
+    // through onto the anchor's own file.
+    var failing = std.testing.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
+    try t.expectError(error.OutOfMemory, samePath(failing.allocator(), "song.it", "./song.it"));
+
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    try t.expect(try samePath(arena.allocator(), "song.it", "./song.it"));
+    try t.expect(try samePath(arena.allocator(), "dir/../song.it", "song.it"));
+    try t.expect(!try samePath(arena.allocator(), "song.mid", "song.it"));
+}
 
 test "build: a dumped .it rebuilds to bytes carrying the residue, and says nothing about it" {
     var s = try Scratch.init("corpus/it-minimal/song.it", "song.it");
