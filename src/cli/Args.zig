@@ -338,7 +338,7 @@ fn setOut(arena: Allocator, out: *Command, value: []const u8) ?[]const u8 {
     if (!takesOutput(out.verb)) return say(
         arena,
         "{s} produces a report, not an artifact, and takes no `-o` (redirect it)",
-        .{@tagName(out.verb)},
+        .{verbName(out.verb)},
         "this verb takes no -o",
     );
     out.out = value;
@@ -1018,6 +1018,15 @@ test "parse: -o takes the artifact's path, spelled either way" {
         (try parseOk(arena, &.{ "tempura", "dump", "s.mid", "-o=d.sjon" })).out.?,
     );
     _ = try usageMessage(arena, &.{ "tempura", "dump", "s.mid", "-o" });
+}
+
+test "parse: a verb with no artifact refuses -o by the name it was typed as" {
+    var arena_state: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // `check_residue` is the enum's spelling; the user typed the dash.
+    const said = try usageMessage(arena, &.{ "tempura", "check-residue", "s.mid", "-o", "x" });
+    try t.expect(std.mem.startsWith(u8, said, "check-residue produces a report"));
 }
 
 test "parse: dump's five switches, and --patterns takes bin and nothing else" {
