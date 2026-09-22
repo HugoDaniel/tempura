@@ -54,25 +54,70 @@ pub const Applied = struct {
 /// a root inserted or removed renumbers every root after it, and every
 /// other action names its root by that number.
 ///
-/// Between actions the document is re-parsed — SJON's own `.preserve`
-/// fold does it (`Edit.applyEdits`), because a spliced span moves every
-/// byte coordinate after it — so a plan never relies on an address
-/// surviving a prior action. Layout is `.preserve`: every byte outside a
-/// touched span is the author's, comments included (§11.5, §11.6).
+/// Between actions the document is re-parsed, because a spliced span
+/// moves every byte coordinate after it — so a plan never relies on an
+/// address surviving a prior action. Each action goes through SJON's own
+/// single-edit entry (`sjon.applyEdit`) with the `.preserve` layout,
+/// threaded here rather than folded inside SJON's batch (`applyEdits`),
+/// whose preserve fold is documented as observably identical to exactly
+/// this: threading single edits. Layout is `.preserve`: every byte
+/// outside a touched span is the author's, comments included (§11.5,
+/// §11.6).
+///
+/// It is threaded HERE so the text's length can be read between splices.
+/// SJON holds every source it parses to its file ceiling (`ceiling`) as a
+/// PRECONDITION — an assertion, undefined behaviour in `ReleaseSmall` —
+/// and a plan can GROW a text (an insert, a duplicate), so a document
+/// inside the ceiling can be past it one splice later. No text past it is
+/// ever handed to SJON, and none is ever returned: `Applied.text` is
+/// within the ceiling whenever `text` was, so the host's next parse of it
+/// (`tpr_apply`'s reload) holds SJON's precondition too.
 ///
 /// A batch is all-or-nothing. An action SJON refuses aborts the whole
 /// apply, the document comes back untouched, and the refusal rides out
 /// as a `sjon_diagnostic` — SJON's complaint in SJON's words, which is
 /// how every other part of this repo carries one. An action that is not
-/// JSON at all is refused the same way (see `Actions.read`).
+/// JSON at all is refused the same way (see `Actions.read`), and so is a
+/// splice that would take the text past the ceiling, or a `text` already
+/// past it: the ceiling is SJON's, so its refusal is too.
 pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Error!Applied {
+    return applyWithin(gpa, text, p, ceiling);
+}
+
+/// SJON's file ceiling, `Binary.MAX_FILE_SIZE` (256 MiB): the longest
+/// source `sjon.parse`, `sjon.validateDocument` and `sjon.applyEdit`
+/// accept — each asserts it — and so the longest text `apply` splices
+/// into or hands back.
+pub const ceiling: usize = sjon.Binary.MAX_FILE_SIZE;
+
+/// `apply` under a ceiling of `limit` bytes. The public entry passes
+/// SJON's own; the tests pass a small one, because a plan that grows a
+/// document past 256 MiB is not something a unit test should allocate.
+fn applyWithin(
+    gpa: std.mem.Allocator,
+    text: [:0]const u8,
+    p: *const Plan.Plan,
+    limit: usize,
+) Error!Applied {
+    std.debug.assert(limit <= ceiling);
     p.invariants();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
-    const whole: Diag.Span = .{ .start = 0, .end = @intCast(text.len) };
+    const whole = wholeOf(text);
 
+    if (text.len > limit) {
+        try diags.add(
+            .sjon_diagnostic,
+            .err,
+            whole,
+            "the document is {d} bytes, past SJON's file ceiling of {d}, so no edit can be " ++
+                "spliced into it; the document is left as it was",
+            .{ text.len, limit },
+        );
+        return untouched(text, diags, &arena);
+    }
     if (p.actions.len == 0) return untouched(text, diags, &arena);
 
     const ordered = try gpa.dupe(Plan.Action, p.actions);
@@ -94,27 +139,36 @@ pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Er
         return untouched(text, diags, &arena);
     }
 
-    const edited = sjon.Edit.applyEdits(
-        gpa,
-        text,
-        actions.values.items,
-        .{ .layout = .preserve },
-    ) catch |e| switch (e) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => {
-            try diags.add(.sjon_diagnostic, .err, whole, "SJON refused the edit: {s}", .{
-                @errorName(e),
-            });
+    switch (try fold(gpa, arena.allocator(), text, actions.values.items, limit)) {
+        .text => |edited| {
+            // The postcondition the header promises: never a text past
+            // the ceiling that the caller did not hand in.
+            std.debug.assert(edited.len <= limit);
+            return .{ .text = edited, .diags = diags, .arena = arena };
+        },
+        .refused => |why| {
+            try diags.add(.sjon_diagnostic, .err, whole, "SJON refused the edit: {s}", .{why});
             return untouched(text, diags, &arena);
         },
-    };
-    defer edited.deinit();
+        .too_large => |over| {
+            try diags.add(
+                .sjon_diagnostic,
+                .err,
+                whole,
+                "action {d} of the plan would make the document {d} bytes, past SJON's file " ++
+                    "ceiling of {d}; the document is left as it was",
+                .{ over.index, over.len, limit },
+            );
+            return untouched(text, diags, &arena);
+        },
+    }
+}
 
-    return .{
-        .text = try arena.allocator().dupeZ(u8, edited.data),
-        .diags = diags,
-        .arena = arena,
-    };
+/// The span every refusal of the whole document carries: all of it, as
+/// far as a `Diag.Span` can say — a text past `u32` is past the ceiling
+/// and refused before any other span is asked of it.
+fn wholeOf(text: []const u8) Diag.Span {
+    return .{ .start = 0, .end = @intCast(@min(text.len, std.math.maxInt(u32))) };
 }
 
 /// The answer that leaves the document as it was: `text` copied into
@@ -123,6 +177,57 @@ pub fn apply(gpa: std.mem.Allocator, text: [:0]const u8, p: *const Plan.Plan) Er
 fn untouched(text: [:0]const u8, diags: Diag.List, arena: *std.heap.ArenaAllocator) Error!Applied {
     const copy = try arena.allocator().dupeZ(u8, text);
     return .{ .text = copy, .diags = diags, .arena = arena.* };
+}
+
+/// What threading a plan's actions through `text` came to.
+const Folded = union(enum) {
+    /// The edited document, in the result's arena, within the ceiling.
+    text: [:0]u8,
+    /// SJON refused an action; the name of its error, static.
+    refused: []const u8,
+    /// The action at `index` of the sequenced order would have made the
+    /// text `len` bytes, past the ceiling.
+    too_large: struct { index: usize, len: usize },
+};
+
+/// `values` spliced into `text` one at a time, each through
+/// `sjon.applyEdit` under `.preserve`, with the length read after every
+/// splice and before the next parse: every text SJON is handed is within
+/// `limit`, and so is the answer. The intermediates are `gpa`'s and freed
+/// as the fold moves on; only the last lands in `arena`.
+///
+/// Bounded by `values`, one splice each.
+fn fold(
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    text: [:0]const u8,
+    values: []const std.json.Value,
+    limit: usize,
+) Error!Folded {
+    var owned: ?[:0]u8 = null;
+    defer if (owned) |o| gpa.free(o);
+    var cur: [:0]const u8 = text;
+    for (values, 0..) |value, i| {
+        std.debug.assert(cur.len <= limit);
+        const next = sjon.applyEdit(gpa, cur, value, .{ .layout = .preserve }) catch |e|
+            switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return .{ .refused = @errorName(e) },
+            };
+        defer next.deinit();
+        if (next.data.len > limit) return .{ .too_large = .{ .index = i, .len = next.data.len } };
+
+        const last = i + 1 == values.len;
+        const into = if (last) arena else gpa;
+        const spliced = try into.dupeZ(u8, next.data);
+        if (last) return .{ .text = spliced };
+        if (owned) |o| gpa.free(o);
+        owned = spliced;
+        cur = spliced;
+    }
+    // An empty batch: `apply` answers that one before it folds, and the
+    // answer would be the text as it came.
+    return .{ .text = try arena.dupeZ(u8, cur) };
 }
 
 /// The plan's actions, parsed back into the values SJON's editor takes.
@@ -389,6 +494,80 @@ test "apply: an action that is not JSON leaves the document alone and says so" {
     try testing.expect(applied.diags.hasErrors());
     try testing.expectEqual(Diag.Code.sjon_diagnostic, applied.diags.items()[0].code);
     try testing.expectEqualStrings(fixture, applied.text);
+}
+
+/// One note inserted at slot `slot` of the fixture's lane: a splice that
+/// GROWS the text, which is what the ceiling tests need.
+fn growBy(b: *Plan.Builder, slot: u32) !void {
+    try b.insertPositional(
+        .{ .root = 1, .path = &.{} },
+        slot,
+        "{\"$form\":\"note\",\"at\":{\"$num\":[4,\"q\"]}," ++
+            "\"dur\":{\"$num\":[0.5,\"q\"]},\"key\":64}",
+    );
+}
+
+/// The length `apply` gives the fixture under `p` with SJON's own ceiling.
+fn appliedLen(p: *const Plan.Plan) !usize {
+    var applied = try apply(testing.allocator, fixture, p);
+    defer applied.deinit();
+    try testing.expect(!applied.diags.hasErrors());
+    return applied.text.len;
+}
+
+/// `applyWithin` under `limit` refuses `p`: one `sjon_diagnostic`, and
+/// the fixture back byte for byte.
+fn expectRefusedWithin(p: *const Plan.Plan, limit: usize) !void {
+    var applied = try applyWithin(testing.allocator, fixture, p, limit);
+    defer applied.deinit();
+    try testing.expectEqual(@as(usize, 1), applied.diags.items().len);
+    try testing.expectEqual(Diag.Code.sjon_diagnostic, applied.diags.items()[0].code);
+    try testing.expect(std.mem.indexOf(u8, applied.diags.items()[0].message, "ceiling") != null);
+    try testing.expectEqualStrings(fixture, applied.text);
+}
+
+test "apply: a splice that would grow the document past SJON's ceiling is refused, untouched" {
+    // SJON asserts every source it parses is within `Binary.MAX_FILE_SIZE`
+    // — undefined behaviour in ReleaseSmall — and an insert GROWS the
+    // text, so a document inside the ceiling was one splice from a parse
+    // past it, and `tpr_apply` re-parses what `apply` hands back. The
+    // real ceiling is 256 MiB, so the test drives `applyWithin`, the
+    // entry `apply` calls with it, under a ceiling the fixture sits just
+    // below.
+    const gpa = testing.allocator;
+    try testing.expectEqual(@as(usize, sjon.Binary.MAX_FILE_SIZE), ceiling);
+
+    var one: Plan.Builder = .init(gpa);
+    errdefer one.deinit();
+    try growBy(&one, 0);
+    var first = try one.finish();
+    defer first.deinit();
+    const after_first = try appliedLen(&first);
+    try testing.expect(after_first > fixture.len);
+
+    // At the ceiling exactly the edit lands; a byte under it, refused.
+    {
+        var applied = try applyWithin(gpa, fixture, &first, after_first);
+        defer applied.deinit();
+        try testing.expect(!applied.diags.hasErrors());
+        try testing.expectEqual(after_first, applied.text.len);
+    }
+    try expectRefusedWithin(&first, after_first - 1);
+
+    // Two inserts, the first inside the ceiling and the second past it:
+    // all-or-nothing, so the answer is the document as it CAME, not the
+    // text after the first splice.
+    var two: Plan.Builder = .init(gpa);
+    errdefer two.deinit();
+    try growBy(&two, 0);
+    try growBy(&two, 1);
+    var both = try two.finish();
+    defer both.deinit();
+    try testing.expect(try appliedLen(&both) > after_first);
+    try expectRefusedWithin(&both, after_first);
+
+    // …and a document already past the ceiling is never parsed at all.
+    try expectRefusedWithin(&first, fixture.len - 1);
 }
 
 test "apply: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
