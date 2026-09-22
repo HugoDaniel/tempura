@@ -55,6 +55,7 @@ const Resolver = @import("Resolver.zig");
 const bridge_it = @import("bridge_it.zig");
 const bridge_smf = @import("bridge_smf.zig");
 const checks = @import("checks.zig");
+const narrow = @import("narrow.zig");
 const itf = @import("../itf/itf.zig");
 const smf = @import("../smf/smf.zig");
 
@@ -760,8 +761,8 @@ const Ctx = struct {
                 if (self.tree.tagOf(node) == .vector) {
                     const elems = self.tree.vectorElements(node);
                     if (elems.len == 2) {
-                        n = castU8(readNumber(self.tree, elems[0]));
-                        d = castU8(readNumber(self.tree, elems[1]));
+                        n = narrow.orZero(u8, readNumber(self.tree, elems[0]));
+                        d = narrow.orZero(u8, readNumber(self.tree, elems[1]));
                     }
                 }
             }
@@ -793,7 +794,7 @@ const Ctx = struct {
 
             const tempo: @FieldType(Doc.TempoPoint, "tempo") = blk: {
                 if (kvNode(self.tree, children, "us")) |node| {
-                    break :blk .{ .us = castU32(readNumber(self.tree, node)) };
+                    break :blk .{ .us = narrow.orZero(u32, readNumber(self.tree, node)) };
                 }
                 if (kvNode(self.tree, children, "qpm")) |node| {
                     break :blk .{ .qpm = readNumber(self.tree, node) orelse 0 };
@@ -854,12 +855,13 @@ const Ctx = struct {
             // `:size` is a USER number and the schema's bounds are not a
             // cast's: `1e30` has no `u64` to be truncated to, and an
             // `@intFromFloat` past the range is a panic on user input
-            // (the root contract forbids one). Saturating instead, with
-            // `bridge_it.castInt` — the doc layer's one such reader — so
-            // an impossible `:size` cannot match the file's length and
-            // comes back as `anchor_mismatch` with a span.
+            // (the root contract forbids one). Saturating instead — the
+            // bridges' rule, `narrow.saturate`, as `bridge_it` reads the
+            // same key off an `(it/source …)` — so an impossible `:size`
+            // cannot match the file's length and comes back as
+            // `anchor_mismatch` with a span.
             const size: ?u64 = if (kvNode(self.tree, children, "size")) |n|
-                if (readNumber(self.tree, n)) |v| bridge_it.castInt(u64, v, 0) else null
+                if (readNumber(self.tree, n)) |v| narrow.saturate(u64, v, 0) else null
             else
                 null;
             const sha_src: ?[]const u8 = if (kvNode(self.tree, children, "sha256")) |n|
@@ -1444,12 +1446,20 @@ const Ctx = struct {
             return null;
         }
         const chs = (try self.channelSet(ch_node.?, span, id)) orelse return null;
-        return .{ .anchor = anchor.id, .address = .{ .smf = .{
-            .track = castU16(readNumber(tree, track_node.?)),
-            .ch = chs,
-            .key = if (kvNode(tree, children, "key")) |n| try self.noteKey(n) else null,
-            .curve = curve,
-        } } };
+        return .{
+            .anchor = anchor.id,
+            .address = .{
+                .smf = .{
+                    // 0, not 1, for a `:track` that will not read: the manifest
+                    // bounds it to 1 and up, so 0 cannot be mistaken for the
+                    // file's first track (`narrow`'s header).
+                    .track = narrow.orZero(u16, readNumber(tree, track_node.?)),
+                    .ch = chs,
+                    .key = if (kvNode(tree, children, "key")) |n| try self.noteKey(n) else null,
+                    .curve = curve,
+                },
+            },
+        };
     }
 
     /// A binding to an Impulse Tracker module: `:channel`, and for a
@@ -1497,7 +1507,7 @@ const Ctx = struct {
             return null;
         }
         return .{ .anchor = anchor.id, .address = .{ .it = .{
-            .channel = wireChannel(u6, readNumber(tree, channel_node)),
+            .channel = narrow.wireChannel(u6, readNumber(tree, channel_node)),
             .column = column,
             .fx = itFx(tree, children),
         } } };
@@ -1535,7 +1545,7 @@ const Ctx = struct {
     fn channelSet(self: *Ctx, node: NodeIndex, span: Ast.Span, id: []const u8) Error!?Doc.Channels {
         const tree = self.tree;
         if (tree.tagOf(node) != .vector) {
-            return Doc.Channels.single(wireChannel(u4, readNumber(tree, node)));
+            return Doc.Channels.single(narrow.wireChannel(u4, readNumber(tree, node)));
         }
         const elems = tree.vectorElements(node);
         if (elems.len == 0) {
@@ -1550,7 +1560,7 @@ const Ctx = struct {
         }
         var set: Doc.Channels = .none;
         for (elems) |e| {
-            const c = wireChannel(u4, readNumber(tree, e));
+            const c = narrow.wireChannel(u4, readNumber(tree, e));
             if (set.has(c)) {
                 try self.emit(
                     .address_invalid,
@@ -1585,17 +1595,17 @@ const Ctx = struct {
                 tree,
                 children,
                 "vel",
-            )) |n| castU7(readNumber(tree, n)) else default_vel,
+            )) |n| narrow.orZero(u7, readNumber(tree, n)) else default_vel,
             .ch = if (kvNode(
                 tree,
                 children,
                 "ch",
-            )) |n| wireChannel(u4, readNumber(tree, n)) else default_note_ch,
+            )) |n| narrow.wireChannel(u4, readNumber(tree, n)) else default_note_ch,
             .off_vel = if (kvNode(
                 tree,
                 children,
                 "off-vel",
-            )) |n| castU7(readNumber(tree, n)) else null,
+            )) |n| narrow.orZero(u7, readNumber(tree, n)) else null,
             .span = .{ .start = span.start, .end = span.end },
         };
     }
@@ -1659,14 +1669,14 @@ const Ctx = struct {
                 tree,
                 children,
                 "repeat",
-            )) |n| castU32(readNumber(tree, n)) else default_repeat,
+            )) |n| narrow.orZero(u32, readNumber(tree, n)) else default_repeat,
             .offset = offset,
             .length = length,
             .transpose = if (kvNode(
                 tree,
                 children,
                 "transpose",
-            )) |n| castI8(readNumber(tree, n)) else default_transpose,
+            )) |n| narrow.orZero(i8, readNumber(tree, n)) else default_transpose,
             .span = .{ .start = span.start, .end = span.end },
         };
     }
@@ -1831,7 +1841,7 @@ const Ctx = struct {
     /// (`"C4"` is 60, sharps `#`, flats `b` — the midi set's convention,
     /// midi 02).
     fn noteKey(self: *Ctx, node: NodeIndex) Error!?u7 {
-        if (self.tree.tagOf(node) != .string) return castU7(readNumber(self.tree, node));
+        if (self.tree.tagOf(node) != .string) return narrow.orZero(u7, readNumber(self.tree, node));
         const spelling = self.tree.stringText(node);
         return parseNoteName(spelling) orelse {
             // The manifest types the slot as a string and says the
@@ -2312,14 +2322,6 @@ fn literalOf(tree: *const Ast.Tree, node: NodeIndex) ?Pos.Literal {
     return .{ .value = nu.value, .unit = unit };
 }
 
-/// Narrowing readers. Each is TOTAL: the manifest's bounds have already
-/// been checked by the time a clean document gets here, and a document
-/// SJON refused still has to lower without trapping.
-fn castU8(v: ?f64) u8 {
-    const x = v orelse return 0;
-    return if (x >= 0 and x <= 255) @intFromFloat(x) else 0;
-}
-
 /// `:cc` as a curve lane spells it — one number, or `[msb lsb]` for a
 /// 14-bit pair — or null when the key is absent or not one of those two
 /// shapes. Read the same way for a bound lane's address and for a native
@@ -2330,11 +2332,11 @@ fn ccAddress(tree: *const Ast.Tree, children: []const NodeIndex) ?Doc.SmfCurve {
         const elems = tree.vectorElements(node);
         if (elems.len != 2) return null;
         return .{ .cc14 = .{
-            castU7(readNumber(tree, elems[0])),
-            castU7(readNumber(tree, elems[1])),
+            narrow.orZero(u7, readNumber(tree, elems[0])),
+            narrow.orZero(u7, readNumber(tree, elems[1])),
         } };
     }
-    return .{ .cc = castU7(readNumber(tree, node)) };
+    return .{ .cc = narrow.orZero(u7, readNumber(tree, node)) };
 }
 
 /// `:range` as a curve lane spells it — `[lo hi]` — or null when the key
@@ -2376,39 +2378,6 @@ fn itFx(tree: *const Ast.Tree, children: []const NodeIndex) ?u8 {
     if (tree.tagOf(n) != .string) return null;
     const t = tree.stringText(n);
     return if (t.len == 1) t[0] else null;
-}
-
-fn castU7(v: ?f64) u7 {
-    const x = v orelse return 0;
-    return if (x >= 0 and x <= 127) @intFromFloat(x) else 0;
-}
-
-/// A `:track` that will not read answers 0 like every other narrowing
-/// reader here, not 1: the manifest bounds `:track` to 1 and up, so 0 is
-/// outside its domain and cannot be mistaken for the first track of the
-/// file. (`wireChannel` is the one that answers 0 meaningfully — 0 is
-/// channel 1 on the wire, the manifest's own floor.)
-fn castU16(v: ?f64) u16 {
-    const x = v orelse return 0;
-    return if (x >= 0 and x <= 65535) @intFromFloat(x) else 0;
-}
-
-fn castU32(v: ?f64) u32 {
-    const x = v orelse return 0;
-    return if (x >= 0 and x <= 4_294_967_295) @intFromFloat(x) else 0;
-}
-
-fn castI8(v: ?f64) i8 {
-    const x = v orelse return 0;
-    return if (x >= -128 and x <= 127) @intFromFloat(x) else 0;
-}
-
-/// A 1-based display channel to its wire value. `:ch 1` is 0 and
-/// `:channel 1` is 0 — the domains `u4` and `u6` name exactly.
-fn wireChannel(comptime T: type, v: ?f64) T {
-    const max: f64 = @floatFromInt(std.math.maxInt(T));
-    const x = (v orelse 1) - 1;
-    return if (x >= 0 and x <= max) @intFromFloat(x) else 0;
 }
 
 /// The most a note name's `#`/`b` run may move its letter: an octave.

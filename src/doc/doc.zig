@@ -47,6 +47,10 @@ pub const bridge_it = @import("bridge_it.zig");
 /// The skeleton: the timeline tier a file with no residue derives.
 pub const skeleton = @import("skeleton.zig");
 
+/// A tree's number narrowed to the integer a field holds — total, and
+/// named by what an out-of-range number becomes.
+pub const narrow = @import("narrow.zig");
+
 /// The `dump` pipeline: a `.mid` or a `.it` in, a document out — the
 /// one file in this part that sits ABOVE it (it reaches into
 /// `residue/` and both format cores), because an assembly needs every
@@ -125,5 +129,6 @@ test {
     _ = bridge_smf;
     _ = bridge_it;
     _ = skeleton;
+    _ = narrow;
     _ = pipeline;
 }

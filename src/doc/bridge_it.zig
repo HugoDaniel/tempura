@@ -27,6 +27,7 @@ const Diag = @import("../Diag.zig");
 const Doc = @import("Value.zig");
 const Schema = @import("../Schema.zig");
 const bridge_smf = @import("bridge_smf.zig");
+const narrow = @import("narrow.zig");
 const itf = @import("../itf/itf.zig");
 const model = itf.model;
 const walk = itf.walk;
@@ -858,7 +859,7 @@ const Reader = struct {
             // no `u64` can hold is user input, not a cast's problem, and
             // a saturated one disagrees with the file and says
             // `anchor_conflict` / `anchor_mismatch` with a span.
-            .size = if (kvNumber(tree, children, "size")) |v| castInt(u64, v, 0) else null,
+            .size = if (kvNumber(tree, children, "size")) |v| narrow.saturate(u64, v, 0) else null,
             .sha256 = if (kvNode(tree, children, "sha256")) |n|
                 if (tree.tagOf(n) == .string) tree.stringText(n) else null
             else
@@ -871,14 +872,14 @@ const Reader = struct {
         const tree = self.tree;
         const children = tree.formHeader(form).children;
         const h = &self.b.module.header;
-        h.initial_speed = castInt(u8, kvNumber(tree, children, "speed"), defaults.speed);
-        h.initial_tempo = castInt(u8, kvNumber(tree, children, "tempo"), defaults.tempo);
+        h.initial_speed = narrow.saturate(u8, kvNumber(tree, children, "speed"), defaults.speed);
+        h.initial_tempo = narrow.saturate(u8, kvNumber(tree, children, "tempo"), defaults.tempo);
         if (kvNode(tree, children, "highlight")) |n| {
             if (tree.tagOf(n) == .vector) {
                 const elems = tree.vectorElements(n);
                 if (elems.len == 2) {
-                    h.highlight_minor = castInt(u8, numberOf(tree, elems[0]), 4);
-                    h.highlight_major = castInt(u8, numberOf(tree, elems[1]), 16);
+                    h.highlight_minor = narrow.saturate(u8, numberOf(tree, elems[0]), 4);
+                    h.highlight_major = narrow.saturate(u8, numberOf(tree, elems[1]), 16);
                     h.special |= model.special.highlight;
                 }
             }
@@ -893,20 +894,24 @@ const Reader = struct {
             const on = boolAt(tree, children, entry[0]) orelse continue;
             if (on) h.flags |= entry[1] else h.flags &= ~entry[1];
         }
-        h.global_volume = castInt(u8, kvNumber(tree, children, "global-vol"), defaults.global_vol);
-        h.mix_volume = castInt(u8, kvNumber(tree, children, "mix-vol"), defaults.mix_vol);
-        h.pan_separation = castInt(
+        h.global_volume = narrow.saturate(
+            u8,
+            kvNumber(tree, children, "global-vol"),
+            defaults.global_vol,
+        );
+        h.mix_volume = narrow.saturate(u8, kvNumber(tree, children, "mix-vol"), defaults.mix_vol);
+        h.pan_separation = narrow.saturate(
             u8,
             kvNumber(tree, children, "pan-separation"),
             defaults.pan_separation,
         );
-        h.pitch_wheel_depth = castInt(
+        h.pitch_wheel_depth = narrow.saturate(
             u8,
             kvNumber(tree, children, "pitch-wheel-depth"),
             defaults.pitch_wheel_depth,
         );
-        h.cwtv = castInt(u16, kvNumber(tree, children, "cwtv"), model.cwtv_tempura);
-        h.cmwt = castInt(u16, kvNumber(tree, children, "cmwt"), model.cmwt_tempura);
+        h.cwtv = narrow.saturate(u16, kvNumber(tree, children, "cwtv"), model.cwtv_tempura);
+        h.cmwt = narrow.saturate(u16, kvNumber(tree, children, "cmwt"), model.cmwt_tempura);
     }
 
     fn channels(self: *Reader, form: NodeIndex) Error!void {
@@ -917,17 +922,17 @@ const Reader = struct {
             if (!std.mem.eql(u8, tree.formHeader(child).head, "ch")) continue;
             const children = tree.formHeader(child).children;
             const number = positionalNumber(tree, children) orelse continue;
-            if (number < 1 or number > model.channels) continue;
-            const i: usize = @intFromFloat(number - 1);
+            const i: usize = narrow.int(u6, number - 1) orelse continue;
 
             const surround = boolAt(tree, children, "surround") orelse false;
             const muted = boolAt(tree, children, "muted") orelse false;
-            const pan = castInt(u8, kvNumber(tree, children, "pan"), defaults.pan);
+            const pan = narrow.saturate(u8, kvNumber(tree, children, "pan"), defaults.pan);
             h.channel_pan[i] = (if (surround) @as(
                 u8,
                 100,
             ) else pan) | (if (muted) @as(u8, 0x80) else 0);
-            h.channel_vol[i] = castInt(u8, kvNumber(tree, children, "vol"), defaults.channel_vol);
+            const vol = kvNumber(tree, children, "vol");
+            h.channel_vol[i] = narrow.saturate(u8, vol, defaults.channel_vol);
         }
     }
 
@@ -1093,7 +1098,7 @@ const Reader = struct {
             if (!std.mem.eql(u8, tree.formHeader(child).head, "data")) continue;
             const data = tree.formHeader(child).children;
             record.data = try self.binChild(child);
-            record.bits = castInt(u8, kvNumber(tree, data, "bits"), 8);
+            record.bits = narrow.saturate(u8, kvNumber(tree, data, "bits"), 8);
             record.channels = if (boolAt(tree, data, "stereo") orelse false) 2 else 1;
             record.enc = encOf(symbolAt(tree, data, "enc"));
         }
@@ -1196,7 +1201,7 @@ const Reader = struct {
     /// 65535)` asked for about 21 GB of cells.
     fn patternRows(self: *Reader, form: NodeIndex, children: []const NodeIndex) Error!u16 {
         const spelled = kvNumber(self.tree, children, "rows");
-        const declared = castInt(u16, spelled, defaults.rows);
+        const declared = narrow.saturate(u16, spelled, defaults.rows);
         const rows = std.math.clamp(declared, 1, itf.read.max_pattern_rows);
         if (rows != declared) try self.diags.add(
             .it_pattern_rows_out_of_range,
@@ -1212,8 +1217,8 @@ const Reader = struct {
         const tree = self.tree;
         const children = tree.formHeader(form).children;
         const number = positionalNumber(tree, children) orelse return;
-        if (number < 0 or number >= @as(f64, @floatFromInt(pat.rows))) return;
-        const r: usize = @intFromFloat(number);
+        const r: usize = narrow.int(u16, number) orelse return;
+        if (r >= pat.rows) return;
 
         for (children) |child| {
             if (tree.tagOf(child) != .form) continue;
@@ -1248,7 +1253,7 @@ const Reader = struct {
         const c = channel orelse return;
 
         var out: model.Cell = .{ .note = note };
-        if (kvNumber(tree, children, "ins")) |v| out.ins = castInt(u8, v, 0);
+        if (kvNumber(tree, children, "ins")) |v| out.ins = narrow.saturate(u8, v, 0);
         out.vol = try self.volume(children);
         if (kvNode(tree, children, "fx")) |n| {
             if (tree.tagOf(n) == .string) {
@@ -1269,7 +1274,7 @@ const Reader = struct {
     fn volume(self: *Reader, children: []const NodeIndex) Error!u8 {
         const tree = self.tree;
         const node = kvNode(tree, children, "vol") orelse return model.vol_none;
-        if (numberOf(tree, node)) |v| return castInt(u8, v, model.vol_none);
+        if (numberOf(tree, node)) |v| return narrow.saturate(u8, v, model.vol_none);
         if (tree.tagOf(node) != .string) return model.vol_none;
 
         const text = tree.stringText(node);
@@ -1326,8 +1331,8 @@ const Reader = struct {
         // empty and the writer has nothing to copy.
         const at = kvNumber(tree, children, "at") orelse return .none;
         const region: model.Region = .{
-            .off = castInt(u32, at, 0),
-            .len = castInt(u32, kvNumber(tree, children, "len"), 0),
+            .off = narrow.saturate(u32, at, 0),
+            .len = narrow.saturate(u32, kvNumber(tree, children, "len"), 0),
         };
         if (self.anchor_bytes) |bytes| {
             if (region.end() > bytes.len) try self.diags.add(
@@ -1365,7 +1370,7 @@ fn orderEntry(tree: *const Ast.Tree, child: NodeIndex) ?u8 {
             if (std.mem.eql(u8, text, "end")) return walk.order_end;
             return null;
         },
-        .number, .number_i64, .number_u64 => castInt(u8, numberOf(tree, child), 0),
+        .number, .number_i64, .number_u64 => narrow.saturate(u8, numberOf(tree, child), 0),
         else => null,
     };
 }
@@ -1451,26 +1456,6 @@ fn positionalNumber(tree: *const Ast.Tree, children: []const NodeIndex) ?f64 {
         if (numberOf(tree, c)) |v| return v;
     }
     return null;
-}
-
-/// One user number narrowed to the field that holds it, SATURATING —
-/// the doc layer's only float-to-integer reader, and the shape every one
-/// of them has to have.
-///
-/// A document's numbers are user input, so a narrowing cast on one is a
-/// panic waiting for `1e30` (`root.zig`: "user input is never asserted
-/// on"). NaN takes the fallback, a value past either end takes that end,
-/// and what is left is in range by construction. `fromSjon.readAnchors`
-/// calls it for the same `:size` key this file reads two forms away —
-/// which is why it is public rather than a second copy there.
-pub fn castInt(comptime T: type, v: ?f64, fallback: T) T {
-    const x = v orelse return fallback;
-    if (std.math.isNan(x)) return fallback;
-    const lo: f64 = @floatFromInt(std.math.minInt(T));
-    const hi: f64 = @floatFromInt(std.math.maxInt(T));
-    if (x <= lo) return std.math.minInt(T);
-    if (x >= hi) return std.math.maxInt(T);
-    return @intFromFloat(x);
 }
 
 // ---------------------------------------------------------------------

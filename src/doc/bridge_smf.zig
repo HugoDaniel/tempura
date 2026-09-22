@@ -29,8 +29,8 @@
 //! numeric bounds, so a document that breaks one is refused at
 //! validation and rides across as `sjon_diagnostic` — the split
 //! `fromSjon.zig`'s header states. The readers here are TOTAL and
-//! saturate, exactly as that file's casts do, so an unvalidated tree
-//! still lowers without trapping.
+//! saturate — `narrow.saturate`, the format bridges' rule — so an
+//! unvalidated tree still lowers without trapping.
 
 const std = @import("std");
 const sjon = @import("sjon");
@@ -38,6 +38,7 @@ const sjon = @import("sjon");
 const Diag = @import("../Diag.zig");
 const Doc = @import("Value.zig");
 const Schema = @import("../Schema.zig");
+const narrow = @import("narrow.zig");
 const smf = @import("../smf/smf.zig");
 
 const Ast = sjon.Ast;
@@ -516,8 +517,10 @@ const Reader = struct {
                 if (!std.mem.eql(u8, ns, "midi")) continue;
             }
             if (std.mem.eql(u8, hdr.head, "smf")) {
-                self.b.format = castInt(u8, kvNumber(self.tree, hdr.children, "format"), 1);
-                const ppq = castInt(u15, kvNumber(self.tree, hdr.children, "division"), 480);
+                const format = kvNumber(self.tree, hdr.children, "format");
+                const division = kvNumber(self.tree, hdr.children, "division");
+                self.b.format = narrow.saturate(u8, format, 1);
+                const ppq = narrow.saturate(u15, division, 480);
                 self.b.division = .{ .ppq = ppq };
             } else if (std.mem.eql(u8, hdr.head, "mtrk")) {
                 try self.track(idx);
@@ -539,7 +542,7 @@ const Reader = struct {
             // is already refused; lowered anyway, it floors at 0, which
             // keeps every tick a bound lane pairs and converts inside
             // `[0, maxInt(i64)]` — the one range whose differences fit.
-            const at = @max(0, castInt(
+            const at = @max(0, narrow.saturate(
                 i64,
                 kvNumber(self.tree, self.tree.formHeader(child).children, "at"),
                 0,
@@ -610,7 +613,7 @@ const Reader = struct {
             => .{ .{ .bytes = try self.textBytes(children) }, kind },
             .meta_unknown => .{ .{ .meta = .{
                 .bytes = try self.hexBytes(children, "data"),
-                .meta_type = castInt(u8, kvNumber(tree, children, "type"), 0),
+                .meta_type = narrow.saturate(u8, kvNumber(tree, children, "type"), 0),
             } }, kind },
             .sequence_number,
             .midi_channel_prefix,
@@ -670,31 +673,31 @@ const Reader = struct {
 fn channelPayload(tree: *const Ast.Tree, children: []const NodeIndex, kind: smf.Kind) smf.Payload {
     return switch (kind) {
         .note_off, .note_on => .{ .note = .{
-            .ch = wireChannel(tree, children),
-            .key = castInt(u8, kvNumber(tree, children, "key"), 0),
-            .vel = castInt(u8, kvNumber(tree, children, "vel"), 0),
+            .ch = channelOf(tree, children),
+            .key = narrow.saturate(u8, kvNumber(tree, children, "key"), 0),
+            .vel = narrow.saturate(u8, kvNumber(tree, children, "vel"), 0),
         } },
         .poly_pressure => .{ .poly = .{
-            .ch = wireChannel(tree, children),
-            .key = castInt(u8, kvNumber(tree, children, "key"), 0),
-            .val = castInt(u8, kvNumber(tree, children, "val"), 0),
+            .ch = channelOf(tree, children),
+            .key = narrow.saturate(u8, kvNumber(tree, children, "key"), 0),
+            .val = narrow.saturate(u8, kvNumber(tree, children, "val"), 0),
         } },
         .control_change => .{ .control = .{
-            .ch = wireChannel(tree, children),
-            .num = castInt(u8, kvNumber(tree, children, "num"), 0),
-            .val = castInt(u8, kvNumber(tree, children, "val"), 0),
+            .ch = channelOf(tree, children),
+            .num = narrow.saturate(u8, kvNumber(tree, children, "num"), 0),
+            .val = narrow.saturate(u8, kvNumber(tree, children, "val"), 0),
         } },
         .program_change => .{ .program = .{
-            .ch = wireChannel(tree, children),
-            .num = castInt(u8, kvNumber(tree, children, "num"), 0),
+            .ch = channelOf(tree, children),
+            .num = narrow.saturate(u8, kvNumber(tree, children, "num"), 0),
         } },
         .channel_pressure => .{ .pressure = .{
-            .ch = wireChannel(tree, children),
-            .val = castInt(u8, kvNumber(tree, children, "val"), 0),
+            .ch = channelOf(tree, children),
+            .val = narrow.saturate(u8, kvNumber(tree, children, "val"), 0),
         } },
         .pitch_bend => .{ .bend = .{
-            .ch = wireChannel(tree, children),
-            .value = castInt(u16, kvNumber(tree, children, "val"), 8192),
+            .ch = channelOf(tree, children),
+            .value = narrow.saturate(u16, kvNumber(tree, children, "val"), 8192),
         } },
         else => unreachable,
     };
@@ -704,27 +707,27 @@ fn channelPayload(tree: *const Ast.Tree, children: []const NodeIndex, kind: smf.
 /// defaults where a key is absent. For those eight kinds only.
 fn metaPayload(tree: *const Ast.Tree, children: []const NodeIndex, kind: smf.Kind) smf.Payload {
     return switch (kind) {
-        .sequence_number => .{ .number = castInt(u16, kvNumber(tree, children, "num"), 0) },
-        .midi_channel_prefix => .{ .byte = wireChannel(tree, children) },
-        .midi_port => .{ .byte = castInt(u8, kvNumber(tree, children, "port"), 0) },
+        .sequence_number => .{ .number = narrow.saturate(u16, kvNumber(tree, children, "num"), 0) },
+        .midi_channel_prefix => .{ .byte = channelOf(tree, children) },
+        .midi_port => .{ .byte = narrow.saturate(u8, kvNumber(tree, children, "port"), 0) },
         .end_of_track => .empty,
-        .set_tempo => .{ .tempo = castInt(u32, kvNumber(tree, children, "us"), 0) },
+        .set_tempo => .{ .tempo = narrow.saturate(u32, kvNumber(tree, children, "us"), 0) },
         .smpte_offset => .{ .smpte = .{
-            .hr = castInt(u8, kvNumber(tree, children, "hr"), 0),
-            .mn = castInt(u8, kvNumber(tree, children, "mn"), 0),
-            .se = castInt(u8, kvNumber(tree, children, "se"), 0),
-            .fr = castInt(u8, kvNumber(tree, children, "fr"), 0),
-            .ff = castInt(u8, kvNumber(tree, children, "ff"), 0),
+            .hr = narrow.saturate(u8, kvNumber(tree, children, "hr"), 0),
+            .mn = narrow.saturate(u8, kvNumber(tree, children, "mn"), 0),
+            .se = narrow.saturate(u8, kvNumber(tree, children, "se"), 0),
+            .fr = narrow.saturate(u8, kvNumber(tree, children, "fr"), 0),
+            .ff = narrow.saturate(u8, kvNumber(tree, children, "ff"), 0),
         } },
         .time_signature => .{ .time_sig = .{
-            .nn = castInt(u8, kvNumber(tree, children, "num"), 4),
-            .dd = powerOfTwo(castInt(u16, kvNumber(tree, children, "denom"), 4)),
-            .cc = castInt(u8, kvNumber(tree, children, "clocks"), 24),
-            .bb = castInt(u8, kvNumber(tree, children, "thirty-seconds"), 8),
+            .nn = narrow.saturate(u8, kvNumber(tree, children, "num"), 4),
+            .dd = powerOfTwo(narrow.saturate(u16, kvNumber(tree, children, "denom"), 4)),
+            .cc = narrow.saturate(u8, kvNumber(tree, children, "clocks"), 24),
+            .bb = narrow.saturate(u8, kvNumber(tree, children, "thirty-seconds"), 8),
         } },
         .key_signature => .{ .key_sig = .{
-            .sf = castInt(i8, kvNumber(tree, children, "sf"), 0),
-            .mi = castInt(u8, kvNumber(tree, children, "mi"), 0),
+            .sf = narrow.saturate(i8, kvNumber(tree, children, "sf"), 0),
+            .mi = narrow.saturate(u8, kvNumber(tree, children, "mi"), 0),
         } },
         else => unreachable,
     };
@@ -756,24 +759,10 @@ fn kvNumber(tree: *const Ast.Tree, children: []const NodeIndex, name: []const u8
     };
 }
 
-/// `:ch` 1..16 back to the wire's 0..15. Absent or out of range is
-/// channel 1, which is 0.
-fn wireChannel(tree: *const Ast.Tree, children: []const NodeIndex) u8 {
-    const v = kvNumber(tree, children, "ch") orelse return 0;
-    return if (v >= 1 and v <= 16) @intFromFloat(v - 1) else 0;
-}
-
-/// A narrowing read that SATURATES rather than trapping. The manifest's
-/// bounds have already refused anything outside them; this is what keeps
-/// an unvalidated tree from taking the process with it.
-fn castInt(comptime T: type, v: ?f64, fallback: T) T {
-    const x = v orelse return fallback;
-    if (std.math.isNan(x)) return fallback;
-    const lo: f64 = @floatFromInt(std.math.minInt(T));
-    const hi: f64 = @floatFromInt(std.math.maxInt(T));
-    if (x <= lo) return std.math.minInt(T);
-    if (x >= hi) return std.math.maxInt(T);
-    return @intFromFloat(x);
+/// `:ch` 1..16 back to the wire's 0..15 (`narrow.wireChannel`): absent
+/// or out of range is channel 1, which is 0.
+fn channelOf(tree: *const Ast.Tree, children: []const NodeIndex) u8 {
+    return narrow.wireChannel(u4, kvNumber(tree, children, "ch"));
 }
 
 /// A time signature's denominator back to RP-001's `dd` exponent. A
