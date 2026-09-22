@@ -1167,8 +1167,11 @@ const Run = struct {
         return std.mem.join(self.arena, ", ", parts.items);
     }
 
+    /// A binding's keys, in the canonical printer's spelling — the one
+    /// owner (`toSjon.appendAddressKeys`), so the bound lane a stale
+    /// verdict writes reads back as the text it printed.
     fn addressKeys(self: *Run, out: *std.ArrayList(u8), address: Doc.Address) Error!void {
-        return addressKeysInto(self.arena, out, address);
+        return toSjon.appendAddressKeys(self.arena, out, address);
     }
 
     fn addressText(self: *Run, address: Doc.Address) Error![]const u8 {
@@ -1257,39 +1260,6 @@ const Run = struct {
         }
     }
 };
-
-/// The binding keys of `address`, spelled exactly as the canonical
-/// printer spells them (`doc/toSjon.zig`'s `binding`).
-///
-/// The two spellings MUST agree: a bound lane this writes is read back
-/// and re-printed by `toSjon`, and a disagreement would make a dump
-/// non-idempotent — dump, print, dump again and the text moves. A test
-/// at the bottom of this file loads what this produces and compares the
-/// printer's own output with it, address shape by address shape.
-pub fn addressKeysInto(gpa: Allocator, out: *std.ArrayList(u8), address: Doc.Address) Error!void {
-    switch (address) {
-        .smf => |s| {
-            try out.print(gpa, " :track {d} :ch ", .{s.track});
-            try channelsInto(gpa, out, s.ch, "[", " ", "]");
-            if (s.key) |k| try out.print(gpa, " :key {d}", .{k});
-            if (s.curve) |c| switch (c) {
-                .cc => |n| try out.print(gpa, " :cc {d}", .{n}),
-                .cc14 => |pair| try out.print(gpa, " :cc [{d} {d}]", .{ pair[0], pair[1] }),
-                .bend => try out.appendSlice(gpa, " :bend true"),
-                .pressure => try out.appendSlice(gpa, " :pressure true"),
-                .velocity => try out.appendSlice(gpa, " :velocity true"),
-            };
-        },
-        .it => |s| {
-            try out.print(gpa, " :channel {d}", .{@as(u8, s.channel) + 1});
-            if (s.column) |col| {
-                try out.appendSlice(gpa, " :column ");
-                try out.appendSlice(gpa, @tagName(col));
-            }
-            if (s.fx) |letter| try out.print(gpa, " :fx \"{c}\"", .{letter});
-        },
-    }
-}
 
 /// The address as a diagnostic says it — the same facts `addressKeys`
 /// spells as document keys, in prose, because a warning is read by a
@@ -3375,10 +3345,11 @@ test "reconcile: a lane record naming a lane the essence has not got is named an
 }
 
 test "reconcile: the binding keys it writes are the ones the printer writes back" {
-    // `addressKeysInto` and `toSjon`'s `binding` are two spellings of one
-    // thing, and a disagreement would make a dump non-idempotent: the
-    // bound lane a stale verdict writes is read back and re-printed, and
-    // the text would move on the second pass. Every address shape, once.
+    // A stale verdict's bound lane is spelled by `toSjon.appendAddressKeys`
+    // — the printer's own — and read back and re-printed: the text must
+    // not move on the second pass. Every address shape, once, and the
+    // `:fx "\""` the rebind used to write unescaped (as text that did
+    // not parse).
     const gpa = testing.allocator;
     var schema = try Schema.load(gpa);
     defer schema.deinit();
@@ -3429,6 +3400,7 @@ test "reconcile: the binding keys it writes are the ones the printer writes back
         .{ .kind = "notes", .address = .{ .it = .{ .channel = 3, .column = null, .fx = null } } },
         .{ .kind = "curve", .address = .{ .it = .{ .channel = 5, .column = .vol, .fx = null } } },
         .{ .kind = "curve", .address = .{ .it = .{ .channel = 5, .column = .fx, .fx = 'T' } } },
+        .{ .kind = "curve", .address = .{ .it = .{ .channel = 5, .column = .fx, .fx = '"' } } },
     };
 
     for (cases) |c| {
@@ -3436,7 +3408,7 @@ test "reconcile: the binding keys it writes are the ones the printer writes back
         defer arena.deinit();
 
         var keys: std.ArrayList(u8) = .empty;
-        try addressKeysInto(arena.allocator(), &keys, c.address);
+        try toSjon.appendAddressKeys(arena.allocator(), &keys, c.address);
 
         const kind_name = switch (c.address) {
             .smf => "smf",
@@ -3461,6 +3433,8 @@ test "reconcile: the binding keys it writes are the ones the printer writes back
         var res = try fromSjon.fromSource(gpa, &schema, source, null);
         defer res.deinit();
         try testing.expect(!res.diags.hasErrors());
+        // What was spelled is what was read.
+        try testing.expect(std.meta.eql(c.address, res.doc.lanes[0].binding.?.address));
 
         const printed = try toSjon.print(gpa, &res.doc, &res.map, .{});
         defer gpa.free(printed);

@@ -86,6 +86,74 @@ pub fn print(
     return out.toOwnedSlice(gpa);
 }
 
+/// The binding keys of `address` — everything after `:from <anchor>` —
+/// in the canonical spelling, appended to `out` (which the caller owns
+/// and frees with the `gpa` it passes).
+///
+/// ONE owner. The printer spells a binding here, and so do the two
+/// residue writers that emit a binding a later load reads back: the
+/// stale-lane rebind (`residue/reconcile.zig`) and the message tail
+/// (`residue/it.zig`). Three spellings had drifted — the rebind wrote
+/// `:fx "{c}"` unescaped, so a lane bound at `:fx "\""` came back as
+/// text that does not parse — and a disagreement makes a dump
+/// non-idempotent. A `.mid` address is `:track N :ch C` (one channel is
+/// `:ch 2`, several `:ch [1 2]`, 1-based as the document counts), then
+/// `:key` and the one curve key that narrow it; a `.it` address is
+/// `:channel N`, `:column` and `:fx`, the letter quoted through SJON's
+/// own escaper.
+pub fn appendAddressKeys(
+    gpa: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    address: Doc.Address,
+) Error!void {
+    switch (address) {
+        .smf => |s| {
+            try out.print(gpa, " :track {d} :ch ", .{s.track});
+            if (s.ch.count() == 1) {
+                try out.print(gpa, "{d}", .{@as(u8, s.ch.first()) + 1});
+            } else {
+                try out.append(gpa, '[');
+                var it = s.ch.iterator();
+                var sep = false;
+                while (it.next()) |c| {
+                    if (sep) try out.append(gpa, ' ');
+                    sep = true;
+                    try out.print(gpa, "{d}", .{@as(u8, c) + 1});
+                }
+                try out.append(gpa, ']');
+            }
+            if (s.key) |k| try out.print(gpa, " :key {d}", .{k});
+            if (s.curve) |c| try appendCurveKey(gpa, out, c);
+        },
+        .it => |s| {
+            try out.print(gpa, " :channel {d}", .{@as(u8, s.channel) + 1});
+            if (s.column) |col| try out.print(gpa, " :column {t}", .{col});
+            if (s.fx) |letter| {
+                try out.appendSlice(gpa, " :fx ");
+                try sjon.StringEscape.appendQuoted(out, gpa, &[_]u8{letter});
+            }
+        },
+    }
+}
+
+/// The one key that names a MIDI surface — `:cc N`, `:cc [MSB LSB]`,
+/// `:bend true`, `:pressure true` or `:velocity true` — appended to
+/// `out`: a bound address's narrowing key, and a native curve lane's own
+/// `:cc`, spelled alike.
+pub fn appendCurveKey(
+    gpa: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    curve: Doc.SmfCurve,
+) Error!void {
+    switch (curve) {
+        .cc => |n| try out.print(gpa, " :cc {d}", .{n}),
+        .cc14 => |pair| try out.print(gpa, " :cc [{d} {d}]", .{ pair[0], pair[1] }),
+        .bend => try out.appendSlice(gpa, " :bend true"),
+        .pressure => try out.appendSlice(gpa, " :pressure true"),
+        .velocity => try out.appendSlice(gpa, " :velocity true"),
+    }
+}
+
 const Printer = struct {
     gpa: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -303,67 +371,13 @@ const Printer = struct {
     /// One MIDI surface, as a lane spells it: a bound lane's read
     /// address, or a native curve lane's own `:cc`.
     fn smfCurve(self: *Printer, c: Doc.SmfCurve) Error!void {
-        switch (c) {
-            .cc => |n| {
-                try self.raw(" :cc ");
-                try self.int(n);
-            },
-            .cc14 => |pair| {
-                try self.raw(" :cc [");
-                try self.int(pair[0]);
-                try self.raw(" ");
-                try self.int(pair[1]);
-                try self.raw("]");
-            },
-            .bend => try self.raw(" :bend true"),
-            .pressure => try self.raw(" :pressure true"),
-            .velocity => try self.raw(" :velocity true"),
-        }
+        return appendCurveKey(self.gpa, self.out, c);
     }
 
     fn binding(self: *Printer, b: Doc.Binding) Error!void {
         try self.raw(" :from ");
         try self.raw(b.anchor);
-        switch (b.address) {
-            .smf => |s| {
-                try self.raw(" :track ");
-                try self.int(s.track);
-                // One channel is `:ch 2`; several are `:ch [1 2]`, the
-                // spelling a dump writes for a lane that was rendered on
-                // more than one (`residue/reconcile.zig`, `bindLane`).
-                try self.raw(" :ch ");
-                if (s.ch.count() == 1) {
-                    try self.int(@as(u8, s.ch.first()) + 1);
-                } else {
-                    try self.raw("[");
-                    var it = s.ch.iterator();
-                    var sep = false;
-                    while (it.next()) |c| {
-                        if (sep) try self.raw(" ");
-                        sep = true;
-                        try self.int(@as(u8, c) + 1);
-                    }
-                    try self.raw("]");
-                }
-                if (s.key) |k| {
-                    try self.raw(" :key ");
-                    try self.int(k);
-                }
-                if (s.curve) |c| try self.smfCurve(c);
-            },
-            .it => |s| {
-                try self.raw(" :channel ");
-                try self.int(@as(u8, s.channel) + 1);
-                if (s.column) |col| {
-                    try self.raw(" :column ");
-                    try self.raw(@tagName(col));
-                }
-                if (s.fx) |letter| {
-                    try self.raw(" :fx ");
-                    try self.string(&[_]u8{letter});
-                }
-            },
-        }
+        try appendAddressKeys(self.gpa, self.out, b.address);
     }
 
     /// A lane's children, on their own lines and SORTED BY `:at`.

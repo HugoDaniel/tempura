@@ -65,6 +65,7 @@ const sjon = @import("sjon");
 const Diag = @import("../Diag.zig");
 const Doc = @import("../doc/Value.zig");
 const TimeMap = @import("../time/TimeMap.zig");
+const toSjon = @import("../doc/toSjon.zig");
 const essence = @import("essence.zig");
 const records = @import("records.zig");
 
@@ -523,10 +524,7 @@ const Tailer = struct {
         if (l.binding) |b| {
             try self.raw(" :from ");
             try self.symbol(b.anchor);
-            switch (b.address) {
-                .smf => |s| try self.smfAddress(s),
-                .it => |s| try self.itAddress(s),
-            }
+            try self.addressKeys(b.address);
         }
         if (l.range) |r| {
             try self.raw(" :range [");
@@ -551,69 +549,15 @@ const Tailer = struct {
         try self.commit(group_lane);
     }
 
-    /// A `.mid` address's keys: the track, the channel or channel set,
-    /// and the key and the controller that narrow it, in the canonical
-    /// printer's order and spelling.
-    fn smfAddress(self: *Tailer, s: @FieldType(Doc.Address, "smf")) Error!void {
-        try self.raw(" :track ");
-        try self.int(s.track);
-        try self.raw(" :ch ");
-        try self.channels(s.ch);
-        if (s.key) |k| {
-            try self.raw(" :key ");
-            try self.int(k);
-        }
-        if (s.curve) |curve| try self.curveKey(curve);
-    }
-
-    /// The canonical printer's spelling of a channel set: `2` for one
-    /// channel, `[1 2]` for several, 1-based as the document counts.
-    fn channels(self: *Tailer, chs: Doc.Channels) Error!void {
-        if (chs.count() == 1) return self.int(@as(u8, chs.first()) + 1);
-        try self.raw("[");
-        var it = chs.iterator();
-        var sep = false;
-        while (it.next()) |c| {
-            if (sep) try self.raw(" ");
-            sep = true;
-            try self.int(@as(u8, c) + 1);
-        }
-        try self.raw("]");
-    }
-
-    /// The one key that names a curve's controller surface.
-    fn curveKey(self: *Tailer, curve: Doc.SmfCurve) Error!void {
-        switch (curve) {
-            .cc => |n| {
-                try self.raw(" :cc ");
-                try self.int(n);
-            },
-            .cc14 => |pair| {
-                try self.raw(" :cc [");
-                try self.int(pair[0]);
-                try self.raw(" ");
-                try self.int(pair[1]);
-                try self.raw("]");
-            },
-            .bend => try self.raw(" :bend true"),
-            .pressure => try self.raw(" :pressure true"),
-            .velocity => try self.raw(" :velocity true"),
-        }
-    }
-
-    /// A `.it` address's keys: the channel, 1-based, and the column and
-    /// effect letter that narrow it.
-    fn itAddress(self: *Tailer, s: @FieldType(Doc.Address, "it")) Error!void {
-        try self.raw(" :channel ");
-        try self.int(@as(u8, s.channel) + 1);
-        if (s.column) |col| {
-            try self.raw(" :column ");
-            try self.raw(@tagName(col));
-        }
-        if (s.fx) |letter| {
-            try self.raw(" :fx ");
-            try self.string(&[_]u8{letter});
-        }
+    /// An address's keys in the canonical printer's spelling — the one
+    /// owner, `toSjon.appendAddressKeys` — fed through `byte` like every
+    /// other byte of the tail, so an `:fx` a record decoded as `%` or a
+    /// non-ASCII byte still reverses exactly (`parseTail`).
+    fn addressKeys(self: *Tailer, address: Doc.Address) Error!void {
+        var keys: std.ArrayList(u8) = .empty;
+        defer keys.deinit(self.gpa);
+        try toSjon.appendAddressKeys(self.gpa, &keys, address);
+        for (keys.items) |c| try self.byte(c);
     }
 
     /// A pacer root, verbatim but for the tail's two rules.
