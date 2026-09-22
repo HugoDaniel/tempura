@@ -475,8 +475,11 @@ pub const Doc = struct {
     ///
     /// Every duration is `≥ 0`: notes' and sections' alike resolve
     /// through `TimeMap.durationTicks`, which never answers a distance
-    /// backwards. Two of plan 12's first clauses are NOT here, because
-    /// the loader does not establish them: `:repeat 0` is the schema's
+    /// backwards. Every keyframe component and every `:range` end is
+    /// finite: the reader narrows each through `narrow.f32OrZero`, so
+    /// the `1e999` the manifest refuses is a 0 here, never an infinity
+    /// an exporter has to meet. Two of plan 12's first clauses are NOT
+    /// here, because the loader does not establish them: `:repeat 0` is the schema's
     /// complaint and the clip is kept with its zero, and two anchors of
     /// one `:id` are both kept. Both are diagnostics on the document, not
     /// defects of the value.
@@ -680,7 +683,11 @@ fn laneInvariants(l: *const Lane, in_phrase: bool) void {
         // `ncomp` counts the components in use: one to four.
         std.debug.assert(k.ncomp >= 1);
         std.debug.assert(k.ncomp <= 4);
+        // Every component is finite: `narrow.f32OrZero` keeps a 0 where
+        // f32 holds no value, so no exporter meets an infinity.
+        for (k.value) |c| std.debug.assert(std.math.isFinite(c));
     }
+    if (l.range) |r| for (r) |end| std.debug.assert(std.math.isFinite(end));
     for (l.clips) |c| spanOk(c.span);
 }
 

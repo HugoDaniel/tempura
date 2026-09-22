@@ -25,6 +25,11 @@
 //!     no `u64` holds cannot then match any file.
 //!   * `wireChannel` — a channel counted from 1 to the wire's count from
 //!     0, and channel 1 when the number is absent or no channel.
+//!   * `f32OrZero` — the one FLOAT narrowing: a keyframe's value and a
+//!     curve's `:range`, which the manifest types `:repr f32`. What f32
+//!     cannot hold (`1e39`, and `1e999`, which SJON reads as an infinity)
+//!     is 0, `orZero`'s rule, because `@floatCast` does not trap there —
+//!     it answers an infinity, which then flows into every exporter.
 //!
 //! Until this file the three readers each carried their own copies, and
 //! the difference between the first two rules was an accident of which
@@ -69,6 +74,17 @@ pub fn saturate(comptime T: type, v: ?f64, fallback: T) T {
 pub fn wireChannel(comptime T: type, v: ?f64) T {
     const counted = v orelse return 0;
     return int(T, counted - 1) orelse 0;
+}
+
+/// `v` as the `f32` the document layer keeps, or 0 when there is no
+/// number, it is not one (NaN, an infinity), or its f32 is not finite —
+/// past `floatMax(f32)`, where the manifest's `:repr f32` has already
+/// refused it with `sjon_diagnostic` (see the header). A finite value
+/// in range keeps f32's own rounding of it, `@floatCast`'s.
+pub fn f32OrZero(v: ?f64) f32 {
+    const narrowed: f32 = @floatCast(v orelse return 0);
+    if (!std.math.isFinite(narrowed)) return 0;
+    return narrowed;
 }
 
 /// `T`'s range as two exact `f64` bounds, the upper one exclusive.
@@ -123,4 +139,20 @@ test "narrow: orZero, saturate and wireChannel say what out of range becomes" {
     try testing.expectEqual(@as(u4, 0), wireChannel(u4, null));
     try testing.expectEqual(@as(u6, 63), wireChannel(u6, 64));
     try testing.expectEqual(@as(u6, 0), wireChannel(u6, -9e18));
+}
+
+test "narrow.f32OrZero: what f32 cannot hold is 0, never an infinity" {
+    try testing.expectEqual(@as(f32, 0.5), f32OrZero(0.5));
+    try testing.expectEqual(@as(f32, -2), f32OrZero(-2));
+    try testing.expectEqual(@as(f32, 0), f32OrZero(null));
+    try testing.expectEqual(@as(f32, 0), f32OrZero(1e39));
+    try testing.expectEqual(@as(f32, 0), f32OrZero(-1e39));
+    try testing.expectEqual(@as(f32, 0), f32OrZero(std.math.inf(f64)));
+    try testing.expectEqual(@as(f32, 0), f32OrZero(-std.math.inf(f64)));
+    try testing.expectEqual(@as(f32, 0), f32OrZero(std.math.nan(f64)));
+    // f32's own largest finite value still reads, as does a number that
+    // only rounds to it.
+    const max: f64 = std.math.floatMax(f32);
+    try testing.expectEqual(std.math.floatMax(f32), f32OrZero(max));
+    try testing.expectEqual(@as(f32, 3.4e38), f32OrZero(3.4e38));
 }

@@ -1615,6 +1615,12 @@ const Ctx = struct {
         const at_node = kvNode(tree, children, "at") orelse return null;
         const at = (try self.resolve(at_node)) orelse return null;
 
+        // Each component through `narrow.f32OrZero`: the manifest's
+        // `:repr f32` refuses a value f32 cannot hold (`1e39`, or `1e999`,
+        // which SJON reads as an infinity) as `sjon_diagnostic`, and the
+        // reader keeps a 0 in its place rather than the infinity
+        // `@floatCast` would answer — which reached every exporter and the
+        // score of a host that builds a document that loaded with errors.
         var value: [4]f32 = .{ 0, 0, 0, 0 };
         var ncomp: u3 = 1;
         if (kvNode(tree, children, "value")) |node| {
@@ -1622,9 +1628,9 @@ const Ctx = struct {
                 const elems = tree.vectorElements(node);
                 const n = @min(elems.len, 4);
                 ncomp = @intCast(@max(n, 1));
-                for (elems[0..n], 0..) |e, i| value[i] = @floatCast(readNumber(tree, e) orelse 0);
+                for (elems[0..n], 0..) |e, i| value[i] = narrow.f32OrZero(readNumber(tree, e));
             } else {
-                value[0] = @floatCast(readNumber(tree, node) orelse 0);
+                value[0] = narrow.f32OrZero(readNumber(tree, node));
             }
         }
         return .{
@@ -2335,15 +2341,16 @@ fn ccAddress(tree: *const Ast.Tree, children: []const NodeIndex) ?Doc.SmfCurve {
 }
 
 /// `:range` as a curve lane spells it — `[lo hi]` — or null when the key
-/// is absent or not a pair.
+/// is absent or not a pair. Each end is `:repr f32` in the manifest and
+/// narrowed as a keyframe's value is (`narrow.f32OrZero`).
 fn rangeOf(tree: *const Ast.Tree, children: []const NodeIndex) ?[2]f32 {
     const node = kvNode(tree, children, "range") orelse return null;
     if (tree.tagOf(node) != .vector) return null;
     const elems = tree.vectorElements(node);
     if (elems.len != 2) return null;
     return .{
-        @floatCast(readNumber(tree, elems[0]) orelse 0),
-        @floatCast(readNumber(tree, elems[1]) orelse 0),
+        narrow.f32OrZero(readNumber(tree, elems[0])),
+        narrow.f32OrZero(readNumber(tree, elems[1])),
     };
 }
 
@@ -3199,6 +3206,47 @@ test "fromSjon: :ease, :query and :expr keep their source text whole" {
     try testing.expectEqual(@as(u3, 3), res.doc.lanes[0].keyframes[0].ncomp);
     try testing.expectEqualStrings("(euclid 3 8 1)", res.doc.lanes[1].query_src.?);
     try testing.expectEqualStrings("(sin (* beat 6.2832))", res.doc.lanes[2].expr_src.?);
+}
+
+test "fromSjon: a keyframe value or a :range f32 cannot hold is the manifest's refusal and a 0" {
+    // `@floatCast` answered an infinity for `1e39`, and SJON reads `1e999`
+    // as one already: the manifest's `:repr f32` said `sjon_diagnostic`,
+    // and the Doc carried the infinity on into the exporters and the
+    // score of any host that builds a document that loaded with errors.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    const cases = [_]struct { value: []const u8, want: [2]f32 }{
+        .{ .value = "1e999", .want = .{ 0, 0 } },
+        .{ .value = "-1e999", .want = .{ 0, 0 } },
+        .{ .value = "1e39", .want = .{ 0, 0 } },
+        .{ .value = "[0.5 1e39]", .want = .{ 0.5, 0 } },
+        .{ .value = "[1e999 0.25]", .want = .{ 0, 0.25 } },
+    };
+    for (cases) |c| {
+        const source = try std.fmt.allocPrintSentinel(gpa, "{s}" ++
+            "(lane :name glow :kind curve\n  (keyframe :at 0q :value {s}))\n", .{
+            preamble,
+            c.value,
+        }, 0);
+        defer gpa.free(source);
+        var res = try fromSource(gpa, &schema, source, null);
+        defer res.deinit();
+        try testing.expect(res.diags.count(.sjon_diagnostic) >= 1);
+        const k = res.doc.lanes[0].keyframes[0];
+        try testing.expectEqual(c.want[0], k.value[0]);
+        try testing.expectEqual(c.want[1], k.value[1]);
+    }
+
+    var ranged = try fromSource(gpa, &schema, preamble ++
+        \\(lane :name glow :kind curve :range [0 1e39]
+        \\  (keyframe :at 0q :value 0.5))
+        \\
+    , null);
+    defer ranged.deinit();
+    try testing.expect(ranged.diags.count(.sjon_diagnostic) >= 1);
+    try testing.expectEqual([2]f32{ 0, 0 }, ranged.doc.lanes[0].range.?);
 }
 
 test "fromSjon: a pass-through root is kept verbatim, with the comments above it" {
