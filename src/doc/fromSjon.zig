@@ -934,9 +934,7 @@ const Ctx = struct {
                     var read = try bridge_smf.formsToSequence(self.gpa, self.tree, roots);
                     defer read.diags.deinit();
                     errdefer read.sequence.deinit();
-                    for (read.diags.items()) |d| {
-                        try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-                    }
+                    try self.diags.extend(read.diags.items());
                     try midi.append(
                         self.arena,
                         .{ .anchor = anchor_id, .sequence = read.sequence },
@@ -951,9 +949,7 @@ const Ctx = struct {
                     );
                     defer read.diags.deinit();
                     errdefer read.module.deinit();
-                    for (read.diags.items()) |d| {
-                        try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-                    }
+                    try self.diags.extend(read.diags.items());
                     try self.sourceAgrees(doc, anchor_id, read.source);
                     try it.append(self.arena, .{ .anchor = anchor_id, .module = read.module });
                 },
@@ -1132,9 +1128,7 @@ const Ctx = struct {
         // second read.
         if (candidate) |bytes| doc.conductor_bytes = try self.arena.dupe(u8, bytes);
 
-        for (built.diags.items()) |d| {
-            try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-        }
+        try self.diags.extend(built.diags.items());
         // Into the DOCUMENT's arena: the tables outlive the derivation
         // that made them, because every position in the document
         // resolves against them.
@@ -2187,9 +2181,7 @@ pub fn itConductor(gpa: Allocator, module: *const itf.Module, span: Diag.Span) E
 
     var rowmap = try itf.walk.derive(gpa, module, .{});
     errdefer rowmap.deinit();
-    for (rowmap.diags.items()) |d| {
-        try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-    }
+    try diags.extend(rowmap.diags.items());
 
     var tempo: std.ArrayList(Doc.TempoPoint) = .empty;
     var over = false;

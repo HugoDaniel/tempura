@@ -217,7 +217,7 @@ fn dumpSmf(
 ) Error!Dumped {
     var read = try smf.read(gpa, bytes);
     defer read.deinit();
-    try copyDiags(diags, &read.diags);
+    try diags.extend(read.diags.items());
 
     // The version is read BEFORE the detach, because detach's whole
     // answer to a newer envelope is to leave it alone: it takes nothing
@@ -226,7 +226,7 @@ fn dumpSmf(
 
     var detached = try residue_smf.detach(gpa, &read.sequence);
     defer detached.deinit();
-    try copyDiags(diags, &detached.diags);
+    try diags.extend(detached.diags.items());
 
     // Rule 3's "the payloads stay where they are" is literal in a
     // `.mid`: they stay in the TIER, as the plain `sequencer-specific`
@@ -292,7 +292,7 @@ fn dumpIt(
 ) Error!Dumped {
     var read = try itf.read.read(gpa, bytes);
     defer read.deinit();
-    try copyDiags(diags, &read.diags);
+    try diags.extend(read.diags.items());
 
     const chunk_bytes = if (read.module.tmpu) |r| r.slice(bytes) else null;
     const newer = newerIt(chunk_bytes);
@@ -304,7 +304,7 @@ fn dumpIt(
     defer carrier.deinit();
     var chosen = try residue_it.choose(gpa, chunk_bytes, read.module.message, &carrier);
     defer chosen.deinit();
-    try copyDiags(diags, &carrier);
+    try diags.extend(carrier.items());
 
     // The tail is TEXT in IT's own encoding — CR newlines, `%XX` escapes
     // — and rule 5 reads it as SJON, so it is undone here rather than
@@ -415,7 +415,7 @@ fn assemble(
     tier_text: []const u8,
     consumed: reconcile.Consumed,
 ) Error!Dumped {
-    try copyDiags(diags, &rec.diags);
+    try diags.extend(rec.diags.items());
 
     // Into `rec`'s arena, which becomes the `Dumped`'s own: the text
     // dies with the value, and a failure below leaves it to the caller's
@@ -433,7 +433,7 @@ fn assemble(
     const store: Resolver.Memory = .{ .entries = &.{.{ .path = name, .bytes = bytes }} };
     var loaded = try fromSjon.fromSource(gpa, schema, text, Resolver.memory(&store));
     errdefer loaded.deinit();
-    try copyDiags(diags, &loaded.diags);
+    try diags.extend(loaded.diags.items());
     loaded.diags.deinit();
 
     rec.diags.deinit();
@@ -448,11 +448,6 @@ fn assemble(
         .consumed = consumed,
         .arena = rec.arena,
     };
-}
-
-/// Append every diagnostic of `from` to `into`, message and span kept.
-fn copyDiags(into: *Diag.List, from: *const Diag.List) Error!void {
-    for (from.items()) |d| try into.add(d.code, d.severity, d.span, "{s}", .{d.message});
 }
 
 /// A residue this build must leave where it is (plan 04, rule 3): one
@@ -589,7 +584,7 @@ pub fn checkResidue(gpa: Allocator, bytes: []const u8, kind: Doc.AnchorKind) Err
         .smf => {
             var read = try smf.read(gpa, bytes);
             defer read.deinit();
-            try copyDiags(&diags, &read.diags);
+            try diags.extend(read.diags.items());
 
             if (newerSmf(&read.sequence)) |n| {
                 try newerLine(gpa, &out, n);
@@ -598,14 +593,14 @@ pub fn checkResidue(gpa: Allocator, bytes: []const u8, kind: Doc.AnchorKind) Err
 
             var detached = try residue_smf.detach(gpa, &read.sequence);
             defer detached.deinit();
-            try copyDiags(&diags, &detached.diags);
+            try diags.extend(detached.diags.items());
 
             try table(gpa, &out, .{ .smf = &detached.sequence }, detached.payloads, null);
         },
         .it => {
             var read = try itf.read.read(gpa, bytes);
             defer read.deinit();
-            try copyDiags(&diags, &read.diags);
+            try diags.extend(read.diags.items());
 
             const chunk_bytes = if (read.module.tmpu) |r| r.slice(bytes) else null;
             if (newerIt(chunk_bytes)) |n| {
@@ -617,7 +612,7 @@ pub fn checkResidue(gpa: Allocator, bytes: []const u8, kind: Doc.AnchorKind) Err
             defer quiet.deinit();
             var chosen = try residue_it.choose(gpa, chunk_bytes, read.module.message, &quiet);
             defer chosen.deinit();
-            try copyDiags(&diags, &quiet);
+            try diags.extend(quiet.items());
 
             const split = residue_it.splitMessage(read.module.message);
             try out.print(gpa, "chunk: {s}\ntail: {s}\n", .{
@@ -1006,7 +1001,7 @@ fn buildSmf(
         .format0 = opts.format0,
     });
     defer rendered.deinit();
-    try copyDiags(diags, &rendered.diags);
+    try diags.extend(rendered.diags.items());
 
     const wopts: smf.Options = .{
         .running_status = opts.running_status,
@@ -1023,7 +1018,7 @@ fn buildSmf(
     if (!try wantsResidue(diags, opts, if (base) |s| newerSmf(s) else null)) {
         var plain = try smf.write(gpa, &rendered.seq, wopts);
         defer plain.deinit();
-        try copyDiags(diags, &plain.diags);
+        try diags.extend(plain.diags.items());
         return .{
             .bytes = try arena.dupe(u8, plain.bytes),
             .lanes = recs.lanes,
@@ -1094,7 +1089,7 @@ fn smfWithResidue(
 ) Error!Pieces {
     var packed_tier = try residue_essence.pack(gpa, doc, doc_source);
     defer packed_tier.deinit(gpa);
-    try copyDiags(diags, &packed_tier.diags);
+    try diags.extend(packed_tier.diags.items());
 
     const bodies = try encodeLanes(gpa, recs.lanes);
     defer freeBodies(gpa, bodies);
@@ -1106,11 +1101,11 @@ fn smfWithResidue(
         .lanes = bodies,
     }, .{});
     defer carried.deinit();
-    try copyDiags(diags, &carried.diags);
+    try diags.extend(carried.diags.items());
 
     var file = try smf.write(gpa, &carried.sequence, wopts);
     defer file.deinit();
-    try copyDiags(diags, &file.diags);
+    try diags.extend(file.diags.items());
 
     return .{
         .bytes = try arena.dupe(u8, file.bytes),
@@ -1139,7 +1134,7 @@ fn buildIt(
         .fx = opts.fx,
     });
     defer rendered.deinit();
-    try copyDiags(diags, &rendered.diags);
+    try diags.extend(rendered.diags.items());
 
     // The HUMAN half of the song message alone: a rebuild of a document
     // that was dumped from a `.it` would otherwise stack one tail on the
@@ -1256,7 +1251,7 @@ fn itPlain(
         .tmpu = tmpu,
     });
     defer plain.deinit();
-    try copyDiags(diags, &plain.diags);
+    try diags.extend(plain.diags.items());
     return .{
         .bytes = try arena.dupe(u8, plain.bytes),
         .lanes = recs.lanes,
@@ -1283,7 +1278,7 @@ fn itWithResidue(
 ) Error!Pieces {
     var packed_tier = try residue_essence.pack(gpa, doc, doc_source);
     defer packed_tier.deinit(gpa);
-    try copyDiags(diags, &packed_tier.diags);
+    try diags.extend(packed_tier.diags.items());
 
     const bodies = try encodeLanes(gpa, recs.lanes);
     defer freeBodies(gpa, bodies);
@@ -1298,7 +1293,7 @@ fn itWithResidue(
 
     var tail = try residue_it.tail(gpa, doc, &derived.map);
     defer tail.deinit(gpa);
-    try copyDiags(diags, &tail.diags);
+    try diags.extend(tail.diags.items());
     const whole = try residue_it.appendTail(gpa, human, tail.bytes);
     defer gpa.free(whole);
 
@@ -1309,7 +1304,7 @@ fn itWithResidue(
         .message_tail = whole[human.len..],
     });
     defer file.deinit();
-    try copyDiags(diags, &file.diags);
+    try diags.extend(file.diags.items());
 
     return .{
         .bytes = try arena.dupe(u8, file.bytes),

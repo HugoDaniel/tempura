@@ -988,9 +988,7 @@ const Reader = struct {
             if (tree.tagOf(child) != .string) continue;
             var text = try model.utf8ToCp437(self.gpa, tree.stringText(child));
             defer text.deinit();
-            for (text.diags.items()) |d| {
-                try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-            }
+            try self.diags.extend(text.diags.items());
             // The document's newline is IT's CR on the way back (plan 06,
             // "The canonical writer": CR newlines, NUL-terminated).
             const bytes = try self.b.module.allocator().dupe(u8, text.bytes);
