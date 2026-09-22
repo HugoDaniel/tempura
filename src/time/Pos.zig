@@ -547,6 +547,58 @@ test "Pos: spell → parse → tick is the identity on 10 000 random ticks" {
     try testing.expect(q_spellings > 3_000);
 }
 
+test "Pos: spell ∘ parse is the identity on every printed position, under the runner's seed" {
+    // The property, stated whole. For every tick `k` on the grid, [0,
+    // MAX_TICK], the printer's text `spell(k)` reads back through `parse`
+    // and `tickFromLiteral` as `k` itself — and spelling that tick again
+    // gives the SAME TEXT, byte for byte, so a printed position is a
+    // fixed point of `spell ∘ parse` and a dump re-printed never drifts.
+    // A bar line is the map's to resolve: `spell(k, N)` is `Nbar`, and it
+    // parses back as bar `N` asking for the map.
+    //
+    // Seeded from `std.testing.random_seed`, the runner's `--seed`, so
+    // every run draws new positions and a failure prints the seed that
+    // reproduces it. Four regimes: anywhere on the grid, the `9009`
+    // lattice the `q` spelling lives on, the first bars where music is,
+    // and the ceiling, where the f64 seam is thinnest.
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    const rand = prng.random();
+    var buf: [64]u8 = undefined;
+    var again: [64]u8 = undefined;
+    for (0..4_000) |i| {
+        const k = switch (i % 4) {
+            0 => rand.intRangeAtMost(i64, 0, Grid.MAX_TICK),
+            1 => 9009 * rand.intRangeAtMost(i64, 0, @divFloor(Grid.MAX_TICK, 9009)),
+            2 => rand.intRangeAtMost(i64, 0, 64 * Grid.TPQ),
+            else => Grid.MAX_TICK - rand.intRangeAtMost(i64, 0, 1 << 20),
+        };
+        const seed = testing.random_seed;
+        const text = try spelled(&buf, k, null);
+        const lit = switch (parse(text)) {
+            .ok => |l| l,
+            .err => |code| {
+                std.debug.print("seed {d}: {d} spelled {s}: {t}\n", .{ seed, k, text, code });
+                return error.TestSpellingDoesNotParse;
+            },
+        };
+        const back = switch (tickFromLiteral(lit)) {
+            .tick => |t| t,
+            else => return error.TestSpellingNeedsAMap,
+        };
+        if (back != k) {
+            std.debug.print("seed {d}: {d} spelled {s} reads {d}\n", .{ seed, k, text, back });
+            return error.TestRoundTripDrifted;
+        }
+        try testing.expectEqualStrings(text, try spelled(&again, back, null));
+
+        const bar = rand.intRangeAtMost(i64, 0, 1 << 20);
+        const bar_text = try spelled(&buf, k, bar);
+        const bar_lit = parse(bar_text).ok;
+        try testing.expectEqual(Unit.bar, tickFromLiteral(bar_lit).needs_map);
+        try testing.expectEqual(@as(f64, @floatFromInt(bar)), bar_lit.value);
+    }
+}
+
 test "Pos.spell: a negative tick keeps its sign — the printer never lies" {
     // No document holds one (`position_negative` refuses it at the door),
     // but `spell` is total over `i64` and a printer that drops a sign is
