@@ -266,43 +266,18 @@ const Emit = struct {
         return x.at < y.at;
     }
 
-    /// A tick on the target grid.
-    ///
-    /// Exact rational arithmetic in `i128`, so the only question is
-    /// whether the remainder is zero. It is the rounding `--round` asks
-    /// for that is half-to-even, matching how the document's own literals
-    /// round (plan 03).
+    /// A tick on the target grid (`rescale`), and `ppq_rescale_inexact`
+    /// when it does not land and `--round` did not ask for the nearest.
     fn scaled(self: *Emit, at: i64, offset: usize) Fail!i64 {
-        if (self.to_ppq == self.from_ppq) return at;
-
-        const numerator = @as(i128, at) * @as(i128, self.to_ppq);
-        const denominator = @as(i128, self.from_ppq);
-        const quotient = @divFloor(numerator, denominator);
-        const remainder = numerator - quotient * denominator;
-        if (remainder == 0) return clampTick(quotient);
-
-        if (!self.opts.round) {
-            try self.diag(
-                .ppq_rescale_inexact,
-                .err,
-                offset,
-                "tick {d} does not land on {d} pulses per quarter (it was {d})",
-                .{ at, self.to_ppq, self.from_ppq },
-            );
-            return clampTick(quotient);
-        }
-
-        const twice = remainder * 2;
-        const up = twice > denominator or (twice == denominator and @rem(quotient, 2) != 0);
-        return clampTick(quotient + @intFromBool(up));
-    }
-
-    fn clampTick(value: i128) i64 {
-        return @intCast(std.math.clamp(
-            value,
-            @as(i128, std.math.minInt(i64)),
-            @as(i128, std.math.maxInt(i64)),
-        ));
+        const r = rescale(at, self.from_ppq, self.to_ppq, self.opts.round);
+        if (!r.exact and !self.opts.round) try self.diag(
+            .ppq_rescale_inexact,
+            .err,
+            offset,
+            "tick {d} does not land on {d} pulses per quarter (it was {d})",
+            .{ at, self.to_ppq, self.from_ppq },
+        );
+        return r.tick;
     }
 
     /// The delta time from tick `from` to tick `to`. Negative cannot be
@@ -481,6 +456,36 @@ const Emit = struct {
         try w.writeAll(bytes[0..n]);
     }
 };
+
+/// A tick on a grid of `from` pulses per quarter, as a tick on one of
+/// `to`: exact rational arithmetic in `i128`, so the only question is
+/// whether the remainder is zero. One that is not is floored, or — with
+/// `round` — rounded half to even, the way the document's own literals
+/// round (plan 03). Clamped to i64 either way. `from` is a sequence's
+/// `pulsesPerQuarter()`, never 0.
+fn rescale(at: i64, from: u15, to: u15, round: bool) struct { tick: i64, exact: bool } {
+    std.debug.assert(from > 0);
+    if (to == from) return .{ .tick = at, .exact = true };
+
+    const numerator = @as(i128, at) * @as(i128, to);
+    const denominator = @as(i128, from);
+    const quotient = @divFloor(numerator, denominator);
+    const remainder = numerator - quotient * denominator;
+    if (remainder == 0) return .{ .tick = clampTick(quotient), .exact = true };
+    if (!round) return .{ .tick = clampTick(quotient), .exact = false };
+
+    const twice = remainder * 2;
+    const up = twice > denominator or (twice == denominator and @rem(quotient, 2) != 0);
+    return .{ .tick = clampTick(quotient + @intFromBool(up)), .exact = false };
+}
+
+fn clampTick(value: i128) i64 {
+    return @intCast(std.math.clamp(
+        value,
+        @as(i128, std.math.minInt(i64)),
+        @as(i128, std.math.maxInt(i64)),
+    ));
+}
 
 fn writeInt(w: *Writer, comptime T: type, value: T) Writer.Error!void {
     var buf: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
@@ -991,6 +996,22 @@ test "write: ppq rescales exactly, refuses what does not land, and rounds when t
         try testing.expectEqual(@as(i64, 0), back.sequence.tracks[0].events[0].at);
         try testing.expectEqual(@as(i64, 1), back.sequence.tracks[0].events[1].at);
     }
+}
+
+test "rescale: exact when the remainder is zero, floored or rounded half to even otherwise" {
+    try testing.expectEqual(@as(i64, 48), rescale(240, 480, 96, false).tick);
+    try testing.expect(rescale(240, 480, 96, false).exact);
+    // 1 · 96 / 480 = 0.2: floored without `--round`, nearest with it.
+    try testing.expectEqual(@as(i64, 0), rescale(1, 480, 96, false).tick);
+    try testing.expect(!rescale(1, 480, 96, false).exact);
+    try testing.expectEqual(@as(i64, 1), rescale(3, 480, 96, true).tick);
+    // 2.5 rounds to 2 and 3.5 to 4: half to even.
+    try testing.expectEqual(@as(i64, 2), rescale(5, 2, 1, true).tick);
+    try testing.expectEqual(@as(i64, 4), rescale(7, 2, 1, true).tick);
+    // The grid is kept, and an i64 past the ceiling clamps.
+    try testing.expectEqual(@as(i64, -7), rescale(-7, 96, 96, false).tick);
+    const top = rescale(std.math.maxInt(i64), 1, 32767, false);
+    try testing.expectEqual(@as(i64, std.math.maxInt(i64)), top.tick);
 }
 
 test "write: a delta a VLQ cannot hold is tick_overflow, and the file stays readable" {
