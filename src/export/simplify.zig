@@ -424,6 +424,92 @@ test "simplify.budget: a hold lane keeps the steps that exceed eps and drops the
     try testing.expectEqualSlices(i64, &.{ 0, 10 }, run_ticks);
 }
 
+test "simplify.budget: property — a subsequence, its ends kept, every dropped key within eps of its chord" {
+    // The property, over random monotone curves (seeded from the test
+    // runner's `random_seed`, so a failure is reproducible with the seed
+    // it prints): `budget` answers a SUBSEQUENCE of its input — every
+    // kept key is an input key, in input order — that keeps the FIRST
+    // key and, for `linear`, the LAST (a `hold` lane's trailing plateau
+    // is its first key held to the end, which is all `collapse` keeps of
+    // it), and every key it drops lies within `eps` of the chord pacer
+    // will draw across it: for `linear`, the perpendicular distance in
+    // the (beat, value) plane to the segment between the kept keys either
+    // side; for `hold`, the value the kept key before it holds. Plateaus
+    // are drawn on purpose, so the equal-run collapse is exercised under
+    // both stages.
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const rand = prng.random();
+    const tpb: i64 = 180_180;
+
+    for (0..200) |_| {
+        const n = rand.intRangeAtMost(usize, 2, 300);
+        const keys = try gpa.alloc(Key, n);
+        defer gpa.free(keys);
+        var tick: i64 = 0;
+        var v: f32 = rand.float(f32);
+        for (keys) |*key| {
+            tick += rand.intRangeAtMost(i64, 1, tpb);
+            // A third of the steps are a plateau, the rest climb a little.
+            if (rand.uintLessThan(u8, 3) != 0) v += rand.float(f32) * 0.05;
+            key.* = k(tick, v);
+        }
+        const eps: f32 = 0.001 + rand.float(f32) * 0.1;
+        const mode: Mode = if (rand.boolean()) .linear else .hold;
+
+        const kept = try budget(gpa, keys, mode, eps, tpb);
+        defer gpa.free(kept);
+        try expectSubsequenceWithinEps(keys, kept, mode, eps, tpb);
+    }
+}
+
+/// `budget`'s property for one input: `kept` is a subsequence of `keys`
+/// with its first key (and, for `linear`, its last), and every dropped
+/// key is within `eps` (and an f32
+/// rounding's worth of slack — `thinHold` subtracts in f32) of the chord
+/// its kept neighbours draw.
+fn expectSubsequenceWithinEps(
+    keys: []const Key,
+    kept: []const Key,
+    mode: Mode,
+    eps: f32,
+    tpb: i64,
+) !void {
+    try testing.expect(kept.len >= 1);
+    try testing.expectEqual(keys[0].tick, kept[0].tick);
+    if (mode == .linear) try testing.expectEqual(keys[keys.len - 1].tick, kept[kept.len - 1].tick);
+
+    const slack: f64 = @as(f64, eps) * (1 + 1e-6) + 1e-9;
+    var at: usize = 0; // the kept key at or before `keys[i]`
+    for (keys) |key| {
+        if (at + 1 < kept.len and kept[at + 1].tick <= key.tick) at += 1;
+        const lo = kept[at];
+        if (lo.tick == key.tick) {
+            // Kept: the very key, unchanged.
+            try testing.expectEqual(key.value[0], lo.value[0]);
+            continue;
+        }
+        const off: f64 = switch (mode) {
+            .hold => @abs(@as(f64, key.value[0]) - lo.value[0]),
+            .linear => chordOffset(lo, kept[at + 1], key, tpb),
+        };
+        try testing.expect(off <= slack);
+    }
+}
+
+/// The perpendicular distance from `key` to the chord `lo → hi` in the
+/// (beat, value) plane — the metric `rdp` keeps a key by.
+fn chordOffset(lo: Key, hi: Key, key: Key, tpb: i64) f64 {
+    const per_beat: f64 = @floatFromInt(tpb);
+    const dx = @as(f64, @floatFromInt(hi.tick - lo.tick)) / per_beat;
+    const px = @as(f64, @floatFromInt(key.tick - lo.tick)) / per_beat;
+    const dy = @as(f64, hi.value[0]) - lo.value[0];
+    const py = @as(f64, key.value[0]) - lo.value[0];
+    const len2 = dx * dx + dy * dy;
+    if (len2 == 0) return @abs(py);
+    return @abs(px * dy - py * dx) / @sqrt(len2);
+}
+
 test "simplify: a vector lane is measured on its worst component" {
     const gpa = testing.allocator;
     const tpb: i64 = 180_180;
