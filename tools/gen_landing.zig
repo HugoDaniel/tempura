@@ -162,6 +162,12 @@ fn exampleNative(gpa: Allocator) !support.Fixture {
 /// One rendered artifact, on its way to disk or to a comparison.
 const Artifact = struct { path: []const u8, data: []const u8 };
 
+/// `gen-landing <fixtures-dir> [--full] [--check]`. Renders every
+/// fixture, then writes them under the directory — or, with `--check`,
+/// compares them with what is there and writes nothing (the leg `verify`
+/// runs). Exit 0 when written or current, 1 when stale, 2 on a usage
+/// error. What it allocates dies with the process arena or is freed
+/// before it returns.
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const gpa = init.gpa;
@@ -174,17 +180,10 @@ pub fn main(init: std.process.Init) !u8 {
     defer out.flush() catch {};
 
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 2) {
+    const cmd = parseArgs(args) orelse {
         try out.print("usage: gen-landing <fixtures-dir> [--full] [--check]\n", .{});
         return 2;
-    }
-    const dir_path = args[1];
-    var full = false;
-    var check = false;
-    for (args[2..]) |a| {
-        if (std.mem.eql(u8, a, "--full")) full = true;
-        if (std.mem.eql(u8, a, "--check")) check = true;
-    }
+    };
 
     // Render everything FIRST, then either write it or compare it. The
     // gate's leg must not touch the committed fixtures — a `verify` that
@@ -193,70 +192,10 @@ pub fn main(init: std.process.Init) !u8 {
     // shape).
     var artifacts: std.ArrayList(Artifact) = .empty;
     defer artifacts.deinit(gpa);
+    const scores_dir = try std.fs.path.join(arena, &.{ cmd.dir, "scores" });
+    const positions = try renderAll(gpa, arena, out, cmd, scores_dir, &artifacts);
 
-    var scores: std.ArrayList(Score) = .empty;
-    defer scores.deinit(gpa);
-    const scores_dir = try std.fs.path.join(arena, &.{ dir_path, "scores" });
-    for (cases) |c| {
-        var fx = try c.build(gpa);
-        defer fx.deinit();
-        var res = try exporter.exportScore(gpa, &fx.doc, &fx.derived, &.{}, c.opts);
-        defer res.deinit();
-        if (res.diags.hasErrors()) {
-            for (res.diags.items()) |d| try out.print(
-                "landing: {s}: {t}: {s}\n",
-                .{ c.file, d.code, d.message },
-            );
-            return error.GoldenScoreHasErrors;
-        }
-        try artifacts.append(gpa, .{
-            .path = try std.fs.path.join(arena, &.{ scores_dir, c.file }),
-            .data = try arena.dupe(u8, res.text),
-        });
-        try scores.append(gpa, try describe(arena, c.file, res.landings));
-    }
-
-    var ticks: std.ArrayList(Entry) = .empty;
-    defer ticks.deinit(gpa);
-    try collect(gpa, &ticks, full);
-
-    var json: Io.Writer.Allocating = .init(arena);
-    defer json.deinit();
-    try render(&json.writer, ticks.items, scores.items, full);
-    try artifacts.append(gpa, .{
-        .path = try std.fs.path.join(arena, &.{ dir_path, "landing.json" }),
-        .data = json.written(),
-    });
-
-    if (check) {
-        var stale: usize = 0;
-        for (artifacts.items) |art| {
-            const on_disk = Io.Dir.cwd().readFileAlloc(
-                io,
-                art.path,
-                gpa,
-                .limited(64 * 1024 * 1024),
-            ) catch {
-                try out.print("landing: {s} is missing\n", .{art.path});
-                stale += 1;
-                continue;
-            };
-            defer gpa.free(on_disk);
-            if (!std.mem.eql(u8, on_disk, art.data)) {
-                try out.print("landing: {s} is stale\n", .{art.path});
-                stale += 1;
-            }
-        }
-        if (stale != 0) {
-            try out.print(
-                "landing: {d} fixture(s) do not match this tree — run `zig build landing`\n",
-                .{stale},
-            );
-            return 1;
-        }
-        try out.print("landing: {d} fixtures up to date\n", .{artifacts.items.len});
-        return 0;
-    }
+    if (cmd.check) return checkArtifacts(gpa, io, out, artifacts.items);
 
     try Io.Dir.cwd().createDirPath(io, scores_dir);
     for (artifacts.items) |art| {
@@ -265,8 +204,121 @@ pub fn main(init: std.process.Init) !u8 {
     }
     try out.print(
         "landing: {d} positions{s}\n",
-        .{ ticks.items.len, if (full) ", exhaustive" else "" },
+        .{ positions, if (cmd.full) ", exhaustive" else "" },
     );
+    return 0;
+}
+
+/// What the command line asked for.
+const Command = struct { dir: []const u8, full: bool, check: bool };
+
+/// The directory, then `--full` and `--check` in any order; null when
+/// there is no directory. Borrows `args`.
+fn parseArgs(args: []const [:0]const u8) ?Command {
+    if (args.len < 2) return null;
+    var cmd: Command = .{ .dir = args[1], .full = false, .check = false };
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "--full")) cmd.full = true;
+        if (std.mem.eql(u8, arg, "--check")) cmd.check = true;
+    }
+    return cmd;
+}
+
+/// Every artifact, appended to `artifacts` with its bytes in `arena`:
+/// one golden score per case under `scores_dir`, then `landing.json`
+/// over the sampled ticks and the scores' landing claims. Answers how
+/// many positions the fixture names.
+fn renderAll(
+    gpa: Allocator,
+    arena: Allocator,
+    out: *Io.Writer,
+    cmd: Command,
+    scores_dir: []const u8,
+    artifacts: *std.ArrayList(Artifact),
+) !usize {
+    var scores: std.ArrayList(Score) = .empty;
+    defer scores.deinit(gpa);
+    for (cases) |c| {
+        const score = try renderScore(gpa, arena, out, c);
+        try artifacts.append(gpa, .{
+            .path = try std.fs.path.join(arena, &.{ scores_dir, c.file }),
+            .data = score.text,
+        });
+        try scores.append(gpa, score.claims);
+    }
+
+    var ticks: std.ArrayList(Entry) = .empty;
+    defer ticks.deinit(gpa);
+    try collect(gpa, &ticks, cmd.full);
+
+    // Arena-backed and never deinited here: `landing.json`'s bytes are
+    // the artifact, and the process arena frees them.
+    var json: Io.Writer.Allocating = .init(arena);
+    try render(&json.writer, ticks.items, scores.items, cmd.full);
+    try artifacts.append(gpa, .{
+        .path = try std.fs.path.join(arena, &.{ cmd.dir, "landing.json" }),
+        .data = json.written(),
+    });
+    return ticks.items.len;
+}
+
+/// One golden score, exported: its text and its landing claims, both
+/// copied into `arena` — the exporter's own storage dies here. A score
+/// the exporter complains of is no fixture: the complaints are printed
+/// and the run fails.
+fn renderScore(
+    gpa: Allocator,
+    arena: Allocator,
+    out: *Io.Writer,
+    c: Case,
+) !struct { text: []const u8, claims: Score } {
+    var fx = try c.build(gpa);
+    defer fx.deinit();
+    var res = try exporter.exportScore(gpa, &fx.doc, &fx.derived, &.{}, c.opts);
+    defer res.deinit();
+    if (res.diags.hasErrors()) {
+        for (res.diags.items()) |d| try out.print(
+            "landing: {s}: {t}: {s}\n",
+            .{ c.file, d.code, d.message },
+        );
+        return error.GoldenScoreHasErrors;
+    }
+    return .{
+        .text = try arena.dupe(u8, res.text),
+        .claims = try describe(arena, c.file, res.landings),
+    };
+}
+
+/// `--check`: every artifact against the file already at its path, and
+/// nothing written. 0 when all are current; 1, having named each one,
+/// when any is missing or stale.
+fn checkArtifacts(gpa: Allocator, io: Io, out: *Io.Writer, artifacts: []const Artifact) !u8 {
+    var stale: usize = 0;
+    for (artifacts) |art| {
+        const on_disk = Io.Dir.cwd().readFileAlloc(
+            io,
+            art.path,
+            gpa,
+            .limited(64 * 1024 * 1024),
+        ) catch {
+            try out.print("landing: {s} is missing\n", .{art.path});
+            stale += 1;
+            continue;
+        };
+        defer gpa.free(on_disk);
+        if (!std.mem.eql(u8, on_disk, art.data)) {
+            try out.print("landing: {s} is stale\n", .{art.path});
+            stale += 1;
+        }
+    }
+    if (stale != 0) {
+        try out.print(
+            "landing: {d} fixture(s) do not match this tree — run `zig build landing`\n",
+            .{stale},
+        );
+        return 1;
+    }
+    try out.print("landing: {d} fixtures up to date\n", .{artifacts.len});
     return 0;
 }
 

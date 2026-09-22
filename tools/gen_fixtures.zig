@@ -107,6 +107,12 @@ const cases = [_]Case{
     .{ .name = "edit-bound-it-cell", .file = "x.it", .build = boundItAnchor },
 };
 
+/// `gen-fixtures <corpus-dir>`: every case's `song.mid` / `song.it`,
+/// rebuilt from the cores' own builders and written into its case
+/// directory (the bytes are committed; `git diff` is the drift). Exit 0
+/// when all were written, 1 when a builder refused or a file could not be
+/// written, 2 on a usage error. Each file's bytes are freed as soon as
+/// they are on disk.
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const gpa = init.gpa;
@@ -529,61 +535,13 @@ fn itMidiMacros(gpa: Allocator) ![]u8 {
 /// ADPCM), a foreign trailing chunk and tempura's own `TMPU` payload.
 ///
 /// Every opaque region is a slice of an ANCHOR the fixture builds first
-/// — a `Module` plus the wrong bytes is nonsense (it 03, "The anchor") —
-/// and the canonical writer copies them into the file it lays out.
+/// (`passthroughAnchor`) — a `Module` plus the wrong bytes is nonsense
+/// (it 03, "The anchor") — and the canonical writer copies them into the
+/// file it lays out.
 fn itPassthrough(gpa: Allocator) ![]u8 {
     var anchor: std.ArrayList(u8) = .empty;
     defer anchor.deinit(gpa);
-
-    // One 554-byte instrument record: `IMPI`, a name at 0x20, and 528
-    // bytes nothing reads.
-    const ins_at: u32 = @intCast(anchor.items.len);
-    try anchor.appendSlice(gpa, "IMPI");
-    try anchor.appendNTimes(gpa, 0, itf.model.ins.name - 4);
-    try appendName(gpa, &anchor, "piano");
-    try anchor.appendNTimes(gpa, 0xEE, itf.model.instrument_size - itf.model.ins.name - 26);
-
-    // The three sample headers, each 80 bytes of `IMPS`. Their data
-    // pointers are the writer's to patch, so they stay zero here.
-    const pcm_hdr = try appendSampleHeader(gpa, &anchor, .{
-        .name = "pcm",
-        .flags = itf.model.sample_flag.has_data,
-        .convert = itf.model.sample_convert.signed,
-        .length = 8,
-    });
-    const it215_hdr = try appendSampleHeader(gpa, &anchor, .{
-        .name = "squeezed",
-        .flags = itf.model.sample_flag.has_data | itf.model.sample_flag.compressed,
-        .convert = itf.model.sample_convert.signed | itf.model.sample_convert.delta,
-        .length = 4,
-    });
-    const adpcm_hdr = try appendSampleHeader(gpa, &anchor, .{
-        .name = "adpcm",
-        .flags = itf.model.sample_flag.has_data,
-        .convert = itf.model.sample_convert.adpcm,
-        .length = 8,
-    });
-
-    // …and their data. Eight 8-bit frames is eight bytes; an IT215
-    // block is a `u16` length and that many bytes; ModPlug's ADPCM is a
-    // 16-byte nibble table then one nibble per frame.
-    const pcm_data: u32 = @intCast(anchor.items.len);
-    try anchor.appendSlice(gpa, &[_]u8{ 0x00, 0x10, 0x20, 0x30, 0x40, 0x30, 0x20, 0x10 });
-    const it215_data: u32 = @intCast(anchor.items.len);
-    try anchor.appendSlice(gpa, &[_]u8{ 0x06, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6 });
-    const adpcm_data: u32 = @intCast(anchor.items.len);
-    try anchor.appendNTimes(gpa, 0x7F, 16);
-    try anchor.appendSlice(gpa, &[_]u8{ 0x12, 0x34, 0x56, 0x78 });
-
-    // A trailing chunk another tracker wrote, kept verbatim and never
-    // parsed, and tempura's residue payload after it.
-    const foreign_at: u32 = @intCast(anchor.items.len);
-    try anchor.appendSlice(gpa, "STPM");
-    try anchor.appendSlice(gpa, &[_]u8{ 0x04, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF });
-    const foreign_len: u32 = @intCast(anchor.items.len - foreign_at);
-    const tmpu_at: u32 = @intCast(anchor.items.len);
-    try anchor.appendSlice(gpa, "tempura residue");
-    const tmpu_len: u32 = @intCast(anchor.items.len - tmpu_at);
+    const at = try passthroughAnchor(gpa, &anchor);
 
     var b: itf.Builder = .init(gpa);
     errdefer b.deinit();
@@ -593,34 +551,107 @@ fn itPassthrough(gpa: Allocator) ![]u8 {
     const p = try b.addPattern(64);
     p.at(0, 0).* = .{ .note = 60, .ins = 1, .vol = 64 };
     p.at(16, 0).* = .{ .note = 62, .ins = 1 };
-    try b.addInstrument("piano", .{ .off = ins_at, .len = itf.model.instrument_size });
+    try b.addInstrument("piano", .{ .off = at.ins, .len = itf.model.instrument_size });
     try b.addSample(.{
         .name = nameBytes("pcm"),
-        .raw = .{ .off = pcm_hdr, .len = itf.model.sample_header_size },
-        .data = .{ .off = pcm_data, .len = 8 },
+        .raw = .{ .off = at.pcm_hdr, .len = itf.model.sample_header_size },
+        .data = .{ .off = at.pcm_data, .len = 8 },
         .bits = 8,
         .channels = 1,
         .enc = .pcm,
     });
     try b.addSample(.{
         .name = nameBytes("squeezed"),
-        .raw = .{ .off = it215_hdr, .len = itf.model.sample_header_size },
-        .data = .{ .off = it215_data, .len = 8 },
+        .raw = .{ .off = at.it215_hdr, .len = itf.model.sample_header_size },
+        .data = .{ .off = at.it215_data, .len = 8 },
         .bits = 8,
         .channels = 1,
         .enc = .it215,
     });
     try b.addSample(.{
         .name = nameBytes("adpcm"),
-        .raw = .{ .off = adpcm_hdr, .len = itf.model.sample_header_size },
-        .data = .{ .off = adpcm_data, .len = 20 },
+        .raw = .{ .off = at.adpcm_hdr, .len = itf.model.sample_header_size },
+        .data = .{ .off = at.adpcm_data, .len = 20 },
         .bits = 8,
         .channels = 1,
         .enc = .adpcm,
     });
-    try b.addForeign("STPM".*, .{ .off = foreign_at, .len = foreign_len });
-    b.module.tmpu = .{ .off = tmpu_at, .len = tmpu_len };
+    try b.addForeign("STPM".*, .{ .off = at.foreign, .len = at.foreign_len });
+    b.module.tmpu = .{ .off = at.tmpu, .len = at.tmpu_len };
     return finishIt(gpa, &b, anchor.items, .{});
+}
+
+/// Where each opaque region of `it-passthrough`'s anchor starts (and, for
+/// the two chunks, how long it is): what the module's records point at.
+const PassthroughAt = struct {
+    ins: u32,
+    pcm_hdr: u32,
+    it215_hdr: u32,
+    adpcm_hdr: u32,
+    pcm_data: u32,
+    it215_data: u32,
+    adpcm_data: u32,
+    foreign: u32,
+    foreign_len: u32,
+    tmpu: u32,
+    tmpu_len: u32,
+};
+
+/// `it-passthrough`'s anchor, appended to `anchor`: an instrument
+/// record, three sample headers and their data, a foreign chunk and a
+/// `TMPU` payload — each at the offset the answer names.
+fn passthroughAnchor(gpa: Allocator, anchor: *std.ArrayList(u8)) !PassthroughAt {
+    var at: PassthroughAt = undefined;
+    // One 554-byte instrument record: `IMPI`, a name at 0x20, and 528
+    // bytes nothing reads.
+    at.ins = @intCast(anchor.items.len);
+    try anchor.appendSlice(gpa, "IMPI");
+    try anchor.appendNTimes(gpa, 0, itf.model.ins.name - 4);
+    try appendName(gpa, anchor, "piano");
+    try anchor.appendNTimes(gpa, 0xEE, itf.model.instrument_size - itf.model.ins.name - 26);
+
+    // The three sample headers, each 80 bytes of `IMPS`. Their data
+    // pointers are the writer's to patch, so they stay zero here.
+    at.pcm_hdr = try appendSampleHeader(gpa, anchor, .{
+        .name = "pcm",
+        .flags = itf.model.sample_flag.has_data,
+        .convert = itf.model.sample_convert.signed,
+        .length = 8,
+    });
+    at.it215_hdr = try appendSampleHeader(gpa, anchor, .{
+        .name = "squeezed",
+        .flags = itf.model.sample_flag.has_data | itf.model.sample_flag.compressed,
+        .convert = itf.model.sample_convert.signed | itf.model.sample_convert.delta,
+        .length = 4,
+    });
+    at.adpcm_hdr = try appendSampleHeader(gpa, anchor, .{
+        .name = "adpcm",
+        .flags = itf.model.sample_flag.has_data,
+        .convert = itf.model.sample_convert.adpcm,
+        .length = 8,
+    });
+
+    // …and their data. Eight 8-bit frames is eight bytes; an IT215
+    // block is a `u16` length and that many bytes; ModPlug's ADPCM is a
+    // 16-byte nibble table then one nibble per frame.
+    at.pcm_data = @intCast(anchor.items.len);
+    try anchor.appendSlice(gpa, &[_]u8{ 0x00, 0x10, 0x20, 0x30, 0x40, 0x30, 0x20, 0x10 });
+    at.it215_data = @intCast(anchor.items.len);
+    try anchor.appendSlice(gpa, &[_]u8{ 0x06, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6 });
+    at.adpcm_data = @intCast(anchor.items.len);
+    try anchor.appendNTimes(gpa, 0x7F, 16);
+    try anchor.appendSlice(gpa, &[_]u8{ 0x12, 0x34, 0x56, 0x78 });
+
+    // A trailing chunk another tracker wrote, kept verbatim and never
+    // parsed, and tempura's residue payload after it.
+    at.foreign = @intCast(anchor.items.len);
+    try anchor.appendSlice(gpa, "STPM");
+    try anchor.appendSlice(gpa, &[_]u8{ 0x04, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF });
+    at.foreign_len = @intCast(anchor.items.len - at.foreign);
+    at.tmpu = @intCast(anchor.items.len);
+    try anchor.appendSlice(gpa, "tempura residue");
+    at.tmpu_len = @intCast(anchor.items.len - at.tmpu);
+    return at;
 }
 
 /// IT's name fields are left-justified, NUL-padded and 26 bytes.
