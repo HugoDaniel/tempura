@@ -198,12 +198,14 @@ pub fn parseChunk(gpa: Allocator, bytes: []const u8) Error!ParsedChunk {
 
     // A chunk never splits the essence — it has room — but a reader that
     // refused a split one would be brittle for no gain, so the same
-    // all-or-none reassembly runs here. Its diagnostic is the caller's
+    // all-or-none verdict runs here. Its diagnostic is the caller's
     // business, and `choose` is where a corrupt chunk becomes one.
-    var quiet: Diag.List = .init(gpa);
-    defer quiet.deinit();
-    const essence_body = try records.reassemble(arena.allocator(), taken.parts.items, &quiet);
-    if (quiet.count(.residue_corrupt) > 0) return .{ .corrupt = .residue_corrupt };
+    const parts = taken.parts.items;
+    var essence_body: ?[]const u8 = null;
+    if (parts.len > 0) {
+        const size = records.partsSize(parts) orelse return .{ .corrupt = .residue_corrupt };
+        essence_body = try records.join(arena.allocator(), parts, size);
+    }
 
     kept = true;
     return .{ .ok = .{

@@ -311,38 +311,53 @@ pub const Gathered = struct {
 /// shorter essence, it is Binary IR that would decode as garbage. So a
 /// missing part, a disagreeing `total` or a repeated `seq` is
 /// `residue_corrupt` and the caller takes the skeleton path (plan 04,
-/// rule 4).
+/// rule 4). No parts at all is no essence, and no complaint.
+///
+/// The parent of the two leaves below: `partsSize` decides, this
+/// diagnoses, `join` allocates. The body is `gpa`'s — pass an arena, as
+/// both carriers do, or free it.
 pub fn reassemble(gpa: Allocator, parts: []const Part, diags: *Diag.List) Error!?[]const u8 {
     if (parts.len == 0) return null;
-
-    const total = parts[0].total;
-    var seen = [_]bool{false} ** (max_parts + 1);
-    var whole = total != 0 and parts.len == @as(usize, total);
-    var size: usize = 0;
-    if (whole) {
-        for (parts) |p| {
-            if (p.total != total or p.seq >= total or seen[p.seq]) {
-                whole = false;
-                break;
-            }
-            seen[p.seq] = true;
-            size += p.body.len;
-        }
-    }
-    if (!whole) {
+    const size = partsSize(parts) orelse {
         try diags.add(
             .residue_corrupt,
             .warning,
             .{ .start = 0, .end = 0 },
             "the essence rides in {d} of {d} parts; a split body is all or none, so none of it " ++
                 "was used",
-            .{ parts.len, total },
+            .{ parts.len, parts[0].total },
         );
         return null;
-    }
+    };
+    return try join(gpa, parts, size);
+}
 
+/// The length of the body `parts` join into, or null when they do not
+/// make one whole split: none at all, a `total` of zero or one two parts
+/// disagree on, a `seq` past `total`, a `seq` twice, or a part missing.
+/// Pure over the parts, and what a carrier asks when it wants the
+/// verdict without a report (`it.parseChunk`).
+pub fn partsSize(parts: []const Part) ?usize {
+    if (parts.len == 0) return null;
+    const total = parts[0].total;
+    if (total == 0 or parts.len != @as(usize, total)) return null;
+    var seen = [_]bool{false} ** (max_parts + 1);
+    var size: usize = 0;
+    for (parts) |p| {
+        if (p.total != total or p.seq >= total or seen[p.seq]) return null;
+        seen[p.seq] = true;
+        size += p.body.len;
+    }
+    return size;
+}
+
+/// The parts' bodies end to end, in `seq` order, in `size` bytes owned
+/// by `gpa`. PRECONDITION: `size == partsSize(parts).?` — so every `seq`
+/// below `total` is there exactly once and the copies fill the buffer.
+pub fn join(gpa: Allocator, parts: []const Part, size: usize) Error![]u8 {
     const out = try gpa.alloc(u8, size);
     var at: usize = 0;
+    const total = parts[0].total;
     var want: u8 = 0;
     while (want < total) : (want += 1) {
         for (parts) |p| {
@@ -352,6 +367,7 @@ pub fn reassemble(gpa: Allocator, parts: []const Part, diags: *Diag.List) Error!
             break;
         }
     }
+    std.debug.assert(at == size);
     return out;
 }
 
@@ -1214,6 +1230,14 @@ test "records: the parts of a split essence, in order, once each, or not at all"
     // No parts at all is no essence, and no complaint.
     try testing.expect((try reassemble(scratch, &.{}, &diags)) == null);
     try testing.expectEqual(@as(usize, 5), diags.count(.residue_corrupt));
+
+    // The pure verdict agrees case for case, and says nothing.
+    try testing.expectEqual(@as(?usize, 11), partsSize(&whole));
+    try testing.expectEqual(@as(?usize, 11), partsSize(&shuffled));
+    try testing.expectEqual(@as(?usize, null), partsSize(&duplicated));
+    for (cases) |parts| try testing.expectEqual(@as(?usize, null), partsSize(parts));
+    try testing.expectEqual(@as(?usize, null), partsSize(&.{}));
+    try testing.expectEqualStrings("onetwothree", try join(scratch, &shuffled, 11));
 }
 
 test "records: the envelope is 7D 74 65 6D ver kind seq total" {
