@@ -241,7 +241,7 @@ fn dumpSmf(
     else
         &detached.sequence;
 
-    var tier = try bridge_smf.sequenceToForms(gpa, tier_seq, null, .{ .qualify = opts.qualify });
+    var tier = try smfTier(gpa, tier_seq, opts);
     defer gpa.free(tier);
 
     var rec = try reconcile.reconcile(gpa, schema, .{
@@ -258,9 +258,7 @@ fn dumpSmf(
     if (consumed.any()) {
         // Printed BEFORE the old text is freed: a print that fails must
         // leave `tier` naming live memory, or its `defer` frees it twice.
-        const reprinted = try bridge_smf.sequenceToForms(gpa, tier_seq, null, .{
-            .qualify = opts.qualify,
-        });
+        const reprinted = try smfTier(gpa, tier_seq, opts);
         gpa.free(tier);
         tier = reprinted;
     }
@@ -344,6 +342,48 @@ fn dumpIt(
     }
 
     return assemble(gpa, schema, bytes, name, diags, &rec, tier, consumed);
+}
+
+/// A file's bytes as its tier's SJON text: the format core's reader, then
+/// the bridge, under `opts`' tier switches (`qualify` and it 03's three —
+/// the anchor's name and id are not read). The reader's diagnostics go
+/// into `diags` first, then the `it/` bridge's own, all in the FILE's
+/// byte coordinates. Caller frees the text.
+///
+/// The step `tempura inline` takes (`edit/inline_anchor.zig`), through the
+/// same two bridge calls `dump` prints its tier with — `smfTier` and
+/// `itTier` — so a tier inlined and a tier dumped are spelled by one
+/// function per kind and cannot drift apart. `dump` cannot take this step
+/// whole: it prints the tier from the read AFTER the carrier has taken
+/// the residue out and the reconciliation has consumed what the essence
+/// restored, so it holds the read value itself. Nothing here detaches
+/// anything: an inline's tier is the file as it is.
+pub fn tierText(
+    gpa: Allocator,
+    bytes: []const u8,
+    kind: Doc.AnchorKind,
+    opts: Options,
+    diags: *Diag.List,
+) Error![]u8 {
+    switch (kind) {
+        .smf => {
+            var read = try smf.read(gpa, bytes);
+            defer read.deinit();
+            try diags.extend(read.diags.items());
+            return smfTier(gpa, &read.sequence, opts);
+        },
+        .it => {
+            var read = try itf.read.read(gpa, bytes);
+            defer read.deinit();
+            try diags.extend(read.diags.items());
+            return itTier(gpa, &read, opts, diags, &.{});
+        },
+    }
+}
+
+/// The `midi/` tier printed from a sequence. Caller frees the text.
+fn smfTier(gpa: Allocator, seq: *const smf.Sequence, opts: Options) Error![]u8 {
+    return bridge_smf.sequenceToForms(gpa, seq, null, .{ .qualify = opts.qualify });
 }
 
 /// The `it/` tier printed from the module as read. `diags` is where the
@@ -2138,7 +2178,7 @@ test "pipeline: an IT chunk of a newer envelope leaves it in the file and derive
 /// The `midi/…` or `it/…` half of a dumped text, from its first root on.
 /// The anchor line above it names the bytes dumped and moves with every
 /// rebuild; the tier is the claim.
-fn tierText(text: []const u8, kind: Doc.AnchorKind) []const u8 {
+fn tierHalf(text: []const u8, kind: Doc.AnchorKind) []const u8 {
     const head: []const u8 = switch (kind) {
         .smf => "(midi/smf",
         .it => "(it/module",
@@ -2255,7 +2295,7 @@ test "pipeline.build: build → dump → build → dump is a fixed point for a .
     try testing.expect(!d2.diags.hasErrors());
 
     try testing.expectEqualStrings(beforeAnchor(d1.text), beforeAnchor(d2.text));
-    try testing.expectEqualStrings(tierText(d1.text, .smf), tierText(d2.text, .smf));
+    try testing.expectEqualStrings(tierHalf(d1.text, .smf), tierHalf(d2.text, .smf));
     try testing.expectEqual(b1.lanes.len, b2.lanes.len);
     for (b1.lanes, b2.lanes) |x, y| {
         try testing.expectEqualStrings(x.lane, y.lane);
@@ -2306,20 +2346,20 @@ test "pipeline.build: the same round is a fixed point for a .it" {
     try testing.expect(!d2.diags.hasErrors());
 
     try testing.expectEqualStrings(beforeAnchor(d1.text), beforeAnchor(d2.text));
-    const t1 = try withoutMessage(gpa, tierText(d1.text, .it));
+    const t1 = try withoutMessage(gpa, tierHalf(d1.text, .it));
     defer gpa.free(t1);
-    const t2 = try withoutMessage(gpa, tierText(d2.text, .it));
+    const t2 = try withoutMessage(gpa, tierHalf(d2.text, .it));
     defer gpa.free(t2);
     try testing.expectEqualStrings(t1, t2);
     // The message's tail is the one thing that moved: the second
     // document has an anchor, and the tail says so.
     try testing.expectEqual(
         @as(usize, 0),
-        countIn(tierText(d1.text, .it), "(anchor :id song :kind it :file"),
+        countIn(tierHalf(d1.text, .it), "(anchor :id song :kind it :file"),
     );
     try testing.expectEqual(
         @as(usize, 1),
-        countIn(tierText(d2.text, .it), "(anchor :id song :kind it :file"),
+        countIn(tierHalf(d2.text, .it), "(anchor :id song :kind it :file"),
     );
     // The lanes land on the channels the dump emptied, not above them.
     try testing.expectEqual(b1.lanes.len, b2.lanes.len);
@@ -2626,6 +2666,71 @@ test "pipeline.build: every allocation failure is OutOfMemory, cleanly, with not
             } else {
                 var got = try result;
                 got.deinit();
+                break;
+            }
+        }
+    }
+}
+
+// ---- the tier text, one spelling for inline and dump ----
+
+/// One file of each kind with no residue in it: nothing for a dump to
+/// detach or consume, so its tier is the file's as printed.
+const Bare = struct { bytes: []const u8, kind: Doc.AnchorKind };
+
+test "pipeline.tierText: the tier a file prints as is the one dump splices" {
+    // …for both kinds — which is the claim that `tempura inline` and
+    // `tempura dump` spell a file's tier with one call.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const smf_bytes = try smfBytes(gpa, records.version, false);
+    defer gpa.free(smf_bytes);
+    const it_bytes = try itBytes(gpa, &schema, false);
+    defer gpa.free(it_bytes);
+
+    const bare = [_]Bare{
+        .{ .bytes = smf_bytes, .kind = .smf },
+        .{ .bytes = it_bytes, .kind = .it },
+    };
+    for (bare) |file| {
+        var diags: Diag.List = .init(gpa);
+        defer diags.deinit();
+        const tier = try tierText(gpa, file.bytes, file.kind, .{}, &diags);
+        defer gpa.free(tier);
+        try testing.expect(!diags.hasErrors());
+
+        var got = try dump(gpa, &schema, file.bytes, file.kind, .{});
+        defer got.deinit();
+        try testing.expect(tier.len > 0);
+        try testing.expect(std.mem.indexOf(u8, got.text, tier) != null);
+    }
+}
+
+test "pipeline.tierText: OutOfMemory at every allocation, and nothing leaks" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const smf_bytes = try smfBytes(gpa, records.version, false);
+    defer gpa.free(smf_bytes);
+    const it_bytes = try itBytes(gpa, &schema, false);
+    defer gpa.free(it_bytes);
+
+    const bare = [_]Bare{
+        .{ .bytes = smf_bytes, .kind = .smf },
+        .{ .bytes = it_bytes, .kind = .it },
+    };
+    for (bare) |file| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+            var diags: Diag.List = .init(failing.allocator());
+            defer diags.deinit();
+            const result = tierText(failing.allocator(), file.bytes, file.kind, .{}, &diags);
+            if (failing.has_induced_failure) {
+                try testing.expectError(error.OutOfMemory, result);
+            } else {
+                gpa.free(try result);
                 break;
             }
         }

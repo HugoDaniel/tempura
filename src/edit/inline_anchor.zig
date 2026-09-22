@@ -44,10 +44,11 @@
 //!
 //! The layering rule has `edit/` consume a `Doc` and never bytes, and
 //! this file is the one exception, as `doc/pipeline.zig` is `doc/`'s: an
-//! inline IS an anchor's bytes becoming document text. It reads them
-//! through the format cores' own readers and prints through `doc/`'s
-//! bridges — the calls `tempura dump` makes — and nothing else in `edit/`
-//! imports it.
+//! inline IS an anchor's bytes becoming document text. It hands them to
+//! `doc/pipeline.zig`'s `tierText` — the format cores' own readers, then
+//! the very bridge calls `tempura dump` prints its tier with, so an
+//! inlined tier and a dumped one have one spelling per kind — and nothing
+//! else in `edit/` imports it.
 //!
 //! ## What it does NOT do
 //!
@@ -74,7 +75,6 @@ const Diag = @import("../Diag.zig");
 const Schema = @import("../Schema.zig");
 const doc = @import("../doc/doc.zig");
 const smf = @import("../smf/smf.zig");
-const itf = @import("../itf/itf.zig");
 const plan_file = @import("Plan.zig");
 const apply_file = @import("apply.zig");
 
@@ -153,40 +153,13 @@ pub fn inlineAnchor(
 ) Error!Inlined {
     var file_diags: Diag.List = .init(gpa);
     errdefer file_diags.deinit();
-    const tier = try tierText(gpa, anchor.kind, bytes, &file_diags);
+    // The anchor's file as the tier forms `tempura dump` prints for it,
+    // through dump's own bridge calls, with the default switches (the
+    // header says why): the reader's diagnostics first, then the bridge's.
+    const tier = try doc.pipeline.tierText(gpa, bytes, anchor.kind, .{}, &file_diags);
     defer gpa.free(tier);
     const outcome = try planFor(gpa, source, anchor.span, tier);
     return .{ .file_diags = file_diags, .outcome = outcome };
-}
-
-/// The anchor's file as the tier forms `tempura dump` prints for it,
-/// with the bridges' default switches (the header says why). The
-/// reader's diagnostics go into `diags` first, then the bridge's own.
-/// Caller frees the text.
-fn tierText(
-    gpa: Allocator,
-    kind: doc.AnchorKind,
-    bytes: []const u8,
-    diags: *Diag.List,
-) Error![]u8 {
-    switch (kind) {
-        .smf => {
-            var res = try smf.read(gpa, bytes);
-            defer res.deinit();
-            try diags.extend(res.diags.items());
-            return doc.bridge_smf.sequenceToForms(gpa, &res.sequence, null, .{ .qualify = true });
-        },
-        .it => {
-            var res = try itf.read.read(gpa, bytes);
-            defer res.deinit();
-            try diags.extend(res.diags.items());
-            return doc.bridge_it.moduleToForms(gpa, &res.module, .{
-                .qualify = true,
-                .source_map = &res.source_map,
-                .diags = diags,
-            });
-        },
-    }
 }
 
 /// The plan for `tier`, landing after the root of `source` spanned by
