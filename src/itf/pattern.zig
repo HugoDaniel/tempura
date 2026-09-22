@@ -74,24 +74,24 @@ const Cache = struct {
 };
 
 /// A pattern's cells and what was wrong with the stream that held them.
+/// `unpack`'s answer: the cells live in `arena`, and `deinit` frees them
+/// with the report — nothing here borrows the stream.
 pub const Unpacked = struct {
     arena: std.heap.ArenaAllocator,
     /// `rows × 64`, row-major and dense.
     cells: []Cell,
     diags: Diag.List,
 
+    /// Frees the cells and the report together.
     pub fn deinit(self: *Unpacked) void {
         self.diags.deinit();
         self.arena.deinit();
     }
 };
 
-/// Packed stream → dense cells. Spans are offsets into `bytes`; a caller
-/// that read `bytes` out of a file rebases them onto the file.
-///
-/// The parent keeps the cursor, the row and the diagnostics; `readEntry`
-/// reads one channel entry into its cache and `cellOf` spells the cell
-/// that cache holds.
+/// Packed stream → dense cells, as an owned value: `unpackInto` over a
+/// grid of its own. Spans are offsets into `bytes`. The caller owns the
+/// result and `deinit`s it; nothing in it borrows `bytes`.
 pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8, rows: u16) Error!Unpacked {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_state.deinit();
@@ -99,6 +99,28 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8, rows: u16) Error!Unpack
     errdefer diags.deinit();
 
     const cells = try arena_state.allocator().alloc(Cell, @as(usize, rows) * model.channels);
+    try unpackInto(cells, bytes, rows, &diags, 0);
+    return .{ .arena = arena_state, .cells = cells, .diags = diags };
+}
+
+/// Packed stream → dense cells, written straight into `cells` — the
+/// caller's grid, exactly `rows × 64` — with each diagnostic appended to
+/// `diags` at `base` plus its offset into `bytes` (saturating). How the
+/// reader fills a module's own pattern: one allocation, in the module's
+/// arena, and no second report to copy across.
+///
+/// The parent keeps the cursor, the row and the diagnostics; `readEntry`
+/// reads one channel entry into its cache and `cellOf` spells the cell
+/// that cache holds.
+pub fn unpackInto(
+    cells: []Cell,
+    bytes: []const u8,
+    rows: u16,
+    diags: *Diag.List,
+    base: u32,
+) Error!void {
+    // The caller sizes the grid; a mismatch is its bug, not the stream's.
+    std.debug.assert(cells.len == @as(usize, rows) * model.channels);
     @memset(cells, .empty);
 
     var cache: [model.channels]Cache = @splat(.{});
@@ -116,13 +138,13 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8, rows: u16) Error!Unpack
         const c = &cache[channel];
         switch (readEntry(bytes, &p, lead, c)) {
             .truncated => {
-                try truncated(&diags, p, bytes.len);
+                try truncated(diags, spanAt(base, p, bytes.len), p);
                 break;
             },
             .unknown_command => |at| try diags.add(
                 .it_command_unknown,
                 .warning,
-                .{ .start = @intCast(at), .end = @intCast(at + 2) },
+                spanAt(base, at, at + 2),
                 "command byte {d} names no IT effect; read as no effect",
                 .{bytes[at]},
             ),
@@ -130,8 +152,14 @@ pub fn unpack(gpa: std.mem.Allocator, bytes: []const u8, rows: u16) Error!Unpack
         }
         cells[@as(usize, row) * model.channels + channel] = cellOf(c.*);
     }
+}
 
-    return .{ .arena = arena_state, .cells = cells, .diags = diags };
+/// `[start, end)` of the stream, `base` bytes on and saturating at the
+/// u32 a span holds.
+fn spanAt(base: u32, start: usize, end: usize) Diag.Span {
+    const from = std.math.cast(u32, start) orelse std.math.maxInt(u32);
+    const to = std.math.cast(u32, end) orelse std.math.maxInt(u32);
+    return .{ .start = base +| from, .end = base +| to };
 }
 
 /// What reading one channel entry found.
@@ -209,11 +237,11 @@ fn cellOf(c: Cache) Cell {
     return cell;
 }
 
-fn truncated(diags: *Diag.List, at: usize, end: usize) Error!void {
+fn truncated(diags: *Diag.List, span: Diag.Span, at: usize) Error!void {
     try diags.add(
         .it_truncated,
         .warning,
-        .{ .start = @intCast(at), .end = @intCast(end) },
+        span,
         "the packed pattern stream ends mid-cell at byte {d}",
         .{at},
     );
@@ -240,54 +268,74 @@ fn encodeNote(note: u8) u8 {
     };
 }
 
-/// A packed stream and what had to give to produce it.
+/// A packed stream and what had to give to produce it. `pack`'s answer:
+/// the bytes live in `arena`, and `deinit` frees them with the report.
 pub const Packed = struct {
     arena: std.heap.ArenaAllocator,
     bytes: []const u8,
     diags: Diag.List,
 
+    /// Frees the stream and the report together.
     pub fn deinit(self: *Packed) void {
         self.diags.deinit();
         self.arena.deinit();
     }
 };
 
-/// Dense cells → packed stream, it 05's two-cache scheme.
-///
-/// `cells` is `rows × 64` row-major; a short slice packs the rows it
-/// has. Diagnostic spans are relative to the OUTPUT (a caller that lands
-/// the pattern in a file rebases them), because there is no input file to
-/// point at — the rows are named in the message instead.
-///
-/// The parent keeps the row, the output and the ceiling; `maskFor`
-/// decides what one cell sends and `writeEntry` spells it.
+/// Dense cells → packed stream, as an owned value: `packInto` onto a
+/// list of its own. The caller owns the result and `deinit`s it; it
+/// borrows nothing of `cells`.
 pub fn pack(gpa: std.mem.Allocator, cells: []const Cell, rows: u16) Error!Packed {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_state.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
-    const arena = arena_state.allocator();
 
     var out: std.ArrayList(u8) = .empty;
+    try packInto(arena_state.allocator(), &out, cells, rows, &diags, 0);
+    return .{ .arena = arena_state, .bytes = out.items, .diags = diags };
+}
+
+/// Dense cells → packed stream, it 05's two-cache scheme, appended to
+/// `out` — which grows in `arena` and must be that arena's list: a
+/// buffer it outgrows is left for the arena to free. How the writer
+/// packs straight into the file it is writing.
+///
+/// `cells` is `rows × 64` row-major; a short slice packs the rows it
+/// has. The ceiling is on the stream alone, measured from where `out`
+/// stood. A diagnostic spans `base` — there is no input file to point
+/// at, so the rows are named in the message instead.
+///
+/// The parent keeps the row, the output and the ceiling; `maskFor`
+/// decides what one cell sends and `writeEntry` spells it.
+pub fn packInto(
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    cells: []const Cell,
+    rows: u16,
+    diags: *Diag.List,
+    base: u32,
+) Error!void {
+    const start = out.items.len;
     var cache: [model.channels]Cache = @splat(.{});
 
     var row: u16 = 0;
     while (row < rows) : (row += 1) {
         const row_start = out.items.len;
-        const base = @as(usize, row) * model.channels;
-        if (base >= cells.len) break;
+        const first = @as(usize, row) * model.channels;
+        if (first >= cells.len) break;
 
         for (0..model.channels) |channel| {
-            const at = base + channel;
+            const at = first + channel;
             if (at >= cells.len) break;
             const c = &cache[channel];
             const mask = maskFor(cells[at], c);
             if (mask == 0) continue;
-            try writeEntry(&out, arena, @intCast(channel), mask, c, cells[at]);
+            try writeEntry(out, arena, @intCast(channel), mask, c, cells[at]);
         }
         try out.append(arena, 0);
 
-        if (out.items.len > max_packed) {
+        if (out.items.len - start > max_packed) {
             // The refusal has to say WHICH rows to split (it 05's risk
             // note): everything from this row on is dropped, and the
             // pattern keeps the rows that fit.
@@ -295,7 +343,7 @@ pub fn pack(gpa: std.mem.Allocator, cells: []const Cell, rows: u16) Error!Packed
             try diags.add(
                 .it_pattern_too_large,
                 .err,
-                .{ .start = 0, .end = 0 },
+                .{ .start = base, .end = base },
                 "a {d}-row pattern packs past IT's 64 KB ceiling; split it at row {d} " ++
                     "(rows {d}–{d} were dropped)",
                 .{ rows, row, row, rows - 1 },
@@ -303,8 +351,6 @@ pub fn pack(gpa: std.mem.Allocator, cells: []const Cell, rows: u16) Error!Packed
             break;
         }
     }
-
-    return .{ .arena = arena_state, .bytes = out.items, .diags = diags };
 }
 
 /// The mask one cell packs under, and the cache it leaves behind: a
@@ -355,7 +401,7 @@ fn maskFor(cell: Cell, c: *Cache) u8 {
 
 /// One channel entry's bytes: the lead, the mask when it differs from
 /// the one the channel last sent (which it then becomes), then every
-/// field the mask says is sent. `out` grows in the `Packed`'s arena.
+/// field the mask says is sent. `out` grows in `arena`.
 fn writeEntry(
     out: *std.ArrayList(u8),
     arena: std.mem.Allocator,

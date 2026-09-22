@@ -124,7 +124,6 @@ pub fn write(
     errdefer diags.deinit();
 
     var w: Writer = .{
-        .gpa = gpa,
         .arena = arena_state.allocator(),
         .module = module,
         .source = source,
@@ -139,8 +138,6 @@ pub fn write(
 
 /// The emission in progress.
 const Writer = struct {
-    /// The caller's, for the pattern packer's own transient results.
-    gpa: std.mem.Allocator,
     /// The `Written`'s arena: the output and every scratch list live in
     /// it and are freed with it, never one by one.
     arena: std.mem.Allocator,
@@ -602,19 +599,14 @@ const Writer = struct {
             cells = padded;
         }
 
-        var packed_rows = try pattern.pack(self.gpa, cells, rows);
-        defer packed_rows.deinit();
-        for (packed_rows.diags.items()) |d| {
-            try self.diags.add(d.code, d.severity, .{
-                .start = at + d.span.start,
-                .end = at + d.span.end,
-            }, "{s}", .{d.message});
-        }
-
-        try self.word(@intCast(packed_rows.bytes.len));
-        try self.word(rows);
-        try self.zeros(4);
-        try self.blob(packed_rows.bytes);
+        // The 8-byte header, then the stream packed straight into the
+        // file, and its length back-patched: one list, in the `Written`'s
+        // arena, and no second report to copy.
+        try self.zeros(8);
+        const stream_at = self.out.items.len;
+        try pattern.packInto(self.arena, &self.out, cells, rows, self.diags, at);
+        self.patchWord(at, @intCast(self.out.items.len - stream_at));
+        self.patchWord(at + 2, rows);
     }
 
     /// The bytes of an opaque region, or null when the anchor cannot

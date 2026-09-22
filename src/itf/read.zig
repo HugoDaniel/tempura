@@ -118,7 +118,6 @@ pub fn read(gpa: std.mem.Allocator, bytes: []const u8) Error!Result {
 
     var map: std.ArrayList(SourceMap.Entry) = .empty;
     var r: Reader = .{
-        .gpa = gpa,
         .src = src,
         .arena = module.allocator(),
         .module = &module,
@@ -168,7 +167,6 @@ fn postconditions(result: *const Result, len: usize) void {
 /// The parse in progress. Every read goes through the bounded accessors
 /// below, so no path can leave `src`.
 const Reader = struct {
-    gpa: std.mem.Allocator,
     src: []const u8,
     arena: std.mem.Allocator,
     module: *Module,
@@ -624,15 +622,13 @@ const Reader = struct {
                 end = self.len();
             }
 
-            var unpacked = try pattern.unpack(self.gpa, self.src[data_at..@intCast(end)], rows);
-            defer unpacked.deinit();
-            for (unpacked.diags.items()) |d| {
-                try self.note(d.code, d.severity, .{
-                    .start = data_at + d.span.start,
-                    .end = data_at + d.span.end,
-                }, "{s}", .{d.message});
-            }
-            slot.* = .{ .rows = rows, .cells = try self.arena.dupe(Cell, unpacked.cells) };
+            // Straight into the module's own grid, with the stream's
+            // diagnostics rebased onto the file: one allocation, in the
+            // module's arena, and no second report to copy.
+            const cells = try self.arena.alloc(Cell, @as(usize, rows) * model.channels);
+            const stream = self.src[data_at..@intCast(end)];
+            try pattern.unpackInto(cells, stream, rows, self.diags, data_at);
+            slot.* = .{ .rows = rows, .cells = cells };
             try self.mark(.pattern, @intCast(i), .{ .off = at, .len = @intCast(end - at) });
         }
         self.module.patterns = list;
