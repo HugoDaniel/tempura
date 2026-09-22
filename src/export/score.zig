@@ -183,7 +183,7 @@ pub fn exportScore(
 
     var e: Emitter = .{
         .arena = arena.allocator(),
-        .scratch = scratch.allocator(),
+        .scratch_arena = scratch.allocator(),
         .doc = d,
         .derived = derived,
         .map = &derived.map,
@@ -238,7 +238,7 @@ const Emitter = struct {
     /// `exportScore`'s scratch arena, freed before it returns: the tempo
     /// table and every curve's keys, needed only while the text is
     /// written.
-    scratch: Allocator,
+    scratch_arena: Allocator,
     doc: *const doc.Doc,
     derived: *const derive.Derived,
     map: *const TimeMap.TimeMap,
@@ -314,11 +314,11 @@ const Emitter = struct {
         var kept = try self.coalesce(segments, 0);
         // Still past the cap: coalesce anything within `--tempo-eps`.
         if (kept.len + 1 > MAX_TEMPO_SEGMENTS) {
-            self.scratch.free(kept);
+            self.scratch_arena.free(kept);
             kept = try self.coalesce(segments, self.opts.tempo_eps);
         }
         if (kept.len + 1 > MAX_TEMPO_SEGMENTS) {
-            self.scratch.free(kept);
+            self.scratch_arena.free(kept);
             self.tempo = &.{};
             self.seconds_mode = true;
             // pacer reads an `s` literal against `ticks_per_second`,
@@ -351,15 +351,15 @@ const Emitter = struct {
     /// than `eps`. `eps == 0` is the always-on adjacent-equal collapse.
     fn coalesce(self: *Emitter, segments: []const TimeMap.Segment, eps: f64) Error![]TempoForm {
         var out: std.ArrayList(TempoForm) = .empty;
-        errdefer out.deinit(self.scratch);
+        errdefer out.deinit(self.scratch_arena);
         var last = self.bpm;
         for (segments[1..]) |seg| {
             const bpm = self.pacerBpm(seg.us);
             if (@abs(bpm - last) <= eps) continue;
-            try out.append(self.scratch, .{ .tick = seg.tick, .bpm = bpm });
+            try out.append(self.scratch_arena, .{ .tick = seg.tick, .bpm = bpm });
             last = bpm;
         }
-        return out.toOwnedSlice(self.scratch);
+        return out.toOwnedSlice(self.scratch_arena);
     }
 
     fn pacerBpm(self: *const Emitter, us: f64) f64 {
@@ -526,12 +526,12 @@ const Emitter = struct {
         lane: *const doc.Lane,
         index: *const derive.LaneIndex,
     ) Error!void {
-        var c = try lanes.curve(self.scratch, lane, index, self.hints, &self.mapper, .{
+        var c = try lanes.curve(self.scratch_arena, lane, index, self.hints, &self.mapper, .{
             .eps = self.opts.eps,
             .ease_linear = self.opts.ease_linear,
             .no_hints = self.opts.no_hints,
         }, self.diags);
-        defer c.deinit(self.scratch);
+        defer c.deinit(self.scratch_arena);
         if (c.keys.len == 0) return;
 
         if (index.bound) {

@@ -1120,7 +1120,28 @@ fn richFixture(gpa: std.mem.Allocator) ![]u8 {
 
     f.patchDword(ins_pp, f.here());
     _ = try f.instrument("piano");
+    const headers = try richSampleHeaders(&f, smp_pp);
 
+    // Pattern 0 is real; pattern 1 is a parapointer 0.
+    f.patchDword(pat_pp, f.here());
+    const stream = [_]u8{ 0x81, 0x0F, 60, 1, 64, 1, 6, 0x00, 0x01, 62, 2, 32, 4, 0x10, 0x00 };
+    try f.word(stream.len);
+    try f.word(64);
+    try f.zeros(4);
+    try f.blob(&stream);
+
+    try richSampleData(&f, headers);
+    try f.blob("STPM\x07\x08");
+    try f.blob("TMPU");
+    try f.dword(4);
+    try f.blob("resd");
+
+    return f.toOwned();
+}
+
+/// `richFixture`'s three sample headers — 16-bit PCM, ModPlug ADPCM and
+/// IT214-compressed — with their parapointers at `smp_pp` patched.
+fn richSampleHeaders(f: *Fixture, smp_pp: u32) ![3]u32 {
     var headers: [3]u32 = undefined;
     headers[0] = try f.sampleHeader(
         .{
@@ -1138,15 +1159,12 @@ fn richFixture(gpa: std.mem.Allocator) ![]u8 {
         .length = 40000,
     });
     for (headers, 0..) |at, i| f.patchDword(smp_pp + @as(u32, @intCast(i)) * 4, at);
+    return headers;
+}
 
-    // Pattern 0 is real; pattern 1 is a parapointer 0.
-    f.patchDword(pat_pp, f.here());
-    const stream = [_]u8{ 0x81, 0x0F, 60, 1, 64, 1, 6, 0x00, 0x01, 62, 2, 32, 4, 0x10, 0x00 };
-    try f.word(stream.len);
-    try f.word(64);
-    try f.zeros(4);
-    try f.blob(&stream);
-
+/// Each of `richFixture`'s samples' data, its `SamplePointer` patched:
+/// twelve PCM bytes, 24 of ADPCM, and two compressed blocks.
+fn richSampleData(f: *Fixture, headers: [3]u32) !void {
     f.patchDword(headers[0] + model.smp.sample_pointer, f.here());
     try f.blob(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
     f.patchDword(headers[1] + model.smp.sample_pointer, f.here());
@@ -1156,13 +1174,6 @@ fn richFixture(gpa: std.mem.Allocator) ![]u8 {
     try f.blob(&.{ 0xDE, 0xAD, 0xBE, 0xEF });
     try f.word(3);
     try f.blob(&.{ 0x11, 0x22, 0x33 });
-
-    try f.blob("STPM\x07\x08");
-    try f.blob("TMPU");
-    try f.dword(4);
-    try f.blob("resd");
-
-    return f.toOwned();
 }
 
 test "write: the opaque regions come back byte-equal after read → write" {

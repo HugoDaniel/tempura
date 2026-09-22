@@ -577,8 +577,9 @@ const Walker = struct {
     /// The walk itself: from the first playable order, row after row,
     /// until the timing state comes round or the cap trips.
     fn run(self: *Walker, gpa: std.mem.Allocator) Error!void {
-        var seen: std.AutoHashMap(Key, Seen) = .init(gpa);
-        defer seen.deinit();
+        // Looked up, never iterated: no output order depends on it.
+        var seen: std.AutoHashMapUnmanaged(Key, Seen) = .empty;
+        defer seen.deinit(gpa);
         const loops = @max(1, self.opts.loops);
 
         var order = self.resolveOrder(0) orelse return;
@@ -604,7 +605,7 @@ const Walker = struct {
             }
 
             const row_index: u32 = @intCast(self.rows.items.len);
-            if (try revisit(&seen, self.key(order, row), row_index, loops)) |first| {
+            if (try revisit(gpa, &seen, self.key(order, row), row_index, loops)) |first| {
                 self.loop_row = first;
                 break;
             }
@@ -660,12 +661,13 @@ const Walker = struct {
     /// times than `loops` allows, the index of its FIRST visit — the
     /// loop point (plan 06, "Termination").
     fn revisit(
-        seen: *std.AutoHashMap(Key, Seen),
+        gpa: std.mem.Allocator,
+        seen: *std.AutoHashMapUnmanaged(Key, Seen),
         state: Key,
         row_index: u32,
         loops: u8,
     ) Error!?u32 {
-        const gop = try seen.getOrPut(state);
+        const gop = try seen.getOrPut(gpa, state);
         if (!gop.found_existing) {
             gop.value_ptr.* = .{ .first = row_index, .visits = 1 };
             return null;

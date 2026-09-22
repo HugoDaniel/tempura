@@ -1193,7 +1193,8 @@ test "Builder.copyEvent: every pool-backed payload brings its bytes, and nothing
         try testing.expectEqual(x.kind, y.kind);
         try testing.expect(x.payload.eqlOutsidePool(y.payload, x.kind));
         const run = x.payload.poolBytes(x.kind) orelse continue;
-        try testing.expectEqualStrings(src.bytesOf(run), dst.bytesOf(y.payload.poolBytes(y.kind).?));
+        const moved = y.payload.poolBytes(y.kind).?;
+        try testing.expectEqualStrings(src.bytesOf(run), dst.bytesOf(moved));
     }
     // Only what the events named came across.
     try testing.expectEqual(@as(usize, 5 + 2 + 4), dst.pool.len);

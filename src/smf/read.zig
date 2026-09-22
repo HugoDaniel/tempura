@@ -774,71 +774,68 @@ const Walk = struct {
 
         const payload = try self.payloadBytes(pos, end) orelse return null;
         const raw = self.builder.bytesOf(payload);
-
-        const typed: ?Parsed = switch (meta_type) {
-            0x00 => if (raw.len == 2) .{
-                .kind = .sequence_number,
-                .payload = .{ .number = std.mem.readInt(u16, raw[0..2], .big) },
-            } else null,
-            0x01 => .{ .kind = .text_event, .payload = .{ .bytes = payload } },
-            0x02 => .{ .kind = .copyright_notice, .payload = .{ .bytes = payload } },
-            0x03 => .{ .kind = .sequence_name, .payload = .{ .bytes = payload } },
-            0x04 => .{ .kind = .instrument_name, .payload = .{ .bytes = payload } },
-            0x05 => .{ .kind = .lyric, .payload = .{ .bytes = payload } },
-            0x06 => .{ .kind = .marker, .payload = .{ .bytes = payload } },
-            0x07 => .{ .kind = .cue_point, .payload = .{ .bytes = payload } },
-            0x08 => .{ .kind = .program_name, .payload = .{ .bytes = payload } },
-            0x09 => .{ .kind = .device_name, .payload = .{ .bytes = payload } },
-            0x20 => if (raw.len == 1) .{
-                .kind = .midi_channel_prefix,
-                .payload = .{ .byte = raw[0] },
-            } else null,
-            0x21 => if (raw.len == 1) .{
-                .kind = .midi_port,
-                .payload = .{ .byte = raw[0] },
-            } else null,
-            0x2F => if (raw.len == 0) .{ .kind = .end_of_track, .payload = .empty } else null,
-            0x51 => if (raw.len == 3) .{
-                .kind = .set_tempo,
-                .payload = .{
-                    .tempo = (@as(u32, raw[0]) << 16) | (@as(u32, raw[1]) << 8) | raw[2],
-                },
-            } else null,
-            0x54 => if (raw.len == 5) .{ .kind = .smpte_offset, .payload = .{ .smpte = .{
-                .hr = raw[0],
-                .mn = raw[1],
-                .se = raw[2],
-                .fr = raw[3],
-                .ff = raw[4],
-            } } } else null,
-            0x58 => if (raw.len == 4) .{ .kind = .time_signature, .payload = .{ .time_sig = .{
-                .nn = raw[0],
-                .dd = raw[1],
-                .cc = raw[2],
-                .bb = raw[3],
-            } } } else null,
-            0x59 => if (raw.len == 2) .{ .kind = .key_signature, .payload = .{ .key_sig = .{
-                .sf = @bitCast(raw[0]),
-                .mi = raw[1],
-            } } } else null,
-            0x7F => self.sequencerSpecific(raw, payload),
-            else => null,
-        };
-
-        return typed orelse .{
+        return typedMeta(meta_type, raw, payload) orelse .{
             .kind = .meta_unknown,
             .payload = .{ .meta = .{ .bytes = payload, .meta_type = meta_type } },
         };
     }
-
-    /// `FF 7F`: whose payload is it? `Sequence.classifySequencerSpecific`
-    /// answers — tempura's envelope, midivia's hint or somebody else's —
-    /// the same way for the document bridge's reader.
-    fn sequencerSpecific(_: *Walk, raw: []const u8, payload: sequence.Bytes) ?Parsed {
-        const c = sequence.classifySequencerSpecific(raw, payload);
-        return .{ .kind = c.kind, .payload = c.payload };
-    }
 };
+
+/// The typed event a meta `meta_type` with payload `raw` (stored at
+/// `payload` in the pool) is, or null when RP-001 has no row for it or
+/// its length is not the one RP-001 gives — the caller keeps those as
+/// `meta_unknown`. `FF 7F` is `Sequence.classifySequencerSpecific`'s:
+/// tempura's envelope, midivia's hint or somebody else's, the same way
+/// for the document bridge's reader. Pure over the bytes.
+fn typedMeta(meta_type: u8, raw: []const u8, payload: sequence.Bytes) ?Walk.Parsed {
+    return switch (meta_type) {
+        0x00 => if (raw.len == 2) .{
+            .kind = .sequence_number,
+            .payload = .{ .number = std.mem.readInt(u16, raw[0..2], .big) },
+        } else null,
+        0x01 => .{ .kind = .text_event, .payload = .{ .bytes = payload } },
+        0x02 => .{ .kind = .copyright_notice, .payload = .{ .bytes = payload } },
+        0x03 => .{ .kind = .sequence_name, .payload = .{ .bytes = payload } },
+        0x04 => .{ .kind = .instrument_name, .payload = .{ .bytes = payload } },
+        0x05 => .{ .kind = .lyric, .payload = .{ .bytes = payload } },
+        0x06 => .{ .kind = .marker, .payload = .{ .bytes = payload } },
+        0x07 => .{ .kind = .cue_point, .payload = .{ .bytes = payload } },
+        0x08 => .{ .kind = .program_name, .payload = .{ .bytes = payload } },
+        0x09 => .{ .kind = .device_name, .payload = .{ .bytes = payload } },
+        0x20 => if (raw.len == 1) .{
+            .kind = .midi_channel_prefix,
+            .payload = .{ .byte = raw[0] },
+        } else null,
+        0x21 => if (raw.len == 1) .{ .kind = .midi_port, .payload = .{ .byte = raw[0] } } else null,
+        0x2F => if (raw.len == 0) .{ .kind = .end_of_track, .payload = .empty } else null,
+        0x51 => if (raw.len == 3) .{
+            .kind = .set_tempo,
+            .payload = .{ .tempo = (@as(u32, raw[0]) << 16) | (@as(u32, raw[1]) << 8) | raw[2] },
+        } else null,
+        0x54 => if (raw.len == 5) .{ .kind = .smpte_offset, .payload = .{ .smpte = .{
+            .hr = raw[0],
+            .mn = raw[1],
+            .se = raw[2],
+            .fr = raw[3],
+            .ff = raw[4],
+        } } } else null,
+        0x58 => if (raw.len == 4) .{ .kind = .time_signature, .payload = .{ .time_sig = .{
+            .nn = raw[0],
+            .dd = raw[1],
+            .cc = raw[2],
+            .bb = raw[3],
+        } } } else null,
+        0x59 => if (raw.len == 2) .{ .kind = .key_signature, .payload = .{ .key_sig = .{
+            .sf = @bitCast(raw[0]),
+            .mi = raw[1],
+        } } } else null,
+        0x7F => blk: {
+            const c = sequence.classifySequencerSpecific(raw, payload);
+            break :blk .{ .kind = c.kind, .payload = c.payload };
+        },
+        else => null,
+    };
+}
 
 test "read: the hand-built two-track fixture parses to the expected Sequence" {
     const gpa = testing.allocator;

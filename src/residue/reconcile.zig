@@ -2103,6 +2103,32 @@ const SmfCarry = struct {
     ver: u8 = records.version,
 };
 
+/// The half of a `.mid` case after the residue is attached, the way
+/// `dump` reads a file: write → read → detach → the bridge's tier text.
+fn smfThroughFile(gpa: Allocator, carried: *const Sequence.Sequence) !SmfCase {
+    var file = try smf_write.write(gpa, carried, .{});
+    defer file.deinit();
+    try testing.expect(!file.diags.hasErrors());
+    const bytes = try gpa.dupe(u8, file.bytes);
+    errdefer gpa.free(bytes);
+
+    var read_back = try smf_read.read(gpa, bytes);
+    errdefer read_back.deinit();
+    try testing.expect(!read_back.diags.hasErrors());
+
+    var detached = try carrier_smf.detach(gpa, &read_back.sequence);
+    errdefer detached.deinit();
+
+    const text = try bridge_smf.sequenceToForms(gpa, &detached.sequence, null, .{});
+    return .{
+        .gpa = gpa,
+        .bytes = bytes,
+        .file = read_back,
+        .detached = detached,
+        .text = text,
+    };
+}
+
 /// Build a `.mid` the way `build` would, then read it back the way `dump`
 /// does: attach → write → read → detach → the bridge's tier text.
 fn smfCase(gpa: Allocator, carry: SmfCarry) !SmfCase {
@@ -2154,27 +2180,7 @@ fn smfCase(gpa: Allocator, carry: SmfCarry) !SmfCase {
     try testing.expect(!carried.diags.hasErrors());
     if (carry.ver != records.version) setVersion(&carried.sequence, carry.ver);
 
-    var file = try smf_write.write(gpa, &carried.sequence, .{});
-    defer file.deinit();
-    try testing.expect(!file.diags.hasErrors());
-    const bytes = try gpa.dupe(u8, file.bytes);
-    errdefer gpa.free(bytes);
-
-    var read_back = try smf_read.read(gpa, bytes);
-    errdefer read_back.deinit();
-    try testing.expect(!read_back.diags.hasErrors());
-
-    var detached = try carrier_smf.detach(gpa, &read_back.sequence);
-    errdefer detached.deinit();
-
-    const text = try bridge_smf.sequenceToForms(gpa, &detached.sequence, null, .{});
-    return .{
-        .gpa = gpa,
-        .bytes = bytes,
-        .file = read_back,
-        .detached = detached,
-        .text = text,
-    };
+    return smfThroughFile(gpa, &carried.sequence);
 }
 
 /// Re-stamp every residue event's envelope version — the one thing a
@@ -2324,30 +2330,28 @@ test "reconcile: rule 2 — a velocity edit makes one lane bound and leaves the 
     try testing.expect(std.mem.indexOf(u8, got.doc_text, "; the kick, as the author") != null);
 }
 
-/// A `.mid` tempura built from a lane whose notes name TWO channels —
-/// one track for the lane and one record PER CHANNEL, since a lane hash
-/// is over a `(track, ch)` pair — plus a second lane on a track of its
-/// own, read back the way `dump` reads it. With `edited`, the channel-2
-/// note is one velocity lighter than the records were computed over: a
-/// DAW's edit to one of the lane's two channels.
-fn kitCase(gpa: Allocator, edited: bool) !SmfCase {
-    const source: [:0]const u8 =
-        \\(timeline :title "kit" :length 1bar)
-        \\
-        \\(anchor :id song :kind smf :file "song.mid" :size 1 :sha256 "9f2a")
-        \\
-        \\(tempo-point :at 0bar :qpm 120)
-        \\(meter-point :at 0bar :sig [4 4])
-        \\
-        \\(lane :name kit :kind notes :target drums
-        \\  (note :at 0bar :dur 1q :key 36 :vel 100 :ch 1)
-        \\  (note :at 1q :dur 1q :key 38 :vel 80 :ch 2))
-        \\
-        \\(lane :name hat :kind notes
-        \\  (note :at 2q :dur 1q :key 42 :vel 70))
-        \\
-    ;
+/// `kitCase`'s document: a lane rendered on two channels of one track
+/// and a lane on a track of its own.
+const kit_source: [:0]const u8 =
+    \\(timeline :title "kit" :length 1bar)
+    \\
+    \\(anchor :id song :kind smf :file "song.mid" :size 1 :sha256 "9f2a")
+    \\
+    \\(tempo-point :at 0bar :qpm 120)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(lane :name kit :kind notes :target drums
+    \\  (note :at 0bar :dur 1q :key 36 :vel 100 :ch 1)
+    \\  (note :at 1q :dur 1q :key 38 :vel 80 :ch 2))
+    \\
+    \\(lane :name hat :kind notes
+    \\  (note :at 2q :dur 1q :key 42 :vel 70))
+    \\
+;
 
+/// The file `kit_source` renders to, as tempura wrote it: the conductor,
+/// the kit's two channels on track 2, the hat on track 3.
+fn kitSequence(gpa: Allocator) !Sequence.Sequence {
     var b: Sequence.Builder = .init(gpa);
     errdefer b.deinit();
     b.format = 1;
@@ -2373,7 +2377,18 @@ fn kitCase(gpa: Allocator, edited: bool) !SmfCase {
     try b.addEvent(t2, 192, .note_on, .{ .note = .{ .ch = 0, .key = 42, .vel = 70 } });
     try b.addEvent(t2, 288, .note_off, .{ .note = .{ .ch = 0, .key = 42, .vel = 64 } });
     try b.addEvent(t2, 384, .end_of_track, .empty);
-    var written = try b.finish();
+    return b.finish();
+}
+
+/// A `.mid` tempura built from a lane whose notes name TWO channels —
+/// one track for the lane and one record PER CHANNEL, since a lane hash
+/// is over a `(track, ch)` pair — plus a second lane on a track of its
+/// own, read back the way `dump` reads it. With `edited`, the channel-2
+/// note is one velocity lighter than the records were computed over: a
+/// DAW's edit to one of the lane's two channels.
+fn kitCase(gpa: Allocator, edited: bool) !SmfCase {
+    const source = kit_source;
+    var written = try kitSequence(gpa);
     defer written.deinit();
 
     // The records, over the file as tempura wrote it.
@@ -2416,27 +2431,7 @@ fn kitCase(gpa: Allocator, edited: bool) !SmfCase {
     defer carried.deinit();
     try testing.expect(!carried.diags.hasErrors());
 
-    var file = try smf_write.write(gpa, &carried.sequence, .{});
-    defer file.deinit();
-    try testing.expect(!file.diags.hasErrors());
-    const bytes = try gpa.dupe(u8, file.bytes);
-    errdefer gpa.free(bytes);
-
-    var read_back = try smf_read.read(gpa, bytes);
-    errdefer read_back.deinit();
-    try testing.expect(!read_back.diags.hasErrors());
-
-    var detached = try carrier_smf.detach(gpa, &read_back.sequence);
-    errdefer detached.deinit();
-
-    const text = try bridge_smf.sequenceToForms(gpa, &detached.sequence, null, .{});
-    return .{
-        .gpa = gpa,
-        .bytes = bytes,
-        .file = read_back,
-        .detached = detached,
-        .text = text,
-    };
+    return smfThroughFile(gpa, &carried.sequence);
 }
 
 test "reconcile: rule 2 — a lane rendered on two channels and edited on one binds at both" {
@@ -2860,15 +2855,42 @@ const ItCarry = struct {
 /// Build a `.it` the way `build` would, then read it back the way `dump`
 /// does: chunk and tail → write → read → `choose` → the bridge's text.
 fn itCase(gpa: Allocator, schema: *const Schema, carry: ItCarry) !ItCase {
+    const payload = try itChunk(gpa, carry);
+    defer gpa.free(payload);
+
+    var doc_res = try fromSjon.fromSource(gpa, schema, it_source, null);
+    defer doc_res.deinit();
+    try testing.expect(!doc_res.diags.hasErrors());
+    var t = try carrier_it.tail(gpa, &doc_res.doc, &doc_res.map);
+    defer t.deinit(gpa);
+    try testing.expect(!t.diags.hasErrors());
+
+    var read_as = try itFile(gpa, carry.read_as);
+    defer read_as.deinit();
+    const whole = try carrier_it.appendTail(gpa, read_as.message, t.bytes);
+    defer gpa.free(whole);
+
+    var file = try itf_write.write(gpa, &read_as, null, .{
+        .tmpu = if (carry.chunk) payload else null,
+        .message_tail = if (carry.tail) whole[read_as.message.len..] else null,
+    });
+    defer file.deinit();
+    try testing.expect(!file.diags.hasErrors());
+    return itThroughFile(gpa, file.bytes);
+}
+
+/// The `TMPU` payload `build` would write for `carry.written`: the
+/// essence, the kick's and the bass-vol's records (the latter with its
+/// hint) and the conductor record, hashed over that module. Caller owns.
+fn itChunk(gpa: Allocator, carry: ItCarry) ![]u8 {
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
-    const arena = scratch.allocator();
 
     var written = try itFile(gpa, carry.written);
     defer written.deinit();
     var wrows = try walk.derive(gpa, &written, .{});
     defer wrows.deinit();
-    const pats = try playedPatterns(arena, &wrows);
+    const pats = try playedPatterns(scratch.allocator(), &wrows);
 
     const kick = try records.encodeLane(gpa, .{
         .lane = "kick",
@@ -2893,32 +2915,18 @@ fn itCase(gpa: Allocator, schema: *const Schema, carry: ItCarry) !ItCase {
     defer packed_tier.deinit(gpa);
     try testing.expect(!packed_tier.diags.hasErrors());
 
-    const payload = try carrier_it.chunk(gpa, .{
+    return carrier_it.chunk(gpa, .{
         .essence = packed_tier.bytes,
         .conductor = &conductor,
         .lanes = &.{ kick, bass },
     });
-    defer gpa.free(payload);
+}
 
-    var doc_res = try fromSjon.fromSource(gpa, schema, it_source, null);
-    defer doc_res.deinit();
-    try testing.expect(!doc_res.diags.hasErrors());
-    var t = try carrier_it.tail(gpa, &doc_res.doc, &doc_res.map);
-    defer t.deinit(gpa);
-    try testing.expect(!t.diags.hasErrors());
-
-    var read_as = try itFile(gpa, carry.read_as);
-    defer read_as.deinit();
-    const whole = try carrier_it.appendTail(gpa, read_as.message, t.bytes);
-    defer gpa.free(whole);
-
-    var file = try itf_write.write(gpa, &read_as, null, .{
-        .tmpu = if (carry.chunk) payload else null,
-        .message_tail = if (carry.tail) whole[read_as.message.len..] else null,
-    });
-    defer file.deinit();
-    try testing.expect(!file.diags.hasErrors());
-    const bytes = try gpa.dupe(u8, file.bytes);
+/// The half of a `.it` case after it is written, the way `dump` reads a
+/// file: read → `choose` a carrier → the tail's source when that is the
+/// one → the bridge's tier text. `written` is copied; the case owns it.
+fn itThroughFile(gpa: Allocator, written: []const u8) !ItCase {
+    const bytes = try gpa.dupe(u8, written);
     errdefer gpa.free(bytes);
 
     var read_back = try itf_read.read(gpa, bytes);
