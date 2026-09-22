@@ -24,6 +24,10 @@ pub const score = @import("score.zig");
 /// document point that made it.
 pub const tempo = @import("tempo.zig");
 
+/// A curve value as a controller's integer — the one quantizer both
+/// renderers write through.
+pub const quantize = @import("quantize.zig");
+
 /// `renderSmf` — a native timeline as a Standard MIDI File.
 pub const render_smf = @import("render_smf.zig");
 
@@ -52,6 +56,7 @@ test {
     _ = lanes;
     _ = score;
     _ = tempo;
+    _ = quantize;
     _ = render_smf;
     _ = render_it;
     _ = test_support;

@@ -84,6 +84,7 @@ const Grid = @import("../time/Grid.zig");
 const derive = @import("../time/derive.zig");
 const Sequence = @import("../smf/Sequence.zig");
 const records = @import("../residue/records.zig");
+const quantize = @import("quantize.zig");
 const tempo = @import("tempo.zig");
 
 const Allocator = std.mem.Allocator;
@@ -644,7 +645,7 @@ const Render = struct {
             const u = @as(f64, @floatFromInt(at - from.tick)) / @as(f64, @floatFromInt(span));
             const v = v0 + (v1 - v0) * u;
             try b.addEvent(track, self.pulse(at, off_grid), .control_change, .{
-                .control = .{ .ch = 0, .num = num, .val = value7f(v, range) },
+                .control = .{ .ch = 0, .num = num, .val = value7(v, range) },
             });
         }
     }
@@ -746,21 +747,11 @@ fn setTempo(us: f64) struct { us: u32, clamped: bool } {
     return .{ .us = @intFromFloat(rounded), .clamped = false };
 }
 
-/// `round((v − lo) / (hi − lo) · 127)`, clamped to the controller's
-/// domain. A degenerate `:range` (`hi == lo`) has no scale and answers 0.
-fn value7(v: f32, range: [2]f32) u7 {
-    return value7f(v, range);
-}
-
-fn value7f(v: f64, range: [2]f32) u7 {
-    const lo: f64 = range[0];
-    const hi: f64 = range[1];
-    if (hi == lo or !std.math.isFinite(lo) or !std.math.isFinite(hi)) return 0;
-    if (!std.math.isFinite(v)) return 0;
-    const scaled = @round((v - lo) / (hi - lo) * 127.0);
-    if (!(scaled > 0)) return 0;
-    if (scaled >= 127) return 127;
-    return @intFromFloat(scaled);
+/// A curve value as a 7-bit controller value under `range`: the shared
+/// quantizer (`quantize.zig`) at a top of 127, which it never answers
+/// past — so the narrowing to u7 holds by construction.
+fn value7(v: f64, range: [2]f32) u7 {
+    return @intCast(quantize.quantize(v, range, 127));
 }
 
 // ---------------------------------------------------------------------

@@ -47,6 +47,7 @@ const derive = @import("../time/derive.zig");
 const itf = @import("../itf/itf.zig");
 const records = @import("../residue/records.zig");
 const reconcile = @import("../residue/reconcile.zig");
+const quantize = @import("quantize.zig");
 const tempo = @import("tempo.zig");
 
 const Allocator = std.mem.Allocator;
@@ -671,9 +672,9 @@ const Render = struct {
         if (self.opts.fx) |letter| {
             if (cell.fx != 0) return;
             cell.fx = letter -% '@';
-            cell.param = scale(v, range, 255);
+            cell.param = quantize.quantize(v, range, 255);
         } else {
-            cell.vol = scale(v, range, 64);
+            cell.vol = quantize.quantize(v, range, 64);
         }
         if (!placed.onRow()) self.inexact += 1;
     }
@@ -853,18 +854,6 @@ fn itTempo(qpm: f64) struct { byte: u8, exact: bool } {
 /// inverse of `doc/bridge_it.zig`'s `velocityOf`.
 fn volumeOf(vel: u7) u8 {
     return @intCast((@as(u16, vel) * 64 + 63) / 127);
-}
-
-/// `round((v − lo) / (hi − lo) · top)`, clamped to `0..top`.
-fn scale(v: f64, range: [2]f32, top: u8) u8 {
-    const lo: f64 = range[0];
-    const hi: f64 = range[1];
-    if (hi == lo) return 0;
-    if (!std.math.isFinite(lo) or !std.math.isFinite(hi) or !std.math.isFinite(v)) return 0;
-    const scaled = @round((v - lo) / (hi - lo) * @as(f64, @floatFromInt(top)));
-    if (!(scaled > 0)) return 0;
-    if (scaled >= @as(f64, @floatFromInt(top))) return top;
-    return @intFromFloat(scaled);
 }
 
 /// One past the highest channel any cell of `module` uses.
