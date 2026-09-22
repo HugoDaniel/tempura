@@ -512,6 +512,10 @@ const Writer = struct {
         return out.items;
     }
 
+    /// One pattern record: its rows clamped to IT's range — a long one
+    /// cut, a short one padded (`padShort`) — then the 8-byte header and
+    /// the stream packed straight into the file, its length back-patched:
+    /// one list, in the `Written`'s arena, and no second report to copy.
     fn writePattern(self: *Writer, p: model.Pattern, index: usize) Error!void {
         const at = self.here();
         var rows = p.rows;
@@ -529,84 +533,56 @@ const Writer = struct {
             rows = self.limits.rows_max;
             cells = cells[0..@min(cells.len, @as(usize, rows) * model.channels)];
         } else if (rows < self.limits.rows_min) {
-            // IT's shortest pattern is 32 rows, so a shorter one is
-            // padded and told to break where it used to end (it 05).
-            const padded_len = @as(usize, self.limits.rows_min) * model.channels;
-            const padded = try self.arena.alloc(Cell, padded_len);
-            @memset(padded, .empty);
-            @memcpy(padded[0..@min(cells.len, padded.len)], cells[0..@min(cells.len, padded.len)]);
-
-            if (rows == 0) {
-                // A pattern with no rows has no last row to break on, so
-                // it is written as the shortest IT accepts, and empty.
-                try self.note(
-                    .it_pattern_rows_out_of_range,
-                    .warning,
-                    at,
-                    at + 8,
-                    "pattern {d} has no rows; written as {d} empty rows",
-                    .{ index, self.limits.rows_min },
-                );
-            } else {
-                const last: usize = @as(usize, rows) - 1;
-                const free = breakChannel(padded, last);
-                const channel = free orelse model.channels - 1;
-                const slot = &padded[last * model.channels + channel];
-                if (free == null) {
-                    // Every channel on that row already carries a
-                    // command: the break has to displace one, and which
-                    // rows caused it is the diagnostic's whole point.
-                    var name_buf: [5]u8 = undefined;
-                    try self.note(
-                        .it_pattern_rows_out_of_range,
-                        .err,
-                        at,
-                        at + 8,
-                        "pattern {d} has {d} rows, under IT's {d}; the C00 break on row {d} " ++
-                            "overwrote channel {d}'s command {s}{x:0>2}",
-                        .{
-                            index,
-                            rows,
-                            self.limits.rows_min,
-                            last,
-                            channel + 1,
-                            commandName(&name_buf, slot.fx),
-                            slot.param,
-                        },
-                    );
-                } else {
-                    try self.note(
-                        .it_pattern_rows_out_of_range,
-                        .warning,
-                        at,
-                        at + 8,
-                        "pattern {d} has {d} rows, under IT's {d}; written {d} rows with a C00 " ++
-                            "break on row {d}, channel {d}",
-                        .{
-                            index,
-                            rows,
-                            self.limits.rows_min,
-                            self.limits.rows_min,
-                            last,
-                            channel + 1,
-                        },
-                    );
-                }
-                slot.fx = cmd_break;
-                slot.param = 0;
-            }
+            const padded = try padShort(self.arena, cells, rows, self.limits.rows_min);
+            try self.shortPattern(at, index, rows, padded);
             rows = self.limits.rows_min;
-            cells = padded;
+            cells = padded.cells;
         }
 
-        // The 8-byte header, then the stream packed straight into the
-        // file, and its length back-patched: one list, in the `Written`'s
-        // arena, and no second report to copy.
         try self.zeros(8);
         const stream_at = self.out.items.len;
         try pattern.packInto(self.arena, &self.out, cells, rows, self.diags, at);
         self.patchWord(at, @intCast(self.out.items.len - stream_at));
         self.patchWord(at + 2, rows);
+    }
+
+    /// What padding a `rows`-row pattern cost, said at its record `at`:
+    /// written empty when it had no rows, a `C00` break where a channel
+    /// was free, and — loudly — the command a break had to displace.
+    fn shortPattern(self: *Writer, at: u32, index: usize, rows: u16, padded: Padded) Error!void {
+        const min = self.limits.rows_min;
+        const channel = padded.channel orelse return self.note(
+            .it_pattern_rows_out_of_range,
+            .warning,
+            at,
+            at + 8,
+            "pattern {d} has no rows; written as {d} empty rows",
+            .{ index, min },
+        );
+        const last = rows - 1;
+        if (padded.displaced) |old| {
+            // Every channel on that row already carried a command, and
+            // which rows caused it is the diagnostic's whole point.
+            var name_buf: [5]u8 = undefined;
+            return self.note(
+                .it_pattern_rows_out_of_range,
+                .err,
+                at,
+                at + 8,
+                "pattern {d} has {d} rows, under IT's {d}; the C00 break on row {d} " ++
+                    "overwrote channel {d}'s command {s}{x:0>2}",
+                .{ index, rows, min, last, channel + 1, commandName(&name_buf, old.fx), old.param },
+            );
+        }
+        try self.note(
+            .it_pattern_rows_out_of_range,
+            .warning,
+            at,
+            at + 8,
+            "pattern {d} has {d} rows, under IT's {d}; written {d} rows with a C00 " ++
+                "break on row {d}, channel {d}",
+            .{ index, rows, min, min, last, channel + 1 },
+        );
     }
 
     /// The bytes of an opaque region, or null when the anchor cannot
@@ -736,6 +712,42 @@ const Writer = struct {
 
 fn setBit(value: u16, bit: u16, on: bool) u16 {
     return if (on) value | bit else value & ~bit;
+}
+
+/// A pattern shorter than IT's shortest, as `padShort` wrote it.
+const Padded = struct {
+    /// `rows_min × 64` cells in the arena, the pattern's own first.
+    cells: []Cell,
+    /// The channel of the last real row the `C00` break went into, or
+    /// null for a pattern with no rows — no last row to break on, so it
+    /// is written empty.
+    channel: ?usize,
+    /// The command the break replaced, when every channel of that row
+    /// already carried one.
+    displaced: ?Cell,
+};
+
+/// A short pattern padded to `rows_min` rows and told to break where it
+/// used to end (it 05): its cells, then empty ones, with `C00` in the
+/// leftmost free effect column of its last row — or, when that row has
+/// none free, in its last channel, over the command there. The cells are
+/// `arena`'s; the caller says what it cost.
+fn padShort(arena: std.mem.Allocator, cells: []const Cell, rows: u16, rows_min: u16) Error!Padded {
+    std.debug.assert(rows < rows_min);
+    const padded = try arena.alloc(Cell, @as(usize, rows_min) * model.channels);
+    @memset(padded, .empty);
+    const kept = @min(cells.len, padded.len);
+    @memcpy(padded[0..kept], cells[0..kept]);
+    if (rows == 0) return .{ .cells = padded, .channel = null, .displaced = null };
+
+    const last: usize = @as(usize, rows) - 1;
+    const free = breakChannel(padded, last);
+    const channel = free orelse model.channels - 1;
+    const slot = &padded[last * model.channels + channel];
+    const displaced: ?Cell = if (free == null) slot.* else null;
+    slot.fx = cmd_break;
+    slot.param = 0;
+    return .{ .cells = padded, .channel = channel, .displaced = displaced };
 }
 
 /// A command as a diagnostic names it: its letter (`A`), or `#200 ` for
