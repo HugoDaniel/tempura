@@ -172,6 +172,22 @@ const Slot = struct {
     delay: u8,
 };
 
+/// What `slotOf` answers: the slot, and whether it IS the tick — a row,
+/// or a row and an `SDx` delay — rather than a rounding. The caller
+/// counts the rounding (`render_inexact`) only when it writes there, so
+/// a cut a later note displaces, or a note that collides, costs nothing
+/// in the report.
+const Placed = struct {
+    slot: Slot,
+    exact: bool,
+
+    /// Exact for a writer with no `SDx` to spend — a `Txx`, a curve
+    /// value — for which a delayed position is a rounding to its row.
+    fn onRow(self: Placed) bool {
+        return self.exact and self.slot.delay == 0;
+    }
+};
+
 const Render = struct {
     gpa: Allocator,
     /// The result's arena: every record's name and segments.
@@ -392,15 +408,19 @@ const Render = struct {
         if (self.base == null) _ = walk.next();
         // Bounded by the map's segments.
         while (walk.next()) |kept| {
-            const slot = self.slotAt(kept.tick) orelse continue;
+            const placed = self.slotOf(kept.tick) orelse continue;
             const param = try self.tempoByte(kept);
-            if (!self.placeFx(slot, fx_t, param)) try self.diags.add(
+            if (self.placeFx(placed.slot, fx_t, param)) {
+                if (!placed.onRow()) self.inexact += 1;
+                continue;
+            }
+            try self.diags.add(
                 .render_inexact,
                 .warning,
                 kept.span,
                 "every effect column of row {d} of pattern {d} is taken, so this tempo point " ++
                     "could not be written there",
-                .{ slot.row, slot.pattern },
+                .{ placed.slot.row, placed.slot.pattern },
             );
         }
     }
@@ -440,13 +460,13 @@ const Render = struct {
         const busy = try self.gpa.alloc(i64, voices);
         defer self.gpa.free(busy);
         @memset(busy, std.math.minInt(i64));
-        const cuts = try self.gpa.alloc(?Slot, voices);
+        const cuts = try self.gpa.alloc(?Placed, voices);
         defer self.gpa.free(cuts);
         @memset(cuts, null);
 
         var exceeded: usize = 0;
         for (index.onsets) |o| {
-            const slot = self.slotAt(o.tick) orelse continue;
+            const placed = self.slotOf(o.tick) orelse continue;
             const end = o.tick +| @max(o.dur, 0);
 
             var voice: ?u8 = null;
@@ -471,11 +491,11 @@ const Render = struct {
 
             // The pending cut of the voice's previous note, placed only
             // where it does not land on this note's own cell.
-            if (cuts[v]) |cut| self.placeCut(cut, first + v, slot);
-            cuts[v] = self.slotAt(end);
+            if (cuts[v]) |cut| self.placeCut(cut, first + v, placed.slot);
+            cuts[v] = self.slotOf(end);
             busy[v] = end;
 
-            try self.placeNote(slot, first + v, o);
+            try self.placeNote(placed, first + v, o);
         }
         for (cuts, 0..) |cut, v| {
             if (cut) |c| self.placeCut(c, first + @as(u8, @intCast(v)), null);
@@ -489,7 +509,8 @@ const Render = struct {
         });
     }
 
-    fn placeNote(self: *Render, slot: Slot, channel: u8, o: derive.Onset) Error!void {
+    fn placeNote(self: *Render, placed: Placed, channel: u8, o: derive.Onset) Error!void {
+        const slot = placed.slot;
         const cell = self.cellAt(slot, channel) orelse return;
         // One cell holds one note. Two notes of one voice that round
         // onto the same cell are not a note and a louder note — the
@@ -502,6 +523,7 @@ const Render = struct {
         cell.note = @min(o.key, model.note_max);
         cell.ins = 1;
         cell.vol = volumeOf(o.vel);
+        if (!placed.exact) self.inexact += 1;
         if (slot.delay > 0) {
             if (cell.fx == 0) {
                 cell.fx = fx_s;
@@ -528,18 +550,27 @@ const Render = struct {
     /// still a cell that can end a note, and requiring the whole cell to
     /// be empty meant a note whose end fell on a tempo change's row rang
     /// on for ever — the one place a duration was silently lost.
-    fn placeCut(self: *Render, cut: Slot, channel: u8, next: ?Slot) void {
+    ///
+    /// A rounding is counted only when the cut is written: one a later
+    /// note displaces said nothing about any position.
+    fn placeCut(self: *Render, placed: Placed, channel: u8, next: ?Slot) void {
+        const cut = placed.slot;
         if (next) |n| {
             if (n.pattern == cut.pattern and n.row == cut.row) return;
         }
         const cell = self.cellAt(cut, channel) orelse return;
         if (cell.note != model.note_none) return;
         cell.note = model.note_cut;
-        // The end is a position like any other: an `SDx` says it exactly.
-        if (cut.delay > 0 and cell.fx == 0) {
-            cell.fx = fx_s;
-            cell.param = sd | cut.delay;
+        if (!placed.exact) self.inexact += 1;
+        if (cut.delay == 0) return;
+        // The end is a position like any other: an `SDx` says it exactly,
+        // when the effect column is free, and the row rounds it when not.
+        if (cell.fx != 0) {
+            self.inexact += 1;
+            return;
         }
+        cell.fx = fx_s;
+        cell.param = sd | cut.delay;
     }
 
     fn instrumentless(self: *Render) bool {
@@ -631,9 +662,12 @@ const Render = struct {
         return rows *| self.row_ticks;
     }
 
+    /// One curve value at the row `tick` lands on. A curve spends no
+    /// `SDx`, so a delayed position is a rounding to its row, counted when
+    /// the value is written.
     fn placeCurve(self: *Render, tick: i64, channel: u8, v: f64, range: [2]f32) void {
-        const slot = self.slotAt(tick) orelse return;
-        const cell = self.cellAt(slot, channel) orelse return;
+        const placed = self.slotOf(tick) orelse return;
+        const cell = self.cellAt(placed.slot, channel) orelse return;
         if (self.opts.fx) |letter| {
             if (cell.fx != 0) return;
             cell.fx = letter -% '@';
@@ -641,70 +675,84 @@ const Render = struct {
         } else {
             cell.vol = scale(v, range, 64);
         }
+        if (!placed.onRow()) self.inexact += 1;
     }
 
     // ---- the grid ----
 
-    /// Where a tempura tick lands, or null when it lands outside the
-    /// module altogether.
-    fn slotAt(self: *Render, tick: i64) ?Slot {
+    /// Where a tempura tick lands, and whether exactly, or null when it
+    /// lands outside the module altogether. Pure: the caller counts a
+    /// rounding when it writes (`Placed`).
+    fn slotOf(self: *const Render, tick: i64) ?Placed {
         if (tick < 0) return null;
-        if (self.rows) |*map| {
-            // The anchored path: the row the tracker would be playing.
-            const it_tick = @divFloor(tick, Grid.IT_TICK);
-            const pos = itf.walk.orderRowAt(map, it_tick) orelse {
-                self.inexact += 1;
-                return self.lastSlot();
-            };
-            if (pos.order >= self.orders.len) return null;
-            const pattern = self.orders[pos.order];
-            if (pattern >= self.patterns.items.len) return null;
-            // An `SDx` says a sub-row position EXACTLY, so it is not a
-            // rounding and is not counted as one; a position that is not
-            // a whole IT tick, or more than 15 of them into a row, is.
-            const on_tick = @rem(tick, Grid.IT_TICK) == 0;
-            const on_row = on_tick and pos.tick_in_row == 0;
-            const can_delay = on_tick and pos.tick_in_row <= 15;
-            if (!on_row and !can_delay) self.inexact += 1;
-            return .{
+        if (self.rows) |*map| return self.walkSlot(map, tick);
+        return self.gridSlot(tick);
+    }
+
+    /// The anchored path: the row the tracker would be playing at `tick`,
+    /// by the anchor's own walk. Past the walk's end is the last cell,
+    /// late rather than lost.
+    fn walkSlot(self: *const Render, map: *const itf.walk.RowMap, tick: i64) ?Placed {
+        const it_tick = @divFloor(tick, Grid.IT_TICK);
+        const pos = itf.walk.orderRowAt(map, it_tick) orelse {
+            return .{ .slot = self.lastSlot() orelse return null, .exact = false };
+        };
+        if (pos.order >= self.orders.len) return null;
+        const pattern = self.orders[pos.order];
+        if (pattern >= self.patterns.items.len) return null;
+        // An `SDx` says a sub-row position EXACTLY, so it is not a
+        // rounding; a position that is not a whole IT tick, or more than
+        // 15 of them into a row, is.
+        const on_tick = @rem(tick, Grid.IT_TICK) == 0;
+        const on_row = on_tick and pos.tick_in_row == 0;
+        const can_delay = on_tick and pos.tick_in_row <= 15;
+        return .{
+            .slot = .{
                 .pattern = pattern,
                 .row = pos.row,
                 .delay = if (can_delay) @intCast(pos.tick_in_row) else 0,
-            };
-        }
+            },
+            .exact = on_row or can_delay,
+        };
+    }
 
+    /// The fresh path: `rows_per_pattern` rows of `row_ticks` each, one
+    /// pattern after another.
+    fn gridSlot(self: *const Render, tick: i64) ?Placed {
         const rows = @divFloor(tick, self.row_ticks);
         const rem = tick - rows * self.row_ticks;
         const pattern_index: usize = @intCast(@divFloor(rows, @as(i64, self.rows_per_pattern)));
         if (pattern_index >= self.patterns.items.len) return null;
         const row: u16 = @intCast(@rem(rows, @as(i64, self.rows_per_pattern)));
+        const here: Slot = .{ .pattern = @intCast(pattern_index), .row = row, .delay = 0 };
 
-        if (rem == 0) return .{ .pattern = @intCast(pattern_index), .row = row, .delay = 0 };
+        if (rem == 0) return .{ .slot = here, .exact = true };
         // `SDx` first: a delay of `x` whole IT ticks says the position
-        // exactly, and only what it cannot say is rounded and counted.
+        // exactly, and only what it cannot say is rounded.
         if (@rem(rem, Grid.IT_TICK) == 0) {
             const ticks = @divExact(rem, Grid.IT_TICK);
-            if (ticks <= 15) return .{
-                .pattern = @intCast(pattern_index),
-                .row = row,
-                .delay = @intCast(ticks),
-            };
+            if (ticks <= 15) {
+                var delayed = here;
+                delayed.delay = @intCast(ticks);
+                return .{ .slot = delayed, .exact = true };
+            }
         }
-        self.inexact += 1;
         // Nearest row, ties up — the row the position is closer to.
         const nearest = if (2 * rem >= self.row_ticks) rows + 1 else rows;
         const pi: usize = @intCast(@divFloor(nearest, @as(i64, self.rows_per_pattern)));
-        if (pi >= self.patterns.items.len) return self.lastSlot();
-        return .{
+        if (pi >= self.patterns.items.len) {
+            return .{ .slot = self.lastSlot() orelse return null, .exact = false };
+        }
+        return .{ .slot = .{
             .pattern = @intCast(pi),
             .row = @intCast(@rem(nearest, @as(i64, self.rows_per_pattern))),
             .delay = 0,
-        };
+        }, .exact = false };
     }
 
     /// The last cell of the module — where a position past its end is
     /// clamped, so a note is late rather than lost.
-    fn lastSlot(self: *Render) ?Slot {
+    fn lastSlot(self: *const Render) ?Slot {
         if (self.patterns.items.len == 0) return null;
         const last = self.patterns.items.len - 1;
         const p = self.patterns.items[last];
@@ -1103,6 +1151,31 @@ test "renderIt: a tempo change becomes a Txx at its row" {
     // reason to lose its duration: the cut needs the NOTE column, not
     // the whole cell.
     try testing.expectEqual(@as(u8, model.note_cut), cell.note);
+}
+
+test "renderIt: a rounded cut the next note displaces is not counted as a rounding" {
+    // The first note ends one tempura tick past row 4, so its `^^^`
+    // rounds to row 4 — where the second note, itself rounded, lands on
+    // the same voice. The cut is never written, and only the note that
+    // was is counted.
+    const gpa = testing.allocator;
+    var fx = try load(gpa,
+        \\(timeline :length 1bar)
+        \\(tempo-point :at 0q :us 500000)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name kick :kind notes
+        \\  (note :at 0q :dur 46126081t :key 60 :vel 100)
+        \\  (note :at 46126082t :dur 46126078t :key 62 :vel 100))
+    );
+    defer fx.deinit();
+
+    var out = try renderIt(gpa, &fx.doc, &fx.derived, null, .{ .voices = 1 });
+    defer out.deinit();
+    try testing.expectEqual(@as(u8, 62), cellOf(&out.module, 0, 4, 0).note);
+    try testing.expectEqual(@as(u8, model.note_cut), cellOf(&out.module, 0, 8, 0).note);
+    try testing.expectEqual(@as(usize, 1), out.diags.count(.render_inexact));
+    const d = out.diags.items()[out.diags.items().len - 1];
+    try testing.expect(std.mem.startsWith(u8, d.message, "1 position(s)"));
 }
 
 test "renderIt: a note whose voice's cell is already taken is counted, never overwritten" {
