@@ -99,6 +99,7 @@ const fromSjon = @import("fromSjon.zig");
 const time_derive = @import("../time/derive.zig");
 const render_smf = @import("../export/render_smf.zig");
 const render_it = @import("../export/render_it.zig");
+const export_lanes = @import("../export/lanes.zig");
 const residue_essence = @import("../residue/essence.zig");
 const walk = @import("../itf/walk.zig");
 
@@ -178,7 +179,45 @@ pub const Dumped = struct {
         }
         return null;
     }
+
+    /// Plan 04's rule 2 as the score exporter reads it: every easing hint
+    /// a stale curve lane KEPT, as the `EaseHint`s `exportScore` takes, in
+    /// verdict order. The verdict already dropped the hints the file's own
+    /// steps contradict (`ease_hint_mismatch`), so what is here is exactly
+    /// what a score should honour — and a lane whose hash matched asked no
+    /// questions of its steps, so it has none.
+    ///
+    /// The one spelling of that step for every host that exports the
+    /// score of a FILE: `tempura export-score song.it`, the corpus
+    /// runner's `(export-score)` and `tpr_exportScore` after
+    /// `tpr_loadFile`. A document read from text carries no verdicts, so
+    /// it has no hints to pass (`cli/export_score.zig`'s header).
+    ///
+    /// Everything the answer names — the slice, each lane name and each
+    /// easing — is COPIED into `arena`, so it outlives this `Dumped`: the
+    /// wasm keeps the hints after the dump that produced them is gone.
+    /// Nothing is freed on its own, so pass an arena.
+    pub fn easeHints(self: *const Dumped, arena: Allocator) Error![]const EaseHint {
+        var total: usize = 0;
+        for (self.verdicts) |v| total += v.hints.len;
+        const out = try arena.alloc(EaseHint, total);
+        var at: usize = 0;
+        for (self.verdicts) |v| {
+            if (v.hints.len == 0) continue;
+            const lane = try arena.dupe(u8, v.lane);
+            for (v.hints) |h| {
+                const ease = try arena.dupe(u8, h.ease);
+                out[at] = .{ .lane = lane, .from = h.from, .to = h.to, .ease = ease };
+                at += 1;
+            }
+        }
+        std.debug.assert(at == total);
+        return out;
+    }
 };
+
+/// One easing hint as the score exporter takes it (`export/lanes.zig`).
+pub const EaseHint = export_lanes.EaseHint;
 
 /// A `.mid` or a `.it` as a document — plan 10's `dump` row, whole.
 pub fn dump(
@@ -2668,6 +2707,147 @@ test "pipeline.build: every allocation failure is OutOfMemory, cleanly, with not
                 got.deinit();
                 break;
             }
+        }
+    }
+}
+
+// ---- a stale curve's easing hints, as the score exporter takes them ----
+
+/// A native curve of three `in-cubic` segments back to back — the shape
+/// `corpus/residue-stale-curve` is built from (`tools/gen_fixtures.zig`).
+const curve_doc: [:0]const u8 =
+    \\; a curve whose easing only the record carries
+    \\(timeline :title "curve" :length 1bar)
+    \\
+    \\(tempo-point :at 0bar :qpm 120)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(lane :name glow :kind curve :target glow
+    \\  (keyframe :at 0bar :value 0)
+    \\  (keyframe :at 1q :value 0.25 :ease in-cubic)
+    \\  (keyframe :at 2q :value 0.5 :ease in-cubic)
+    \\  (keyframe :at 3q :value 1 :ease in-cubic))
+    \\
+;
+
+/// One controller point on the curve's CC 74, as a DAW would draw it.
+fn drawnCc(at: i64, val: u7) smf.Event {
+    return .{ .at = at, .kind = .control_change, .payload = .{
+        .control = .{ .ch = 0, .num = 74, .val = val },
+    } };
+}
+
+/// `curve_doc` built onto CC 74, then redrawn the way a DAW would leave
+/// it: a point far off the second segment's cubic (so its hint drops) and
+/// the third segment re-sampled along its own (so its hint is kept, over
+/// steps worth collapsing). The ticks are the build's own 960 ppq, which
+/// the helper checks. Caller frees.
+fn staleCurveBytes(gpa: Allocator, schema: *const Schema) ![]u8 {
+    var fx = try ready(gpa, schema, curve_doc);
+    defer fx.deinit();
+    var built = try build(gpa, schema, curve_doc, &fx.res.doc, &fx.derived, .smf, .{ .cc = 74 });
+    defer built.deinit();
+
+    var read = try smf.read(gpa, built.bytes);
+    defer read.deinit();
+    try testing.expectEqual(@as(u15, 960), read.sequence.division.pulsesPerQuarter());
+    const drawn = [_]smf.Event{
+        drawnCc(1440, 120),
+        drawnCc(2160, 65),
+        drawnCc(2400, 72),
+        drawnCc(2640, 91),
+    };
+    // The lane's own track: the conductor's is first.
+    const track = &read.sequence.tracks[1];
+    var events: std.ArrayList(smf.Event) = .empty;
+    defer events.deinit(gpa);
+    var next: usize = 0;
+    for (track.events) |e| {
+        while (next < drawn.len and drawn[next].at < e.at) : (next += 1) {
+            try events.append(gpa, drawn[next]);
+        }
+        try events.append(gpa, e);
+    }
+    try testing.expectEqual(drawn.len, next);
+    const original = track.events;
+    track.events = events.items;
+    defer track.events = original;
+
+    var file = try smf.write(gpa, &read.sequence, .{});
+    defer file.deinit();
+    return gpa.dupe(u8, file.bytes);
+}
+
+test "Dumped.easeHints: the hint a stale curve kept, copied out of the dump" {
+    const gpa = testing.allocator;
+    const tpq = @import("../time/Grid.zig").TPQ;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const bytes = try staleCurveBytes(gpa, &schema);
+    defer gpa.free(bytes);
+
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const hints = blk: {
+        var got = try dump(gpa, &schema, bytes, .smf, .{});
+        defer got.deinit();
+        // The verdict's own view: bound, one hint kept, one dropped.
+        const glow = got.verdictFor("glow").?;
+        try testing.expectEqual(reconcile.Action.became_bound, glow.action);
+        try testing.expectEqual(@as(usize, 1), glow.hints.len);
+        try testing.expectEqual(@as(usize, 1), got.diags.count(.ease_hint_mismatch));
+        break :blk try got.easeHints(scratch.allocator());
+    };
+
+    // …and the copy, read after the dump is gone: every string in it is
+    // the arena's, which is what lets the wasm keep it.
+    try testing.expectEqual(@as(usize, 1), hints.len);
+    try testing.expectEqualStrings("glow", hints[0].lane);
+    try testing.expectEqualStrings("in-cubic", hints[0].ease);
+    try testing.expectEqual(2 * tpq, hints[0].from);
+    try testing.expectEqual(3 * tpq, hints[0].to);
+}
+
+test "Dumped.easeHints: a file whose hashes all match has none to pass" {
+    // Rule 2's first branch asks no questions of the steps, so a lane
+    // restored native carries no hint — the same answer a document read
+    // from text gives.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var fx = try ready(gpa, &schema, curve_doc);
+    defer fx.deinit();
+    var built = try build(gpa, &schema, curve_doc, &fx.res.doc, &fx.derived, .smf, .{ .cc = 74 });
+    defer built.deinit();
+
+    var got = try dump(gpa, &schema, built.bytes, .smf, .{});
+    defer got.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    try testing.expectEqual(@as(usize, 0), (try got.easeHints(scratch.allocator())).len);
+}
+
+test "Dumped.easeHints: OutOfMemory at every allocation, and the arena takes it all back" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const bytes = try staleCurveBytes(gpa, &schema);
+    defer gpa.free(bytes);
+    var got = try dump(gpa, &schema, bytes, .smf, .{});
+    defer got.deinit();
+
+    // Bounded by the allocations one call makes, which the loop finds.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_index });
+        var arena: std.heap.ArenaAllocator = .init(failing.allocator());
+        defer arena.deinit();
+        const result = got.easeHints(arena.allocator());
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            try testing.expectEqual(@as(usize, 1), (try result).len);
+            break;
         }
     }
 }

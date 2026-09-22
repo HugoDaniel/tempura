@@ -117,26 +117,16 @@ fn fromFile(ctx: *const Cli.Ctx, bytes: []const u8, kind: Args.Kind) Cli.Error!u
     defer derived.deinit();
 
     // Plan 04's rule 2: a stale curve lane keeps the easing the record
-    // hinted at, for the segments the file's own steps confirm. The
-    // verdict already dropped the rest (`ease_hint_mismatch`), so what is
-    // left is exactly what the exporter should honour.
-    var hints: std.ArrayList(exporter.EaseHint) = .empty;
-    defer hints.deinit(ctx.arena);
-    for (dumped.verdicts) |v| {
-        for (v.hints) |h| try hints.append(ctx.arena, .{
-            .lane = v.lane,
-            .from = h.from,
-            .to = h.to,
-            .ease = h.ease,
-        });
-    }
+    // hinted at, for the segments the file's own steps confirm — one
+    // spelling in the core, the corpus runner's and the wasm's too.
+    const hints = try dumped.easeHints(ctx.arena);
 
     var all: std.ArrayList(tempura.Diag.Diagnostic) = .empty;
     defer all.deinit(ctx.arena);
     try all.appendSlice(ctx.arena, dumped.diags.items());
     try all.appendSlice(ctx.arena, derived.diags.items());
 
-    return emit(ctx, &dumped.doc, &derived, hints.items, all.items, .bytes);
+    return emit(ctx, &dumped.doc, &derived, hints, all.items, .bytes);
 }
 
 fn emit(

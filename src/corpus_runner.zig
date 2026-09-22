@@ -2226,20 +2226,15 @@ fn renderScore(
     loaded: *Loaded,
     rep: Report,
 ) Error!bool {
-    var hints: std.ArrayList(exporter.score.EaseHint) = .empty;
-    defer hints.deinit(gpa);
-    if (loaded.dumped) |*d| {
-        for (d.verdicts) |v| {
-            for (v.hints) |h| try hints.append(gpa, .{
-                .lane = v.lane,
-                .from = h.from,
-                .to = h.to,
-                .ease = h.ease,
-            });
-        }
-    }
+    // The one spelling of that step, the CLI's and the wasm's too.
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const hints: []const exporter.EaseHint = if (loaded.dumped) |*d|
+        try d.easeHints(scratch.allocator())
+    else
+        &.{};
 
-    var res = try exporter.exportScore(gpa, loaded.doc_(), &loaded.derived, hints.items, .{
+    var res = try exporter.exportScore(gpa, loaded.doc_(), &loaded.derived, hints, .{
         .max_keys_per_track = ask.max_keys,
     });
     defer res.deinit();
@@ -2251,7 +2246,7 @@ fn renderScore(
         res.meter[1],
         res.seconds_mode,
         res.aggregated,
-        hints.items.len,
+        hints.len,
     });
     if (!try renderDiags(w, "  ", &res.diags, rep)) return false;
     try pw(w, ")\n");
