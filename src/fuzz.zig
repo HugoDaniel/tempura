@@ -94,6 +94,7 @@ const doc_part = @import("doc/doc.zig");
 const edit = @import("edit/edit.zig");
 const time = @import("time/time.zig");
 const exporter = @import("export/export.zig");
+const TprAbi = @import("TprAbi.zig");
 /// The edit part's own fixtures — a test-only file, imported by a
 /// test-only target, so an operation harness plans over the same
 /// document the edit tests do.
@@ -1252,39 +1253,103 @@ fn checkFromSource(schema: *const Schema, input: [:0]const u8) !Seen {
         try testing.expect(res.diags.count(.anchor_unavailable) > 0);
     }
 
-    try checkDownstream(gpa, &res.doc);
+    try checkDownstream(gpa, schema, input, &res.doc);
     return seen;
 }
 
 /// Everything a host can do with a document once it has loaded, with or
 /// without errors: derive it, ask the playhead where a second or a tick
-/// falls (`tpr_at` and `tpr_atTick` hand a host's number straight in,
-/// NaN and the ends of i64 included), and export the pacer score. Each of
+/// falls and snap a tick to a grid (`tpr_at`, `tpr_atTick` and `tpr_snap`
+/// hand a host's numbers straight in — NaN, the infinities and the ends
+/// of i64 included), encode the `'TPTL'` and `'TPPH'` blobs, export the
+/// pacer score, and build both kinds of file (`tpr_build` builds a
+/// document that loaded with errors, where the CLI refuses). Each of
 /// these asserts plan 12's invariants at its entry and on its answer;
 /// this is the gate that proves no document reaches one of them — in the
 /// ReleaseSmall wasm a violated assertion is undefined behaviour.
-fn checkDownstream(gpa: std.mem.Allocator, doc: *const Doc.Doc) !void {
+fn checkDownstream(
+    gpa: std.mem.Allocator,
+    schema: *const Schema,
+    source: [:0]const u8,
+    doc: *const Doc.Doc,
+) !void {
     var derived = try time.derive.derive(gpa, doc);
     defer derived.deinit();
 
-    const seconds = [_]f64{ -1.0, 0.0, 0.5, 7.25, 1e9, std.math.inf(f64), std.math.nan(f64) };
-    for (seconds) |s| {
-        var pos = time.Playhead.at(gpa, &derived, s) catch |e| switch (e) {
-            error.OutOfMemory => return e,
-            error.TickOverflow, error.NonFiniteTime => continue,
-        };
-        pos.deinit(gpa);
-    }
-    const ticks = [_]i64{
-        std.math.minInt(i64), -1, 0, 1449, time.Grid.MAX_TICK, std.math.maxInt(i64),
-    };
-    for (ticks) |t| {
-        var pos = try time.Playhead.atTick(gpa, &derived, t);
-        pos.deinit(gpa);
-    }
+    try checkPlayhead(gpa, &derived);
+    try checkSnap(&derived);
+    try checkTimelineBlob(gpa, &derived);
 
     var score = try exporter.exportScore(gpa, doc, &derived, &.{}, .{});
     score.deinit();
+
+    for ([_]Doc.AnchorKind{ .smf, .it }) |kind| {
+        var built = try pipeline.build(gpa, schema, source, doc, &derived, kind, .{});
+        built.deinit();
+    }
+}
+
+/// `tpr_at` and `tpr_atTick` at the numbers a host can hand in, and the
+/// `'TPPH'` blob of every position that came back, into a buffer of the
+/// size the encoder says it needs.
+fn checkPlayhead(gpa: std.mem.Allocator, derived: *const time.derive.Derived) !void {
+    const seconds = [_]f64{ -1.0, 0.0, 0.5, 7.25, 1e9, std.math.inf(f64), std.math.nan(f64) };
+    for (seconds) |s| {
+        var pos = time.Playhead.at(gpa, derived, s) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            error.TickOverflow, error.NonFiniteTime => continue,
+        };
+        defer pos.deinit(gpa);
+        try checkPlayheadBlob(gpa, pos);
+    }
+    for (extreme_ticks) |t| {
+        var pos = try time.Playhead.atTick(gpa, derived, t);
+        defer pos.deinit(gpa);
+        try checkPlayheadBlob(gpa, pos);
+    }
+}
+
+fn checkPlayheadBlob(gpa: std.mem.Allocator, pos: time.Playhead.Position) !void {
+    const buf = try gpa.alloc(u8, TprAbi.playheadEncodedLen(pos));
+    defer gpa.free(buf);
+    const blob = try TprAbi.encodePlayhead(pos, buf);
+    try testing.expectEqual(buf.len, blob.len);
+}
+
+/// The ticks a host can hand the playhead: both ends of i64, the grid's
+/// ceiling and one past it, and the ordinary ones.
+const extreme_ticks = [_]i64{
+    std.math.minInt(i64), -1,                     0,                    1449,
+    time.Grid.MAX_TICK,   time.Grid.MAX_TICK + 1, std.math.maxInt(i64),
+};
+
+/// `tpr_snap(tick, grid, swing)`: every grid, at every extreme tick, at
+/// every swing a host can spell. The claim is the one a caller relies
+/// on: the answer is a tick on the grid's own range, never a wrap.
+fn checkSnap(derived: *const time.derive.Derived) !void {
+    const swings = [_]f64{
+        0,                  0.5,               -0.5,   1,
+        -1,                 1e300,             -1e300, std.math.inf(f64),
+        -std.math.inf(f64), std.math.nan(f64),
+    };
+    for (extreme_ticks) |t| {
+        for (std.enums.values(time.Playhead.SnapGrid)) |grid| {
+            for (swings) |swing| {
+                const got = time.Playhead.snap(derived, t, grid, swing);
+                try testing.expect(got >= 0);
+                try testing.expect(got <= time.Grid.MAX_TICK);
+            }
+        }
+    }
+}
+
+/// `tpr_timeline`'s blob, into exactly the bytes `timelineEncodedLen`
+/// says it takes: the sum and the stream agree whatever the names hold.
+fn checkTimelineBlob(gpa: std.mem.Allocator, derived: *const time.derive.Derived) !void {
+    const buf = try gpa.alloc(u8, TprAbi.timelineEncodedLen(derived));
+    defer gpa.free(buf);
+    const blob = try TprAbi.encodeTimeline(derived, buf);
+    try testing.expectEqual(buf.len, blob.len);
 }
 
 fn fuzzFromSource(schema: *const Schema, smith: *Smith) anyerror!void {
@@ -1317,6 +1382,30 @@ const bad_documents = [_][:0]const u8{
     "(timeline :conductor s)\n(anchor :id s :kind it :file \"x.it\")\n" ++
         "(it/module (it/timing :speed 6 :tempo 125) (it/orders 0)" ++
         " (it/pattern 0 :rows 8 (row 70000 (ev 5000000000 \"C-5\"))))\n",
+    // The second wave's (plan 12), one row per undefined behaviour a
+    // document could reach. A note name whose octave overflows an i32.
+    "(timeline)\n(lane :name x :kind notes :target x (note :at 0q :dur 1q :key \"C300000000\"))\n",
+    // A bound note whose `:at` saturates to minInt(i64): the pairing's
+    // `at - on.at` and the writer's `at - last`.
+    "(timeline :conductor s)\n(anchor :id s :kind smf :file \"x.mid\")\n" ++
+        "(midi/smf :format 0 :division 480)\n(midi/mtrk" ++
+        " (note-on :at -1e30 :ch 1 :key 36 :vel 100) (note-off :at 9.3e18 :ch 1 :key 36 :vel 0)" ++
+        " (end-of-track :at 0))\n(lane :name k :kind notes :from s :track 1 :ch 1)\n",
+    // A tempo the map refuses, and a slow one past set-tempo's 24 bits.
+    "(timeline)\n(tempo-point :at 0q :qpm -5)\n(tempo-point :at 4q :qpm 2)\n" ++
+        "(meter-point :at 0bar :sig [4 4])\n(lane :name x :kind notes :target x" ++
+        " (note :at 0q :dur 1q :key 36))\n",
+    // A module that declares a pattern past its own caps: filler patterns
+    // at the declared height asked for gigabytes.
+    "(timeline :conductor s)\n(anchor :id s :kind it :file \"x.it\")\n" ++
+        "(it/module (it/timing :speed 6 :tempo 125) (it/orders 0)" ++
+        " (it/pattern 1023 :rows 65535))\n",
+    // 65,536 orders: `ord_num` is a u16.
+    "(timeline :conductor s)\n(anchor :id s :kind it :file \"x.it\")\n" ++
+        "(it/module (it/timing :speed 6 :tempo 125) (it/orders" ++ (" 0" ** 65536) ++
+        ") (it/pattern 0 :rows 4))\n",
+    // A cue name past the `'TPTL'` record's u16 length.
+    "(timeline)\n(cue :at 0q :name \"" ++ ("x" ** 70000) ++ "\")\n",
 };
 
 /// The corpus's own documents, by name — the seeds that are real
@@ -1447,15 +1536,33 @@ fn checkOpJson(fx: *const edit_support.Fixture, input: []const u8) !Seen {
         var planned = try edit.plan(gpa, fx.doc_(), &fx.tree, op);
         defer planned.deinit();
         if (planned.summary.refused) try testing.expect(planned.actions.len == 0);
+        // …and an accepted plan APPLIES: `tpr_apply` commits what
+        // `tpr_plan` produced, so every action the planner wrote has to
+        // be one the splice can read back.
+        try checkApply(fx, &planned);
     } else {
         try testing.expect(parsed.diags.hasErrors());
     }
 
-    // The action list reads the same numbers through its own door.
+    // The action list reads the same numbers through its own door, and
+    // what it accepts is applied the way `tpr_apply([…])` applies it.
     var actions = try edit.fromActionsJson(gpa, input);
     defer actions.deinit();
     try seen.note(&actions.diags);
+    try checkApply(fx, &actions);
     return seen;
+}
+
+/// Apply `planned` to the fixture's text unless it was refused, and
+/// claim only what holds for any plan: the splice RETURNS, and its report
+/// is well-formed. SJON may refuse an address the text does not have;
+/// that is a diagnostic, never a panic.
+fn checkApply(fx: *const edit_support.Fixture, planned: *const edit.Plan) !void {
+    if (planned.summary.refused or planned.diags.hasErrors()) return;
+    var applied = try edit.apply(testing.allocator, fx.source, planned);
+    defer applied.deinit();
+    var seen: Seen = .{};
+    try seen.note(&applied.diags);
 }
 
 fn fuzzOpJson(fx: *const edit_support.Fixture, smith: *Smith) anyerror!void {
@@ -1496,6 +1603,20 @@ const bad_ops = [_][]const u8{
     \\{"op":"insert-tempo","at":"4q","qpm":110}
     ,
     \\[{"op":"set_keyword","root":4294967296,"path":[0],"key":"at","value":{"$num":[1e30,"q"]}}]
+    ,
+    // The second wave's (plan 12): a value f32 cannot hold, planned into
+    // an action `apply` could not read back.
+    \\{"op":"revalue","sel":{},"value":1e39}
+    ,
+    \\{"op":"insert-tempo","at":184504320,"qpm":1e39}
+    ,
+    // `clamp(x - 1, …)` on minInt(i64).
+    \\{"op":"insert","lane":"flash","note":{"at":0,"dur":1,"key":60,"ch":-9223372036854775808}}
+    ,
+    // …and what the map would refuse on reload.
+    \\{"op":"insert-meter","at":184504320,"sig":[4,3]}
+    ,
+    \\{"op":"insert-tempo","at":184504320,"qpm":-5}
     ,
 };
 
