@@ -84,6 +84,7 @@ test {
     _ = edit;
     _ = exporter;
     _ = TprAbi;
+    _ = @import("Easing.zig");
     // Not part of the `tempura` module — the corpus runner is its own
     // executable root, built against these same sources — but its
     // harness vocabulary, its canonical renderer and its verdict earn

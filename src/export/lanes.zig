@@ -31,8 +31,9 @@
 //! with `ease_hint_mismatch` and the steps win.
 //!
 //! Verification evaluates the curve, and plan 00 forbids libm in a value
-//! path — so the twelve POLYNOMIAL primitives are reproduced here from
-//! `pacer/src/Easing.zig` verbatim and everything else (the sine and
+//! path — so the twelve POLYNOMIAL primitives are reproduced from
+//! `pacer/src/Easing.zig` verbatim (in `src/Easing.zig`, the one copy
+//! reconciliation reads too) and everything else (the sine and
 //! expo primitives, and every `(seq …)` / `(chain …)` / `(steps …)` /
 //! `(cubic-bezier …)` / `(spring …)` form) is unevaluable and its hint
 //! is dropped rather than trusted. A hint tempura cannot check is a hint
@@ -42,6 +43,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const Diag = @import("../Diag.zig");
+const Easing = @import("../Easing.zig");
 const doc = @import("../doc/doc.zig");
 const time = @import("../time/time.zig");
 
@@ -329,23 +331,21 @@ fn spanOf(steps: []const derive.Step, h: EaseHint) ?struct { start: usize, end: 
 }
 
 /// Whether every step strictly inside `[start, end]` lies within `eps`
-/// of `ease` drawn between the two endpoints' values.
+/// of `ease` drawn between the two endpoints' values, component by
+/// component (`Easing.deviation`, the one curve reconciliation reads
+/// too).
 fn verify(raw: []const simplify.Key, start: usize, end: usize, ease: []const u8, eps: f32) bool {
     // An unevaluable easing never verifies: see the module header.
-    if (easeAt(ease, 0.5) == null) return false;
-
-    const span: f64 = @floatFromInt(raw[end].tick - raw[start].tick);
-    if (span <= 0) return false;
+    if (!Easing.evaluable(ease)) return false;
+    if (raw[end].tick <= raw[start].tick) return false;
     var i = start + 1;
     while (i < end) : (i += 1) {
-        const u = @as(f64, @floatFromInt(raw[i].tick - raw[start].tick)) / span;
-        const shaped = easeAt(ease, u) orelse return false;
         var c: usize = 0;
         while (c < @max(raw[i].ncomp, 1)) : (c += 1) {
-            const lo: f64 = raw[start].value[c];
-            const hi: f64 = raw[end].value[c];
-            const want = lo + (hi - lo) * shaped;
-            if (@abs(want - @as(f64, raw[i].value[c])) > @as(f64, eps)) return false;
+            const from: Easing.Point = .{ .tick = raw[start].tick, .value = raw[start].value[c] };
+            const to: Easing.Point = .{ .tick = raw[end].tick, .value = raw[end].value[c] };
+            const off = Easing.deviation(ease, from, to, raw[i].tick, raw[i].value[c]);
+            if ((off orelse return false) > @as(f64, eps)) return false;
         }
     }
     return true;
@@ -381,34 +381,6 @@ fn scaled(value: [4]f32, ncomp: u3, range: ?[2]f32) [4]f32 {
         out[c] = r[0] + value[c] * (r[1] - r[0]);
     }
     return out;
-}
-
-/// pacer's twelve POLYNOMIAL easing primitives, reproduced from
-/// `pacer/src/Easing.zig`'s `evalOp` expression for expression — null
-/// for every easing this cannot evaluate exactly (the sine and expo
-/// primitives, which need a transcendental, and every combinator form,
-/// which needs pacer's own compiler).
-pub fn easeAt(ease: []const u8, u: f64) ?f64 {
-    const p1 = 1.0 - u;
-    if (std.mem.eql(u8, ease, "linear")) return u;
-    if (std.mem.eql(u8, ease, "hold")) return if (u >= 1) 1.0 else 0.0;
-    if (std.mem.eql(u8, ease, "smoothstep")) return u * u * (3.0 - 2.0 * u);
-    if (std.mem.eql(u8, ease, "in-quad")) return u * u;
-    if (std.mem.eql(u8, ease, "out-quad")) return 1.0 - p1 * p1;
-    if (std.mem.eql(u8, ease, "in-out-quad"))
-        return if (u < 0.5) 2.0 * u * u else 1.0 - (2.0 * p1) * (2.0 * p1) / 2.0;
-    if (std.mem.eql(u8, ease, "in-cubic")) return u * u * u;
-    if (std.mem.eql(u8, ease, "out-cubic")) return 1.0 - p1 * p1 * p1;
-    if (std.mem.eql(u8, ease, "in-out-cubic"))
-        return if (u < 0.5) 4.0 * u * u * u else 1.0 - (2.0 * p1) * (2.0 * p1) * (2.0 * p1) / 2.0;
-    if (std.mem.eql(u8, ease, "in-quart")) return u * u * u * u;
-    if (std.mem.eql(u8, ease, "out-quart")) return 1.0 - p1 * p1 * p1 * p1;
-    if (std.mem.eql(u8, ease, "in-out-quart"))
-        return if (u < 0.5)
-            8.0 * u * u * u * u
-        else
-            1.0 - (2.0 * p1) * (2.0 * p1) * (2.0 * p1) * (2.0 * p1) / 2.0;
-    return null;
 }
 
 // ---- tests ----
@@ -741,21 +713,4 @@ test "lanes.curve: no_hints ignores every hint, verified or not" {
     defer got.deinit(gpa);
     try testing.expectEqual(@as(usize, 0), diags.items().len);
     for (got.keys) |key| try testing.expectEqualStrings("hold", key.ease);
-}
-
-test "lanes.easeAt: the twelve polynomial primitives match pacer's own formulas" {
-    try testing.expectEqual(@as(?f64, 0.5), easeAt("linear", 0.5));
-    try testing.expectEqual(@as(?f64, 0), easeAt("hold", 0.5));
-    try testing.expectEqual(@as(?f64, 1), easeAt("hold", 1));
-    try testing.expectEqual(@as(?f64, 0.5), easeAt("smoothstep", 0.5));
-    try testing.expectEqual(@as(?f64, 0.25), easeAt("in-quad", 0.5));
-    try testing.expectEqual(@as(?f64, 0.75), easeAt("out-quad", 0.5));
-    try testing.expectEqual(@as(?f64, 0.125), easeAt("in-cubic", 0.5));
-    try testing.expectEqual(@as(?f64, 0.0625), easeAt("in-quart", 0.5));
-    try testing.expectEqual(@as(?f64, 0.5), easeAt("in-out-quad", 0.5));
-    try testing.expectEqual(@as(?f64, 0.5), easeAt("in-out-cubic", 0.5));
-    try testing.expectEqual(@as(?f64, 0.5), easeAt("in-out-quart", 0.5));
-    // Everything else is unevaluable HERE, on purpose.
-    try testing.expect(easeAt("in-sine", 0.5) == null);
-    try testing.expect(easeAt("(spring :damping 0.5)", 0.5) == null);
 }

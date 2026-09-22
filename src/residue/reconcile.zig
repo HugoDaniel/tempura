@@ -97,6 +97,7 @@ const std = @import("std");
 const sjon = @import("sjon");
 
 const Diag = @import("../Diag.zig");
+const Easing = @import("../Easing.zig");
 const Schema = @import("../Schema.zig");
 const Doc = @import("../doc/Value.zig");
 const Resolver = @import("../doc/Resolver.zig");
@@ -1897,9 +1898,8 @@ fn boolValue(tree: *const Ast.Tree, form: NodeIndex, key: []const u8) bool {
 ///
 /// A segment with fewer than three steps in it has nothing that could
 /// contradict a named curve — two points are on every curve through
-/// them — so its hint is kept. The rest is `export/lanes.zig`'s `verify`
-/// over a single component; the two want one home once `src/export/`
-/// settles, and the report records the ask.
+/// them — so its hint is kept. The curve is `src/Easing.zig`'s, the one
+/// `export/lanes.zig`'s `verify` reads too.
 fn verifySegment(steps: []const Step, from: i64, to: i64, ease: []const u8, eps: f32) bool {
     var first: ?usize = null;
     var last: usize = 0;
@@ -1914,56 +1914,17 @@ fn verifySegment(steps: []const Step, from: i64, to: i64, ease: []const u8, eps:
 
     // An unevaluable easing never verifies: a hint tempura cannot check
     // is a hint tempura does not apply (plan 08).
-    if (easeAt(ease, 0.5) == null) return false;
-
-    const span: f64 = @floatFromInt(steps[last].at - steps[start].at);
-    if (span <= 0) return false;
-    const lo: f64 = steps[start].value;
-    const hi: f64 = steps[last].value;
+    if (!Easing.evaluable(ease)) return false;
+    if (steps[last].at <= steps[start].at) return false;
+    const lo: Easing.Point = .{ .tick = steps[start].at, .value = steps[start].value };
+    const hi: Easing.Point = .{ .tick = steps[last].at, .value = steps[last].value };
 
     var i = start + 1;
     while (i < last) : (i += 1) {
-        const u = @as(f64, @floatFromInt(steps[i].at - steps[start].at)) / span;
-        const shaped = easeAt(ease, u) orelse return false;
-        const want = lo + (hi - lo) * shaped;
-        if (@abs(want - @as(f64, steps[i].value)) > @as(f64, eps)) return false;
+        const off = Easing.deviation(ease, lo, hi, steps[i].at, steps[i].value);
+        if ((off orelse return false) > @as(f64, eps)) return false;
     }
     return true;
-}
-
-/// pacer's twelve POLYNOMIAL easing primitives, reproduced from
-/// `pacer/src/Easing.zig`'s `evalOp` expression for expression — null
-/// for every easing this cannot evaluate exactly (the sine and expo
-/// primitives, which need a transcendental plan 00 forbids in a value
-/// path, and every combinator form, which needs pacer's own compiler).
-///
-/// A second copy of `export/lanes.zig`'s `easeAt`, and it has to stay
-/// one: `export/lanes.zig` imports `doc/doc.zig`, `doc/doc.zig` exports
-/// `doc/pipeline.zig`, and `doc/pipeline.zig` imports THIS file — so an
-/// import here would close a four-file cycle. The two are
-/// expression-identical; a shared home below both (a `src/Easing.zig`
-/// beside `src/Diag.zig`) is the ask recorded with this task.
-fn easeAt(ease: []const u8, u: f64) ?f64 {
-    const p1 = 1.0 - u;
-    if (std.mem.eql(u8, ease, "linear")) return u;
-    if (std.mem.eql(u8, ease, "hold")) return if (u >= 1) 1.0 else 0.0;
-    if (std.mem.eql(u8, ease, "smoothstep")) return u * u * (3.0 - 2.0 * u);
-    if (std.mem.eql(u8, ease, "in-quad")) return u * u;
-    if (std.mem.eql(u8, ease, "out-quad")) return 1.0 - p1 * p1;
-    if (std.mem.eql(u8, ease, "in-out-quad"))
-        return if (u < 0.5) 2.0 * u * u else 1.0 - (2.0 * p1) * (2.0 * p1) / 2.0;
-    if (std.mem.eql(u8, ease, "in-cubic")) return u * u * u;
-    if (std.mem.eql(u8, ease, "out-cubic")) return 1.0 - p1 * p1 * p1;
-    if (std.mem.eql(u8, ease, "in-out-cubic"))
-        return if (u < 0.5) 4.0 * u * u * u else 1.0 - (2.0 * p1) * (2.0 * p1) * (2.0 * p1) / 2.0;
-    if (std.mem.eql(u8, ease, "in-quart")) return u * u * u * u;
-    if (std.mem.eql(u8, ease, "out-quart")) return 1.0 - p1 * p1 * p1 * p1;
-    if (std.mem.eql(u8, ease, "in-out-quart"))
-        return if (u < 0.5)
-            8.0 * u * u * u * u
-        else
-            1.0 - (2.0 * p1) * (2.0 * p1) * (2.0 * p1) * (2.0 * p1) / 2.0;
-    return null;
 }
 
 // ---------------------------------------------------------------------
