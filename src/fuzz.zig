@@ -1406,6 +1406,19 @@ const bad_documents = [_][:0]const u8{
         ") (it/pattern 0 :rows 4))\n",
     // A cue name past the `'TPTL'` record's u16 length.
     "(timeline)\n(cue :at 0q :name \"" ++ ("x" ** 70000) ++ "\")\n",
+    // Round 2 of the second wave. A keyframe value and a `:range` f32
+    // cannot hold, which the reader kept as infinities (`Doc.invariants`
+    // now holds them finite).
+    "(timeline)\n(tempo-point :at 0q :qpm 120)\n(meter-point :at 0bar :sig [4 4])\n" ++
+        "(lane :name g :kind curve :range [0 1e39] (keyframe :at 0q :value 1e999)" ++
+        " (keyframe :at 1q :value [0.5 -1e39]))\n",
+    // A file past the grid ceiling at division 1, conducting and bound:
+    // `smfToTicks` saturates, and the conductor and the lane both say so.
+    "(timeline :conductor s)\n(anchor :id s :kind smf :file \"x.mid\")\n" ++
+        "(midi/smf :format 0 :division 1)\n(midi/mtrk" ++
+        " (note-on :at 0 :ch 1 :key 36 :vel 100) (set-tempo :at 300000000 :us 400000)" ++
+        " (note-off :at 300000001 :ch 1 :key 36 :vel 0) (end-of-track :at 300000001))\n" ++
+        "(lane :name k :kind notes :from s :track 1 :ch 1)\n",
 };
 
 /// The corpus's own documents, by name — the seeds that are real
@@ -1617,6 +1630,14 @@ const bad_ops = [_][]const u8{
     \\{"op":"insert-meter","at":184504320,"sig":[4,3]}
     ,
     \\{"op":"insert-tempo","at":184504320,"qpm":-5}
+    ,
+    // …and what the manifest would refuse on reload, which the map
+    // honours; `:us` is narrowed, never clamped.
+    \\{"op":"insert-tempo","at":184504320,"qpm":2000}
+    ,
+    \\{"op":"insert-tempo","at":184504320,"us":0}
+    ,
+    \\{"op":"insert-tempo","at":184504320,"us":5000000000}
     ,
 };
 
