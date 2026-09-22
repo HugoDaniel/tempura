@@ -1514,7 +1514,20 @@ fn touch(gpa: Allocator, list: *std.ArrayList(u16), pi: u16) Error!void {
 /// the whole `(track, ch)` pair, for a `.it` the record's channel over
 /// every pattern the walk played, ascending and deduplicated
 /// (`playedPatterns`).
+///
+/// A transient WORKER, not a returned value — plan 12's `Reader`,
+/// `Writer`, `Run` and `Tailer` — so it may keep the caller's `gpa`:
+/// every hasher lives inside the one call that made it, `reconcile`'s
+/// `Run` (freed by `run.deinit()` before `reconcile` returns, which is
+/// why the played-pattern list is copied into the result's arena first)
+/// and `pipeline`'s residue check (`defer hasher.deinit()`). What it
+/// answers is a `[32]u8` by value; only `rowmap` lends a pointer, valid
+/// until `deinit`. A host that kept one past its call would be keeping
+/// the allocator too, which is the thing the rule forbids.
 pub const Hasher = struct {
+    /// The caller's allocator, held for the call's length only (see the
+    /// type's doc): the IT walk is derived from it on first ask, lazily,
+    /// because a hasher asked only for the conductor never needs one.
     gpa: Allocator,
     tier: Tier,
     /// The IT timing walk, derived on first ask. A `.mid` gets an empty
@@ -1524,7 +1537,8 @@ pub const Hasher = struct {
     scratch: std.heap.ArenaAllocator,
 
     /// A hasher over `tier`, which it borrows. It keeps `gpa` for the IT
-    /// walk it derives on first ask and frees in `deinit`.
+    /// walk it derives on first ask and frees in `deinit`, which the
+    /// caller runs before its own call returns.
     pub fn init(gpa: Allocator, tier: Tier) Hasher {
         return .{ .gpa = gpa, .tier = tier, .scratch = .init(gpa) };
     }
