@@ -95,6 +95,8 @@ pub const Unpacked = union(enum) {
     /// The body is not decodable Binary IR at all — `residue_corrupt`.
     corrupt: Diag.Code,
 
+    /// Frees the re-printed text of an `.ok` with the `gpa` `unpack` was
+    /// given; the other arms own nothing.
     pub fn deinit(self: *Unpacked, gpa: Allocator) void {
         switch (self.*) {
             .ok => |e| gpa.free(e.text),
@@ -128,6 +130,8 @@ pub const Packed = struct {
     bytes: []u8,
     diags: Diag.List,
 
+    /// Frees the Binary IR with the `gpa` `pack` was given, and the
+    /// report; the value is spent.
     pub fn deinit(self: *Packed, gpa: Allocator) void {
         gpa.free(self.bytes);
         self.diags.deinit();

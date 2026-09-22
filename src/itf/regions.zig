@@ -103,10 +103,13 @@ fn walkBlocks(bytes: []const u8, off: u32, available: u32, desc: Descriptor) Ext
 pub const MinPointer = struct {
     value: u32,
 
+    /// A running minimum that starts at `fallback` — the end of the file,
+    /// when nothing smaller is ever offered.
     pub fn init(fallback: u32) MinPointer {
         return .{ .value = fallback };
     }
 
+    /// Lowers the minimum to `pointer`; a 0 is "not there" and is ignored.
     pub fn offer(self: *MinPointer, pointer: u32) void {
         if (pointer != 0 and pointer < self.value) self.value = pointer;
     }

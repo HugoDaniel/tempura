@@ -599,6 +599,8 @@ pub const Sequence = struct {
     pool: []const u8,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the tracks, the pool and every slice in one call; every `Bytes`
+    /// a caller kept from it is dead after this.
     pub fn deinit(self: *Sequence) void {
         self.arena.deinit();
     }
@@ -659,6 +661,8 @@ pub const Builder = struct {
     format: u8 = 1,
     division: Division = .{ .ppq = 480 },
 
+    /// A builder over a fresh arena. `finish` hands the arena to the
+    /// `Sequence` it returns; `deinit` frees an abandoned one.
     pub fn init(gpa: std.mem.Allocator) Builder {
         return .{ .arena = .init(gpa) };
     }

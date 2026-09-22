@@ -65,6 +65,7 @@ pub const Written = struct {
     bytes: []const u8,
     diags: Diag.List,
 
+    /// Frees the bytes and the report together; the value is spent.
     pub fn deinit(self: *Written) void {
         self.diags.deinit();
         self.arena.deinit();

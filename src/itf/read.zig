@@ -80,6 +80,8 @@ pub const SourceMap = struct {
     /// `Result.deinit`.
     entries: []const Entry = &.{},
 
+    /// Where the `index`th record of `kind` was read from, or null for one
+    /// the reader never honoured (a parapointer 0, one out of range).
     pub fn find(self: SourceMap, kind: Kind, index: u32) ?Region {
         for (self.entries) |e| {
             if (e.kind == kind and e.index == index) return e.region;
@@ -95,6 +97,9 @@ pub const Result = struct {
     source_map: SourceMap,
     diags: Diag.List,
 
+    /// Frees the module (the map's entries live in its arena) and the
+    /// report. The input bytes are the caller's: the module's regions point
+    /// into them, so they have to outlive every use of those regions.
     pub fn deinit(self: *Result) void {
         self.diags.deinit();
         self.module.deinit();

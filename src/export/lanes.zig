@@ -94,6 +94,8 @@ pub const Trigger = struct {
     /// How many onsets landed on a tick another onset already held.
     aggregated: u32,
 
+    /// Frees `ticks` and `vel` with the `gpa` `triggers` was given; the
+    /// value is spent. A caller that handed `triggers` an arena may skip it.
     pub fn deinit(self: *Trigger, gpa: Allocator) void {
         gpa.free(self.ticks);
         gpa.free(self.vel);
@@ -108,6 +110,8 @@ pub const Curve = struct {
     /// `A → B` count.
     source_steps: u32,
 
+    /// Frees `keys` with the `gpa` `curve` was given; the value is spent.
+    /// The keys' `ease` texts are borrowed and outlive it.
     pub fn deinit(self: *Curve, gpa: Allocator) void {
         gpa.free(self.keys);
         self.* = undefined;
@@ -121,6 +125,9 @@ pub const Curve = struct {
 /// both the aggregation happens AFTER the conversion, because that is
 /// where two distinct tempura ticks can become one pacer tick and pacer
 /// refuses an `:at` list that is not strictly ascending.
+///
+/// The two slices are `gpa`'s and the caller owns them (`Trigger.deinit`);
+/// nothing in the answer borrows `onsets`.
 pub fn triggers(
     gpa: Allocator,
     onsets: []const derive.Onset,
@@ -156,6 +163,11 @@ pub fn triggers(
 }
 
 /// Steps → a track's `(key …)` children.
+///
+/// `keys` is `gpa`'s and the caller owns it (`Curve.deinit`); every
+/// scratch table is freed before this returns. A key's `ease` borrows the
+/// lane's step (`derive`'s arena) or the hint it came from, which must
+/// outlive the keys.
 pub fn curve(
     gpa: Allocator,
     lane: *const doc.Lane,

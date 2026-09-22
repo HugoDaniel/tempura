@@ -92,6 +92,8 @@ pub const RowMap = struct {
     loop_row: ?u32 = null,
     diags: Diag.List,
 
+    /// Frees the rows, the tempo segments, the onsets and the report in
+    /// one call; the value is spent. It borrows nothing of the module.
     pub fn deinit(self: *RowMap) void {
         self.diags.deinit();
         self.arena.deinit();

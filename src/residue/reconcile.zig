@@ -148,6 +148,7 @@ pub const Tier = union(enum) {
     smf: *const Sequence.Sequence,
     it: *const itf.Module,
 
+    /// The anchor kind the tier belongs to.
     pub fn kind(self: Tier) Doc.AnchorKind {
         return switch (self) {
             .smf => .smf,
@@ -292,6 +293,8 @@ pub const Result = struct {
     diags: Diag.List,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the text, the verdicts, every string in them and the report,
+    /// in one call; the value is spent.
     pub fn deinit(self: *Result) void {
         self.diags.deinit();
         self.arena.deinit();
@@ -1367,6 +1370,7 @@ pub const Consumed = struct {
     /// `(bin :at :len)` region of the file cannot lose a cell.
     patterns: []const u16 = &.{},
 
+    /// Whether the consumption took anything out of the tier at all.
     pub fn any(self: Consumed) bool {
         return self.events + self.cells + self.conductor > 0;
     }
@@ -1519,16 +1523,23 @@ pub const Hasher = struct {
     /// Scratch for the pattern list a lane hash needs, freed whole.
     scratch: std.heap.ArenaAllocator,
 
+    /// A hasher over `tier`, which it borrows. It keeps `gpa` for the IT
+    /// walk it derives on first ask and frees in `deinit`.
     pub fn init(gpa: Allocator, tier: Tier) Hasher {
         return .{ .gpa = gpa, .tier = tier, .scratch = .init(gpa) };
     }
 
+    /// Frees the walk, if one was derived, and the scratch; the tier it
+    /// borrowed is untouched.
     pub fn deinit(self: *Hasher) void {
         if (self.rows) |*r| r.deinit();
         self.scratch.deinit();
         self.* = undefined;
     }
 
+    /// The file's timing walk, derived once — an empty map for a `.mid`,
+    /// so every caller stays total. Borrowed from the hasher: valid until
+    /// `deinit`.
     pub fn rowmap(self: *Hasher) Error!*const walk.RowMap {
         if (self.rows == null) {
             self.rows = switch (self.tier) {

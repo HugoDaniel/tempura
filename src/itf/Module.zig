@@ -192,6 +192,7 @@ pub const Region = struct {
     /// The region that is not there.
     pub const none: Region = .{};
 
+    /// Whether the region names no bytes at all.
     pub fn isEmpty(self: Region) bool {
         return self.len == 0;
     }
@@ -251,6 +252,8 @@ pub const Cell = struct {
 
     pub const empty: Cell = .{};
 
+    /// Whether every field is its "absent" spelling — what the packer
+    /// skips and `highestUsed` does not count.
     pub fn isEmpty(self: Cell) bool {
         return std.meta.eql(self, empty);
     }
@@ -417,6 +420,9 @@ pub const Module = struct {
         return .{ .arena = .init(gpa) };
     }
 
+    /// Frees everything the module holds — orders, patterns, names, the
+    /// message and the MIDI block — in one call. The anchor's bytes its
+    /// regions point into are the caller's and are not touched.
     pub fn deinit(self: *Module) void {
         self.arena.deinit();
     }
@@ -456,6 +462,8 @@ pub const Builder = struct {
     samples: std.ArrayList(Sample) = .empty,
     foreign: std.ArrayList(Foreign) = .empty,
 
+    /// A builder over a fresh module's arena, the header already
+    /// `Header.fresh`. `finish` hands the arena over; `deinit` frees it.
     pub fn init(gpa: std.mem.Allocator) Builder {
         var m: Module = .init(gpa);
         m.header = .fresh;
@@ -467,6 +475,8 @@ pub const Builder = struct {
         if (!self.finished) self.module.deinit();
     }
 
+    /// Appends one order entry: a pattern number, `+++` (254) or `---`
+    /// (255). Any byte is kept — the writer trims and clamps.
     pub fn addOrder(self: *Builder, order: u8) Error!void {
         try self.orders.append(self.module.allocator(), order);
     }
@@ -482,16 +492,22 @@ pub const Builder = struct {
         return p;
     }
 
+    /// Appends an opaque instrument: `name` copied (truncated to 26 bytes)
+    /// and `raw`, a region of the anchor's bytes the writer copies back.
     pub fn addInstrument(self: *Builder, name: []const u8, raw: Region) Error!void {
         var o: Opaque = .{ .raw = raw };
         copyName(&o.name, name);
         try self.instruments.append(self.module.allocator(), o);
     }
 
+    /// Appends a sample record, copied; its regions point into the
+    /// anchor's bytes, which the caller keeps alive for the writer.
     pub fn addSample(self: *Builder, sample: Sample) Error!void {
         try self.samples.append(self.module.allocator(), sample);
     }
 
+    /// Appends another tracker's trailing chunk, `raw` a region of the
+    /// anchor's bytes, re-emitted verbatim by the writer.
     pub fn addForeign(self: *Builder, tag: [4]u8, raw: Region) Error!void {
         try self.foreign.append(self.module.allocator(), .{ .tag = tag, .raw = raw });
     }
@@ -508,6 +524,7 @@ pub const Builder = struct {
         self.module.midi_config_bytes = try self.module.allocator().dupe(u8, block);
     }
 
+    /// Sets the song title, copied and truncated to the 26-byte field.
     pub fn setTitle(self: *Builder, title: []const u8) void {
         copyName(&self.module.header.title, title);
     }
@@ -598,6 +615,7 @@ pub const Text = struct {
     bytes: []const u8,
     diags: Diag.List,
 
+    /// Frees the bytes and the report together; the value is spent.
     pub fn deinit(self: *Text) void {
         self.diags.deinit();
         self.arena.deinit();
@@ -607,6 +625,9 @@ pub const Text = struct {
 /// CP437 bytes → UTF-8. Total: every byte has a character, so the
 /// diagnostics list comes back empty. CR and NUL pass through as
 /// themselves.
+///
+/// `bytes` is borrowed; the UTF-8 lives in the `Text`'s arena and the
+/// caller owns the value (`Text.deinit`).
 pub fn cp437ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) Error!Text {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_state.deinit();
@@ -633,6 +654,9 @@ pub fn cp437ToUtf8(gpa: std.mem.Allocator, bytes: []const u8) Error!Text {
 /// UTF-8 → CP437. Partial: a codepoint CP437 cannot spell (and any
 /// invalid UTF-8) becomes `?` with an `it_message_encoding_lossy`
 /// diagnostic spanning the offending bytes of the INPUT.
+///
+/// `text` is borrowed; the CP437 bytes live in the `Text`'s arena and
+/// the caller owns the value (`Text.deinit`).
 pub fn utf8ToCp437(gpa: std.mem.Allocator, text: []const u8) Error!Text {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_state.deinit();

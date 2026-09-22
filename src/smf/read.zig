@@ -95,6 +95,8 @@ pub const SourceMap = struct {
     /// was found in.
     riff: ?Region,
 
+    /// Frees the chunk, track and site tables; the value is spent. The
+    /// input's bytes are not referenced: every offset is a number.
     pub fn deinit(self: *SourceMap) void {
         self.arena.deinit();
     }
@@ -106,6 +108,8 @@ pub const Result = struct {
     source_map: SourceMap,
     diags: Diag.List,
 
+    /// Frees the sequence, the map and the report — the three owned pieces
+    /// — in one call. Nothing in it borrows the input bytes.
     pub fn deinit(self: *Result) void {
         self.sequence.deinit();
         self.source_map.deinit();

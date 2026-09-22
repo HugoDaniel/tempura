@@ -74,6 +74,8 @@ pub const Attached = struct {
     sequence: Sequence.Sequence,
     diags: Diag.List,
 
+    /// Frees the sequence (its pool holds the seated payloads) and the
+    /// report; the value is spent.
     pub fn deinit(self: *Attached) void {
         self.diags.deinit();
         self.sequence.deinit();
@@ -90,6 +92,8 @@ pub const Detached = struct {
     sequence: Sequence.Sequence,
     diags: Diag.List,
 
+    /// Frees the sequence, the payload bodies `payloads` borrows and the
+    /// report, in one call; the value is spent.
     pub fn deinit(self: *Detached) void {
         self.diags.deinit();
         self.sequence.deinit();

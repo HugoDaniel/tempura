@@ -135,6 +135,8 @@ pub const Result = struct {
     diags: Diag.List,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the sequence (its own pool), the records' names and segments
+    /// and the report, in one call; the value is spent.
     pub fn deinit(self: *Result) void {
         self.diags.deinit();
         self.seq.deinit();

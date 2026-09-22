@@ -94,6 +94,7 @@ pub const Parsed = struct {
     arena: std.heap.ArenaAllocator,
     payloads: records.Payloads,
 
+    /// Frees every payload body in one call; `payloads` is dead after it.
     pub fn deinit(self: *Parsed) void {
         self.arena.deinit();
     }
@@ -108,6 +109,7 @@ pub const ParsedChunk = union(enum) {
     /// The framing does not hold: `residue_corrupt`.
     corrupt: Diag.Code,
 
+    /// Frees an `.ok`'s payloads; the other arms own nothing.
     pub fn deinit(self: *ParsedChunk) void {
         switch (self.*) {
             .ok => |*p| p.deinit(),
@@ -252,6 +254,8 @@ pub const Tail = struct {
     bytes: []u8,
     diags: Diag.List,
 
+    /// Frees the tail's bytes with the `gpa` `tail` was given, and the
+    /// report; the value is spent.
     pub fn deinit(self: *Tail, gpa: Allocator) void {
         gpa.free(self.bytes);
         self.diags.deinit();
@@ -688,6 +692,8 @@ pub const Chosen = union(enum) {
     tail: []const u8,
     none,
 
+    /// Frees a chosen chunk's payloads. A `.tail` borrows the message it
+    /// was found in and owns nothing.
     pub fn deinit(self: *Chosen) void {
         switch (self.*) {
             .chunk => |*p| p.deinit(),

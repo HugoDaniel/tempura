@@ -406,6 +406,8 @@ pub const DecodedLane = union(enum) {
     ok: LaneRecord,
     corrupt: Diag.Code,
 
+    /// Frees an `.ok`'s segment list with the `gpa` `decodeLane` was given;
+    /// the name and the easings it borrows belong to the decoded body.
     pub fn deinit(self: *DecodedLane, gpa: Allocator) void {
         switch (self.*) {
             .ok => |r| gpa.free(r.steps_only),

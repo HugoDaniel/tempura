@@ -52,6 +52,9 @@ pub const Key = struct {
 pub const Mode = enum { hold, linear };
 
 /// Stage 1: equal-run collapse.
+///
+/// The kept keys are a new slice of `gpa`'s, which the caller frees;
+/// `keys` is borrowed and untouched, and a key's `ease` stays borrowed.
 pub fn collapse(gpa: Allocator, keys: []const Key, mode: Mode) Error![]Key {
     if (keys.len <= 2) return gpa.dupe(Key, keys);
 
@@ -82,6 +85,9 @@ pub fn collapse(gpa: Allocator, keys: []const Key, mode: Mode) Error![]Key {
 /// `tpb` is pacer's ticks per beat, because the metric is a distance in
 /// the `(beat, value)` PLANE: scaling the horizontal axis changes which
 /// points survive, so the axis has to be the one plan 08 names.
+///
+/// The kept keys are a new slice of `gpa`'s, which the caller frees;
+/// `keys` is borrowed and untouched, and a key's `ease` stays borrowed.
 pub fn rdp(gpa: Allocator, keys: []const Key, eps: f32, tpb: i64) Error![]Key {
     if (keys.len <= 2) return gpa.dupe(Key, keys);
 
@@ -117,6 +123,9 @@ pub fn rdp(gpa: Allocator, keys: []const Key, eps: f32, tpb: i64) Error![]Key {
 /// kept one by more than `eps`. The first and the last key always stay
 /// — the first is where the lane starts and the last is where it ends,
 /// and pacer holds both past their edges.
+///
+/// The kept keys are a new slice of `gpa`'s, which the caller frees;
+/// `keys` is borrowed and untouched, and a key's `ease` stays borrowed.
 pub fn thinHold(gpa: Allocator, keys: []const Key, eps: f32) Error![]Key {
     if (keys.len <= 2) return gpa.dupe(Key, keys);
 
@@ -137,6 +146,9 @@ pub fn thinHold(gpa: Allocator, keys: []const Key, eps: f32) Error![]Key {
 }
 
 /// Both stages, in order — what a bound curve lane actually runs.
+///
+/// The kept keys are a new slice of `gpa`'s, which the caller frees;
+/// `keys` is borrowed and untouched, and a key's `ease` stays borrowed.
 pub fn budget(gpa: Allocator, keys: []const Key, mode: Mode, eps: f32, tpb: i64) Error![]Key {
     const collapsed = try collapse(gpa, keys, mode);
     defer gpa.free(collapsed);

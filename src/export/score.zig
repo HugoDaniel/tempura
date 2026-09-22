@@ -149,6 +149,8 @@ pub const Result = struct {
     landings: []const Landing,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the text, the landings and the report, in one call; the value
+    /// is spent.
     pub fn deinit(self: *Result) void {
         self.diags.deinit();
         self.arena.deinit();

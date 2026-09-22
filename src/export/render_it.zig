@@ -94,6 +94,8 @@ pub const Result = struct {
     diags: Diag.List,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the module, the records' names and segments and the report,
+    /// in one call; the value is spent.
     pub fn deinit(self: *Result) void {
         self.diags.deinit();
         self.module.deinit();
