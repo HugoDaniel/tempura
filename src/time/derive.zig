@@ -404,7 +404,7 @@ fn bound(
     switch (binding.address) {
         .smf => |addr| {
             const tier = smfTier(doc, binding.anchor) orelse return;
-            try boundSmf(gpa, arena, &tier.sequence, lane.kind, addr, onsets, steps, diags);
+            try boundSmf(gpa, arena, &tier.sequence, lane, addr, onsets, steps, diags);
         },
         .it => |addr| {
             const tier = itTier(doc, binding.anchor) orelse return;
@@ -428,37 +428,58 @@ const ItAddress = @FieldType(value.Address, "it");
 
 /// A lane bound to an SMF anchor: the notes its address pairs, or the
 /// curve its address reads, each converted from pulses onto the grid.
+///
+/// A position past the grid's ceiling is placed AT it (`Grid.smfToTicks`
+/// saturates, so the lane table's magnitude bound holds), counted, and
+/// said once for the lane as `tick_overflow` with the lane's span — plan
+/// 03's rule that the ceiling is a diagnostic and never a wrap. The
+/// anchor's conductor, when it is one, has said the same of the whole
+/// file (`fromSjon.smfConductor`); this names the lane that reads it.
 fn boundSmf(
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     seq: *const Sequence.Sequence,
-    kind: value.LaneKind,
+    lane: *const value.Lane,
     addr: SmfAddress,
     onsets: *std.ArrayList(Onset),
     steps: *std.ArrayList(Step),
     diags: *Diag.List,
 ) Error!void {
     const ppq = seq.division.pulsesPerQuarter();
-    switch (kind) {
+    var past_ceiling: usize = 0;
+    switch (lane.kind) {
         .notes => {
             var paired = try bridge_smf.pairNotes(gpa, seq, addr.track, addr.ch, addr.key);
             defer paired.deinit();
             try diags.extend(paired.diags.items());
-            for (paired.notes) |n| try onsets.append(arena, smfOnset(n, ppq));
+            for (paired.notes) |n| {
+                const onset, const over = smfOnset(n, ppq);
+                if (over) past_ceiling += 1;
+                try onsets.append(arena, onset);
+            }
         },
         .curve => {
             const address = addr.curve orelse return;
             const read = try bridge_smf.curveSteps(gpa, seq, addr.track, addr.ch, address);
             defer gpa.free(read);
             for (read) |s| {
-                const at = Grid.smfToTicks(s.at, ppq).tick;
-                try steps.append(arena, normalised(at, s.value));
+                const at = Grid.smfToTicks(s.at, ppq);
+                if (at.overflow) past_ceiling += 1;
+                try steps.append(arena, normalised(at.tick, s.value));
             }
         },
         // A `query` or a `formula` lane cannot bind
         // (`bound_kind_invalid`, the document's own check).
         .query, .formula => {},
     }
+    if (past_ceiling > 0) try diags.add(
+        .tick_overflow,
+        .err,
+        lane.span,
+        "lane {s}: {d} of the anchor's positions sit past the grid ceiling {d}; each is " ++
+            "placed at the ceiling, not where the file puts it",
+        .{ lane.name, past_ceiling, Grid.MAX_TICK },
+    );
 }
 
 /// A lane bound to an IT anchor: the notes of its channel, or the column
@@ -510,24 +531,27 @@ fn conductorWalk(
     return null;
 }
 
-/// One paired SMF note as an onset on the grid. BOTH ends are converted,
-/// so the duration is the distance between two grid ticks rather than a
-/// converted span, and a note carries its channel and release velocity.
-fn smfOnset(n: bridge_smf.PairedNote, ppq: u15) Onset {
-    const at = Grid.smfToTicks(n.at, ppq).tick;
+/// One paired SMF note as an onset on the grid, and whether either end
+/// sat past the ceiling (and so was placed at it, which `boundSmf` says).
+/// BOTH ends are converted, so the duration is the distance between two
+/// grid ticks rather than a converted span, and a note carries its
+/// channel and release velocity.
+fn smfOnset(n: bridge_smf.PairedNote, ppq: u15) struct { Onset, bool } {
+    const at = Grid.smfToTicks(n.at, ppq);
     // Saturating: a `Sequence` carries any `i64` tick, and past the
     // ceiling `smfToTicks` answers `MAX_TICK` either way.
-    const end = Grid.smfToTicks(n.at +| @max(n.dur, 0), ppq).tick;
+    const end = Grid.smfToTicks(n.at +| @max(n.dur, 0), ppq);
     // The conversion is monotone, so a note never ends before it starts.
-    std.debug.assert(end >= at);
-    return .{
-        .tick = at,
-        .dur = end - at,
+    std.debug.assert(end.tick >= at.tick);
+    const onset: Onset = .{
+        .tick = at.tick,
+        .dur = end.tick - at.tick,
         .key = n.key,
         .vel = n.vel,
         .ch = n.ch,
         .off_vel = n.off_vel,
     };
+    return .{ onset, at.overflow or end.overflow };
 }
 
 /// One IT note as an onset on the grid, or null when it starts past the
@@ -1782,6 +1806,48 @@ test "derive: a bound SMF lane over ticks at i64's ends derives, and its onsets 
     try testing.expectEqual(Grid.MAX_TICK, kick.onsets[0].dur);
     try testing.expectEqual(Grid.MAX_TICK, kick.onsets[1].tick);
     try testing.expectEqual(@as(i64, 0), kick.onsets[1].dur);
+}
+
+test "derive: a bound SMF lane whose file runs past the grid ceiling says tick_overflow" {
+    // At division 1 SMF tick 300 000 000 is past `MAX_TICK` (one SMF tick
+    // is TPQ grid ticks). `smfToTicks` saturated both lanes' content onto
+    // the ceiling and flagged it, and the flag was dropped: the document
+    // loaded clean (the anchor does not conduct, so no conductor read the
+    // file) and derived clean, with a note and a controller step placed
+    // at the ceiling instead of where the file put them.
+    const gpa = testing.allocator;
+    var loaded = try test_support.load(gpa,
+        \\(timeline :title "far")
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\(midi/smf :format 0 :division 1)
+        \\(midi/mtrk
+        \\  (note-on        :at 0         :ch 1 :key 36 :vel 100)
+        \\  (control-change :at 0         :ch 1 :num 74 :val 0)
+        \\  (note-off       :at 1         :ch 1 :key 36 :vel 64)
+        \\  (note-on        :at 300000000 :ch 1 :key 38 :vel 100)
+        \\  (control-change :at 300000000 :ch 1 :num 74 :val 127)
+        \\  (note-off       :at 300000001 :ch 1 :key 38 :vel 64)
+        \\  (end-of-track   :at 300000001))
+        \\(lane :name kick :kind notes :from song :track 1 :ch 1)
+        \\(lane :name cutoff :kind curve :from song :track 1 :ch 1 :cc 74)
+        \\(lane :name own :kind notes :target own (note :at 0q :dur 1q :key 60))
+    );
+    defer loaded.deinit();
+    try testing.expect(!loaded.diags.hasErrors());
+
+    var d = try derive(gpa, &loaded.doc);
+    defer d.deinit();
+    // One per lane that reads the file, with that lane's span; the
+    // native lane reads nothing of it.
+    try testing.expectEqual(@as(usize, 2), d.diags.count(.tick_overflow));
+    for (d.diags.items(), 0..) |diag, i| {
+        try testing.expectEqual(Diag.Code.tick_overflow, diag.code);
+        try testing.expectEqual(loaded.doc.lanes[i].span, diag.span);
+    }
+    try testing.expectEqual(Grid.MAX_TICK, d.laneByName("kick").?.onsets[1].tick);
+    try testing.expectEqual(Grid.MAX_TICK, d.laneByName("cutoff").?.steps[1].tick);
 }
 
 test "derive: a bound IT notes lane reads the module through the walk" {

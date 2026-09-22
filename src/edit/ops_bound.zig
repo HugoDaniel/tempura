@@ -495,12 +495,21 @@ const Ctx = struct {
         vel: std.ArrayList(u32) = .empty,
         targets: u32 = 0,
         inexact: u32 = 0,
-        /// The first destination, in the file's own ticks, whose place
-        /// on the grid is past its ceiling — recorded here and refused
-        /// once by `smfLane`, as `ops_native.Ctx.off_grid` is: an
-        /// accepted plan has to be applicable, and an `:at` there would
-        /// reload saturated.
+        /// The first position, in the file's own ticks, whose place on
+        /// the grid is past its ceiling — a destination this plan
+        /// computed, or a target's own — recorded here and refused once
+        /// by `smfLane`, as `ops_native.Ctx.off_grid` is: an accepted
+        /// plan has to be applicable, and an `:at` there would reload
+        /// saturated.
         off_grid: ?i64 = null,
+
+        /// A target the selection reached at SMF tick `at`; `over` when
+        /// its own place on the grid is past the ceiling. `smfToTicks`
+        /// saturates it there, so no delta, no end and no landing can be
+        /// read off it, and it is refused as a destination past it is.
+        fn reached(self: *SmfEdits, at: i64, over: bool) void {
+            if (self.off_grid == null and over) self.off_grid = at;
+        }
 
         /// One event's move to SMF tick `to`, checked against the grid.
         fn move(
@@ -515,15 +524,16 @@ const Ctx = struct {
         }
     };
 
-    /// Plan 03's ceiling over a destination this plan COMPUTED in a
-    /// file's own ticks: a diagnostic, never a wrap, and never an `:at`
-    /// the document would reload saturated.
+    /// Plan 03's ceiling over a position in a file's own ticks — one this
+    /// plan COMPUTED, or one a target already sits at: a diagnostic,
+    /// never a wrap, and never an `:at` the document would reload
+    /// saturated.
     fn refusePastCeiling(self: *Ctx, span: Diag.Span, smf_tick: i64) Error!void {
         try self.b.refuse(
             .tick_overflow,
             span,
-            "this edit would put an event at SMF tick {d}, which is past the grid's ceiling " ++
-                "({d} ticks): plan 03 makes a position there a diagnostic and never a wrap",
+            "SMF tick {d} is past the grid's ceiling ({d} ticks), so this edit has no grid " ++
+                "position for an event there: plan 03 makes one a diagnostic and never a wrap",
             .{ smf_tick, Grid.MAX_TICK },
         );
     }
@@ -599,9 +609,11 @@ const Ctx = struct {
     ) Error!SmfEdits {
         var edits: SmfEdits = .{};
         for (found) |s| {
-            const at = Grid.smfToTicks(s.at, ppq).tick;
+            const grid = Grid.smfToTicks(s.at, ppq);
+            const at = grid.tick;
             if (!sel.covers(at)) continue;
             edits.targets += 1;
+            edits.reached(s.at, grid.overflow);
             switch (op) {
                 .remove => try edits.gone.append(self.arena, s.slot),
                 .retime => |x| {
@@ -631,10 +643,12 @@ const Ctx = struct {
     ) Error!SmfEdits {
         var edits: SmfEdits = .{};
         for (found) |pair| {
-            const at = Grid.smfToTicks(pair.at, ppq).tick;
+            const grid = Grid.smfToTicks(pair.at, ppq);
+            const at = grid.tick;
             if (!sel.covers(at)) continue;
             if (!Select.keyWanted(sel.keys, pair.key)) continue;
             edits.targets += 1;
+            edits.reached(pair.at, grid.overflow);
             switch (op) {
                 .remove => {
                     try edits.gone.append(self.arena, pair.on);
@@ -1402,6 +1416,7 @@ const Ctx = struct {
         if (lane.kind == .curve) {
             for (try self.steps(evs, src.addr.ch, src.addr.curve.?)) |s| {
                 const at = Grid.smfToTicks(s.at, src.ppq);
+                if (at.overflow) return self.refusePastCeiling(lane.span, s.at);
                 if (!at.exact) inexact += 1;
                 const json = (try self.keyframeJson(at.tick, s.v, lane.span)) orelse return;
                 try self.b.insertPositional(lane_site, index, json);
@@ -1412,6 +1427,10 @@ const Ctx = struct {
             for (try self.pairs(evs, src.addr.ch, src.addr.key)) |pair| {
                 const at = Grid.smfToTicks(pair.at, src.ppq);
                 const end = Grid.smfToTicks(pair.end, src.ppq);
+                // The note is written at its grid ticks, so an end past the
+                // ceiling would reload as a note that stops AT it.
+                if (at.overflow) return self.refusePastCeiling(lane.span, pair.at);
+                if (end.overflow) return self.refusePastCeiling(lane.span, pair.end);
                 if (!at.exact or !end.exact) inexact += 1;
                 const json = try self.noteJson(pair, at.tick, end.tick);
                 try self.b.insertPositional(lane_site, index, json);
@@ -2269,6 +2288,60 @@ test "bound SMF: a retime whose note-off would leave the grid is tick_overflow, 
     try testing.expect(p.summary.refused);
     try testing.expectEqual(@as(usize, 0), p.actions.len);
     try testing.expect(p.findDiag(.tick_overflow) != null);
+}
+
+test "bound SMF: an event already past the grid ceiling is tick_overflow for any edit that reaches it" {
+    // At division 1, SMF tick 300 000 000 is past `MAX_TICK`. The planner
+    // read it saturated AT the ceiling: `materialize` wrote a native note
+    // there, and a retime computed its landing from the ceiling rather
+    // than from where the file puts it — both accepted, with no word.
+    //
+    // The anchor does not conduct, so the document loads clean: the
+    // planner is the first reader of these positions.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa,
+        \\(timeline :title "far" :length 2bar)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\(midi/smf :format 0 :division 1)
+        \\(midi/mtrk
+        \\  (note-on        :at 0         :ch 1 :key 36 :vel 100)
+        \\  (control-change :at 0         :ch 1 :num 74 :val 0)
+        \\  (note-off       :at 1         :ch 1 :key 36 :vel 64)
+        \\  (note-on        :at 300000000 :ch 1 :key 38 :vel 100)
+        \\  (control-change :at 300000000 :ch 1 :num 74 :val 127)
+        \\  (note-off       :at 300000001 :ch 1 :key 38 :vel 64)
+        \\  (end-of-track   :at 300000001))
+        \\(lane :name kick :kind notes :from song :track 1 :ch 1)
+        \\(lane :name cutoff :kind curve :from song :track 1 :ch 1 :cc 74)
+        \\
+    );
+    defer fx.deinit();
+
+    const reaching = [_]Op.Op{
+        .{ .materialize = .{ .lane = "kick" } },
+        .{ .materialize = .{ .lane = "cutoff" } },
+        .{ .retime = .{ .sel = .{ .lanes = &.{"kick"}, .kinds = .notes }, .delta = TPQ } },
+        .{ .retime = .{ .sel = .{ .lanes = &.{"cutoff"}, .kinds = .keyframes }, .delta = -TPQ } },
+    };
+    for (reaching) |op| {
+        var p = try plan(gpa, fx.doc_(), &fx.tree, op);
+        defer p.deinit();
+        try testing.expect(p.summary.refused);
+        try testing.expectEqual(@as(usize, 0), p.actions.len);
+        try testing.expect(p.findDiag(.tick_overflow) != null);
+    }
+
+    // A selection that stops short of the far events never reads them,
+    // and plans as it always did.
+    var near = try plan(gpa, fx.doc_(), &fx.tree, .{ .retime = .{
+        .sel = .{ .lanes = &.{"kick"}, .kinds = .notes, .range = .{ 0, 4 * TPQ } },
+        .delta = TPQ,
+    } });
+    defer near.deinit();
+    try testing.expect(!near.summary.refused);
+    try testing.expectEqual(@as(u32, 1), near.summary.targets);
 }
 
 test "bound SMF: a pitch-bend :val past 14 bits reads clamped, never an overflow" {

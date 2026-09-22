@@ -1239,6 +1239,11 @@ const Run = struct {
                 defer self.gpa.free(raw);
                 const ppq = seq.division.pulsesPerQuarter();
                 const out = try self.gpa.alloc(Step, raw.len);
+                // Saturated past the ceiling and not reported here: these
+                // steps only confirm or drop an easing hint (said as
+                // `ease_hint_mismatch`), and the lane they belong to says
+                // `tick_overflow` itself wherever its time is read
+                // (`time/derive`, over the document this dump becomes).
                 for (raw, out) |src, *dst| dst.* = .{
                     .at = Grid.smfToTicks(src.at, ppq).tick,
                     .value = src.value,

@@ -80,6 +80,14 @@
 //! `division` change UNDER unchanged ticks moves every event on the
 //! grid, and the hash says so.
 //!
+//! A position past the grid's ceiling hashes SATURATED, and `smfToTicks`'
+//! `overflow` is not reported here: a hash is a fingerprint with no
+//! diagnostic list and no span to give one, and it is the same number on
+//! both sides of the comparison it serves (a build's record against a
+//! file's), so saturation cannot make two readings of one file disagree.
+//! The file's overflow is said where its time is READ — `fromSjon`'s
+//! conductor for the whole file, `time/derive` for each bound lane.
+//!
 //! Each hash starts with an ASCII domain tag ending in `\n`, so two
 //! layouts can never collide, and the tag carries the layout's version.
 //!

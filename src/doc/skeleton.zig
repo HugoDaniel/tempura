@@ -254,6 +254,12 @@ const Deriver = struct {
         // A marker whose bytes are not UTF-8 has no name a document can
         // spell; it stays in the `midi/` tier, where it is exact.
         if (!std.unicode.utf8ValidateSlice(text)) return;
+        // A marker past the grid's ceiling is cued AT it. The skeleton has
+        // no diagnostic list to say so in (rule 1 raises nothing of its
+        // own), and needs none: the document it derives conducts by this
+        // file and keeps the marker in its tier, so the dump's load of it
+        // runs `fromSjon.smfConductor`, which counts every event of every
+        // track and says `tick_overflow` for the file.
         try self.cues.append(self.arena, .{
             .name = try self.arena.dupe(u8, text),
             .at = Grid.smfToTicks(e.at, ppq).tick,

@@ -2093,14 +2093,7 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
     );
 
     var points = try smfPoints(arena, seq, span);
-    if (points.ignored > 0) try diags.add(
-        .smpte_tempo_ignored,
-        .warning,
-        span,
-        "{d} set-tempo event(s) of a SMPTE file are kept in the dump and not believed: " ++
-            "SMPTE ticks are wall-clock",
-        .{points.ignored},
-    );
+    try sayPoints(&diags, &points, span);
     // The tempo the converted grid was derived for — 120 quarter notes
     // per minute, an integer, so the one SMPTE segment keeps plan 03's
     // integer path — and the number the writer and the bridge put on
@@ -2122,14 +2115,42 @@ pub fn smfConductor(gpa: Allocator, seq: *const smf.Sequence, span: Diag.Span) E
     };
 }
 
+/// What `smfPoints` found that the conductor has to say, with `span`:
+/// a SMPTE file's tempo events, kept and not believed; and the events
+/// past the grid's ceiling, which `Grid.smfToTicks` saturates AT it —
+/// plan 03's rule that the ceiling is a diagnostic and never a wrap, and
+/// the SMF half of `itConductor`'s `tick_overflow`. Said once for the
+/// file, because every event of every track is counted: a bound lane
+/// that reads one of them says so again for itself (`time/derive`).
+fn sayPoints(diags: *Diag.List, points: *const SmfPoints, span: Diag.Span) Error!void {
+    if (points.ignored > 0) try diags.add(
+        .smpte_tempo_ignored,
+        .warning,
+        span,
+        "{d} set-tempo event(s) of a SMPTE file are kept in the dump and not believed: " ++
+            "SMPTE ticks are wall-clock",
+        .{points.ignored},
+    );
+    if (points.past_ceiling > 0) try diags.add(
+        .tick_overflow,
+        .err,
+        span,
+        "{d} event(s) of this file sit past the grid ceiling {d}; each is read at the " ++
+            "ceiling, not where the file puts it",
+        .{ points.past_ceiling, Grid.MAX_TICK },
+    );
+}
+
 /// What rule 2 reads out of a sequence's tracks: every tempo and meter
 /// event as a point on the converted grid, in file order; how many tempo
-/// events a SMPTE file had (kept in the dump, not believed); and the
-/// tick its last event lands on.
+/// events a SMPTE file had (kept in the dump, not believed); how many
+/// events of any kind sit past the grid's ceiling; and the tick its last
+/// event lands on.
 const SmfPoints = struct {
     tempo: std.ArrayList(Doc.TempoPoint) = .empty,
     meter: std.ArrayList(Doc.MeterPoint) = .empty,
     ignored: usize = 0,
+    past_ceiling: usize = 0,
     end: i64 = 0,
 };
 
@@ -2139,7 +2160,9 @@ fn smfPoints(arena: Allocator, seq: *const smf.Sequence, span: Diag.Span) Error!
     var out: SmfPoints = .{};
     for (seq.tracks) |track| {
         for (track.events) |e| {
-            out.end = @max(out.end, Grid.smfToTicks(e.at, ppq).tick);
+            const at = Grid.smfToTicks(e.at, ppq);
+            if (at.overflow) out.past_ceiling += 1;
+            out.end = @max(out.end, at.tick);
         }
         for (track.events) |e| switch (e.kind) {
             .set_tempo => {
@@ -3825,6 +3848,53 @@ test "fromSjon.smfConductor: an inexact division is named once, and format 2 con
     try testing.expectEqual(@as(usize, 1), c.diags.count(.division_inexact));
     try testing.expectEqual(@as(usize, 1), c.diags.count(.smf_format2));
     try testing.expectEqual(@as(usize, 3), c.tempo.len);
+}
+
+test "fromSjon.smfConductor: events past the grid ceiling are tick_overflow, once for the file" {
+    // At division 1 one SMF tick is TPQ grid ticks, so SMF tick 2^28 — one
+    // maximal VLQ delta — is past `MAX_TICK = 2^53`. `smfToTicks`
+    // saturated it and flagged `overflow`, and nothing read the flag: the
+    // map took a tempo change and an end at the ceiling with no word.
+    const gpa = testing.allocator;
+    const far: i64 = 1 << 28;
+    try testing.expect(Grid.smfToTicks(far, 1).overflow);
+
+    var seq = seq: {
+        var b: smf.Builder = .init(gpa);
+        errdefer b.deinit();
+        b.division = .{ .ppq = 1 };
+        const t = try b.addTrack();
+        try b.addEvent(t, 0, .set_tempo, .{ .tempo = 500_000 });
+        try b.addEvent(t, far, .set_tempo, .{ .tempo = 400_000 });
+        try b.addEvent(t, far + 1, .end_of_track, .empty);
+        break :seq try b.finish();
+    };
+    defer seq.deinit();
+
+    var c = try smfConductor(gpa, &seq, .{ .start = 3, .end = 9 });
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 1), c.diags.count(.tick_overflow));
+    const d = c.diags.items()[0];
+    try testing.expectEqual(Diag.Span{ .start = 3, .end = 9 }, d.span);
+    try testing.expect(std.mem.indexOf(u8, d.message, "2 event(s)") != null);
+    // Read AT the ceiling, which is what the diagnostic says.
+    try testing.expectEqual(Grid.MAX_TICK, c.end);
+    try testing.expectEqual(Grid.MAX_TICK, c.tempo[c.tempo.len - 1].tick);
+
+    // …and a file inside the ceiling says nothing of it.
+    var near = seq: {
+        var b: smf.Builder = .init(gpa);
+        errdefer b.deinit();
+        b.division = .{ .ppq = 1 };
+        const t = try b.addTrack();
+        try b.addEvent(t, 0, .set_tempo, .{ .tempo = 500_000 });
+        try b.addEvent(t, 1_000_000, .end_of_track, .empty);
+        break :seq try b.finish();
+    };
+    defer near.deinit();
+    var quiet = try smfConductor(gpa, &near, .{ .start = 0, .end = 1 });
+    defer quiet.deinit();
+    try testing.expectEqual(@as(usize, 0), quiet.diags.count(.tick_overflow));
 }
 
 test "fromSjon.smfConductor: equal ticks keep file order and the last one wins" {
