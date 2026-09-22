@@ -57,6 +57,9 @@ pub const Result = struct {
     conductor: ?Doc.AnchorId,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the lanes, the cues and every name in them, the conductor's
+    /// id included: a `Doc` that borrowed them (reconcile splices them
+    /// into one) must be done with them first.
     pub fn deinit(self: *Result) void {
         self.arena.deinit();
     }
@@ -71,6 +74,13 @@ pub const Result = struct {
 };
 
 /// Derive the skeleton of `doc`'s inline tiers.
+///
+/// Ownership: every lane, cue, name and binding of the result is COPIED
+/// into its own arena, allocated from `gpa` and freed by
+/// `Result.deinit`; the result borrows nothing from `doc` and keeps no
+/// allocator of the caller's. `gpa` also carries the derivation's
+/// scratch (a track's controller census, an IT walk), freed before this
+/// returns.
 pub fn derive(gpa: Allocator, doc: *const Doc.Doc, opts: Options) Error!Result {
     doc.invariants();
     var arena_state: std.heap.ArenaAllocator = .init(gpa);

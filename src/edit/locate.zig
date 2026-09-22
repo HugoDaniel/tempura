@@ -85,6 +85,12 @@ pub const Site = struct {
 /// `(row 2 (ev 1 …))` has the row NUMBER at step 0 and the cell at step
 /// 1, and an off-by-one there addresses the wrong node rather than
 /// failing.
+///
+/// Ownership: allocated with `gpa` and the caller's to free — every
+/// caller in this part hands in a plan's arena. A node that is not a
+/// form answers the STATIC empty slice `&.{}` instead; freeing that is
+/// a zero-length free, a no-op, so a caller need not ask which it got.
+/// The nodes index `tree`, which must outlive the slice's use.
 pub fn positional(
     gpa: std.mem.Allocator,
     tree: *const sjon.Ast.Tree,
@@ -119,19 +125,24 @@ pub const Where = struct {
 /// addressable node with its parent link — and borrows the tree it was
 /// built from.
 pub const Map = struct {
-    gpa: std.mem.Allocator,
     table: sjon.Edit.NodeTable,
 
+    /// The table of `tree`'s addressable nodes, allocated with `gpa` and
+    /// freed by `deinit`. The map BORROWS `tree` — every span and path
+    /// it answers is a coordinate of that parse — so the tree must
+    /// outlive it.
     pub fn init(gpa: std.mem.Allocator, tree: *const sjon.Ast.Tree) Error!Map {
-        // `nodeTable` fails only on allocation: it walks a tree that is
-        // already bounded and refuses nothing.
+        // `nodeTable` fails only on allocation: its walk `try`s nothing
+        // but its two lists' appends, over a tree already bounded.
         const table = sjon.Edit.nodeTable(gpa, tree) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => unreachable,
         };
-        return .{ .gpa = gpa, .table = table };
+        return .{ .table = table };
     }
 
+    /// Frees the table. Every `Where` answered before stays valid: its
+    /// path was allocated with the caller's own allocator, not here.
     pub fn deinit(self: *const Map) void {
         self.table.deinit();
     }

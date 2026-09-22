@@ -474,6 +474,8 @@ pub const Read = struct {
     sequence: smf.Sequence,
     diags: Diag.List,
 
+    /// Frees both. A caller that keeps the sequence (the load hands it
+    /// to its tier) takes it out and frees the report alone.
     pub fn deinit(self: *Read) void {
         self.sequence.deinit();
         self.diags.deinit();
@@ -486,6 +488,12 @@ pub const Read = struct {
 /// the `(midi/mtrk …)` forms that follow it. The walk is total — a form
 /// this vocabulary does not name is skipped, and a missing key reads as
 /// its zero.
+///
+/// Ownership: the sequence owns an arena of its own, allocated from
+/// `gpa` — every byte payload is COPIED into its pool, so it borrows
+/// nothing from `tree` and outlives it — and the report's messages live
+/// in the list's arena; `Read.deinit` frees both. The report's spans
+/// are coordinates of the document `tree` was parsed from.
 pub fn formsToSequence(gpa: Allocator, tree: *const Ast.Tree, roots: []const NodeIndex) Error!Read {
     var b: smf.Builder = .init(gpa);
     errdefer b.deinit();

@@ -54,6 +54,7 @@ pub const Kinds = struct {
     pub const keyframes: Kinds = .{ .keyframe = true };
     pub const clips: Kinds = .{ .clip = true };
 
+    /// Whether the set holds `kind`.
     pub fn has(self: Kinds, kind: Kind) bool {
         return switch (kind) {
             .note => self.note,
@@ -64,6 +65,7 @@ pub const Kinds = struct {
         };
     }
 
+    /// Whether the set holds any kind at all.
     pub fn any(self: Kinds) bool {
         return self.note or self.keyframe or self.clip or self.section or self.cue;
     }
@@ -120,6 +122,8 @@ pub const Resolved = struct {
     bound: ?Diag.Span,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees `targets`. A `Target` holds only indices, ticks and spans,
+    /// so nothing copied out of one dangles afterwards.
     pub fn deinit(self: *Resolved) void {
         self.arena.deinit();
         self.* = undefined;
@@ -131,6 +135,12 @@ pub const Resolved = struct {
 /// A lane filter is a question about LANE CONTENT, so the two root kinds
 /// answer only when there is none: `lanes = null` reaches the sections
 /// and cues, `lanes = &.{"flash"}` does not.
+///
+/// Ownership: the targets live in the result's own arena, allocated from
+/// `gpa` and freed by `Resolved.deinit`; the result keeps no allocator of
+/// the caller's and borrows nothing from `d` or `sel` — a target names
+/// its lane and item by INDEX into `d`, so it means something only
+/// against the document it was resolved over.
 ///
 /// Complexity: O(n log n) over the content the filters kept — one pass to
 /// collect, one stable sort into the plan's order.

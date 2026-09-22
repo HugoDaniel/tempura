@@ -744,6 +744,9 @@ pub const Read = struct {
     source: ?Source,
     diags: Diag.List,
 
+    /// Frees the module and the report. `source` borrows the tree and is
+    /// not freed here; a caller that keeps the module (the load hands it
+    /// to its tier) takes it out and frees the report alone.
     pub fn deinit(self: *Read) void {
         self.module.deinit();
         self.diags.deinit();
@@ -763,6 +766,13 @@ pub const Read = struct {
 /// belongs to the DOCUMENT, `checks.anchorBytes` is what verifies it
 /// against `:size` and `:sha256`, and all this needs of the result is
 /// how long it is.
+///
+/// Ownership: the module owns an arena of its own, allocated from `gpa`,
+/// holding every cell, name and embedded block; a `(bin …)` it seats is
+/// a REGION — an offset and a length into the anchor's file, which the
+/// module does not hold and the caller keeps alive for as long as the
+/// region is read. `source` borrows `tree`. `Read.deinit` frees the
+/// module and the report.
 pub fn formsToModule(
     gpa: Allocator,
     tree: *const Ast.Tree,
