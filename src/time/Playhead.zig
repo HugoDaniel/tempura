@@ -381,109 +381,93 @@ fn fixture(gpa: std.mem.Allocator, end: tm.End) !Doc {
     var doc: Doc = .empty(gpa);
     errdefer doc.deinit();
     const arena = doc.arena.allocator();
-    const span: Diag.Span = .{ .start = 0, .end = 1 };
 
-    const tempo = try arena.alloc(tm.TempoPoint, 2);
-    tempo[0] = .{ .tick = 0, .tempo = .{ .us = 500_000 } };
-    tempo[1] = .{ .tick = 184_504_320, .tempo = .{ .us = 250_000 } };
-    const meter = try arena.alloc(tm.MeterPoint, 2);
-    meter[0] = .{ .tick = 0, .n = 4, .d = 4 };
-    meter[1] = .{ .tick = 369_008_640, .n = 3, .d = 4 };
+    doc.tempo = try arena.dupe(tm.TempoPoint, &.{
+        .{ .tick = 0, .tempo = .{ .us = 500_000 } },
+        .{ .tick = 184_504_320, .tempo = .{ .us = 250_000 } },
+    });
+    doc.meter = try arena.dupe(tm.MeterPoint, &.{
+        .{ .tick = 0, .n = 4, .d = 4 },
+        .{ .tick = 369_008_640, .n = 3, .d = 4 },
+    });
+    doc.sections = try arena.dupe(value.Section, &.{
+        .{ .name = "intro", .at = 0, .dur = 2 * bar44, .span = fixture_span },
+        .{ .name = "drop", .at = bar44, .dur = 2 * bar44, .span = fixture_span },
+    });
+    doc.cues = try arena.dupe(value.Cue, &.{
+        .{ .name = "a", .at = 184_504_320, .span = fixture_span },
+        .{ .name = "b", .at = 507_386_880, .span = fixture_span },
+    });
+    doc.lanes = try fixtureLanes(arena);
+    doc.length = 645_765_120;
+    doc.end = end;
+    return doc;
+}
 
-    const sections = try arena.alloc(value.Section, 2);
-    sections[0] = .{ .name = "intro", .at = 0, .dur = 2 * bar44, .span = span };
-    sections[1] = .{ .name = "drop", .at = bar44, .dur = 2 * bar44, .span = span };
-    const cues = try arena.alloc(value.Cue, 2);
-    cues[0] = .{ .name = "a", .at = 184_504_320, .span = span };
-    cues[1] = .{ .name = "b", .at = 507_386_880, .span = span };
+/// The one span every fixture node carries: none of these tests reads it.
+const fixture_span: Diag.Span = .{ .start = 0, .end = 1 };
 
-    const notes = try arena.alloc(value.Note, 3);
-    notes[0] = .{
-        .at = 0,
-        .dur = TPQ,
-        .key = 36,
-        .vel = 100,
+/// The fixture's two lanes: `kick`, three notes in the first half-bar,
+/// and `glow`, a curve with a keyframe on each of the first three bar
+/// lines. Every slice in `arena`.
+fn fixtureLanes(arena: std.mem.Allocator) ![]value.Lane {
+    const notes = try arena.dupe(value.Note, &.{
+        fixtureNote(0, TPQ, 36, 100),
+        fixtureNote(TPQ, 2 * TPQ, 38, 90),
+        fixtureNote(2 * TPQ, TPQ / 2, 42, 80),
+    });
+    const keys = try arena.dupe(value.Keyframe, &.{
+        fixtureKey(0, 0.2, "hold"),
+        fixtureKey(184_504_320, 0.9, "in-cubic"),
+        fixtureKey(369_008_640, 0.1, "linear"),
+    });
+    return arena.dupe(value.Lane, &.{
+        fixtureLane("kick", .notes, notes, &.{}),
+        fixtureLane("glow", .curve, &.{}, keys),
+    });
+}
+
+fn fixtureNote(tick: i64, dur: i64, key: u7, vel: u7) value.Note {
+    return .{
+        .at = tick,
+        .dur = dur,
+        .key = key,
+        .vel = vel,
         .ch = 0,
         .off_vel = null,
-        .span = span,
+        .span = fixture_span,
     };
-    notes[1] = .{
-        .at = TPQ,
-        .dur = 2 * TPQ,
-        .key = 38,
-        .vel = 90,
-        .ch = 0,
-        .off_vel = null,
-        .span = span,
-    };
-    notes[2] = .{
-        .at = 2 * TPQ,
-        .dur = TPQ / 2,
-        .key = 42,
-        .vel = 80,
-        .ch = 0,
-        .off_vel = null,
-        .span = span,
-    };
-    const keys = try arena.alloc(value.Keyframe, 3);
-    keys[0] = .{
-        .at = 0,
-        .value = .{ 0.2, 0, 0, 0 },
-        .ncomp = 1,
-        .ease_src = "hold",
-        .span = span,
-    };
-    keys[1] = .{
-        .at = 184_504_320,
-        .value = .{ 0.9, 0, 0, 0 },
-        .ncomp = 1,
-        .ease_src = "in-cubic",
-        .span = span,
-    };
-    keys[2] = .{
-        .at = 369_008_640,
-        .value = .{ 0.1, 0, 0, 0 },
-        .ncomp = 1,
-        .ease_src = "linear",
-        .span = span,
-    };
+}
 
-    const lanes = try arena.alloc(value.Lane, 2);
-    lanes[0] = .{
-        .name = "kick",
-        .kind = .notes,
-        .target = "kick",
+fn fixtureKey(tick: i64, v: f32, ease: []const u8) value.Keyframe {
+    return .{
+        .at = tick,
+        .value = .{ v, 0, 0, 0 },
+        .ncomp = 1,
+        .ease_src = ease,
+        .span = fixture_span,
+    };
+}
+
+fn fixtureLane(
+    name: []const u8,
+    kind: value.LaneKind,
+    notes: []value.Note,
+    keys: []value.Keyframe,
+) value.Lane {
+    return .{
+        .name = name,
+        .kind = kind,
+        .target = name,
         .range = null,
         .binding = null,
         .notes = notes,
-        .keyframes = &.{},
-        .clips = &.{},
-        .query_src = null,
-        .expr_src = null,
-        .span = span,
-    };
-    lanes[1] = .{
-        .name = "glow",
-        .kind = .curve,
-        .target = "glow",
-        .range = null,
-        .binding = null,
-        .notes = &.{},
         .keyframes = keys,
         .clips = &.{},
         .query_src = null,
         .expr_src = null,
-        .span = span,
+        .span = fixture_span,
     };
-
-    doc.tempo = tempo;
-    doc.meter = meter;
-    doc.sections = sections;
-    doc.cues = cues;
-    doc.lanes = lanes;
-    doc.length = 645_765_120;
-    doc.end = end;
-    return doc;
 }
 
 test "Playhead.at: tick 0 — the first section, no cue behind, the first ahead" {
