@@ -895,6 +895,12 @@ fn opJson(
 /// "lane"`, a lane's name) is a string there; a united number would be a
 /// position, and the grammar takes TICKS, so a unit is refused rather
 /// than silently dropped.
+///
+/// Recursive (a vector or a form → its children), and bounded by the
+/// substrate: the tree is the harness's, parsed by SJON's validator,
+/// whose parser refuses nesting deeper than `Parser.MAX_PARSE_DEPTH`
+/// (1024 frames), so the walk is at most that many levels deep. Plan 12
+/// accepts the tree walks on exactly that bound.
 fn jsonOfNode(w: *Io.Writer, tree: *const Ast.Tree, node: NodeIndex) Error!void {
     switch (tree.tagOf(node)) {
         .number => try p(w, "{d}", .{tree.numberOf(node)}),
@@ -2452,6 +2458,9 @@ fn firstDifference(expected: []const u8, actual: []const u8) ?Mismatch {
     var exp_lines = std.mem.splitScalar(u8, expected, '\n');
     var act_lines = std.mem.splitScalar(u8, actual, '\n');
     var line: usize = 1;
+    // Bounded by the longer text's line count: every turn takes a line
+    // from each side, and once both are out the texts were equal — which
+    // the byte comparison above has already ruled out.
     while (true) : (line += 1) {
         const e = exp_lines.next();
         const ac = act_lines.next();

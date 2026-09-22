@@ -289,15 +289,15 @@ test "inspect: a truncated file still maps what it has, and says what is wrong" 
 /// themselves, which is also the only way the test can be sure what it is
 /// looking for is really there.
 fn inspectBytes(tmp: *std.testing.TmpDir, name: []const u8, bytes: []const u8) !Cli.Captured {
-    const a = t.allocator;
+    const gpa = t.allocator;
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
     const path = try std.fmt.allocPrintSentinel(
-        a,
+        gpa,
         ".zig-cache/tmp/{s}/{s}",
         .{ tmp.sub_path, name },
         0,
     );
-    defer a.free(path);
+    defer gpa.free(path);
     return Cli.invoke(&.{ "tempura", "inspect", path });
 }
 

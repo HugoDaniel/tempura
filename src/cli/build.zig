@@ -334,22 +334,22 @@ const Scratch = struct {
     file: [:0]u8,
 
     fn init(rel_file: []const u8, name: []const u8) !Scratch {
-        const a = t.allocator;
-        const src = try Cli.repoPath(a, rel_file);
-        defer a.free(src);
+        const gpa = t.allocator;
+        const src = try Cli.repoPath(gpa, rel_file);
+        defer gpa.free(src);
 
         var tmp = t.tmpDir(.{});
         errdefer tmp.cleanup();
-        const bytes = try Io.Dir.cwd().readFileAlloc(std.testing.io, src, a, .limited(1 << 20));
-        defer a.free(bytes);
+        const bytes = try Io.Dir.cwd().readFileAlloc(std.testing.io, src, gpa, .limited(1 << 20));
+        defer gpa.free(bytes);
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
 
-        const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-        errdefer a.free(dir);
-        const doc = try std.fmt.allocPrintSentinel(a, "{s}/doc.sjon", .{dir}, 0);
-        errdefer a.free(doc);
-        const file = try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, name }, 0);
-        errdefer a.free(file);
+        const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        errdefer gpa.free(dir);
+        const doc = try std.fmt.allocPrintSentinel(gpa, "{s}/doc.sjon", .{dir}, 0);
+        errdefer gpa.free(doc);
+        const file = try std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ dir, name }, 0);
+        errdefer gpa.free(file);
 
         var d = try Cli.invoke(&.{ "tempura", "dump", file, "-o", doc });
         defer d.deinit();
@@ -612,28 +612,28 @@ const TwoAnchors = struct {
     it: [:0]u8,
 
     fn init() !TwoAnchors {
-        const a = t.allocator;
+        const gpa = t.allocator;
         var tmp = t.tmpDir(.{});
         errdefer tmp.cleanup();
 
-        const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-        errdefer a.free(dir);
+        const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        errdefer gpa.free(dir);
 
         // Both files are real, and the document's `:size` / `:sha256`
         // are theirs, because `fromSource` verifies before it honours a
         // single offset.
-        var text: Writer.Allocating = .init(a);
+        var text: Writer.Allocating = .init(gpa);
         defer text.deinit();
         try text.writer.writeAll("(timeline :conductor song)\n\n");
 
         inline for (.{ .{ "song.mid", "smf" }, .{ "drums.it", "it" } }) |pair| {
-            const src = try Cli.repoPath(a, if (pair[1][0] == 's')
+            const src = try Cli.repoPath(gpa, if (pair[1][0] == 's')
                 "corpus/skeleton-smf/song.mid"
             else
                 "corpus/it-minimal/song.it");
-            defer a.free(src);
-            const raw = try Io.Dir.cwd().readFileAlloc(std.testing.io, src, a, .limited(1 << 20));
-            defer a.free(raw);
+            defer gpa.free(src);
+            const raw = try Io.Dir.cwd().readFileAlloc(std.testing.io, src, gpa, .limited(1 << 20));
+            defer gpa.free(raw);
             try tmp.dir.writeFile(std.testing.io, .{ .sub_path = pair[0], .data = raw });
 
             var digest: [32]u8 = undefined;
@@ -644,29 +644,29 @@ const TwoAnchors = struct {
             );
 
             // The tier itself, taken from a dump of that same file.
-            const dumped = try dumpTier(a, src, pair[1][0] == 's');
-            defer a.free(dumped);
+            const dumped = try dumpTier(gpa, src, pair[1][0] == 's');
+            defer gpa.free(dumped);
             try text.writer.writeAll(dumped);
             try text.writer.writeAll("\n");
         }
 
-        const doc = try std.fmt.allocPrintSentinel(a, "{s}/doc.sjon", .{dir}, 0);
-        errdefer a.free(doc);
+        const doc = try std.fmt.allocPrintSentinel(gpa, "{s}/doc.sjon", .{dir}, 0);
+        errdefer gpa.free(doc);
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "doc.sjon", .data = text.written() });
 
         return .{
             .tmp = tmp,
             .dir = dir,
             .doc = doc,
-            .mid = try std.fmt.allocPrintSentinel(a, "{s}/song.mid", .{dir}, 0),
-            .it = try std.fmt.allocPrintSentinel(a, "{s}/drums.it", .{dir}, 0),
+            .mid = try std.fmt.allocPrintSentinel(gpa, "{s}/song.mid", .{dir}, 0),
+            .it = try std.fmt.allocPrintSentinel(gpa, "{s}/drums.it", .{dir}, 0),
         };
     }
 
     /// The `(midi/…)` or `(it/…)` forms of one file, lifted out of a
     /// `dump` of it — everything from the first tier head to the end of
     /// the document's tier block.
-    fn dumpTier(a: std.mem.Allocator, path: [:0]const u8, is_smf: bool) ![]u8 {
+    fn dumpTier(gpa: std.mem.Allocator, path: [:0]const u8, is_smf: bool) ![]u8 {
         var c = try Cli.invoke(&.{ "tempura", "dump", path });
         defer c.deinit();
         try t.expectEqual(Cli.Exit.ok, c.code);
@@ -677,7 +677,7 @@ const TwoAnchors = struct {
         const to = std.mem.indexOf(u8, text[from..], "\n(cue ") orelse
             std.mem.indexOf(u8, text[from..], "\n(lane ") orelse
             (text.len - from);
-        return a.dupe(u8, text[from..][0..to]);
+        return gpa.dupe(u8, text[from..][0..to]);
     }
 
     fn read(self: *TwoAnchors, name: []const u8) ![]u8 {
