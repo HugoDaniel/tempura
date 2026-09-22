@@ -67,6 +67,38 @@ pub fn refuseOffGrid(b: *Plan.Builder, op: Op.Op) Error!bool {
     return true;
 }
 
+/// What `wallClockMoves` finds: the moves, and how many of the targets
+/// did not keep their second exactly. `moves` is the caller's, freed with
+/// the `gpa` it was built with.
+const WallClock = struct { moves: []Ctx.Move, inexact: u32 };
+
+/// Where each of `targets` lands when it keeps its SECOND: its second
+/// under `before`, read back as a tick under `after` through the clock
+/// floor. A target whose second `after` cannot place (past the ceiling)
+/// stays where it is and is counted, as is one the floor lands a hair
+/// before its second — lossy by construction, which is `wall_clock`'s
+/// contract. Pure: the maps and the targets are read, never kept.
+fn wallClockMoves(
+    gpa: std.mem.Allocator,
+    before: *const TimeMap.TimeMap,
+    after: *const TimeMap.TimeMap,
+    targets: []const Select.Target,
+) Error!WallClock {
+    var inexact: u32 = 0;
+    var moves: std.ArrayList(Ctx.Move) = .empty;
+    errdefer moves.deinit(gpa);
+    for (targets) |t| {
+        const seconds = before.secondsFromTick(t.at);
+        const to = after.tickFromSeconds(seconds) catch {
+            inexact +|= 1;
+            continue;
+        };
+        if (after.secondsFromTick(to) != seconds) inexact +|= 1;
+        try moves.append(gpa, .{ .t = t, .to = to });
+    }
+    return .{ .moves = try moves.toOwnedSlice(gpa), .inexact = inexact };
+}
+
 /// A tempo point as the document will hold it: a `:qpm` is written as an
 /// f32 (`value.float`), so a tempo too small for one reloads as `0` —
 /// which is what `TimeMap.tempoOk` has to be asked about. Every other
@@ -1548,60 +1580,7 @@ const Ctx = struct {
             self.d.tempo,
             x.point.tick,
         )) return;
-        var points: std.ArrayList(doc.TempoPoint) = .empty;
-        defer points.deinit(self.gpa);
-        try points.appendSlice(self.gpa, self.d.tempo);
-        var at: usize = points.items.len;
-        for (points.items, 0..) |p, i| {
-            if (p.tick > x.point.tick) {
-                at = i;
-                break;
-            }
-        }
-        try points.insert(self.gpa, at, x.point);
-
-        if (x.mode == .wall_clock) {
-            var after = try TimeMap.derive(
-                self.gpa,
-                points.items,
-                self.d.meter,
-                self.map.length,
-                self.d.end,
-            );
-            defer after.deinit();
-
-            var moved = try Select.resolve(
-                self.gpa,
-                self.d,
-                .{ .range = .{ x.point.tick + 1, Grid.MAX_TICK } },
-            );
-            defer moved.deinit();
-            self.b.summary.targets = @intCast(moved.targets.len);
-
-            var inexact: u32 = 0;
-            var moves: std.ArrayList(Move) = .empty;
-            defer moves.deinit(self.gpa);
-            for (moved.targets) |t| {
-                const seconds = self.map.secondsFromTick(t.at);
-                const to = after.map.tickFromSeconds(seconds) catch {
-                    inexact += 1;
-                    continue;
-                };
-                if (after.map.secondsFromTick(to) != seconds) inexact += 1;
-                try moves.append(self.gpa, .{ .t = t, .to = to });
-            }
-            try self.moveAll(moves.items);
-            if (inexact > 0) {
-                self.b.summary.inexact = inexact;
-                try self.b.note(
-                    .edit_inexact,
-                    .warning,
-                    .{ .start = 0, .end = 0 },
-                    "{d} wall-clock position(s) rounded onto the grid",
-                    .{inexact},
-                );
-            }
-        }
+        if (x.mode == .wall_clock) try self.keepSeconds(x.point);
 
         var f = try value.Form.init(self.gpa, "tempo-point");
         defer f.deinit();
@@ -1612,6 +1591,51 @@ const Ctx = struct {
         };
         if (!try self.spelled(written, .{ .start = 0, .end = 0 })) return;
         try self.insertRootInOrder("tempo-point", x.point.tick, self.d.tempo, try f.done());
+    }
+
+    /// `wall_clock`'s half of `insertTempo`: every event after `point`
+    /// retimed to the SECOND it is at now, under the map `point` makes —
+    /// lossy by construction, and every rounding counted and said.
+    fn keepSeconds(self: *Ctx, point: doc.TempoPoint) Error!void {
+        var points: std.ArrayList(doc.TempoPoint) = .empty;
+        defer points.deinit(self.gpa);
+        try points.appendSlice(self.gpa, self.d.tempo);
+        var at: usize = points.items.len;
+        for (points.items, 0..) |p, i| {
+            if (p.tick > point.tick) {
+                at = i;
+                break;
+            }
+        }
+        try points.insert(self.gpa, at, point);
+        var after = try TimeMap.derive(
+            self.gpa,
+            points.items,
+            self.d.meter,
+            self.map.length,
+            self.d.end,
+        );
+        defer after.deinit();
+
+        // `point.tick` is on the grid (`Op.offGrid`), so one past it is.
+        var moved = try Select.resolve(self.gpa, self.d, .{
+            .range = .{ point.tick + 1, Grid.MAX_TICK },
+        });
+        defer moved.deinit();
+        self.b.summary.targets = @intCast(moved.targets.len);
+
+        const found = try wallClockMoves(self.gpa, self.map, &after.map, moved.targets);
+        defer self.gpa.free(found.moves);
+        try self.moveAll(found.moves);
+        if (found.inexact == 0) return;
+        self.b.summary.inexact = found.inexact;
+        try self.b.note(
+            .edit_inexact,
+            .warning,
+            .{ .start = 0, .end = 0 },
+            "{d} wall-clock position(s) rounded onto the grid",
+            .{found.inexact},
+        );
     }
 
     /// A meter point, and the re-spelling that keeps the document saying
