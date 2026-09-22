@@ -174,9 +174,16 @@ pub fn exportScore(
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);
     errdefer diags.deinit();
+    // Everything the emission needs only while it runs — the coalesced
+    // tempo table, each curve's keys, the body before the header goes
+    // on top of it — lives here and dies with this frame, so the result
+    // keeps the text and the landings and nothing else.
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
 
     var e: Emitter = .{
         .arena = arena.allocator(),
+        .scratch = scratch.allocator(),
         .doc = d,
         .derived = derived,
         .map = &derived.map,
@@ -191,7 +198,7 @@ pub fn exportScore(
     // The BODY is rendered first, because the header comment counts what
     // rendering it found (the roundings, the aggregations, the keys) and
     // the warning comments are the diagnostics it raised.
-    var body: Io.Writer.Allocating = .init(arena.allocator());
+    var body: Io.Writer.Allocating = .init(scratch.allocator());
     try e.transport(&body.writer);
     try e.tempoForms(&body.writer);
     try e.cues(&body.writer);
@@ -199,9 +206,10 @@ pub fn exportScore(
     try e.laneForms(&body.writer);
     try e.passthrough(&body.writer);
 
-    // Both sinks allocate from the RESULT's arena and neither is
-    // `deinit`ed: the arena moves into the `Result`, so the text it hands
-    // back outlives this frame and one `Result.deinit()` frees the lot.
+    // The text allocates from the RESULT's arena and is never `deinit`ed:
+    // the arena moves into the `Result`, so the text it hands back
+    // outlives this frame and one `Result.deinit()` frees the lot. The
+    // body it was copied from is scratch.
     var out: Io.Writer.Allocating = .init(arena.allocator());
     try e.header(&out.writer);
     out.writer.writeAll(body.written()) catch return error.OutOfMemory;
@@ -224,8 +232,13 @@ pub fn exportScore(
 const TempoForm = struct { tick: i64, bpm: f64 };
 
 const Emitter = struct {
-    /// The result's arena: the text, the landings, every scratch table.
+    /// The result's arena: the text and the landings, which the `Result`
+    /// hands back.
     arena: Allocator,
+    /// `exportScore`'s scratch arena, freed before it returns: the tempo
+    /// table and every curve's keys, needed only while the text is
+    /// written.
+    scratch: Allocator,
     doc: *const doc.Doc,
     derived: *const derive.Derived,
     map: *const TimeMap.TimeMap,
@@ -301,11 +314,11 @@ const Emitter = struct {
         var kept = try self.coalesce(segments, 0);
         // Still past the cap: coalesce anything within `--tempo-eps`.
         if (kept.len + 1 > MAX_TEMPO_SEGMENTS) {
-            self.arena.free(kept);
+            self.scratch.free(kept);
             kept = try self.coalesce(segments, self.opts.tempo_eps);
         }
         if (kept.len + 1 > MAX_TEMPO_SEGMENTS) {
-            self.arena.free(kept);
+            self.scratch.free(kept);
             self.tempo = &.{};
             self.seconds_mode = true;
             // pacer reads an `s` literal against `ticks_per_second`,
@@ -338,15 +351,15 @@ const Emitter = struct {
     /// than `eps`. `eps == 0` is the always-on adjacent-equal collapse.
     fn coalesce(self: *Emitter, segments: []const TimeMap.Segment, eps: f64) Error![]TempoForm {
         var out: std.ArrayList(TempoForm) = .empty;
-        errdefer out.deinit(self.arena);
+        errdefer out.deinit(self.scratch);
         var last = self.bpm;
         for (segments[1..]) |seg| {
             const bpm = self.pacerBpm(seg.us);
             if (@abs(bpm - last) <= eps) continue;
-            try out.append(self.arena, .{ .tick = seg.tick, .bpm = bpm });
+            try out.append(self.scratch, .{ .tick = seg.tick, .bpm = bpm });
             last = bpm;
         }
-        return out.toOwnedSlice(self.arena);
+        return out.toOwnedSlice(self.scratch);
     }
 
     fn pacerBpm(self: *const Emitter, us: f64) f64 {
@@ -471,18 +484,15 @@ const Emitter = struct {
         lane: *const doc.Lane,
         index: *const derive.LaneIndex,
     ) Error!void {
-        var t = try lanes.triggers(self.arena, index.onsets, &self.mapper);
-        defer t.deinit(self.arena);
+        // In the RESULT's arena and never freed on its own: the ticks move
+        // into the landing below (what the node suite reads back through
+        // the real driver), and the velocities ride along with them.
+        const t = try lanes.triggers(self.arena, index.onsets, &self.mapper);
         // pacer refuses an empty `:at` list (`trigger_invalid`), so a
         // lane with nothing on it is a lane with no form.
         if (t.ticks.len == 0) return;
         self.aggregated +|= t.aggregated;
-        // The proof's half of the emission: what the node suite reads
-        // back through the real driver.
-        try self.landings.append(self.arena, .{
-            .target = lane.target,
-            .ticks = try self.arena.dupe(i64, t.ticks),
-        });
+        try self.landings.append(self.arena, .{ .target = lane.target, .ticks = t.ticks });
 
         if (t.ticks.len > MAX_ONSETS) try self.diags.add(
             .export_onset_budget,
@@ -516,12 +526,12 @@ const Emitter = struct {
         lane: *const doc.Lane,
         index: *const derive.LaneIndex,
     ) Error!void {
-        var c = try lanes.curve(self.arena, lane, index, self.hints, &self.mapper, .{
+        var c = try lanes.curve(self.scratch, lane, index, self.hints, &self.mapper, .{
             .eps = self.opts.eps,
             .ease_linear = self.opts.ease_linear,
             .no_hints = self.opts.no_hints,
         }, self.diags);
-        defer c.deinit(self.arena);
+        defer c.deinit(self.scratch);
         if (c.keys.len == 0) return;
 
         if (index.bound) {
