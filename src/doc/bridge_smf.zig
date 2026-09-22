@@ -45,7 +45,7 @@ const NodeIndex = Ast.NodeIndex;
 const Allocator = std.mem.Allocator;
 /// The note payload the core keeps behind `Payload.note`, named here for
 /// the pairing's helpers.
-const Note = @FieldType(smf.Payload, "note");
+const Note = smf.Note;
 const testing = std.testing;
 
 /// Explicit error set: only resource exhaustion. Every defect of a
@@ -141,8 +141,8 @@ fn headName(kind: smf.Kind) []const u8 {
 
 /// The `Kind` a head names, or null. The inverse of `headName` for the
 /// heads that have one: `sequencer-specific` reads back as the plain
-/// kind and `sniffSequencerSpecific` re-types it from the payload, which
-/// is what the READER does with the same bytes.
+/// kind and `smf.classifySequencerSpecific` re-types it from the payload,
+/// which is what the READER does with the same bytes.
 fn kindOfHead(head: []const u8) ?smf.Kind {
     inline for (@typeInfo(smf.Kind).@"enum".fields) |f| {
         const kind: smf.Kind = @enumFromInt(f.value);
@@ -334,7 +334,7 @@ const Printer = struct {
                 // the whole `FF 7F` payload the file carried.
                 const r = e.payload.residue;
                 const body = self.seq.bytesOf(r.body);
-                const head = [_]u8{ 0x7D, 't', 'e', 'm', r.ver, r.kind, r.seq, r.total };
+                const head = smf.residueHead(r);
                 try self.raw(" :data ");
                 try self.hexTwo(&head, body);
             },
@@ -591,7 +591,8 @@ const Reader = struct {
             .sequencer_specific => blk: {
                 const raw = try self.decodeHex(children, "data");
                 const run = try self.b.addBytes(raw);
-                break :blk sniffSequencerSpecific(raw, run);
+                const c = smf.classifySequencerSpecific(raw, run);
+                break :blk .{ c.payload, c.kind };
             },
             .text_event,
             .copyright_notice,
@@ -723,20 +724,6 @@ fn metaPayload(tree: *const Ast.Tree, children: []const NodeIndex, kind: smf.Kin
         } },
         else => unreachable,
     };
-}
-
-fn sniffSequencerSpecific(raw: []const u8, run: smf.Bytes) struct { smf.Payload, smf.Kind } {
-    if (raw.len >= 8 and std.mem.eql(u8, raw[0..4], "\x7Dtem")) return .{ .{ .residue = .{
-        .ver = raw[4],
-        .kind = raw[5],
-        .seq = raw[6],
-        .total = raw[7],
-        .body = .{ .off = run.off + 8, .len = run.len - 8 },
-    } }, .tempura_residue };
-    if (raw.len >= 4 and std.mem.eql(u8, raw[0..4], "\x7Dpau")) {
-        return .{ .{ .bytes = run }, .ease_hint };
-    }
-    return .{ .{ .bytes = run }, .sequencer_specific };
 }
 
 // ---- tree readers, every one of them total ----

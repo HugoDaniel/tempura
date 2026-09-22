@@ -162,14 +162,15 @@ pub const Error = error{OutOfMemory};
 // ---- the envelope ----------------------------------------------------
 
 /// `7D 't' 'e' 'm'` — the manufacturer id every non-commercial project
-/// shares, then tempura's tag.
-pub const magic = [4]u8{ 0x7D, 't', 'e', 'm' };
+/// shares, then tempura's tag. The SMF core owns the spelling
+/// (`Sequence.residue_tag`); the IT chunk's framing uses the same four.
+pub const magic = Sequence.residue_tag;
 
 /// The envelope version this build writes and understands.
 pub const version: u8 = 1;
 
 /// The eight bytes before a body.
-pub const head_len: usize = magic.len + 4;
+pub const head_len: usize = Sequence.residue_head_len;
 
 /// What a payload is. `reserved` is midivia's easing-hint body (plan 04,
 /// "The SMF carrier"): tempura never writes one and never consumes one.

@@ -831,29 +831,12 @@ const Walk = struct {
         };
     }
 
-    /// `FF 7F`: whose payload is it?
-    ///
-    /// `7D` is the manufacturer id every non-commercial project shares,
-    /// so the three bytes after it are the tag: `tem` is tempura's
-    /// residue envelope (plan 04) and is parsed typed, `pau` is
-    /// midivia's easing hint (midi 03) and keeps its body as bytes.
-    /// Anything else is somebody's and stays verbatim.
+    /// `FF 7F`: whose payload is it? `Sequence.classifySequencerSpecific`
+    /// answers — tempura's envelope, midivia's hint or somebody else's —
+    /// the same way for the document bridge's reader.
     fn sequencerSpecific(_: *Walk, raw: []const u8, payload: sequence.Bytes) ?Parsed {
-        if (raw.len >= 8 and std.mem.eql(u8, raw[0..4], "\x7Dtem")) return .{
-            .kind = .tempura_residue,
-            .payload = .{ .residue = .{
-                .ver = raw[4],
-                .kind = raw[5],
-                .seq = raw[6],
-                .total = raw[7],
-                .body = .{ .off = payload.off + 8, .len = payload.len - 8 },
-            } },
-        };
-        if (raw.len >= 4 and std.mem.eql(u8, raw[0..4], "\x7Dpau")) return .{
-            .kind = .ease_hint,
-            .payload = .{ .bytes = payload },
-        };
-        return .{ .kind = .sequencer_specific, .payload = .{ .bytes = payload } };
+        const c = sequence.classifySequencerSpecific(raw, payload);
+        return .{ .kind = c.kind, .payload = c.payload };
     }
 };
 

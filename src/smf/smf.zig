@@ -55,8 +55,25 @@ pub const Bytes = sequence.Bytes;
 pub const ForeignChunk = sequence.ForeignChunk;
 /// A parsed `7D 74 65 6D` payload: tempura's residue envelope.
 pub const TempuraResidue = sequence.TempuraResidue;
+/// What `note_off` and `note_on` carry: channel, key, velocity.
+pub const Note = sequence.Note;
 /// Builds a `Sequence` programmatically.
 pub const Builder = sequence.Builder;
+
+// ---- the sequencer-specific payloads, one spelling ----
+
+/// `7D 't' 'e' 'm'`: tempura's residue envelope tag.
+pub const residue_tag = sequence.residue_tag;
+/// `7D 'p' 'a' 'u'`: midivia's easing hint tag.
+pub const ease_hint_tag = sequence.ease_hint_tag;
+/// The envelope head's length: the tag and `ver kind seq total`.
+pub const residue_head_len = sequence.residue_head_len;
+/// A classified `FF 7F` payload.
+pub const Classified = sequence.Classified;
+/// Whose `FF 7F` payload a run of bytes is.
+pub const classifySequencerSpecific = sequence.classifySequencerSpecific;
+/// A residue event's eight head bytes, rebuilt from its typed fields.
+pub const residueHead = sequence.residueHead;
 
 // ---- reading ----
 

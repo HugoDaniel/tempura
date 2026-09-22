@@ -459,10 +459,11 @@ const Emit = struct {
     /// as `payload` cuts.
     fn residueEvent(self: *Emit, w: *Writer, r: sequence.TempuraResidue) Fail!void {
         const body = self.seq.bytesOf(r.body);
+        const head = sequence.residueHead(r);
         try w.writeAll(&[_]u8{ 0xFF, 0x7F });
-        try vlq.write(w, @intCast(@min(body.len + 8, vlq.MAX)));
-        try w.writeAll(&[_]u8{ 0x7D, 't', 'e', 'm', r.ver, r.kind, r.seq, r.total });
-        try w.writeAll(body[0..@min(body.len, vlq.MAX - 8)]);
+        try vlq.write(w, @intCast(@min(body.len + head.len, vlq.MAX)));
+        try w.writeAll(&head);
+        try w.writeAll(body[0..@min(body.len, vlq.MAX - head.len)]);
     }
 
     fn meta(self: *Emit, w: *Writer, meta_type: u8, bytes: []const u8) Fail!void {

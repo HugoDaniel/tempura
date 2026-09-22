@@ -347,6 +347,61 @@ pub const TempuraResidue = extern struct {
     body: Bytes,
 };
 
+// ---- the sequencer-specific payloads tempura knows ----
+
+/// The manufacturer id every non-commercial project shares (`7D`), then
+/// tempura's tag: a `FF 7F` payload that opens with these four bytes is
+/// tempura's residue envelope (plan 04, "The SMF carrier";
+/// `docs/residue.md`). Wire-frozen at E3. The ONE spelling: the reader,
+/// the writer, the document bridge and the residue's records all read it
+/// from here.
+pub const residue_tag = [4]u8{ 0x7D, 't', 'e', 'm' };
+
+/// midivia's easing hint's tag (midi 03): recognised and kept as bytes,
+/// never written by tempura.
+pub const ease_hint_tag = [4]u8{ 0x7D, 'p', 'a', 'u' };
+
+/// The residue envelope's head: the tag, then `ver kind seq total`.
+pub const residue_head_len: u32 = residue_tag.len + 4;
+
+/// What a `FF 7F` payload is, once its first bytes are read.
+pub const Classified = struct { kind: Kind, payload: Payload };
+
+/// Whose `FF 7F` payload `raw` is: tempura's residue envelope, parsed
+/// typed with its body the rest of `run`; midivia's easing hint, kept as
+/// bytes; or somebody else's, verbatim. `run` is where `raw` sits in the
+/// pool being built, so the answer's runs point into it. The one
+/// classifier — the reader and the document bridge's reader both ask it,
+/// so a `.mid` and its `(midi/…)` dump type the same bytes the same way.
+pub fn classifySequencerSpecific(raw: []const u8, run: Bytes) Classified {
+    // Both callers hand over the pool run they just stored `raw` in.
+    std.debug.assert(raw.len == run.len);
+    const tagged = raw.len >= residue_tag.len;
+    if (tagged and raw.len >= residue_head_len and std.mem.eql(u8, raw[0..4], &residue_tag)) {
+        return .{ .kind = .tempura_residue, .payload = .{ .residue = .{
+            .ver = raw[4],
+            .kind = raw[5],
+            .seq = raw[6],
+            .total = raw[7],
+            .body = .{ .off = run.off + residue_head_len, .len = run.len - residue_head_len },
+        } } };
+    }
+    if (tagged and std.mem.eql(u8, raw[0..4], &ease_hint_tag)) {
+        return .{ .kind = .ease_hint, .payload = .{ .bytes = run } };
+    }
+    return .{ .kind = .sequencer_specific, .payload = .{ .bytes = run } };
+}
+
+/// The eight bytes a `tempura_residue` event's payload opens with,
+/// rebuilt from its typed fields — how the writer and the bridge's
+/// printer spell the envelope, so the round trip is byte-exact.
+pub fn residueHead(r: TempuraResidue) [residue_head_len]u8 {
+    var head: [residue_head_len]u8 = undefined;
+    head[0..residue_tag.len].* = residue_tag;
+    head[residue_tag.len..].* = .{ r.ver, r.kind, r.seq, r.total };
+    return head;
+}
+
 /// Everything an event can carry, in 12 bytes.
 ///
 /// An EXTERN union on purpose: `Event.kind` is the tag, and an extern
@@ -939,6 +994,27 @@ test "Payload: eqlOutsidePool compares the active member, never the union's othe
     const m1: Payload = .{ .meta = .{ .bytes = .{ .off = 0, .len = 1 }, .meta_type = 0x0A } };
     const m2: Payload = .{ .meta = .{ .bytes = .{ .off = 5, .len = 1 }, .meta_type = 0x0B } };
     try testing.expect(!m1.eqlOutsidePool(m2, .meta_unknown));
+}
+
+test "classifySequencerSpecific: tempura's envelope typed, midivia's hint named, the rest verbatim" {
+    const run: Bytes = .{ .off = 10, .len = 10 };
+    const env = classifySequencerSpecific("\x7Dtem\x01\x02\x00\x01hi", run);
+    try testing.expectEqual(Kind.tempura_residue, env.kind);
+    try testing.expectEqual(@as(u8, 2), env.payload.residue.kind);
+    try testing.expectEqual(Bytes{ .off = 18, .len = 2 }, env.payload.residue.body);
+    try testing.expectEqualSlices(u8, "\x7Dtem\x01\x02\x00\x01", &residueHead(env.payload.residue));
+
+    const hint = classifySequencerSpecific("\x7Dpau\x01", .{ .off = 0, .len = 5 });
+    try testing.expectEqual(Kind.ease_hint, hint.kind);
+    // Too short for the envelope: somebody's bytes, not a broken residue.
+    const short = classifySequencerSpecific("\x7Dtem\x01", .{ .off = 0, .len = 5 });
+    try testing.expectEqual(Kind.sequencer_specific, short.kind);
+    const other = classifySequencerSpecific("\x43\x7B", .{ .off = 0, .len = 2 });
+    try testing.expectEqual(Kind.sequencer_specific, other.kind);
+    try testing.expectEqual(Kind.sequencer_specific, classifySequencerSpecific("", .{
+        .off = 0,
+        .len = 0,
+    }).kind);
 }
 
 test "Event: the layout is pinned, as pacer pins its blobs" {
