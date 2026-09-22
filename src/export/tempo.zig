@@ -15,9 +15,9 @@
 //! `:qpm` back to the last bit (`:qpm 102` comes back as
 //! 101.99999999999999) — while an IT tempo is exact exactly when the
 //! AUTHORED number is whole. So each segment comes paired with the point
-//! behind it, found by the same division the map performed
-//! (`TimeMap.usOf`'s, restated in `usOf` below because that one is the
-//! map's own and private), with the point's span for the diagnostics.
+//! behind it, found by the map's own division (`TimeMap.usOf`, the one
+//! owner: a segment's `us` is that value bit for bit), with the point's
+//! span for the diagnostics.
 //!
 //! Pure: no allocation, O(points + segments) for a whole walk, because
 //! the map keeps points in document order and the walk's cursor only
@@ -30,10 +30,6 @@ const Grid = @import("../time/Grid.zig");
 const TimeMap = @import("../time/TimeMap.zig");
 
 const testing = std.testing;
-
-/// Microseconds in a minute: a `:qpm` is `US_PER_MINUTE / qpm` µs a
-/// quarter, the map's conversion.
-const us_per_minute: f64 = 60_000_000;
 
 /// One tempo segment of the map, and the document point that made it.
 pub const Kept = struct {
@@ -76,7 +72,7 @@ pub const Walk = struct {
         const p = found orelse return .{
             .tick = s.tick,
             .us = s.us,
-            .qpm = us_per_minute / s.us,
+            .qpm = TimeMap.US_PER_MINUTE / s.us,
             .span = .{ .start = 0, .end = 0 },
         };
         return .{ .tick = s.tick, .us = s.us, .qpm = qpmOf(p), .span = p.span };
@@ -88,7 +84,7 @@ pub const Walk = struct {
     fn origin(self: *Walk, s: TimeMap.Segment) ?TimeMap.TempoPoint {
         if (self.points.len == 0) return null;
         const p = self.points[0];
-        if (p.tick != 0 or usOf(p) != s.us) return null;
+        if (p.tick != 0 or !behind(p, s)) return null;
         self.point = 1;
         return p;
     }
@@ -101,7 +97,7 @@ pub const Walk = struct {
         // Bounded by the points: the cursor only moves forward.
         while (i < self.points.len) : (i += 1) {
             const p = self.points[i];
-            if (p.tick != s.tick or usOf(p) != s.us) continue;
+            if (p.tick != s.tick or !behind(p, s)) continue;
             self.point = i + 1;
             return p;
         }
@@ -109,20 +105,19 @@ pub const Walk = struct {
     }
 };
 
-/// A point's microseconds per quarter note, by the map's own division —
-/// null-free here because the walk only compares it with a segment's.
-fn usOf(p: TimeMap.TempoPoint) f64 {
-    return switch (p.tempo) {
-        .us => |u| @floatFromInt(u),
-        .qpm => |q| us_per_minute / q,
-    };
+/// Whether `p`'s tempo is `s`'s: the map's own division, compared bit for
+/// bit. A point that names no tempo (`TimeMap.usOf` is null) was refused
+/// and is behind no segment.
+fn behind(p: TimeMap.TempoPoint, s: TimeMap.Segment) bool {
+    const us = TimeMap.usOf(p) orelse return false;
+    return us == s.us;
 }
 
 /// A point's quarter notes per minute, as it was spelled.
 fn qpmOf(p: TimeMap.TempoPoint) f64 {
     return switch (p.tempo) {
         .qpm => |q| q,
-        .us => |u| us_per_minute / @as(f64, @floatFromInt(u)),
+        .us => |u| TimeMap.US_PER_MINUTE / @as(f64, @floatFromInt(u)),
     };
 }
 

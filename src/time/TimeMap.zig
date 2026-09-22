@@ -715,8 +715,9 @@ pub const Result = struct {
 /// of plan 03's `tps_i = (TPQ · 1e6) / us_i`.
 const TICK_US: f64 = @as(f64, @floatFromInt(Grid.TPQ)) * 1e6;
 
-/// Microseconds per quarter note per minute: `us = 60e6 / qpm`.
-const US_PER_MINUTE: f64 = 60_000_000;
+/// Microseconds per quarter note per minute: `us = 60e6 / qpm`, and
+/// `qpm = 60e6 / us` read back (`export/tempo.zig`).
+pub const US_PER_MINUTE: f64 = 60_000_000;
 
 /// What a map with no usable point at tick 0 is given. 120 quarter notes
 /// per minute is SMF's own default (`us = 500 000`, an INTEGER, so the
@@ -1076,9 +1077,6 @@ fn bits(x: f64) u64 {
     return @bitCast(x);
 }
 
-/// The microseconds per quarter note a point names, or `null` when it
-/// names no tempo at all — `:us 0`, or a `:qpm` that is zero, negative or
-/// not a number. `60e6 / qpm` is ONE f64 division (plan 03, "Tempo").
 /// Whether a tempo point names a tempo the map honours: microseconds per
 /// quarter note, from `:us` or from `60e6 / :qpm`, finite and positive —
 /// `usOf`, the test `tempoTable` makes. The one definition, as `meterOk`
@@ -1089,7 +1087,15 @@ pub fn tempoOk(p: TempoPoint) bool {
     return usOf(p) != null;
 }
 
-fn usOf(p: TempoPoint) ?f64 {
+/// The microseconds per quarter note a point names, or `null` when it
+/// names no tempo at all — `:us 0`, or a `:qpm` that is zero, negative or
+/// not a number. `60e6 / qpm` is ONE f64 division (plan 03, "Tempo").
+///
+/// The map's own conversion, and the only one: a segment's `us` is this
+/// value bit for bit, so a consumer that pairs a segment with the point
+/// behind it (`export/tempo.zig`) compares against this and not against
+/// a division of its own. Pure; borrows nothing.
+pub fn usOf(p: TempoPoint) ?f64 {
     const us = switch (p.tempo) {
         .us => |u| @as(f64, @floatFromInt(u)),
         .qpm => |q| US_PER_MINUTE / q,

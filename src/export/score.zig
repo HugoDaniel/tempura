@@ -365,7 +365,7 @@ const Emitter = struct {
     }
 
     fn pacerBpm(self: *const Emitter, us: f64) f64 {
-        return pos.pacerBpm(60_000_000.0 / us, self.d);
+        return pos.pacerBpm(TimeMap.US_PER_MINUTE / us, self.d);
     }
 
     fn checkBpm(self: *Emitter, bpm: f64, span: Diag.Span) Error!void {
