@@ -564,7 +564,10 @@ const Emitter = struct {
                 continue;
             }
             if (std.mem.eql(u8, p.head, "scene")) {
-                if (sceneName(p.text)) |name| {
+                // The bridge's own reader: the exporter may be handed a
+                // document the bridge never saw (the edit engine builds
+                // them too), so it asks rather than trusting a check ran.
+                if (doc.checks.sceneName(p.text)) |name| {
                     if (self.hasSection(name)) {
                         try self.diags.add(
                             .scene_duplicate,
@@ -644,24 +647,6 @@ fn value(w: *Io.Writer, key: simplify.Key) Error!void {
         try pr(w, "{d}", .{key.value[c]});
     }
     w.writeByte(']') catch return error.OutOfMemory;
-}
-
-/// A `(scene …)`'s `:name`, read out of its source text. The same reader
-/// `doc/checks.zig` uses, restated here because the exporter is a
-/// SECOND consumer of a `Doc` — one that may be handed a document the
-/// bridge never saw (the edit engine builds them too).
-fn sceneName(src: []const u8) ?[]const u8 {
-    const at = std.mem.indexOf(u8, src, ":name") orelse return null;
-    var i = at + ":name".len;
-    while (i < src.len and (src[i] == ' ' or src[i] == '\t')) i += 1;
-    if (i < src.len and src[i] == '"') {
-        const start = i + 1;
-        const close = std.mem.indexOfScalarPos(u8, src, start, '"') orelse return null;
-        return if (close > start) src[start..close] else null;
-    }
-    const start = i;
-    while (i < src.len and !std.ascii.isWhitespace(src[i]) and src[i] != ')') i += 1;
-    return if (i > start) src[start..i] else null;
 }
 
 /// `Io.Writer.print` against an allocating sink: the only way it fails

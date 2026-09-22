@@ -224,7 +224,11 @@ pub fn laneNames(diags: *Diag.List, doc: *const Doc.Doc) Error!void {
 /// unquoting is textual and deliberately shallow — an escape inside a
 /// scene name would not compare equal, which fails towards NOT reporting
 /// a collision rather than towards inventing one.
-fn sceneName(src: []const u8) ?[]const u8 {
+///
+/// `pub` because the exporter asks the same question of a document the
+/// bridge may never have seen (`export/score.zig`): one reader, not two.
+/// The answer borrows `src`.
+pub fn sceneName(src: []const u8) ?[]const u8 {
     const at = std.mem.indexOf(u8, src, ":name") orelse return null;
     var i = at + ":name".len;
     while (i < src.len and (src[i] == ' ' or src[i] == '\t')) i += 1;
