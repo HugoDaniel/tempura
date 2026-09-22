@@ -1052,39 +1052,15 @@ const Ctx = struct {
         c: Cell,
         x: Op.Retime,
     ) Error!?CellMove {
-        const to = destination(x, c.at);
-        if (@rem(to, Grid.IT_TICK) != 0) {
-            try self.b.refuse(
-                .edit_inexact,
-                c.span,
-                "an Impulse Tracker cell sounds on a tick of the module's own clock, " ++
-                    "and this position is between two",
-                .{},
-            );
-            return null;
-        }
-        const ri = rowIndexAt(rowmap, @divExact(to, Grid.IT_TICK)) orelse {
-            try self.b.refuse(
-                .edit_range_empty,
-                c.span,
-                "that position is past the module's last row",
-                .{},
-            );
-            return null;
+        const landing = switch (cellLanding(rowmap, destination(x, c.at))) {
+            .ok => |l| l,
+            .refuse => |why| {
+                try self.refuseLanding(c.span, why);
+                return null;
+            },
         };
-        const played = rowmap.rows[ri];
-        const delay = @divExact(to, Grid.IT_TICK) - played.start_tick;
-        if (delay > 15) {
-            try self.b.refuse(
-                .edit_inexact,
-                c.span,
-                "a cell can be held back by at most fifteen ticks (SDF), " ++
-                    "and this one would need {d}",
-                .{delay},
-            );
-            return null;
-        }
-        const fx = (try self.delayColumn(c, delay)) orelse return null;
+        const played = rowmap.rows[landing.row];
+        const fx = (try self.delayColumn(c, landing.delay)) orelse return null;
         if (try self.refuseSharedLanding(rowmap, c, played.pattern, x.allow_shared)) return null;
         const dst = (try self.numbered(module, "pattern", played.pattern)) orelse {
             try self.b.refuse(
@@ -1104,6 +1080,32 @@ const Ctx = struct {
             .fx = fx.json,
             .keep = fx.keep,
         };
+    }
+
+    /// The refusal a cell's landing earns, with its own span.
+    fn refuseLanding(self: *Ctx, span: Diag.Span, why: LandingRefusal) Error!void {
+        switch (why) {
+            .between_ticks => try self.b.refuse(
+                .edit_inexact,
+                span,
+                "an Impulse Tracker cell sounds on a tick of the module's own clock, " ++
+                    "and this position is between two",
+                .{},
+            ),
+            .past_end => try self.b.refuse(
+                .edit_range_empty,
+                span,
+                "that position is past the module's last row",
+                .{},
+            ),
+            .delay => |ticks| try self.b.refuse(
+                .edit_inexact,
+                span,
+                "a cell can be held back by at most fifteen ticks (SDF), " ++
+                    "and this one would need {d}",
+                .{ticks},
+            ),
+        }
     }
 
     /// Refuse a move INTO a pattern more than one order plays. The
@@ -1681,6 +1683,34 @@ fn itToTicks(it_ticks: i64) ?i64 {
 /// Which played row holds `it_tick` — `walk.orderRowAt`'s search,
 /// answering the row's INDEX, because the pattern a move lands in is on
 /// the `PlayedRow` and not on the `Position`.
+/// Why a cell cannot land where a retime sends it — `cellLanding`'s
+/// refusals, with what each diagnostic prints.
+const LandingRefusal = union(enum) {
+    /// The position is between two of the module's ticks.
+    between_ticks,
+    /// The position is past the walk's last row.
+    past_end,
+    /// The `SDx` delay the position needs, past SDF's fifteen.
+    delay: i64,
+};
+
+/// Where a cell lands at tempura tick `to`: the played row (an index into
+/// `rowmap.rows`) and the `SDx` delay into it, or the reason it cannot —
+/// `TimeMap.tempoStep`'s shape, so the rule is a pure function and the
+/// caller keeps the diagnosing. `to` is `destination`'s, never negative.
+fn cellLanding(
+    rowmap: *const walk.RowMap,
+    to: i64,
+) union(enum) { ok: struct { row: u32, delay: i64 }, refuse: LandingRefusal } {
+    if (@rem(to, Grid.IT_TICK) != 0) return .{ .refuse = .between_ticks };
+    const it_tick = @divExact(to, Grid.IT_TICK);
+    const row = rowIndexAt(rowmap, it_tick) orelse return .{ .refuse = .past_end };
+    // `rowIndexAt` answers the last row starting at or before `it_tick`.
+    const delay = it_tick - rowmap.rows[row].start_tick;
+    if (delay > 15) return .{ .refuse = .{ .delay = delay } };
+    return .{ .ok = .{ .row = row, .delay = delay } };
+}
+
 fn rowIndexAt(rowmap: *const walk.RowMap, it_tick: i64) ?u32 {
     if (rowmap.rows.len == 0 or it_tick < 0 or it_tick >= rowmap.total_ticks) return null;
     var lo: usize = 0;
