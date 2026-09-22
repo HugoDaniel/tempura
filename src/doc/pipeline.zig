@@ -156,13 +156,14 @@ pub const Dumped = struct {
     /// rule).
     consumed: reconcile.Consumed,
 
-    gpa: Allocator,
-    /// `reconcile`'s arena — it owns `verdicts` and every string in
-    /// them.
+    /// `reconcile`'s arena, handed on — it owns `text`, `verdicts` and
+    /// every string in them, so the struct keeps no allocator of the
+    /// caller's.
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the text, the document, its map, the report and the
+    /// verdicts; the bytes it was dumped from stay the caller's.
     pub fn deinit(self: *Dumped) void {
-        self.gpa.free(self.text);
         self.map.deinit();
         self.doc.deinit();
         self.diags.deinit();
@@ -416,13 +417,15 @@ fn assemble(
 ) Error!Dumped {
     try copyDiags(diags, &rec.diags);
 
+    // Into `rec`'s arena, which becomes the `Dumped`'s own: the text
+    // dies with the value, and a failure below leaves it to the caller's
+    // `errdefer rec.deinit()`.
     const at = @min(rec.tier_at, rec.doc_text.len);
-    const text = try std.mem.concatWithSentinel(gpa, u8, &.{
+    const text = try std.mem.concatWithSentinel(rec.arena.allocator(), u8, &.{
         rec.doc_text[0..at],
         tier_text,
         rec.doc_text[at..],
     }, 0);
-    errdefer gpa.free(text);
 
     // The reader's OWN bytes, handed back by name: the anchor's `:size`
     // and `:sha256` were computed from them, so it verifies without a
@@ -443,7 +446,6 @@ fn assemble(
         .conductor = rec.conductor,
         .rule = rec.rule,
         .consumed = consumed,
-        .gpa = gpa,
         .arena = rec.arena,
     };
 }
@@ -544,17 +546,30 @@ fn newerIt(chunk_bytes: ?[]const u8) ?Newer {
 // check-residue
 // ---------------------------------------------------------------------
 
-/// What `checkResidue` reports.
+/// What `checkResidue` reports. `arena` owns the text; the struct keeps
+/// no allocator of the caller's.
 pub const Report = struct {
     /// The verdict table, one fact per line, NO trailing blank line.
     text: []u8,
     diags: Diag.List,
-    gpa: Allocator,
+    arena: std.heap.ArenaAllocator,
 
+    /// Frees the text and the report; neither outlives the `Report`.
     pub fn deinit(self: *Report) void {
-        self.gpa.free(self.text);
+        self.arena.deinit();
         self.diags.deinit();
         self.* = undefined;
+    }
+
+    /// The report `checkResidue` hands out: `out`'s text moved into a
+    /// report arena of its own, and `out` released. On a failure `out`
+    /// and `diags` are still the caller's to free.
+    fn of(gpa: Allocator, out: *std.ArrayList(u8), diags: Diag.List) Error!Report {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        errdefer arena.deinit();
+        const text = try arena.allocator().dupe(u8, out.items);
+        out.deinit(gpa);
+        return .{ .text = text, .diags = diags, .arena = arena };
     }
 };
 
@@ -578,7 +593,7 @@ pub fn checkResidue(gpa: Allocator, bytes: []const u8, kind: Doc.AnchorKind) Err
 
             if (newerSmf(&read.sequence)) |n| {
                 try newerLine(gpa, &out, n);
-                return .{ .text = try out.toOwnedSlice(gpa), .diags = diags, .gpa = gpa };
+                return Report.of(gpa, &out, diags);
             }
 
             var detached = try residue_smf.detach(gpa, &read.sequence);
@@ -595,7 +610,7 @@ pub fn checkResidue(gpa: Allocator, bytes: []const u8, kind: Doc.AnchorKind) Err
             const chunk_bytes = if (read.module.tmpu) |r| r.slice(bytes) else null;
             if (newerIt(chunk_bytes)) |n| {
                 try newerLine(gpa, &out, n);
-                return .{ .text = try out.toOwnedSlice(gpa), .diags = diags, .gpa = gpa };
+                return Report.of(gpa, &out, diags);
             }
 
             var quiet: Diag.List = .init(gpa);
@@ -623,7 +638,7 @@ pub fn checkResidue(gpa: Allocator, bytes: []const u8, kind: Doc.AnchorKind) Err
         },
     }
 
-    return .{ .text = try out.toOwnedSlice(gpa), .diags = diags, .gpa = gpa };
+    return Report.of(gpa, &out, diags);
 }
 
 /// `check-residue`'s one line for a residue this build leaves alone.
@@ -748,7 +763,8 @@ pub const BuildOptions = struct {
     in_place: bool = false,
 };
 
-/// A document, built.
+/// A document, built. `arena` owns the file's bytes and every record;
+/// the struct keeps no allocator of the caller's.
 pub const Built = struct {
     bytes: []const u8,
     /// One per rendered native lane — what rode in the file, with the
@@ -758,11 +774,11 @@ pub const Built = struct {
     /// How many bytes of essence rode in the file; zero when none did.
     essence_bytes: usize,
     diags: Diag.List,
-    gpa: Allocator,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the bytes, the records and the report: nothing read out of
+    /// a `Built` outlives it.
     pub fn deinit(self: *Built) void {
-        self.gpa.free(self.bytes);
         self.diags.deinit();
         self.arena.deinit();
         self.* = undefined;
@@ -816,7 +832,7 @@ pub fn build(
     errdefer diags.deinit();
 
     const pieces: Pieces = if (try refuseCrossKind(&diags, doc, kind))
-        .{ .bytes = try gpa.alloc(u8, 0), .lanes = &.{}, .conductor = null, .essence_bytes = 0 }
+        .{ .bytes = &.{}, .lanes = &.{}, .conductor = null, .essence_bytes = 0 }
     else switch (kind) {
         .smf => try buildSmf(gpa, arena.allocator(), doc_source, doc, derived, opts, &diags),
         .it => try buildIt(gpa, arena.allocator(), doc_source, doc, derived, opts, &diags),
@@ -828,12 +844,12 @@ pub fn build(
         .conductor = pieces.conductor,
         .essence_bytes = pieces.essence_bytes,
         .diags = diags,
-        .gpa = gpa,
         .arena = arena,
     };
 }
 
-/// What one kind's build produced, before it is wrapped.
+/// What one kind's build produced, before it is wrapped. Every slice is
+/// in the build's arena, the `Built`'s own.
 const Pieces = struct {
     bytes: []const u8,
     lanes: []const records.LaneRecord,
@@ -1009,13 +1025,13 @@ fn buildSmf(
         defer plain.deinit();
         try copyDiags(diags, &plain.diags);
         return .{
-            .bytes = try gpa.dupe(u8, plain.bytes),
+            .bytes = try arena.dupe(u8, plain.bytes),
             .lanes = recs.lanes,
             .conductor = recs.conductor,
             .essence_bytes = 0,
         };
     }
-    return smfWithResidue(gpa, doc, doc_source, &rendered.seq, wopts, recs, diags);
+    return smfWithResidue(gpa, arena, doc, doc_source, &rendered.seq, wopts, recs, diags);
 }
 
 /// The anchor's own `Sequence`, when the document carries one: the
@@ -1068,6 +1084,7 @@ fn smfRecords(
 /// rendered sequence and written.
 fn smfWithResidue(
     gpa: Allocator,
+    arena: Allocator,
     doc: *const Doc.Doc,
     doc_source: [:0]const u8,
     seq: *const smf.Sequence,
@@ -1096,7 +1113,7 @@ fn smfWithResidue(
     try copyDiags(diags, &file.diags);
 
     return .{
-        .bytes = try gpa.dupe(u8, file.bytes),
+        .bytes = try arena.dupe(u8, file.bytes),
         .lanes = recs.lanes,
         .conductor = recs.conductor,
         .essence_bytes = packed_tier.bytes.len,
@@ -1155,10 +1172,11 @@ fn buildIt(
         // this build shadows nothing. `--no-residue` asked for a file
         // that carries nothing and gets exactly that.
         const kept = if (opts.no_residue) null else carried;
-        return itPlain(gpa, &rendered.module, source, wopts, kept, recs, diags);
+        return itPlain(gpa, arena, &rendered.module, source, wopts, kept, recs, diags);
     }
     return itWithResidue(
         gpa,
+        arena,
         doc,
         doc_source,
         derived,
@@ -1224,6 +1242,7 @@ fn itRecords(
 /// nothing.
 fn itPlain(
     gpa: Allocator,
+    arena: Allocator,
     module: *const itf.Module,
     source: ?[]const u8,
     wopts: itf.write.Options,
@@ -1239,7 +1258,7 @@ fn itPlain(
     defer plain.deinit();
     try copyDiags(diags, &plain.diags);
     return .{
-        .bytes = try gpa.dupe(u8, plain.bytes),
+        .bytes = try arena.dupe(u8, plain.bytes),
         .lanes = recs.lanes,
         .conductor = recs.conductor,
         .essence_bytes = 0,
@@ -1251,6 +1270,7 @@ fn itPlain(
 /// half of the message, and the module written with both.
 fn itWithResidue(
     gpa: Allocator,
+    arena: Allocator,
     doc: *const Doc.Doc,
     doc_source: [:0]const u8,
     derived: *const time_derive.Derived,
@@ -1292,7 +1312,7 @@ fn itWithResidue(
     try copyDiags(diags, &file.diags);
 
     return .{
-        .bytes = try gpa.dupe(u8, file.bytes),
+        .bytes = try arena.dupe(u8, file.bytes),
         .lanes = recs.lanes,
         .conductor = recs.conductor,
         .essence_bytes = packed_tier.bytes.len,
