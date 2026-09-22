@@ -34,6 +34,11 @@ const tempura = @import("tempura");
 const Cli = @import("Cli.zig");
 const Diags = @import("Diags.zig");
 
+/// The verb (`check-residue`): read a `.mid` or a `.it`, and print what
+/// its residue carries and whether it still agrees with the file
+/// (`pipeline.checkResidue`), the diagnostics on stderr. Exits with their
+/// verdict, or `Exit.usage` when the bytes are neither format. Every
+/// value it builds is freed before it returns.
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     const bytes = Cli.load(ctx.arena, ctx.io, ctx.cmd.path) catch |e|
         return Cli.reportLoadFailure(ctx, e);

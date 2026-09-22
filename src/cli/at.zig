@@ -48,6 +48,11 @@ const Writer = std.Io.Writer;
 const Playhead = tempura.time.Playhead;
 const Pos = tempura.time.Pos;
 
+/// The verb: load and derive the document, answer the one position
+/// `--seconds` or `--pos` asks for on stdout, and every load and
+/// derivation diagnostic on stderr. Exits with the document's verdict,
+/// or `Exit.usage` when the question itself was refused. Every value it
+/// builds is freed before it returns.
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     var loaded = switch (try ctx.loadDoc()) {
         .failed => |code| return code,

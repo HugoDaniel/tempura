@@ -26,6 +26,11 @@ const Diags = @import("Diags.zig");
 
 const Writer = std.Io.Writer;
 
+/// The verb: read a `.mid` or a `.it` and print its annotated byte map on
+/// stdout, the reader's diagnostics on stderr beside it. Always prints
+/// the map; exits with the reader's verdict, or `Exit.usage` when the
+/// bytes are neither format. Every value it builds is freed before it
+/// returns.
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     const bytes = Cli.load(ctx.arena, ctx.io, ctx.cmd.path) catch |e|
         return Cli.reportLoadFailure(ctx, e);

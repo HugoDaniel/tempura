@@ -266,10 +266,14 @@ pub const List = struct {
     arena: std.heap.ArenaAllocator,
     entries: std.ArrayList(Diagnostic) = .empty,
 
+    /// An empty list whose arena draws on `gpa`. Allocates nothing until
+    /// the first `add`.
     pub fn init(gpa: std.mem.Allocator) List {
         return .{ .arena = .init(gpa) };
     }
 
+    /// Free every entry and every message at once. Any `items()` slice
+    /// and any message taken from the list dies here.
     pub fn deinit(self: *List) void {
         self.arena.deinit();
     }

@@ -26,6 +26,9 @@ const std = @import("std");
 const Cli = @import("Cli.zig");
 const Diags = @import("Diags.zig");
 
+/// The verb: load the document with its anchors resolved and render the
+/// whole report on stderr; stdout stays empty. Exits with the report's
+/// verdict. Every value it builds is freed before it returns.
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     var loaded = switch (try ctx.loadDoc()) {
         .failed => |code| return code,

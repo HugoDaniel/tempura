@@ -54,6 +54,11 @@ const Diags = @import("Diags.zig");
 
 const edit = tempura.edit;
 
+/// The verb: load the document, read `--op` (with `--select` merged),
+/// plan it, and emit the edited document — or, under `--dry-run`, the
+/// actions. `Exit.usage` for an ask that is not an operation,
+/// `Exit.errors` for a refused plan or a blocking load error, and every
+/// value it builds is freed before it returns.
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     var loaded = switch (try ctx.loadDoc()) {
         .failed => |code| return code,

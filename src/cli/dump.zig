@@ -57,6 +57,11 @@ const pipeline = tempura.doc.pipeline;
 /// name, and it is the one every corpus fixture already spells.
 pub const anchor_id = pipeline.anchor_id;
 
+/// The verb: read a `.mid` or a `.it`, dump it through `pipeline.dump`,
+/// and emit the document (with `--spans`' block when asked), then the
+/// file's diagnostics on stderr. Always emits — a dump is how a defect
+/// is seen — and exits with the diagnostics' verdict. Every value it
+/// builds is freed before it returns.
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     const bytes = Cli.load(ctx.arena, ctx.io, ctx.cmd.path) catch |e|
         return Cli.reportLoadFailure(ctx, e);

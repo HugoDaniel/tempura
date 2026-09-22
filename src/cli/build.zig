@@ -60,6 +60,13 @@ const Io = std.Io;
 const Writer = std.Io.Writer;
 const pipeline = tempura.doc.pipeline;
 
+/// The verb (`build`, and `export`, which is `build --no-residue`): load
+/// a document that must hold together, build its file through
+/// `pipeline.build`, and place the bytes — `--in-place` through a
+/// temporary, `-o`'s path unless it names an anchor, or stdout. Exits
+/// `Exit.errors` for a defective document or a refused build and
+/// `Exit.usage` for a bad invocation; every value it builds is freed
+/// before it returns.
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     var loaded = switch (try ctx.loadDoc()) {
         .failed => |code| return code,

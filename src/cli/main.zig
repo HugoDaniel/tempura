@@ -35,6 +35,10 @@ fn reportInternal(stderr: *std.Io.Writer, err: anyerror) u8 {
     return Cli.Exit.internal;
 }
 
+/// The process: stdio writers and the two process facts in, `Cli.run`,
+/// both channels flushed, and the exit code out — `Cli.Exit.internal`
+/// for anything `run` propagates or a channel that would not flush.
+/// Owns nothing past its return; argv lives in the process arena.
 pub fn main(init: std.process.Init) u8 {
     // A dump of a large `.it` is megabytes of text; a big stdout buffer
     // keeps that one write rather than thousands.

@@ -198,6 +198,9 @@ pub const Ctx = struct {
         return self.writeFile(path, bytes);
     }
 
+    /// Write `bytes` to `path`, relative to the working directory, whole.
+    /// False when it could not be written, having said why on stderr —
+    /// `emit`'s half for `-o`, and `build --in-place`'s temporary.
     pub fn writeFile(self: *const Ctx, path: []const u8, bytes: []const u8) Error!bool {
         Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = bytes }) catch |e| {
             try self.err.print("tempura: {s}: could not write ({s})\n", .{ path, @errorName(e) });
@@ -423,6 +426,12 @@ pub fn printableTag(tag: *const [4]u8) [4]u8 {
     return out;
 }
 
+/// One invocation: parse `argv`, dispatch the verb, and answer its exit
+/// code (`Exit`). Artifacts go to `out`, diagnostics and help to `err`;
+/// neither is flushed here — the caller owns both. `gpa` backs the
+/// values a verb deinits; the invocation's own arena is freed before
+/// this returns, so nothing it made outlives the call. The TEST SEAM
+/// (the header): every end-to-end test drives exactly this.
 pub fn run(
     gpa: Allocator,
     io: Io,
@@ -512,10 +521,14 @@ test {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// What one in-process invocation produced: its exit code and both
+/// channels, captured whole. Owns both buffers.
 pub const Captured = struct {
     code: u8,
     out: Writer.Allocating,
     err: Writer.Allocating,
+
+    /// Free both captured channels.
     pub fn deinit(self: *Captured) void {
         self.out.deinit();
         self.err.deinit();
@@ -528,6 +541,8 @@ pub fn invoke(argv: []const [:0]const u8) !Captured {
     return invokeEnv(argv, .{});
 }
 
+/// `invoke` with the process facts a test chooses (colour, so far).
+/// The `Captured` is the caller's to `deinit`.
 pub fn invokeEnv(argv: []const [:0]const u8, env: Env) !Captured {
     var out: Writer.Allocating = .init(t.allocator);
     errdefer out.deinit();

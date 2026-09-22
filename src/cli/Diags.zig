@@ -49,6 +49,7 @@ pub fn label(path: []const u8) []const u8 {
     return if (isStdin(path)) "<stdin>" else path;
 }
 
+/// Whether an input path is `-`, the one spelling of stdin.
 pub fn isStdin(path: []const u8) bool {
     return path.len == 1 and path[0] == '-';
 }
@@ -67,6 +68,8 @@ pub fn colorEnabled(no_color_set: bool, is_tty: bool) bool {
 pub const Style = struct {
     enabled: bool = false,
 
+    /// The colour that opens a severity word — red, yellow, cyan — or
+    /// nothing when colour is off.
     pub fn severity(self: Style, w: *Writer, sev: Diag.Severity) Writer.Error!void {
         if (!self.enabled) return;
         try w.writeAll(switch (sev) {
@@ -76,13 +79,18 @@ pub const Style = struct {
         });
     }
 
+    /// The sequence that closes what `severity` opened, or nothing when
+    /// colour is off.
     pub fn reset(self: Style, w: *Writer) Writer.Error!void {
         if (self.enabled) try w.writeAll("\x1b[0m");
     }
 };
 
+/// How many diagnostics of each severity a report holds.
 pub const Counts = struct { errors: u32 = 0, warnings: u32 = 0, infos: u32 = 0 };
 
+/// Count `diags` by severity — the summary line's numbers and the JSON
+/// envelope's `counts`.
 pub fn count(diags: []const Diag.Diagnostic) Counts {
     var c: Counts = .{};
     for (diags) |d| switch (d.severity) {
@@ -193,11 +201,14 @@ pub const LineIndex = struct {
         return .{ .source = source, .line_starts = try starts.toOwnedSlice(gpa) };
     }
 
+    /// Free the line table with the `gpa` that `build` was given.
     pub fn deinit(self: *LineIndex, gpa: Allocator) void {
         gpa.free(self.line_starts);
         self.* = undefined;
     }
 
+    /// The 1-based line and codepoint column of byte `offset`, by the
+    /// rules in the struct's header; an offset past the end clamps to it.
     pub fn at(self: *const LineIndex, offset: u32) Pos {
         // Past-EOF clamps rather than panicking: a span is host data
         // here, and an EOF span (`start == source.len`) is ordinary.

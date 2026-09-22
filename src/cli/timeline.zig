@@ -40,6 +40,11 @@ const Stringify = std.json.Stringify;
 /// frozen).
 pub const format_version: u32 = 1;
 
+/// The verb: load and derive the document, and emit the derivation —
+/// `Derived.echo`'s text, or the JSON envelope under `--json` — then
+/// every diagnostic on stderr. Always emits (a defective document still
+/// has a map); exits with the verdict. Every value it builds is freed
+/// before it returns.
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     var loaded = switch (try ctx.loadDoc()) {
         .failed => |code| return code,

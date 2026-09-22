@@ -64,6 +64,11 @@ const Diags = @import("Diags.zig");
 const exporter = tempura.exporter;
 const pipeline = tempura.doc.pipeline;
 
+/// The verb: read the input once, dump it first when its bytes announce
+/// a `.mid` or a `.it`, and emit the pacer score of the document — or
+/// nothing, exiting `Exit.errors`, for a conducted document whose file is
+/// not here. Otherwise exits with the worse of the document's and the
+/// exporter's verdicts. Every value it builds is freed before it returns.
 pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     // Read ONCE, then decide, and the bytes go to whichever half wants
     // them. `Ctx.loadDoc` would read the path again, and for `-` on a

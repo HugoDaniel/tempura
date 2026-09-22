@@ -449,54 +449,90 @@ export fn tpr_abiVersion() u32 {
     return 1;
 }
 
+/// The doc zone: `DOC_CAP` bytes (1 MiB) the host writes a document's
+/// text into before `tpr_load`. Static, so the address never moves; the
+/// module reads it only during the `tpr_load` that names its length, and
+/// copies what it keeps.
 export fn tpr_docPtr() [*]u8 {
     return &doc_buffer;
 }
 
+/// The doc zone's capacity, `DOC_CAP`: the longest text `tpr_load`
+/// takes. A longer length is status 2 and nothing changes.
 export fn tpr_docCap() u32 {
     return DOC_CAP;
 }
 
+/// The file zone: `FILE_CAP` bytes (4 MiB) the host writes a `.mid` or a
+/// `.it` into before `tpr_loadFile` or `tpr_attachAnchor`. Static; read
+/// only during the call that names its length, and copied, so the host
+/// may reuse it at once.
 export fn tpr_filePtr() [*]u8 {
     return &file_buffer;
 }
 
+/// The file zone's capacity, `FILE_CAP`: the largest file either call
+/// takes. A longer length is status 2 and nothing changes.
 export fn tpr_fileCap() u32 {
     return FILE_CAP;
 }
 
+/// The op zone: `OP_CAP` bytes (64 KiB) the host writes an operation or
+/// an action list into before `tpr_plan` or `tpr_apply`. Static; read
+/// only during that call.
 export fn tpr_opPtr() [*]u8 {
     return &op_buffer;
 }
 
+/// The op zone's capacity, `OP_CAP`. A longer length is a refusal, said
+/// in the `'TPDG'` blob (`tpr_plan`) or status 2 (`tpr_apply`).
 export fn tpr_opCap() u32 {
     return OP_CAP;
 }
 
+/// The text zone: where `tpr_text` writes the document, `TEXT_CAP` bytes
+/// (4 MiB). The host reads it; its contents are valid until the next
+/// `tpr_text` writes it.
 export fn tpr_textPtr() [*]const u8 {
     return &text_buffer;
 }
 
+/// The out zone: where `tpr_plan`, `tpr_exportScore` and `tpr_build`
+/// write, `OUT_CAP` bytes (4 MiB) shared by all three. The host reads
+/// it; an answer is valid until the next of the three writes it.
 export fn tpr_outPtr() [*]const u8 {
     return &out_buffer;
 }
 
+/// The out zone's capacity, `OUT_CAP`: the longest plan, score or file a
+/// call hands back. A longer one is 0 and a reason in the `'TPDG'` blob.
 export fn tpr_outCap() u32 {
     return OUT_CAP;
 }
 
+/// The timeline zone: `'TPTL'` as `tpr_timeline` wrote it,
+/// `TIMELINE_CAP` bytes (256 KiB). Valid until the next `tpr_timeline`.
 export fn tpr_timelinePtr() [*]const u8 {
     return &timeline_buffer;
 }
 
+/// The playhead zone: `'TPPH'` as `tpr_at` or `tpr_atTick` wrote it,
+/// `PLAYHEAD_CAP` bytes (4 KiB). Valid until the next of either.
 export fn tpr_playheadPtr() [*]const u8 {
     return &playhead_buffer;
 }
 
+/// The diagnostics zone: `'TPDG'`, `DIAGS_CAP` bytes (64 KiB), rewritten
+/// by every lifecycle verb that reports and by every zero-length answer
+/// (the header) — so it explains the call just made, and is valid until
+/// the next call that writes it. `tpr_diagLen` says how much is there.
 export fn tpr_diagPtr() [*]const u8 {
     return &diags_buffer;
 }
 
+/// How many bytes of the diagnostics zone the last report filled: 0
+/// before any call has published one, and never past `DIAGS_CAP` — the
+/// encoder drops the records that do not fit, and its count says so.
 export fn tpr_diagLen() u32 {
     return diags_len;
 }
