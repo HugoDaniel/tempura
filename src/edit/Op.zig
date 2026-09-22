@@ -678,10 +678,13 @@ const Reader = struct {
             try self.fail("insert-meter wants a \"sig\": [n d]", .{});
             return null;
         };
+        // Narrowed, never clamped: `[0 4]` is not `[1 4]`, and whether
+        // `[n d]` is a meter at all is the map's to say (`TimeMap.meterOk`,
+        // which the planner asks with the reload's own code).
         return .{ .insert_meter = .{ .point = .{
             .tick = self.optInt(o.get("at")) orelse 0,
-            .n = @intCast(std.math.clamp(sig[0], 1, 64)),
-            .d = @intCast(std.math.clamp(sig[1], 1, 64)),
+            .n = self.narrow(u8, sig[0], 4),
+            .d = self.narrow(u8, sig[1], 4),
         } } };
     }
 

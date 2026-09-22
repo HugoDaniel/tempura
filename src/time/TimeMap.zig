@@ -1075,6 +1075,16 @@ fn bits(x: f64) u64 {
 /// The microseconds per quarter note a point names, or `null` when it
 /// names no tempo at all — `:us 0`, or a `:qpm` that is zero, negative or
 /// not a number. `60e6 / qpm` is ONE f64 division (plan 03, "Tempo").
+/// Whether a tempo point names a tempo the map honours: microseconds per
+/// quarter note, from `:us` or from `60e6 / :qpm`, finite and positive —
+/// `usOf`, the test `tempoTable` makes. The one definition, as `meterOk`
+/// is for a meter: a consumer that writes a point (the edit engine's
+/// `insert-tempo`) asks this rather than re-deriving a weaker check,
+/// because only this map says `tempo_map_invalid` about a point.
+pub fn tempoOk(p: TempoPoint) bool {
+    return usOf(p) != null;
+}
+
 fn usOf(p: TempoPoint) ?f64 {
     const us = switch (p.tempo) {
         .us => |u| @as(f64, @floatFromInt(u)),
@@ -2084,6 +2094,22 @@ test "TimeMap.durationTicks: under ONE meter the anchor changes nothing, bit for
             );
         }
     }
+}
+
+test "TimeMap.tempoOk: the tempo table's own test, by name" {
+    try testing.expect(tempoOk(.{ .tick = 0, .tempo = .{ .us = 500_000 } }));
+    try testing.expect(tempoOk(.{ .tick = 0, .tempo = .{ .qpm = 97.3 } }));
+    try testing.expect(!tempoOk(.{ .tick = 0, .tempo = .{ .us = 0 } }));
+    try testing.expect(!tempoOk(.{ .tick = 0, .tempo = .{ .qpm = 0 } }));
+    try testing.expect(!tempoOk(.{ .tick = 0, .tempo = .{ .qpm = -5 } }));
+    try testing.expect(!tempoOk(.{ .tick = 0, .tempo = .{ .qpm = std.math.nan(f64) } }));
+    // …and exactly what `derive` keeps: a point it refuses says
+    // `tempo_map_invalid`, one it keeps does not.
+    var res = try derive(testing.allocator, &.{.{ .tick = 0, .tempo = .{ .qpm = -5 } }}, &.{
+        .{ .tick = 0, .n = 4, .d = 4 },
+    }, 0, .hold);
+    defer res.deinit();
+    try testing.expectEqual(@as(usize, 1), res.diags.count(.tempo_map_invalid));
 }
 
 test "TimeMap.spellDuration: Nbar between two bar lines, else the delta's own spelling" {

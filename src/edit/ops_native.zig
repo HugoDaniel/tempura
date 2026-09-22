@@ -67,6 +67,21 @@ pub fn refuseOffGrid(b: *Plan.Builder, op: Op.Op) Error!bool {
     return true;
 }
 
+/// A tempo point as the document will hold it: a `:qpm` is written as an
+/// f32 (`value.float`), so a tempo too small for one reloads as `0` —
+/// which is what `TimeMap.tempoOk` has to be asked about. Every other
+/// point is written as it is.
+fn asWritten(p: doc.TempoPoint) doc.TempoPoint {
+    return switch (p.tempo) {
+        .us => p,
+        .qpm => |qpm| .{
+            .tick = p.tick,
+            .tempo = .{ .qpm = @as(f32, @floatCast(qpm)) },
+            .span = p.span,
+        },
+    };
+}
+
 /// A number writer's answer as a plan step: running out of memory rides
 /// out, and a number JSON has no spelling for — an infinity in a form
 /// being copied (SJON reads `1e999` as one), or an f32 past its range —
@@ -1517,6 +1532,16 @@ const Ctx = struct {
     /// every later event at the second it was already at.
     fn insertTempo(self: *Ctx, x: Op.InsertTempo) Error!void {
         if (try self.refuseIfConducted("tempo")) return;
+        if (!TimeMap.tempoOk(asWritten(x.point))) {
+            try self.b.refuse(
+                .tempo_map_invalid,
+                self.lastSpan(.tempo),
+                "this tempo is no tempo the map honours (microseconds per quarter note, finite " ++
+                    "and above zero), so the document would not load",
+                .{},
+            );
+            return;
+        }
         if (try self.refuseIfOccupied(
             .tempo_map_invalid,
             "tempo",
@@ -1599,6 +1624,16 @@ const Ctx = struct {
     /// the grid and the clock, neither of which a meter touches.
     fn insertMeter(self: *Ctx, x: Op.InsertMeter) Error!void {
         if (try self.refuseIfConducted("meter")) return;
+        if (!TimeMap.meterOk(x.point)) {
+            try self.b.refuse(
+                .meter_map_invalid,
+                self.lastSpan(.meter),
+                "[{d} {d}] is not a meter the map honours (n is 1..64 and d one of 1, 2, 4, 8, " ++
+                    "16, 32), so the document would not load",
+                .{ x.point.n, x.point.d },
+            );
+            return;
+        }
         if (try self.refuseIfOccupied(
             .meter_map_invalid,
             "meter",
@@ -3594,6 +3629,50 @@ test "ops: insert-tempo and insert-meter at a tick a point already holds are ref
     try testing.expect(meter.summary.refused);
     const m = meter.findDiag(.meter_map_invalid) orelse return error.NotRefused;
     try testing.expectEqual(fx.doc_().meter[1].span, m.span);
+}
+
+test "ops: a meter or a tempo the map would refuse is refused with the reload's code" {
+    // The reader clamped `d` onto 1..64 where the map honours
+    // {1 2 4 8 16 32}, and let any finite `:qpm` through, zero and below
+    // too: the plan was accepted, and its document reloaded with
+    // `meter_map_invalid` / `tempo_map_invalid`. `TimeMap.meterOk` and
+    // `TimeMap.tempoOk` are the map's own tests, asked before planning —
+    // of the tempo as the document will hold it, an f32.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.spread);
+    defer fx.deinit();
+
+    const meters = [_][2]u8{ .{ 3, 3 }, .{ 0, 4 }, .{ 4, 64 }, .{ 65, 4 } };
+    for (meters) |sig| {
+        var p = try plan(gpa, fx.doc_(), &fx.tree, .{
+            .insert_meter = .{ .point = .{ .tick = 19 * TPQ, .n = sig[0], .d = sig[1] } },
+        });
+        defer p.deinit();
+        try testing.expect(p.summary.refused);
+        try testing.expect(p.findDiag(.meter_map_invalid) != null);
+    }
+    const tempi = [_]f64{ 0, -5, 1e-50 };
+    for (tempi) |qpm| {
+        var p = try plan(gpa, fx.doc_(), &fx.tree, .{
+            .insert_tempo = .{ .point = .{ .tick = 12 * TPQ, .tempo = .{ .qpm = qpm } } },
+        });
+        defer p.deinit();
+        try testing.expect(p.summary.refused);
+        try testing.expect(p.findDiag(.tempo_map_invalid) != null);
+    }
+
+    // `{"sig":[0,4]}` reads as the operation asked — no longer clamped
+    // onto `[1 4]` — and a component no `u8` holds names no edit.
+    var zero = try Op.fromJson(gpa,
+        \\{"op":"insert-meter","at":0,"sig":[0,4]}
+    );
+    defer zero.deinit();
+    try testing.expectEqual(@as(u8, 0), zero.op.?.insert_meter.point.n);
+    var wide = try Op.fromJson(gpa,
+        \\{"op":"insert-meter","at":0,"sig":[4,256]}
+    );
+    defer wide.deinit();
+    try testing.expect(wide.op == null);
 }
 
 test "ops: a resize that would sound two notes on one key at once is edit_overlap" {
