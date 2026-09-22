@@ -537,13 +537,15 @@ const Tailer = struct {
         }
         // The two source-text keys are DECLARATIONS, not content: a
         // `query` lane without its `:query` does not read back at all.
+        // Source text, so carried as a pass-through root is — verbatim
+        // but for the tail's two rules, never raw.
         if (l.query_src) |q| {
             try self.raw(" :query ");
-            try self.raw(q);
+            try self.verbatim(q);
         }
         if (l.expr_src) |e| {
             try self.raw(" :expr ");
-            try self.raw(e);
+            try self.verbatim(e);
         }
         try self.raw(")");
         try self.commit(group_lane);
@@ -614,15 +616,9 @@ const Tailer = struct {
         }
     }
 
-    /// A pacer root, verbatim but for its newlines, which become IT's.
+    /// A pacer root, verbatim but for the tail's two rules.
     fn passthrough(self: *Tailer, pt: Doc.Passthrough) Error!void {
-        for (pt.text) |c| {
-            if (c == '\n') {
-                try self.line.append(self.gpa, newline);
-            } else {
-                try self.byte(c);
-            }
-        }
+        try self.verbatim(pt.text);
         try self.commit(group_control);
     }
 
@@ -646,6 +642,21 @@ const Tailer = struct {
         // `%` and the two hex digits of one byte: exactly three.
         const text = std.fmt.bufPrint(&buf, "%{X:0>2}", .{c}) catch unreachable;
         try self.line.appendSlice(self.gpa, text);
+    }
+
+    /// Source text — a pass-through root, a `:query`, an `:expr` —
+    /// verbatim but for the tail's two rules: a newline becomes IT's CR
+    /// (`parseTail` turns it back) and every other byte goes through
+    /// `byte`'s `%XX`. Not reported: this is SJON a person wrote, not a
+    /// name a tracker shows, and the spelling reverses exactly.
+    fn verbatim(self: *Tailer, text: []const u8) Error!void {
+        for (text) |c| {
+            if (c == '\n') {
+                try self.line.append(self.gpa, newline);
+            } else {
+                try self.byte(c);
+            }
+        }
     }
 
     /// A symbol: percent-escaped, unquoted. `%` is a legal identifier
@@ -991,6 +1002,42 @@ test "it: a name that is not ASCII is percent-escaped and reported" {
     try testing.expect(std.mem.indexOf(u8, t.bytes, "caf%C3%A9") != null);
     try testing.expect(std.mem.indexOf(u8, t.bytes, "impulsos %E2%80%94 cinco") != null);
     try testing.expectEqual(@as(usize, 2), t.diags.count(.it_message_encoding_lossy));
+}
+
+test "it: a lane's :query and :expr source goes through the same escaping as every byte" {
+    // `docs/residue.md`: the tail is ASCII by construction — every byte
+    // outside 0x20..0x7E is `%XX` and `%` itself `%25`, and a newline is
+    // IT's CR. A query and a formula are source text, carried verbatim
+    // but for those two rules, like a pass-through root.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const source =
+        \\(timeline :title "t")
+        \\(tempo-point :at 0q :qpm 125)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(lane :name hats :kind query :target hats :query (euclid 3 8 "50%"))
+        \\(lane :name glow :kind formula :target glow :expr (pick "é"
+        \\  beat))
+        \\
+    ;
+    var res = try loadExample(gpa, &schema, source);
+    defer res.deinit();
+
+    var t = try tail(gpa, &res.doc, &res.map);
+    defer t.deinit(gpa);
+    for (t.bytes) |c| try testing.expect(c == newline or (c >= 0x20 and c < 0x7F));
+    try testing.expect(std.mem.indexOf(u8, t.bytes, "\"50%25\"") != null);
+    try testing.expect(std.mem.indexOf(u8, t.bytes, "%C3%A9") != null);
+
+    // The tail carries no tempo or meter points (a tail never does), so
+    // the map's complaints are expected; the lanes are the point here.
+    const back_source = try parseTail(gpa, t.bytes);
+    defer gpa.free(back_source);
+    var back = try fromSjon.fromSource(gpa, &schema, back_source, null);
+    defer back.deinit();
+    try testing.expectEqualStrings("(euclid 3 8 \"50%\")", back.doc.lanes[0].query_src.?);
+    try testing.expectEqualStrings("(pick \"é\"\n  beat)", back.doc.lanes[1].expr_src.?);
 }
 
 test "it: the 4096 budget drops whole lines and says what fell off" {
