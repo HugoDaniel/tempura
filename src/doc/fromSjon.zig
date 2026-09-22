@@ -3249,6 +3249,53 @@ test "fromSjon: a keyframe value or a :range f32 cannot hold is the manifest's r
     try testing.expectEqual([2]f32{ 0, 0 }, ranged.doc.lanes[0].range.?);
 }
 
+test "fromSjon: Doc.tempo_bounds are the manifest's own qpm-value and us-per-quarter" {
+    // The edit engine plans a tempo point with no schema in hand, so it
+    // asks `Doc.tempoInManifest`; this reads the preloaded manifest's
+    // `(numeric-bounds …)` so the restated numbers cannot drift from it.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const tempura = schema.preloaded.plugins[0];
+    try testing.expectEqualStrings("tempura", tempura.name);
+
+    const b = Doc.tempo_bounds;
+    try expectBounds(tempura, "qpm-value", b.qpm_min, b.qpm_max);
+    try expectBounds(tempura, "us-per-quarter", @floatFromInt(b.us_min), @floatFromInt(b.us_max));
+
+    // …and the predicate reads them inclusively, both spellings.
+    const at = struct {
+        fn qpm(q: f64) Doc.TempoPoint {
+            return .{ .tick = 0, .tempo = .{ .qpm = q } };
+        }
+        fn us(u: u32) Doc.TempoPoint {
+            return .{ .tick = 0, .tempo = .{ .us = u } };
+        }
+    };
+    try testing.expect(Doc.tempoInManifest(at.qpm(1)));
+    try testing.expect(Doc.tempoInManifest(at.qpm(1000)));
+    try testing.expect(!Doc.tempoInManifest(at.qpm(1000.5)));
+    try testing.expect(!Doc.tempoInManifest(at.qpm(0.5)));
+    try testing.expect(!Doc.tempoInManifest(at.qpm(std.math.nan(f64))));
+    try testing.expect(Doc.tempoInManifest(at.us(16_777_215)));
+    try testing.expect(!Doc.tempoInManifest(at.us(16_777_216)));
+    try testing.expect(!Doc.tempoInManifest(at.us(0)));
+}
+
+/// `kind` of `plugin` is a number bounded to exactly `[lo, hi]`, both
+/// ends inclusive.
+fn expectBounds(plugin: sjon.Plugin.Plugin, kind: []const u8, lo: f64, hi: f64) !void {
+    for (plugin.value_kinds) |k| {
+        if (!std.mem.eql(u8, k.name, kind)) continue;
+        const n = k.numeric orelse return error.KindHasNoBounds;
+        try testing.expectEqual(lo, n.min.?.value);
+        try testing.expectEqual(hi, n.max.?.value);
+        try testing.expect(!n.exclusive_min and !n.exclusive_max);
+        return;
+    }
+    return error.KindNotInManifest;
+}
+
 test "fromSjon: a pass-through root is kept verbatim, with the comments above it" {
     const gpa = testing.allocator;
     var schema = try Schema.load(gpa);

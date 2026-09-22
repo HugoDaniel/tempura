@@ -661,8 +661,11 @@ const Reader = struct {
 
     fn insertTempo(self: *Reader, o: std.json.ObjectMap) Error!?Op {
         const at = self.optInt(o.get("at")) orelse 0;
+        // Narrowed, never clamped, as `insert-meter`'s `sig` is: `:us 0`
+        // is not `:us 1`, and whether a tempo is one the document can hold
+        // is the planner's to say, with the reload's own code.
         const tempo: @FieldType(doc.TempoPoint, "tempo") = if (self.optInt(o.get("us"))) |us|
-            .{ .us = @intCast(std.math.clamp(us, 1, 16_777_215)) }
+            .{ .us = self.narrow(u32, us, 0) }
         else if (self.real(o.get("qpm"))) |qpm|
             .{ .qpm = qpm }
         else {

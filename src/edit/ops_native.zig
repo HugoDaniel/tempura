@@ -1564,13 +1564,28 @@ const Ctx = struct {
     /// every later event at the second it was already at.
     fn insertTempo(self: *Ctx, x: Op.InsertTempo) Error!void {
         if (try self.refuseIfConducted("tempo")) return;
-        if (!TimeMap.tempoOk(asWritten(x.point))) {
+        const point = asWritten(x.point);
+        if (!TimeMap.tempoOk(point)) {
             try self.b.refuse(
                 .tempo_map_invalid,
                 self.lastSpan(.tempo),
                 "this tempo is no tempo the map honours (microseconds per quarter note, finite " ++
                     "and above zero), so the document would not load",
                 .{},
+            );
+            return;
+        }
+        // The map honours any positive tempo; the MANIFEST does not, and
+        // its refusal is the reload's `sjon_diagnostic` — so it is this
+        // plan's too, rather than a document that validates with errors.
+        if (!doc.tempoInManifest(point)) {
+            const b = doc.tempo_bounds;
+            try self.b.refuse(
+                .sjon_diagnostic,
+                self.lastSpan(.tempo),
+                "a tempo point's :qpm is {d}..{d} and its :us {d}..{d} (the manifest's " ++
+                    "qpm-value and us-per-quarter), so the document would not load",
+                .{ b.qpm_min, b.qpm_max, b.us_min, b.us_max },
             );
             return;
         }
@@ -3694,6 +3709,61 @@ test "ops: a meter or a tempo the map would refuse is refused with the reload's 
     try testing.expectEqual(@as(u8, 0), zero.op.?.insert_meter.point.n);
     var wide = try Op.fromJson(gpa,
         \\{"op":"insert-meter","at":0,"sig":[4,256]}
+    );
+    defer wide.deinit();
+    try testing.expect(wide.op == null);
+}
+
+test "ops: a tempo the manifest would refuse is refused with the reload's code, :us unclamped" {
+    // The map honours any positive tempo, so `tempoOk` let `:qpm 2000`
+    // and `:qpm 0.5` through, and the plan's document reloaded with the
+    // manifest's `sjon_diagnostic` (`qpm-value` is 1..1000). The reader
+    // clamped `:us` onto 1..16 777 215, so `:us 0` planned `:us 1` and
+    // `:us 20000000` planned the 24-bit ceiling — an edit nobody asked for.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa, test_support.spread);
+    defer fx.deinit();
+
+    // Tick 553 512 960 is 12q, between the fixture's two points and past
+    // neither of them.
+    const at_12q = "{\"op\":\"insert-tempo\",\"at\":553512960,";
+    const refused = [_]struct { json: []const u8, code: Diag.Code }{
+        .{ .json = at_12q ++ "\"qpm\":2000}", .code = .sjon_diagnostic },
+        .{ .json = at_12q ++ "\"qpm\":1000.5}", .code = .sjon_diagnostic },
+        .{ .json = at_12q ++ "\"qpm\":0.5}", .code = .sjon_diagnostic },
+        .{ .json = at_12q ++ "\"us\":20000000}", .code = .sjon_diagnostic },
+        .{ .json = at_12q ++ "\"us\":0}", .code = .tempo_map_invalid },
+    };
+    for (refused) |r| {
+        var op = try Op.fromJson(gpa, r.json);
+        defer op.deinit();
+        var p = try plan(gpa, fx.doc_(), &fx.tree, op.op.?);
+        defer p.deinit();
+        try testing.expect(p.summary.refused);
+        try testing.expectEqual(@as(usize, 0), p.actions.len);
+        if (p.findDiag(r.code) == null) {
+            std.debug.print("not refused with {t}: {s}\n", .{ r.code, r.json });
+            return error.NotRefused;
+        }
+    }
+
+    // …and at the manifest's own ends the plan is accepted, and its
+    // document reloads clean (`Reloaded.init` is that assertion).
+    const accepted = [_][]const u8{ at_12q ++ "\"qpm\":1000}", at_12q ++ "\"us\":16777215}" };
+    for (accepted) |json| {
+        var op = try Op.fromJson(gpa, json);
+        defer op.deinit();
+        var p = try plan(gpa, fx.doc_(), &fx.tree, op.op.?);
+        defer p.deinit();
+        try testing.expect(!p.summary.refused);
+        var back = try test_support.Reloaded.init(gpa, fx.source, &p);
+        defer back.deinit();
+        try testing.expectEqual(@as(usize, 3), back.doc_().tempo.len);
+    }
+
+    // A `:us` no `u32` holds names no edit at all.
+    var wide = try Op.fromJson(gpa,
+        \\{"op":"insert-tempo","at":0,"us":5000000000}
     );
     defer wide.deinit();
     try testing.expect(wide.op == null);

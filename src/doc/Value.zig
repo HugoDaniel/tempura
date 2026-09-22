@@ -100,6 +100,34 @@ pub fn spellingOf(p: TempoPoint) Spelling {
     };
 }
 
+/// The manifest's bounds on a tempo point's two spellings —
+/// `schema/tempura.sjon`'s `qpm-value` (1..1000) and `us-per-quarter`
+/// (1..16 777 215, the SMF set-tempo field's 24 bits), both inclusive.
+///
+/// The manifest OWNS them: a document outside them is refused at
+/// validation as `sjon_diagnostic`, while the map honours any positive
+/// tempo (`TimeMap.tempoOk`), so the two are different questions. This is
+/// the manifest's answer restated for a code path that WRITES a tempo
+/// point with no schema in hand — the edit engine's `insert-tempo`, which
+/// refuses what the reload would — and `fromSjon`'s pin test reads the
+/// preloaded manifest's own `(numeric-bounds …)` against these numbers,
+/// so the copy cannot drift.
+pub const tempo_bounds = struct {
+    pub const qpm_min: f64 = 1;
+    pub const qpm_max: f64 = 1000;
+    pub const us_min: u32 = 1;
+    pub const us_max: u32 = 16_777_215;
+};
+
+/// Whether `p`'s tempo, in the spelling it carries, is inside the
+/// manifest's bounds (`tempo_bounds`). A NaN `:qpm` is outside.
+pub fn tempoInManifest(p: TempoPoint) bool {
+    return switch (p.tempo) {
+        .qpm => |q| q >= tempo_bounds.qpm_min and q <= tempo_bounds.qpm_max,
+        .us => |u| u >= tempo_bounds.us_min and u <= tempo_bounds.us_max,
+    };
+}
+
 /// One meter point, as authored.
 pub const MeterPoint = TimeMap.MeterPoint;
 

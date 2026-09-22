@@ -68,6 +68,9 @@ pub const TempoPoint = value.TempoPoint;
 pub const MeterPoint = value.MeterPoint;
 pub const Spelling = value.Spelling;
 pub const spellingOf = value.spellingOf;
+/// The manifest's `:qpm` / `:us` bounds, for a writer of tempo points.
+pub const tempo_bounds = value.tempo_bounds;
+pub const tempoInManifest = value.tempoInManifest;
 pub const Section = value.Section;
 pub const Cue = value.Cue;
 pub const LaneKind = value.LaneKind;
