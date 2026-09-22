@@ -47,18 +47,18 @@ pub fn build(b: *std.Build) void {
     addConform(ctx);
     addAuditDiagnostics(ctx);
     const docs_check = addDocs(ctx);
-    // Not yet in `verify`: joined once the tree it checks is clean.
-    _ = addLint(ctx);
+    const lint = addLint(ctx);
 
     // `zig build verify` — the whole gate in one verb. The corpus runs
     // through its OWN run step, without `b.args`: `zig build verify --
     // --update` must never regenerate goldens behind the gate's back
     // (regen is the `corpus` verb's business alone).
-    const verify = b.step("verify", "test + the CLI goldens + native corpus + node " ++
+    const verify = b.step("verify", "test + lint + the CLI goldens + native corpus + node " ++
         "--test + the wasm size budget + the pacer-schema drift check + the generated-docs " ++
         "drift check");
     verify.dependOn(tests.core);
     verify.dependOn(tests.cli);
+    verify.dependOn(lint);
     verify.dependOn(cli.golden_check);
     verify.dependOn(corpus_verify);
     verify.dependOn(addPacerDrift(ctx));
