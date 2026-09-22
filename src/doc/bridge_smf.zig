@@ -840,6 +840,8 @@ pub const Paired = struct {
     diags: Diag.List,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the notes and the report. A `PairedNote` is plain values,
+    /// so a note copied out survives it.
     pub fn deinit(self: *Paired) void {
         self.diags.deinit();
         self.arena.deinit();

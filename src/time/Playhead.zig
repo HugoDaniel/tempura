@@ -55,6 +55,8 @@ pub const Position = struct {
     /// The tracker position, for a document an IT anchor conducts.
     order_row: ?walk.Position,
 
+    /// Frees `section_ids` with the `gpa` the query was handed — the one
+    /// allocation a position carries; everything else is plain values.
     pub fn deinit(self: *Position, gpa: std.mem.Allocator) void {
         gpa.free(self.section_ids);
         self.* = undefined;

@@ -99,6 +99,9 @@ pub const Result = struct {
     diags: Diag.List,
     map: TimeMap.TimeMap,
 
+    /// Frees all three — the document with its tiers, its map and the
+    /// report. A caller that keeps the document or the map past the
+    /// result takes it out first and frees the rest alone.
     pub fn deinit(self: *Result) void {
         self.doc.deinit();
         self.map.deinit();

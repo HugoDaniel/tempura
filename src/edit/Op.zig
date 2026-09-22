@@ -354,6 +354,9 @@ pub const Parsed = struct {
     diags: Diag.List,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees every string the operation holds — lane names, easing
+    /// text, a selection's keys — and the report: the `Op` dies with
+    /// its `Parsed`, so plan it before this.
     pub fn deinit(self: *Parsed) void {
         self.arena.deinit();
         self.diags.deinit();

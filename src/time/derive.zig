@@ -131,6 +131,8 @@ pub const Derived = struct {
     diags: Diag.List,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the map, the walk, the report and every name, onset and step
+    /// — a slice `Playhead.onsets` lent out included.
     pub fn deinit(self: *Derived) void {
         self.map.deinit();
         if (self.rowmap) |*r| r.deinit();

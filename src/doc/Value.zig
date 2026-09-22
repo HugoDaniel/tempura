@@ -168,6 +168,7 @@ pub const Channels = struct {
         return .{ .mask = @as(u16, 1) << c };
     }
 
+    /// Whether wire channel `c` is in the set.
     pub fn has(self: Channels, c: u4) bool {
         return self.mask & (@as(u16, 1) << c) != 0;
     }
@@ -182,10 +183,12 @@ pub const Channels = struct {
         return .{ .mask = self.mask | other.mask };
     }
 
+    /// Whether the set names no channel — never a valid address.
     pub fn isEmpty(self: Channels) bool {
         return self.mask == 0;
     }
 
+    /// How many channels the set names, 0..16.
     pub fn count(self: Channels) u8 {
         return @popCount(self.mask);
     }
@@ -198,6 +201,7 @@ pub const Channels = struct {
         return @intCast(@ctz(self.mask));
     }
 
+    /// Whether the two sets name the same channels.
     pub fn eql(self: Channels, other: Channels) bool {
         return self.mask == other.mask;
     }
@@ -210,6 +214,7 @@ pub const Channels = struct {
     pub const Iterator = struct {
         left: u16,
 
+        /// The lowest channel not yet answered, or null when none is left.
         pub fn next(self: *Iterator) ?u4 {
             if (self.left == 0) return null;
             const c: u4 = @intCast(@ctz(self.left));
@@ -428,6 +433,10 @@ pub const Doc = struct {
         return .{ .arena = .init(gpa) };
     }
 
+    /// Frees the arena — every slice, name and table — and each inline
+    /// tier's own `Sequence` / `Module`. Nothing read out of the
+    /// document outlives this; a `TimeMap` or a `Derived` built from it
+    /// owns its own and does.
     pub fn deinit(self: *Doc) void {
         for (self.midi) |*t| t.sequence.deinit();
         for (self.it) |*t| t.module.deinit();

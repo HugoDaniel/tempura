@@ -83,6 +83,8 @@ pub const TimeMap = struct {
     loop_secs: f64,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the three tables. The map borrows nothing from the points
+    /// it was derived from, so they may go first.
     pub fn deinit(self: *TimeMap) void {
         self.arena.deinit();
     }
@@ -699,6 +701,8 @@ pub const Result = struct {
     map: TimeMap,
     diags: Diag.List,
 
+    /// Frees both; a caller that keeps the map takes it out and frees
+    /// the report alone.
     pub fn deinit(self: *Result) void {
         self.map.deinit();
         self.diags.deinit();

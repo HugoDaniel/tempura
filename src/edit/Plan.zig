@@ -95,6 +95,7 @@ pub const Plan = struct {
     summary: Summary,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the actions with their text and paths, and the report.
     pub fn deinit(self: *Plan) void {
         self.arena.deinit();
         self.diags.deinit();
@@ -190,6 +191,9 @@ pub const Builder = struct {
     /// safe beside the `defer p.deinit()` its caller closes with.
     finished: bool = false,
 
+    /// An empty builder. Its arena and report are allocated from `gpa`
+    /// and handed to the `Plan` by `finish`, or freed by `deinit`; `gpa`
+    /// itself also carries each action's scratch text, freed per call.
     pub fn init(gpa: std.mem.Allocator) Builder {
         return .{ .gpa = gpa, .arena = .init(gpa), .diags = .init(gpa) };
     }
@@ -207,6 +211,11 @@ pub const Builder = struct {
         return self.arena.allocator();
     }
 
+    /// `set_keyword` on the form at `site`: `:key` becomes `value_json`,
+    /// which must be one JSON value (the value writers' output). `key`
+    /// is spelled raw — every caller passes a vocabulary constant. The
+    /// text and the path are copied into the plan's arena. A no-op once
+    /// refused, like every append here.
     pub fn setKeyword(
         self: *Builder,
         site: Site,
@@ -221,6 +230,7 @@ pub const Builder = struct {
         self.summary.set += 1;
     }
 
+    /// `remove_keyword`: `:key` taken off the form at `site`.
     pub fn removeKeyword(self: *Builder, site: Site, key: []const u8) Error!void {
         if (self.summary.refused) return;
         var out = try self.head(.remove_keyword, site);
@@ -230,6 +240,7 @@ pub const Builder = struct {
         self.summary.set += 1;
     }
 
+    /// `replace`: the node at `site` becomes `value_json`, one JSON value.
     pub fn replace(self: *Builder, site: Site, value_json: []const u8) Error!void {
         if (self.summary.refused) return;
         var out = try self.head(.replace, site);
@@ -256,6 +267,9 @@ pub const Builder = struct {
         self.summary.inserted += 1;
     }
 
+    /// `remove_positional`: positional child `index` of the form at
+    /// `parent`, counted in the document as it stands (`apply` runs the
+    /// removals right to left).
     pub fn removePositional(self: *Builder, parent: Site, index: u32) Error!void {
         if (self.summary.refused) return;
         var out = try self.head(.remove_positional, parent);
@@ -278,6 +292,7 @@ pub const Builder = struct {
         self.summary.inserted += 1;
     }
 
+    /// `remove_root`: root `index` of the document as it stands.
     pub fn removeRoot(self: *Builder, index: u32) Error!void {
         if (self.summary.refused) return;
         var out: std.ArrayList(u8) = .empty;
@@ -318,6 +333,9 @@ pub const Builder = struct {
         try self.diags.add(code, severity, span, fmt, args);
     }
 
+    /// The plan: the arena and the report MOVE into it, so the builder
+    /// owns nothing afterwards and its `deinit` is a no-op. The plan's
+    /// own `deinit` frees them; it keeps `gpa` only through them.
     pub fn finish(self: *Builder) Error!Plan {
         const actions = try self.actions.toOwnedSlice(self.allocator());
         self.finished = true;

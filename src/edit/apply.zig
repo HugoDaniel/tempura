@@ -22,6 +22,8 @@ pub const Applied = struct {
     diags: Diag.List,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the text and the report; a host that re-parses the text
+    /// does so before this.
     pub fn deinit(self: *Applied) void {
         self.arena.deinit();
         self.diags.deinit();

@@ -1633,6 +1633,8 @@ pub const Cues = struct {
     items: []Cue,
     arena: std.heap.ArenaAllocator,
 
+    /// Frees the cues and their names; a cue copied out keeps a name
+    /// that dies here, so a caller that keeps one copies the name too.
     pub fn deinit(self: *Cues) void {
         self.arena.deinit();
     }
@@ -1642,9 +1644,9 @@ pub const Cues = struct {
 /// "Bound lanes over a module"; it 09's anchor idiom). Orders are the
 /// arrangement, so a cue marks where each one began.
 pub fn orderCues(gpa: Allocator, rowmap: *const walk.RowMap) Error!Cues {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    errdefer arena.deinit();
-    const a = arena.allocator();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     var items: std.ArrayList(Cue) = .empty;
     var seen = false;
@@ -1653,18 +1655,18 @@ pub fn orderCues(gpa: Allocator, rowmap: *const walk.RowMap) Error!Cues {
         if (seen and played.order == last_order) continue;
         seen = true;
         last_order = played.order;
-        try items.append(a, .{
+        try items.append(arena, .{
             // The em dash is it 09's own idiom, and the name is what a
             // reader sees in a timeline beside the tracker's order list.
             .name = try std.fmt.allocPrint(
-                a,
+                arena,
                 "order {d} — pattern {d}",
                 .{ played.order, played.pattern },
             ),
             .at = played.start_tick,
         });
     }
-    return .{ .items = items.items, .arena = arena };
+    return .{ .items = items.items, .arena = arena_state };
 }
 
 // ---------------------------------------------------------------------

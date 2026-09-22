@@ -309,6 +309,9 @@ pub const Form = struct {
     buf: Buf = .empty,
     keys: u32 = 0,
 
+    /// A form headed `head`, its text growing in a buffer from `gpa` —
+    /// a scratch builder: the caller copies `done()`'s text where it
+    /// keeps it (a plan's arena) and frees this with `deinit`.
     pub fn init(gpa: std.mem.Allocator, head: []const u8) Error!Form {
         var self: Form = .{ .gpa = gpa };
         errdefer self.deinit();
@@ -317,6 +320,7 @@ pub const Form = struct {
         return self;
     }
 
+    /// Frees the buffer, and with it every text `done` handed out.
     pub fn deinit(self: *Form) void {
         self.buf.deinit(self.gpa);
         self.* = undefined;
@@ -335,6 +339,7 @@ pub const Form = struct {
         self.keys += 1;
     }
 
+    /// `:name` as a position, spelled by `map` (`vals.position`).
     pub fn position(
         self: *Form,
         name: []const u8,
@@ -345,6 +350,7 @@ pub const Form = struct {
         try vals.position(self.gpa, &self.buf, map, tick);
     }
 
+    /// `:name` as a duration measured from `at` (`vals.duration`).
     pub fn duration(
         self: *Form,
         name: []const u8,
@@ -356,26 +362,33 @@ pub const Form = struct {
         try vals.duration(self.gpa, &self.buf, map, ticks, at);
     }
 
+    /// `:name` as a symbol.
     pub fn symbol(self: *Form, name: []const u8, text: []const u8) Error!void {
         try self.key(name);
         try vals.symbol(self.gpa, &self.buf, text);
     }
 
+    /// `:name` as a string, escaped.
     pub fn string(self: *Form, name: []const u8, text: []const u8) Error!void {
         try self.key(name);
         try vals.string(self.gpa, &self.buf, text);
     }
 
+    /// `:name` as an integer.
     pub fn integer(self: *Form, name: []const u8, v: i64) Error!void {
         try self.key(name);
         try vals.integer(self.gpa, &self.buf, v);
     }
 
+    /// `:name` as one f32; `NotFinite` as `vals.float` says, with the
+    /// form's text then half-written and the caller refusing.
     pub fn float(self: *Form, name: []const u8, v: f32) NumberError!void {
         try self.key(name);
         try vals.float(self.gpa, &self.buf, v);
     }
 
+    /// `:name` as a keyframe value (`vals.components`); `NotFinite` as
+    /// `float` says.
     pub fn components(self: *Form, name: []const u8, v: [4]f32, ncomp: u3) NumberError!void {
         try self.key(name);
         try vals.components(self.gpa, &self.buf, v, ncomp);
