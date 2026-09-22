@@ -78,6 +78,7 @@ const Grid = @import("../time/Grid.zig");
 const TimeMap = @import("../time/TimeMap.zig");
 const model = @import("../itf/Module.zig");
 const walk = @import("../itf/walk.zig");
+const Sequence = @import("../smf/Sequence.zig");
 
 const Op = @import("Op.zig");
 const Plan = @import("Plan.zig");
@@ -344,12 +345,15 @@ const Ctx = struct {
     // ---- SMF: the events, the pairs, the steps ----
 
     /// One `(midi/mtrk …)` event, as both readings see it: where its
-    /// bytes are and which tick it carries.
+    /// bytes are, which tick it carries, and — for a head the vocabulary
+    /// names — the event the bridge reads out of it
+    /// (`bridge_smf.inlineEvent`), so every value a plan here moves is
+    /// the value the lane derived from it.
     const Ev = struct {
         slot: u32,
         node: NodeIndex,
-        head: []const u8,
         at: i64,
+        event: ?Sequence.Event,
     };
 
     /// One sounding note, as the two events that spell it.
@@ -389,21 +393,24 @@ const Ctx = struct {
         var out: std.ArrayList(Ev) = .empty;
         for (kids, 0..) |node, i| {
             if (self.tree.tagOf(node) != .form) continue;
+            const event = doc.bridge_smf.inlineEvent(self.tree, node);
             try out.append(arena, .{
                 .slot = @intCast(i),
                 .node = node,
-                .head = self.tree.formHeader(node).head,
-                .at = kvInt(self.tree, node, "at") orelse 0,
+                .at = if (event) |ev| ev.at else doc.bridge_smf.eventTick(self.tree, node),
+                .event = event,
             });
         }
         return out.toOwnedSlice(arena);
     }
 
     /// `note-on` paired with `note-off` on one address, by plan 05's
-    /// rules read off the TREE rather than off the `Sequence`: a plan
-    /// needs the two events' addresses, and a `PairedNote` has values
-    /// alone. `bridge_smf.pairNotes` is the same walk over the same
-    /// events, and a test here holds the two to the same answer.
+    /// rules over the events as the BRIDGE reads them: a plan needs the
+    /// two events' slots, and a `PairedNote` has values alone, so this
+    /// is `bridge_smf.pairNotes`'s walk with the slots kept — over the
+    /// same values (`inlineEvent`) and the same filter
+    /// (`bridge_smf.addressed`), and a test here holds the two to the
+    /// same answer.
     fn pairs(self: *Ctx, evs: []const Ev, chs: doc.Channels, key: ?u7) Error![]const Pair {
         const arena = self.arena;
         var out: std.ArrayList(Pair) = .empty;
@@ -415,22 +422,19 @@ const Ctx = struct {
         var track_end: i64 = 0;
 
         for (evs) |e| {
+            const event = e.event orelse continue;
             track_end = @max(track_end, e.at);
-            const is_on = std.mem.eql(u8, e.head, "note-on");
-            if (!is_on and !std.mem.eql(u8, e.head, "note-off")) continue;
-            const on_ch = wireChannel(chs, kvInt(self.tree, e.node, "ch")) orelse continue;
-            const on_key = kvInt(self.tree, e.node, "key") orelse continue;
-            if (on_key < 0 or on_key > 127) continue;
-            if (key) |want| {
-                if (on_key != @as(i64, want)) continue;
-            }
-            const vel = kvInt(self.tree, e.node, "vel") orelse 0;
-            const held = &open[@as(usize, on_ch) * 128 + @as(usize, @intCast(on_key))];
+            const n = doc.bridge_smf.addressed(event, chs, key) orelse continue;
+            // `addressed` took the channel onto the set and the key
+            // under 128.
+            const ch: u4 = @intCast(n.ch);
+            const held = &open[@as(usize, ch) * 128 + n.key];
+            const vel: u7 = @intCast(@min(n.vel, 127));
 
             // A `note-on` of velocity 0 is a note off on the wire (plan
             // 05, "Events"): the reader stored it as read, and the
             // pairing is what interprets it.
-            if (is_on and vel > 0) {
+            if (event.kind == .note_on and vel > 0) {
                 if (held.*) |i| out.items[i].end = e.at;
                 held.* = out.items.len;
                 try out.append(arena, .{
@@ -438,15 +442,15 @@ const Ctx = struct {
                     .off = null,
                     .at = e.at,
                     .end = e.at,
-                    .key = @intCast(on_key),
-                    .vel = @intCast(std.math.clamp(vel, 0, 127)),
+                    .key = @intCast(n.key),
+                    .vel = vel,
                     .off_vel = null,
-                    .ch = on_ch,
+                    .ch = ch,
                 });
             } else if (held.*) |i| {
                 out.items[i].end = e.at;
                 out.items[i].off = e.slot;
-                out.items[i].off_vel = @intCast(std.math.clamp(vel, 0, 127));
+                out.items[i].off_vel = vel;
                 held.* = null;
             }
         }
@@ -456,7 +460,13 @@ const Ctx = struct {
         return out.toOwnedSlice(arena);
     }
 
-    /// The single events a bound `curve` lane reads off one address.
+    /// The single events a bound `curve` lane reads off one address, each
+    /// valued by `bridge_smf.stepValue` — the value the lane shows.
+    ///
+    /// `:cc [msb lsb]` and `:velocity` are not one event per value (plan
+    /// 05, "Curve lanes"); `reachable` and `materialize` both turn one
+    /// away before it gets here, and `stepValue` answers nothing for
+    /// them, which keeps this total whichever caller arrives.
     fn steps(
         self: *Ctx,
         evs: []const Ev,
@@ -466,39 +476,8 @@ const Ctx = struct {
         const arena = self.arena;
         var out: std.ArrayList(Step) = .empty;
         for (evs) |e| {
-            _ = wireChannel(chs, kvInt(self.tree, e.node, "ch")) orelse continue;
-            const val = kvInt(self.tree, e.node, "val") orelse continue;
-            var v: f32 = 0;
-            switch (curve) {
-                .cc => |num| {
-                    if (!std.mem.eql(u8, e.head, "control-change")) continue;
-                    if ((kvInt(self.tree, e.node, "num") orelse -1) != @as(i64, num)) continue;
-                    v = norm7(val);
-                },
-                .pressure => {
-                    if (!std.mem.eql(u8, e.head, "channel-pressure")) continue;
-                    v = norm7(val);
-                },
-                .bend => {
-                    if (!std.mem.eql(u8, e.head, "pitch-bend")) continue;
-                    // Onto the 14 bits the event carries first: the
-                    // number is the tree's, any `i64`, and `val - 8192`
-                    // overflowed at `minInt`. Centre 8192 is zero; the
-                    // two halves are 8192 and 8191 wide, so the top end
-                    // reads exactly 1.
-                    const bend = std.math.clamp(val, 0, 16383);
-                    const centred: f32 = @floatFromInt(bend - 8192);
-                    const span: f32 = if (bend >= 8192) 8191.0 else 8192.0;
-                    v = centred / span;
-                },
-                // Neither is a single event: a 14-bit controller is
-                // two per value and `:velocity` is the notes' own
-                // velocities (plan 05, "Curve lanes"). `reachable` and
-                // `materialize` both turn one away before it gets here;
-                // answering nothing rather than trapping keeps this
-                // total whichever caller arrives.
-                .cc14, .velocity => continue,
-            }
+            const event = e.event orelse continue;
+            const v = doc.bridge_smf.stepValue(event, chs, curve) orelse continue;
             try out.append(arena, .{ .slot = e.slot, .at = e.at, .v = v });
         }
         return out.toOwnedSlice(arena);
@@ -1743,21 +1722,6 @@ fn volumeOf(vel: u7) i64 {
     return @divTrunc(2 * @as(i64, vel) * 64 + 127, 254);
 }
 
-fn norm7(v: i64) f32 {
-    return @as(f32, @floatFromInt(std.math.clamp(v, 0, 127))) / 127.0;
-}
-
-/// An event's `:ch` as the tier spells it (1-based) to the wire channel
-/// it names, when that channel is one of the address's; null for an
-/// event on another channel, or with no channel, or with one no MIDI
-/// file can carry.
-fn wireChannel(chs: doc.Channels, ch_1: ?i64) ?u4 {
-    const spelled = ch_1 orelse return null;
-    if (spelled < 1 or spelled > 16) return null;
-    const c: u4 = @intCast(spelled - 1);
-    return if (chs.has(c)) c else null;
-}
-
 fn ascending(_: void, x: u32, y: u32) bool {
     return x < y;
 }
@@ -1806,10 +1770,6 @@ fn kvNode(tree: *const Ast.Tree, form: NodeIndex, key: []const u8) ?NodeIndex {
 /// row that does not exist deserves.
 fn narrowed(comptime T: type, n: i64) T {
     return @intCast(std.math.clamp(n, std.math.minInt(T), std.math.maxInt(T)));
-}
-
-fn kvInt(tree: *const Ast.Tree, form: NodeIndex, key: []const u8) ?i64 {
-    return intOf(tree, kvNode(tree, form, key) orelse return null);
 }
 
 /// A number node as an integer, whichever of SJON's three numeric tags
@@ -2097,12 +2057,39 @@ test "bound SMF: a controller step is one event, and it moves like one" {
 }
 
 test "bound SMF: the pairing here is the bridge's pairing" {
-    // This file pairs `note-on` with `note-off` over the TREE, because a
-    // plan needs the two events' addresses and a `PairedNote` carries
-    // values alone. The two walks are one rule, and this is where they
-    // are held to it.
+    // This file pairs `note-on` with `note-off` by SLOT, because a plan
+    // needs the two events' addresses and a `PairedNote` carries values
+    // alone. The two walks are one rule, and this is where they are held
+    // to it.
+    try expectBridgePairing(test_support.bound_smf, 3);
+}
+
+test "bound SMF: an event the manifest refuses reads here as the bridge reads it" {
+    // This file used to read the tree with rules of its own: `:ch 17`
+    // and a missing `:key` dropped an event the bridge reads (as channel
+    // 1 and key 0), and `:at 1.7` rounded where the bridge truncates —
+    // so `materialize` silently lost notes the playhead sounds. Every
+    // value now comes from `bridge_smf.inlineEvent`.
+    try expectBridgePairing(
+        \\(timeline :title "bound" :conductor song :length 2bar)
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\(midi/smf :format 0 :division 480)
+        \\(midi/mtrk
+        \\  (note-on      :at 0   :ch 17 :key 36 :vel 100)
+        \\  (note-off     :at 240 :ch 1  :key 36 :vel 64)
+        \\  (note-on      :at 1.7 :ch 1  :vel 90)
+        \\  (note-off     :at 480 :ch 1  :vel 64)
+        \\  (end-of-track :at 960))
+        \\(lane :name kick :kind notes :from song :track 1 :ch 1)
+        \\
+    , 2);
+}
+
+/// `pairs` over `source`'s first track against `bridge_smf.pairNotes`
+/// over the sequence the load read out of it: note for note.
+fn expectBridgePairing(source: [:0]const u8, notes: usize) !void {
     const gpa = testing.allocator;
-    var fx = try test_support.Fixture.init(gpa, test_support.bound_smf);
+    var fx = try test_support.Fixture.initUnchecked(gpa, source);
     defer fx.deinit();
 
     var b: Plan.Builder = .init(gpa);
@@ -2133,6 +2120,7 @@ test "bound SMF: the pairing here is the bridge's pairing" {
     );
     defer theirs.deinit();
 
+    try testing.expectEqual(notes, mine.len);
     try testing.expectEqual(theirs.notes.len, mine.len);
     for (theirs.notes, mine) |t, m| {
         try testing.expectEqual(t.at, m.at);

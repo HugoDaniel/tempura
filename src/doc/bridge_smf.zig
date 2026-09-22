@@ -538,15 +538,7 @@ const Reader = struct {
         for (children) |child| {
             if (self.tree.tagOf(child) != .form) continue;
             const kind = kindOfHead(self.tree.formHeader(child).head) orelse continue;
-            // `smf-tick` is `:min 0` in the manifest, so a negative `:at`
-            // is already refused; lowered anyway, it floors at 0, which
-            // keeps every tick a bound lane pairs and converts inside
-            // `[0, maxInt(i64)]` — the one range whose differences fit.
-            const at = @max(0, narrow.saturate(
-                i64,
-                kvNumber(self.tree, self.tree.formHeader(child).children, "at"),
-                0,
-            ));
+            const at = eventTick(self.tree, child);
 
             if (count > 0 and at < last_at) try self.diags.add(
                 .at_not_monotone,
@@ -663,6 +655,37 @@ const Reader = struct {
         return self.scratch.items;
     }
 };
+
+/// One `(midi/mtrk …)` event's `:at`, the file's own tick. `smf-tick` is
+/// `:min 0` in the manifest, so a negative `:at` is already refused;
+/// lowered anyway, it floors at 0, which keeps every tick a bound lane
+/// pairs and converts inside `[0, maxInt(i64)]` — the one range whose
+/// differences fit. Public with `inlineEvent`, for the same reader.
+pub fn eventTick(tree: *const Ast.Tree, form: NodeIndex) i64 {
+    const children = tree.formHeader(form).children;
+    return @max(0, narrow.saturate(i64, kvNumber(tree, children, "at"), 0));
+}
+
+/// One `(midi/mtrk …)` child as `formsToSequence` reads it, for a reader
+/// that needs the reading without the builder: `edit/ops_bound`, which
+/// plans over an inline dump's events by their SLOTS and has to see the
+/// values `pairNotes` and `curveSteps` derive from — a second reading
+/// with rules of its own made `materialize` copy other notes than the
+/// playhead sounds. `kind` is the one the head names and `at` is
+/// `eventTick`; the payload is the event's own for the seven channel
+/// kinds and `.empty` for every other, whose bytes live in a builder's
+/// pool. Null for a form no head of the vocabulary names, which the
+/// sequence skips.
+pub fn inlineEvent(tree: *const Ast.Tree, form: NodeIndex) ?smf.Event {
+    if (tree.tagOf(form) != .form) return null;
+    const hdr = tree.formHeader(form);
+    const kind = kindOfHead(hdr.head) orelse return null;
+    const payload: smf.Payload = if (kind.isChannel())
+        channelPayload(tree, hdr.children, kind)
+    else
+        .empty;
+    return .{ .at = eventTick(tree, form), .kind = kind, .payload = payload };
+}
 
 /// Whose `FF 7F` payload is this? The reader's own rule
 /// (`smf/read.zig`'s `sequencerSpecific`), restated so a dump read back
@@ -881,8 +904,10 @@ pub fn pairNotes(
 
 /// The note payload of `e` when it is a `note-on` or `note-off` on one
 /// of `chs` (and on `key`, when one is asked for) — null for every other
-/// event, and for a key no `u7` can hold.
-fn addressed(e: smf.Event, chs: Doc.Channels, key: ?u7) ?Note {
+/// event, and for a key no `u7` can hold. Public for `stepValue`'s
+/// reason: `edit/ops_bound` pairs an inline dump's events by slot and has
+/// to take exactly the events this pairing takes.
+pub fn addressed(e: smf.Event, chs: Doc.Channels, key: ?u7) ?Note {
     switch (e.kind) {
         .note_on, .note_off => {},
         else => return null,
@@ -1012,11 +1037,9 @@ pub fn curveSteps(
 
     var msb: [16]u16 = @splat(0);
     for (trackEvents(seq, track)) |e| switch (address) {
-        .cc => |num| {
-            if (e.kind != .control_change) continue;
-            const c = e.payload.control;
-            if (!onChannels(chs, c.ch) or c.num != @as(u8, num)) continue;
-            try steps.append(gpa, .{ .at = e.at, .value = norm7(c.val) });
+        .cc, .bend, .pressure => {
+            const v = stepValue(e, chs, address) orelse continue;
+            try steps.append(gpa, .{ .at = e.at, .value = v });
         },
         .cc14 => |pair| {
             if (e.kind != .control_change) continue;
@@ -1033,25 +1056,48 @@ pub fn curveSteps(
                 try steps.append(gpa, .{ .at = e.at, .value = norm14(coarse.* | c.val) });
             }
         },
-        .bend => {
-            if (e.kind != .pitch_bend) continue;
-            const b = e.payload.bend;
-            if (!onChannels(chs, b.ch)) continue;
-            // Centre 8192 is zero; the two halves are 8192 and 8191
-            // wide, and the value is clamped so the top end reads 1.
-            const centred = @as(f32, @floatFromInt(@as(i32, b.value) - 8192));
-            const span: f32 = if (b.value >= 8192) 8191.0 else 8192.0;
-            try steps.append(gpa, .{ .at = e.at, .value = centred / span });
-        },
-        .pressure => {
-            if (e.kind != .channel_pressure) continue;
-            const p = e.payload.pressure;
-            if (!onChannels(chs, p.ch)) continue;
-            try steps.append(gpa, .{ .at = e.at, .value = norm7(p.val) });
-        },
+        // Answered above, before the walk: not an event stream at all.
         .velocity => unreachable,
     };
     return steps.toOwnedSlice(gpa);
+}
+
+/// The value one event is on a SINGLE-event surface of `curve` — `:cc N`,
+/// `:bend`, `:pressure` — or null when the event is not one of them on a
+/// channel of `chs` (and for `:cc [msb lsb]` and `:velocity`, which are
+/// not one event per value). NORMALISED as `Step` says.
+///
+/// Shared with `edit/ops_bound`, which moves these events one by one and
+/// has to read the value the lane shows: one rule, the bend's included
+/// — centre 8192 is zero, the halves 8192 and 8191 wide so the top end
+/// reads exactly 1, and the value first clamped onto the 14 bits the
+/// event carries (an inline `:val` past them is the manifest's refusal,
+/// and read raw it made a "bend" of up to 7).
+pub fn stepValue(e: smf.Event, chs: Doc.Channels, curve: Doc.SmfCurve) ?f32 {
+    switch (curve) {
+        .cc => |num| {
+            if (e.kind != .control_change) return null;
+            const c = e.payload.control;
+            if (!onChannels(chs, c.ch) or c.num != @as(u8, num)) return null;
+            return norm7(c.val);
+        },
+        .bend => {
+            if (e.kind != .pitch_bend) return null;
+            const b = e.payload.bend;
+            if (!onChannels(chs, b.ch)) return null;
+            const bent = @min(b.value, 16383);
+            const centred = @as(f32, @floatFromInt(@as(i32, bent) - 8192));
+            const span: f32 = if (bent >= 8192) 8191.0 else 8192.0;
+            return centred / span;
+        },
+        .pressure => {
+            if (e.kind != .channel_pressure) return null;
+            const p = e.payload.pressure;
+            if (!onChannels(chs, p.ch)) return null;
+            return norm7(p.val);
+        },
+        .cc14, .velocity => return null,
+    }
 }
 
 /// Whether an event's channel byte, as the reader stored it, is one of
