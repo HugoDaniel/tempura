@@ -262,10 +262,10 @@ pub fn main(init: std.process.Init) !u8 {
     // input is a document. Two bundles, never composed: a harness file
     // is a script of verbs and not a document, so composing them would
     // only put every document's vocabulary within reach of a typo in a
-    // `times.sjon` and the harness's own `read`, `write`, `plan`, `snap`
-    // and `roundtrip` within reach of a document. `src/Schema.zig`'s
-    // "never composed" test is the proof: those five are unreachable in
-    // the timeline bundle and all five resolve in a composed one.
+    // `times.sjon` and the harness's own verbs within reach of a
+    // document. `src/Schema.zig`'s "never composed" test is the proof:
+    // five of them (`plan`, `export-score`, `roundtrip`, `snap`, `write`)
+    // are unreachable in the timeline bundle and resolve in a composed one.
     var doc_schema = try Schema.load(gpa);
     defer doc_schema.deinit();
 
