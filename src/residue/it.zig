@@ -390,8 +390,6 @@ const Tailer = struct {
     line: std.ArrayList(u8) = .empty,
     /// How many forms did not fit, by group.
     dropped: [4]u32 = @splat(0),
-    /// Whether any name had to be spelled with `%XX`.
-    lossy: bool = false,
 
     const group_section = 0;
     const group_cue = 1;
@@ -581,9 +579,8 @@ const Tailer = struct {
             try self.line.append(self.gpa, c);
             return;
         }
-        // A literal `%` is escaped so the spelling stays reversible, but
-        // it is ASCII already: nothing was lost and nothing is reported.
-        if (c != '%') self.lossy = true;
+        // A literal `%` is escaped so the spelling stays reversible; what
+        // is REPORTED is `needsEscape`'s, decided over the whole name.
         var buf: [3]u8 = undefined;
         // `%` and the two hex digits of one byte: exactly three.
         const text = std.fmt.bufPrint(&buf, "%{X:0>2}", .{c}) catch unreachable;
@@ -622,11 +619,11 @@ const Tailer = struct {
         try sjon.StringEscape.appendQuoted(&self.line, self.gpa, ascii);
     }
 
+    /// A name, every byte through `byte`, and `it_message_encoding_lossy`
+    /// when a tracker will show it as `%XX` (`needsEscape`).
     fn escaped(self: *Tailer, text: []const u8) Error!void {
-        const was = self.lossy;
-        self.lossy = false;
         for (text) |c| try self.byte(c);
-        if (self.lossy) try self.diags.add(
+        if (needsEscape(text)) try self.diags.add(
             .it_message_encoding_lossy,
             .warning,
             .{ .start = 0, .end = 0 },
@@ -634,7 +631,6 @@ const Tailer = struct {
                 "spells it with %XX escapes",
             .{text},
         );
-        self.lossy = was or self.lossy;
     }
 
     fn pos(self: *Tailer, tick: i64) Error!void {
@@ -649,19 +645,20 @@ const Tailer = struct {
     }
 
     fn int(self: *Tailer, v: anytype) Error!void {
-        // The widest integer this is asked for is 64 bits: twenty digits
-        // and a sign, against 32.
         comptime std.debug.assert(@bitSizeOf(@TypeOf(v)) <= 64);
         var buf: [32]u8 = undefined;
-        try self.raw(std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable);
+        // At most 64 bits (pinned just above): twenty digits and a sign,
+        // against 32.
+        const text = std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable;
+        try self.raw(text);
     }
 
     fn float(self: *Tailer, x: f32) Error!void {
         var buf: [std.fmt.float.bufferSize(.decimal, f64)]u8 = undefined;
         if (@floor(x) == x and @abs(x) < 16_777_216) {
+            const whole: i32 = @intFromFloat(x);
             // A whole number below 2^24: eight digits and a sign, into
             // a buffer sized for the widest f64 decimal.
-            const whole: i32 = @intFromFloat(x);
             try self.raw(std.fmt.bufPrint(&buf, "{d}", .{whole}) catch unreachable);
         } else {
             // `bufferSize`'s bound for an f64 in decimal: an f32 has
@@ -670,6 +667,17 @@ const Tailer = struct {
         }
     }
 };
+
+/// Whether spelling `text` in the tail costs a tracker's reader anything:
+/// a byte outside printable ASCII, which `byte` spells `%XX` and a
+/// tracker shows as such. A `%` is escaped too, but it is ASCII already —
+/// nothing is lost, and nothing is reported. Pure over the text.
+fn needsEscape(text: []const u8) bool {
+    for (text) |c| {
+        if (c < 0x20 or c >= 0x7F) return true;
+    }
+    return false;
+}
 
 // ---- which carrier a dump reads --------------------------------------
 
@@ -984,6 +992,14 @@ test "it: a lane's :query and :expr source goes through the same escaping as eve
     defer back.deinit();
     try testing.expectEqualStrings("(euclid 3 8 \"50%\")", back.doc.lanes[0].query_src.?);
     try testing.expectEqualStrings("(pick \"é\"\n  beat)", back.doc.lanes[1].expr_src.?);
+}
+
+test "it.needsEscape: a byte outside printable ASCII costs, a percent does not" {
+    try testing.expect(!needsEscape("intro"));
+    try testing.expect(!needsEscape("50% off"));
+    try testing.expect(needsEscape("café"));
+    try testing.expect(needsEscape("tab\there"));
+    try testing.expect(!needsEscape(""));
 }
 
 test "it: the 4096 budget drops whole lines and says what fell off" {
