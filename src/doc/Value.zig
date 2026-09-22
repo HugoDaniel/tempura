@@ -288,6 +288,26 @@ pub const Clip = struct {
     length: ?i64,
     transpose: i8,
     span: Diag.Span,
+
+    /// How many times the clip plays its phrase: `repeat-count` is "at
+    /// least once" (1..), and a `:repeat 0` the manifest refused still
+    /// lowers as 0, so the floor is here, once.
+    pub fn plays(self: Clip) i64 {
+        return @max(1, self.repeat);
+    }
+
+    /// The playback window, in ticks from `offset`: `:length`, or the
+    /// phrase's length times `plays` less `:offset` — THE formula, which
+    /// the `:length` default (`fromSjon.contentEnd`), the placement
+    /// (`time/derive.place`) and the selection (`edit/Select`) all read.
+    ///
+    /// Saturating: `:repeat` has no maximum and a phrase's `:length`
+    /// reaches the grid's ceiling, so the product does not fit an `i64`
+    /// in general. Not clamped: at or below 0 the clip places nothing,
+    /// and each consumer says what that is to it.
+    pub fn window(self: Clip, phrase: *const Phrase) i64 {
+        return self.length orelse (phrase.length *| self.plays()) -| self.offset;
+    }
 };
 
 /// One stream of content driving one pacer target.
@@ -1007,6 +1027,34 @@ test "Doc.eql: a pass-through form re-laid-out is the same form" {
     try testing.expect(!a.eql(&b));
     two[0].comments = &.{"; pacer's form, pass-through"};
     try testing.expect(a.eql(&b));
+}
+
+test "Doc.Clip.window: :length, or the phrase times its plays less :offset — at least once" {
+    const nowhere: Diag.Span = .{ .start = 0, .end = 0 };
+    const phrase: Phrase = .{ .name = "fill", .length = 100, .lanes = &.{}, .span = nowhere };
+    var clip: Clip = .{
+        .at = 1000,
+        .phrase = "fill",
+        .repeat = 3,
+        .offset = 20,
+        .length = null,
+        .transpose = 0,
+        .span = .{ .start = 0, .end = 0 },
+    };
+    // 100 ticks of phrase, three times, less the 20-tick offset.
+    try std.testing.expectEqual(@as(i64, 280), clip.window(&phrase));
+    // `repeat-count` is at least once: a `:repeat 0` plays the phrase.
+    clip.repeat = 0;
+    try std.testing.expectEqual(@as(i64, 1), clip.plays());
+    try std.testing.expectEqual(@as(i64, 80), clip.window(&phrase));
+    // An explicit `:length` is the window instead.
+    clip.length = 50;
+    try std.testing.expectEqual(@as(i64, 50), clip.window(&phrase));
+    // Saturating: the product of two user numbers does not wrap.
+    clip.length = null;
+    clip.repeat = std.math.maxInt(u32);
+    const huge: Phrase = .{ .name = "fill", .length = 1 << 53, .lanes = &.{}, .span = nowhere };
+    try std.testing.expectEqual(@as(i64, std.math.maxInt(i64) - 20), clip.window(&huge));
 }
 
 test "Doc.anchorById / phraseByName: the two joins the bridge and the printer need" {

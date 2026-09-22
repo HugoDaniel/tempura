@@ -123,14 +123,9 @@ pub fn noteOverlap(diags: *Diag.List, lane: *const Doc.Lane) Error!void {
 /// A clip places the phrase's lane of the same `:name` as the placing
 /// lane; a phrase with no such lane places nothing (plan 02,
 /// `clip_lane_missing`). That the phrase EXISTS is SJON's cross-ref and
-/// not this.
-///
-/// Answers the furthest tick any clip reaches, which is the other half
-/// of the `:length` default rule — "the end of the last event OR CLIP".
-/// A clip's window is its `:length`, or the phrase's length times
-/// `:repeat` minus `:offset`.
-pub fn clipPlacement(diags: *Diag.List, doc: *const Doc.Doc) Error!i64 {
-    var furthest: i64 = 0;
+/// not this. Where a clip's window ends is `fromSjon.contentEnd`'s
+/// question, through `Doc.Clip.window`, and not this check's.
+pub fn clipPlacement(diags: *Diag.List, doc: *const Doc.Doc) Error!void {
     for (doc.lanes) |lane| {
         for (lane.clips) |clip| {
             const phrase = doc.phraseByName(clip.phrase) orelse continue;
@@ -146,13 +141,8 @@ pub fn clipPlacement(diags: *Diag.List, doc: *const Doc.Doc) Error!i64 {
                 "phrase {s} has no lane named {s}, so this clip places nothing",
                 .{ clip.phrase, lane.name },
             );
-
-            const window = clip.length orelse
-                (phrase.length *| @as(i64, clip.repeat)) -| clip.offset;
-            furthest = @max(furthest, clip.at +| @max(0, window));
         }
     }
-    return furthest;
 }
 
 /// A section exports to a pacer `(scene …)` of the same name (plan 02,
@@ -318,7 +308,7 @@ test "checks.sceneName: the one token the scene rule compares" {
     try testing.expect(sceneName("(scene :name )") == null);
 }
 
-test "checks.clipPlacement: the furthest tick a clip reaches" {
+test "checks.clipPlacement: a phrase with no lane of the placing lane's name is clip_lane_missing" {
     const gpa = testing.allocator;
     var diags: Diag.List = .init(gpa);
     defer diags.deinit();
@@ -347,18 +337,12 @@ test "checks.clipPlacement: the furthest tick a clip reaches" {
     doc.phrases = &phrases;
     doc.lanes = &lanes;
 
-    // 100 ticks of phrase, three times, less the 20-tick offset: the
-    // window is 280 and the clip sits at 1000.
-    try testing.expectEqual(@as(i64, 1280), try clipPlacement(&diags, &doc));
+    try clipPlacement(&diags, &doc);
     try testing.expectEqual(@as(usize, 0), diags.count(.clip_lane_missing));
-
-    // An explicit `:length` is the window instead.
-    clips[0].length = 50;
-    try testing.expectEqual(@as(i64, 1050), try clipPlacement(&diags, &doc));
 
     // A phrase with no lane of the placing lane's name places nothing.
     phrase_lanes[0].name = "glow";
-    _ = try clipPlacement(&diags, &doc);
+    try clipPlacement(&diags, &doc);
     try testing.expectEqual(@as(usize, 1), diags.count(.clip_lane_missing));
 }
 

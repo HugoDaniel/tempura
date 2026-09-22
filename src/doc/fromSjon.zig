@@ -182,19 +182,14 @@ fn releaseTiers(doc: *Doc.Doc) void {
 /// Where a document's content ends — plan 02's `:length` default before
 /// the round-up: "the end of the last event or clip".
 ///
-/// This is the rule `Ctx.max_end` accumulates while the walk resolves
-/// each form, stated over a FINISHED value so that a consumer holding a
-/// `Doc` and no tree computes the same number: a native note's
-/// `at + dur`, a keyframe's `at`, and a clip's whole WINDOW whether or
-/// not anything sounds in it (`checks.clipPlacement`'s own arithmetic).
-/// A phrase's own lanes count for nothing — they sound where a clip puts
-/// them and the clip's window already says where that is — and a bound
-/// lane's content counts for nothing either, because it is the ANCHOR's
-/// material and the document did not place it.
-///
-/// `time/derive.zig` calls this rather than keeping a second copy of the
-/// rule: the map that layer builds for a document has to be the map this
-/// one built for it, and one function is how that stays true.
+/// Stated over a FINISHED value, so the load (`Ctx.finalMap`), `mapOf`
+/// and `time/derive.zig` compute one number: a native note's `at + dur`,
+/// a keyframe's `at`, and a clip's whole WINDOW (`Clip.window`) whether
+/// or not anything sounds in it. A phrase's own lanes count for nothing
+/// — they sound where a clip puts them and the clip's window already
+/// says where that is — and a bound lane's content counts for nothing
+/// either, because it is the ANCHOR's material and the document did not
+/// place it.
 ///
 /// Saturating throughout: every term is user arithmetic.
 pub fn contentEnd(doc: *const Doc.Doc) i64 {
@@ -204,9 +199,7 @@ pub fn contentEnd(doc: *const Doc.Doc) i64 {
         for (lane.keyframes) |k| end = @max(end, k.at);
         for (lane.clips) |c| {
             const phrase = doc.phraseByName(c.phrase) orelse continue;
-            const window = c.length orelse
-                (phrase.length *| @as(i64, c.repeat)) -| c.offset;
-            end = @max(end, c.at +| @max(0, window));
+            end = @max(end, c.at +| @max(0, c.window(phrase)));
         }
     }
     return end;
@@ -465,9 +458,6 @@ const Ctx = struct {
     meter: []Doc.MeterPoint = &.{},
     conductor: ?[]const u8 = null,
     end: TimeMap.End = .hold,
-    /// The greatest tick any event or clip reaches — the input to the
-    /// `:length` default rule.
-    max_end: i64 = 0,
 
     /// The CONDUCTOR's tables and where its material ends, copied into
     /// the document's arena out of the tier or the verified bytes the
@@ -684,32 +674,25 @@ const Ctx = struct {
         if (roots.timelines.items.len > 0) try self.readLength(&doc, roots.timelines.items[0]);
 
         // ---- the relations that need the whole document ----
-        // A clip's window is the other half of the `:length` default
-        // rule ("the end of the last event OR CLIP"), so the check hands
-        // back the furthest tick it saw.
-        self.max_end = @max(self.max_end, try checks.clipPlacement(self.diags, &doc));
+        try checks.clipPlacement(self.diags, &doc);
         try checks.laneNames(self.diags, &doc);
         try checks.sceneNames(self.diags, &doc);
         return doc;
     }
 
     /// The final map: the authored `:length`, or plan 02's default — the
-    /// end of the last event or clip rounded UP to a bar.
-    ///
-    /// The round-up falls out of `barTable`'s own stopping rule, which
-    /// appends bar starts until one lands at or past the length it was
-    /// given, so the LAST entry of a table derived over `max_end` is
-    /// exactly that bar line. This pass is also the only one whose
-    /// diagnostics are forwarded: a defect in the tempo table is
-    /// reported once, not once per derive.
+    /// end of the last event or clip (`contentEnd`, over the finished
+    /// document) rounded UP to a bar (`defaultLength`). This pass is the
+    /// only one whose diagnostics are forwarded: a defect in the tempo
+    /// table is reported once, not once per derive.
     fn finalMap(self: *Ctx, doc: *const Doc.Doc) Error!TimeMap.TimeMap {
         // A conducted document's events are its ANCHOR's, so the file's
         // own end counts alongside what the document placed
         // (`Conductor.end`) — the same two terms `mapOf` and
-        // `time/derive.zig` add, through the same `defaultLength`.
+        // `time/derive.zig` add, through the same two functions.
         const tables = timeTables(doc, self.cond);
-        const length = doc.length orelse
-            try defaultLength(self.gpa, tables, @max(self.max_end, tables.end), doc.end);
+        const content = @max(contentEnd(doc), tables.end);
+        const length = doc.length orelse try defaultLength(self.gpa, tables, content, doc.end);
 
         var final = try self.derive(doc, length);
         defer final.diags.deinit();
@@ -1593,7 +1576,6 @@ const Ctx = struct {
         const at = (try self.resolve(at_node)) orelse return null;
         const dur = (try self.duration(dur_node, at)) orelse return null;
         const key = (try self.noteKey(key_node)) orelse return null;
-        self.max_end = @max(self.max_end, at +| dur);
 
         return .{
             .at = at,
@@ -1625,7 +1607,6 @@ const Ctx = struct {
 
         const at_node = kvNode(tree, children, "at") orelse return null;
         const at = (try self.resolve(at_node)) orelse return null;
-        self.max_end = @max(self.max_end, at);
 
         var value: [4]f32 = .{ 0, 0, 0, 0 };
         var ncomp: u3 = 1;
@@ -1712,12 +1693,7 @@ const Ctx = struct {
             for (children) |child| {
                 if (tree.tagOf(child) != .form) continue;
                 if (!std.mem.eql(u8, tree.formHeader(child).head, "lane")) continue;
-                // A phrase's lanes are placed by a clip and sound only
-                // where that clip puts them, so nothing inside one moves
-                // `max_end` on its own — the clip does, in `checkClips`.
-                const before = self.max_end;
                 try lanes.append(self.arena, try self.readLane(child, null));
-                self.max_end = before;
             }
             try out.append(self.arena, .{
                 .name = try self.symbol(name_node),

@@ -307,24 +307,17 @@ pub fn keyWanted(keys: ?[]const u7, key: u7) bool {
     return false;
 }
 
-/// A clip's window: its own `:length`, or the phrase's length times
-/// `:repeat` less `:offset` — the schema's own default, spelled out
-/// because a split needs the number and the document need not carry it.
+/// A clip's window, `Clip.window` — spelled out because a split needs
+/// the number and the document need not carry it — or its own
+/// `:length` when its phrase is not there to measure.
 ///
-/// The default is USER arithmetic, as `time/derive.place` says of the
-/// same product: `:repeat` has no maximum in the manifest and a phrase's
-/// `:length` reaches to the grid ceiling, so `length · repeat` does not
-/// fit an `i64` in general. The window is formed with the derivation's
-/// own saturating operators and then pinned at `Grid.MAX_TICK`: the
-/// derivation places nothing past the ceiling (plan 03), so no clip's
-/// editable window is longer than that, and a target whose `at` and
-/// `dur` are both on the grid keeps every consumer's `at + dur` inside
-/// the domain it was written for.
+/// Pinned onto `[0, Grid.MAX_TICK]`: the default is saturating USER
+/// arithmetic, and the derivation places nothing past the ceiling (plan
+/// 03), so no clip's editable window is longer than that, and a target
+/// whose `at` and `dur` are both on the grid keeps every consumer's
+/// `at + dur` inside the domain it was written for.
 fn clipWindow(d: *const doc.Doc, c: doc.Clip) i64 {
-    if (c.length) |l| return l;
-    const phrase = d.phraseByName(c.phrase) orelse return 0;
-    const repeat: i64 = @max(1, c.repeat);
-    const window = (phrase.length *| repeat) -| c.offset;
+    const window = if (d.phraseByName(c.phrase)) |phrase| c.window(phrase) else c.length orelse 0;
     return std.math.clamp(window, 0, Grid.MAX_TICK);
 }
 

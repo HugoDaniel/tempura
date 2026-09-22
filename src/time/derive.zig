@@ -602,8 +602,8 @@ fn place(
     const from = laneOf(phrase, lane.name) orelse return;
     if (phrase.length <= 0 or clip.offset < 0 or clip.at < 0) return;
 
-    const repeat: i64 = @max(1, clip.repeat);
-    const window = clip.length orelse ((phrase.length *| repeat) -| clip.offset);
+    const repeat = clip.plays();
+    const window = clip.window(phrase);
     if (window <= 0) return;
     // The window in SOURCE ticks, half-open.
     const window_end = clip.offset +| window;
@@ -2526,6 +2526,33 @@ test "derive: a conductor nobody can produce times the document by the placehold
         try testing.expectEqual(res.map.length, mapped.length);
         try testing.expectEqual(res.map.length, d.map.length);
     }
+}
+
+test "derive: a clip of :repeat 0 plays once, and the default :length counts its window" {
+    // `repeat-count` is "at least once" (1..), and a `:repeat 0` the
+    // manifest refused still lowers as 0. The window was computed four
+    // times: `place` and `Select` played it once, `contentEnd` and
+    // `checks` multiplied by the 0 — so the load's default `:length` was
+    // 0 while the playhead placed the phrase's notes. One formula now,
+    // `Clip.window`, and every layer plays it once.
+    const gpa = testing.allocator;
+    var res = try test_support.load(gpa,
+        \\(timeline :title "zero")
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(phrase :name fill :length 1bar
+        \\  (lane :name flash
+        \\    (note :at 1q :dur 1q :key 38)))
+        \\(lane :name flash :kind notes
+        \\  (clip :at 1bar :phrase fill :repeat 0))
+    );
+    defer res.deinit();
+
+    var d = try derive(gpa, &res.doc);
+    defer d.deinit();
+    try testing.expectEqual(@as(usize, 1), d.laneByName("flash").?.onsets.len);
+    try testing.expectEqual(@as(i64, 8 * Grid.TPQ), res.map.length);
+    try testing.expectEqual(res.map.length, d.map.length);
 }
 
 test "derive: a conducted document with no content of its own is as long as its file" {
