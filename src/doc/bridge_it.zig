@@ -125,6 +125,28 @@ fn volFamily(byte: u8) ?VolFamily {
     return null;
 }
 
+/// How the printer spells one volume-column byte — the rule, kept apart
+/// from the printing (`Printer.volume` emits it).
+const VolSpelling = union(enum) {
+    /// `vol_none`: the key is left off.
+    none,
+    /// 0..64: a set-volume number.
+    number: u8,
+    /// A family's code: its letter and the value inside the family.
+    /// `it` is false for OpenMPT's extension, which is spelled and named.
+    code: struct { letter: u8, value: u8, it: bool },
+    /// A byte no tracker gives a meaning: named, and not spelled at all.
+    unknown,
+};
+
+/// `byte`'s spelling in the volume column. Pure and total over `u8`.
+fn volSpelling(byte: u8) VolSpelling {
+    if (byte == model.vol_none) return .none;
+    if (byte <= vol_max) return .{ .number = byte };
+    const family = volFamily(byte) orelse return .unknown;
+    return .{ .code = .{ .letter = family.letter, .value = byte - family.base, .it = family.it } };
+}
+
 /// The note names IT's editor shows: a letter, `-` or `#`, the octave.
 const note_names = [12][2]u8{
     .{ 'C', '-' }, .{ 'C', '#' }, .{ 'D', '-' }, .{ 'D', '#' },
@@ -607,25 +629,26 @@ const Printer = struct {
         try self.raw(")");
     }
 
+    /// One volume-column byte, spelled by `volSpelling`'s rule.
     fn volume(self: *Printer, byte: u8) Error!void {
-        if (byte == model.vol_none) return;
-        if (byte <= vol_max) {
-            try self.raw(" :vol ");
-            try self.int(byte);
-            return;
+        switch (volSpelling(byte)) {
+            .none => {},
+            .number => |n| {
+                try self.raw(" :vol ");
+                try self.int(n);
+            },
+            .code => |code| {
+                if (!code.it) try self.unspellable(
+                    byte,
+                    "OpenMPT's volume-column sample-offset extension, not IT's own column",
+                );
+                try self.raw(" :vol \"");
+                try self.raw(&[_]u8{code.letter});
+                try self.int(code.value);
+                try self.raw("\"");
+            },
+            .unknown => try self.unspellable(byte, "no tracker gives it a meaning"),
         }
-        const family = volFamily(byte) orelse {
-            try self.unspellable(byte, "no tracker gives it a meaning");
-            return;
-        };
-        if (!family.it) try self.unspellable(
-            byte,
-            "OpenMPT's volume-column sample-offset extension, not IT's own column",
-        );
-        try self.raw(" :vol \"");
-        try self.raw(&[_]u8{family.letter});
-        try self.int(byte - family.base);
-        try self.raw("\"");
     }
 
     fn unspellable(self: *Printer, byte: u8, why: []const u8) Error!void {
@@ -1792,6 +1815,19 @@ test "bridge_it: the volume column's families, both directions" {
     defer gpa.free(text);
     try testing.expectEqualStrings(source, text);
     try expectValidates(source);
+}
+
+test "bridge_it.volSpelling: every byte has exactly one answer" {
+    try testing.expectEqual(VolSpelling.none, volSpelling(model.vol_none));
+    try testing.expectEqual(@as(u8, 64), volSpelling(64).number);
+    const pan = volSpelling(128 + 32).code;
+    try testing.expectEqual(@as(u8, 'p'), pan.letter);
+    try testing.expectEqual(@as(u8, 32), pan.value);
+    try testing.expect(pan.it);
+    try testing.expect(!volSpelling(223).code.it);
+    try testing.expectEqual(VolSpelling.unknown, volSpelling(125));
+    // Total over the byte: nothing traps, whatever the column holds.
+    for (0..256) |b| _ = volSpelling(@intCast(b));
 }
 
 test "bridge_it: the OpenMPT volume-column extension is spelled and named" {
