@@ -153,6 +153,9 @@ pub fn renderSmf(
 ) Error!Result {
     doc.invariants();
     derived.invariants();
+    // The read side of the sequence's contract: an anchor's events are
+    // copied pool run and all from here on (`Builder.copyEvent`).
+    if (base) |b| b.invariants();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);

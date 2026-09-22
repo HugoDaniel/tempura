@@ -112,6 +112,9 @@ pub fn renderIt(
 ) Error!Result {
     doc.invariants();
     derived.invariants();
+    // The read side of the module's contract: an anchor's patterns are
+    // walked and copied by index from here on.
+    if (base) |m| m.invariants();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
     var diags: Diag.List = .init(gpa);
@@ -857,21 +860,17 @@ fn volumeOf(vel: u7) u8 {
 }
 
 /// One past the highest channel any cell of `module` uses.
+///
+/// Every pattern's grid is dense, exactly `rows × 64` — the module's own
+/// invariant, asserted at `renderIt`'s entry — so the cell index is the
+/// channel's column in a row, and nothing is guarded twice.
 fn highestUsed(module: *const itf.Module) u16 {
     var highest: u16 = 0;
     for (module.patterns) |p| {
-        if (p.cells.len < @as(usize, p.rows) * model.channels) continue;
-        var row: u16 = 0;
-        while (row < p.rows) : (row += 1) {
-            var c: u16 = 0;
-            while (c < model.channels) : (c += 1) {
-                if (!p.cells[
-                    @as(
-                        usize,
-                        row,
-                    ) * model.channels + c
-                ].isEmpty()) highest = @max(highest, c + 1);
-            }
+        for (p.cells, 0..) |cell, i| {
+            if (cell.isEmpty()) continue;
+            const channel: u16 = @intCast(i % model.channels);
+            highest = @max(highest, channel + 1);
         }
     }
     return highest;
