@@ -242,7 +242,7 @@ fn copyTrack(
 ) Error!void {
     for (src.events) |e| {
         if (e.kind == .tempura_residue and e.payload.residue.ver == records.version) continue;
-        try copyEvent(b, seq, e, track);
+        try b.copyEvent(seq, e, track);
     }
 }
 
@@ -270,7 +270,7 @@ pub fn detach(gpa: Allocator, seq: *const Sequence.Sequence) Error!Detached {
             if (e.kind == .tempura_residue) {
                 if (try takeEvent(&taken, arena.allocator(), seq, e, &diags)) continue;
             }
-            try copyEvent(&b, seq, e, track);
+            try b.copyEvent(seq, e, track);
         }
     }
 
@@ -362,31 +362,6 @@ fn laneTrack(gpa: Allocator, body: []const u8) Error!usize {
         },
         .corrupt => 0,
     };
-}
-
-/// One event from `src` into `b`, pool bytes and all.
-fn copyEvent(
-    b: *Sequence.Builder,
-    src: *const Sequence.Sequence,
-    e: Sequence.Event,
-    track: u32,
-) Error!void {
-    const payload: Sequence.Payload = switch (e.kind.payloadField()) {
-        .bytes => .{ .bytes = try b.addBytes(src.bytesOf(e.payload.bytes)) },
-        .meta => .{ .meta = .{
-            .bytes = try b.addBytes(src.bytesOf(e.payload.meta.bytes)),
-            .meta_type = e.payload.meta.meta_type,
-        } },
-        .residue => .{ .residue = .{
-            .ver = e.payload.residue.ver,
-            .kind = e.payload.residue.kind,
-            .seq = e.payload.residue.seq,
-            .total = e.payload.residue.total,
-            .body = try b.addBytes(src.bytesOf(e.payload.residue.body)),
-        } },
-        else => e.payload,
-    };
-    try b.addEvent(track, e.at, e.kind, payload);
 }
 
 // ---------------------------------------------------------------------
@@ -791,7 +766,7 @@ test "smf: attach replaces the payloads of its own version and keeps a newer env
             .total = 1,
             .body = try b.addBytes("NEWER"),
         } });
-        for (t.events) |e| try copyEvent(&b, &first.sequence, e, track);
+        for (t.events) |e| try b.copyEvent(&first.sequence, e, track);
     }
     var carrying = try b.finish();
     defer carrying.deinit();

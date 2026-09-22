@@ -245,7 +245,7 @@ const Render = struct {
         try self.conductorTrack(&b, track0);
         if (self.base) |src| {
             if (src.tracks.len > 0) {
-                for (src.tracks[0].events) |e| try copyEvent(&b, src, e, track0);
+                for (src.tracks[0].events) |e| try b.copyEvent(src, e, track0);
             }
             var ti: usize = 1;
             while (ti < src.tracks.len) : (ti += 1) {
@@ -253,7 +253,7 @@ const Render = struct {
                 const claimed = std.mem.indexOfScalar(?u32, ghosts.items, track) != null;
                 for (src.tracks[ti].events) |e| {
                     if (claimed and e.kind == .end_of_track) continue;
-                    try copyEvent(&b, src, e, track);
+                    try b.copyEvent(src, e, track);
                 }
             }
             for (src.foreign) |chunk| {
@@ -761,28 +761,6 @@ fn value7f(v: f64, range: [2]f32) u7 {
     if (!(scaled > 0)) return 0;
     if (scaled >= 127) return 127;
     return @intFromFloat(scaled);
-}
-
-/// One event from `src` into `b`, pool bytes and all — the same copy
-/// `residue/smf.zig` makes, for the same reason: a `Bytes` is an offset
-/// into the sequence that owns it.
-fn copyEvent(
-    b: *Sequence.Builder,
-    src: *const Sequence.Sequence,
-    e: Sequence.Event,
-    track: u32,
-) Error!void {
-    var payload = e.payload;
-    if (e.payload.poolBytes(e.kind)) |run| {
-        const copied = try b.addBytes(src.bytesOf(run));
-        switch (e.kind.payloadField()) {
-            .bytes => payload.bytes = copied,
-            .meta => payload.meta.bytes = copied,
-            .residue => payload.residue.body = copied,
-            else => {},
-        }
-    }
-    try b.addEvent(track, e.at, e.kind, payload);
 }
 
 // ---------------------------------------------------------------------

@@ -450,14 +450,56 @@ pub const Payload = extern union {
 
     /// The run into the pool this payload points at, or `null` when the
     /// kind keeps everything inline. The one place the "which kinds
-    /// carry bytes" table is written down.
+    /// carry bytes" table is written down — exhaustively, with
+    /// `withPoolBytes` beside it, so a new pool-backed member cannot be
+    /// read here and forgotten there.
     pub fn poolBytes(self: Payload, kind: Kind) ?Bytes {
         return switch (kind.payloadField()) {
             .bytes => self.bytes,
             .meta => self.meta.bytes,
             .residue => self.residue.body,
-            else => null,
+            .none,
+            .note,
+            .poly,
+            .control,
+            .program,
+            .pressure,
+            .bend,
+            .number,
+            .byte,
+            .tempo,
+            .smpte,
+            .time_sig,
+            .key_sig,
+            => null,
         };
+    }
+
+    /// This payload with the run `poolBytes` reads replaced by `run`, and
+    /// everything else as it was; the payload itself for a kind that
+    /// keeps everything inline.
+    pub fn withPoolBytes(self: Payload, kind: Kind, run: Bytes) Payload {
+        var out = self;
+        switch (kind.payloadField()) {
+            .bytes => out.bytes = run,
+            .meta => out.meta.bytes = run,
+            .residue => out.residue.body = run,
+            .none,
+            .note,
+            .poly,
+            .control,
+            .program,
+            .pressure,
+            .bend,
+            .number,
+            .byte,
+            .tempo,
+            .smpte,
+            .time_sig,
+            .key_sig,
+            => {},
+        }
+        return out;
     }
 
     /// The channel and the data bytes of a channel message, in wire
@@ -660,6 +702,20 @@ pub const Builder = struct {
     pub fn addEvent(self: *Builder, track: u32, at: i64, kind: Kind, payload: Payload) Error!void {
         const arena = self.arena.allocator();
         try self.tracks.items[track].append(arena, .{ .at = at, .kind = kind, .payload = payload });
+    }
+
+    /// Appends `e`, an event of `src`, to `track`, copying the bytes its
+    /// payload names into this builder's pool: a `Bytes` is an offset
+    /// into the sequence that owns it, and an event moved without its
+    /// run would point at whatever this pool holds there. The one copy —
+    /// the residue's `attach` and `detach` and the renderer's base all
+    /// go through it, and it asks `poolBytes` which kinds carry a run.
+    pub fn copyEvent(self: *Builder, src: *const Sequence, e: Event, track: u32) Error!void {
+        var payload = e.payload;
+        if (e.payload.poolBytes(e.kind)) |run| {
+            payload = payload.withPoolBytes(e.kind, try self.addBytes(src.bytesOf(run)));
+        }
+        try self.addEvent(track, e.at, e.kind, payload);
     }
 
     /// How many events `track` holds so far.
@@ -1104,6 +1160,43 @@ test "Builder: document order decides among events at one tick" {
     try testing.expectEqual(Kind.set_tempo, events[1].kind);
     try testing.expectEqual(Kind.time_signature, events[2].kind);
     try testing.expectEqualStrings("\x01\x02", seq.bytesOf(events[0].payload.residue.body));
+}
+
+test "Builder.copyEvent: every pool-backed payload brings its bytes, and nothing else moves" {
+    var a: Builder = .init(testing.allocator);
+    errdefer a.deinit();
+    const ta = try a.addTrack();
+    _ = try a.addBytes("padding so the offsets differ");
+    try a.addEvent(ta, 0, .marker, .{ .bytes = try a.addBytes("verse") });
+    const unknown = try a.addBytes("\xAB\xCD");
+    try a.addEvent(ta, 1, .meta_unknown, .{ .meta = .{ .bytes = unknown, .meta_type = 0x0A } });
+    try a.addEvent(ta, 2, .tempura_residue, .{ .residue = .{
+        .ver = 1,
+        .kind = 2,
+        .seq = 0,
+        .total = 1,
+        .body = try a.addBytes("body"),
+    } });
+    try a.addEvent(ta, 3, .note_on, .{ .note = .{ .ch = 1, .key = 60, .vel = 100 } });
+    var src = try a.finish();
+    defer src.deinit();
+
+    var b: Builder = .init(testing.allocator);
+    errdefer b.deinit();
+    const tb = try b.addTrack();
+    for (src.tracks[0].events) |e| try b.copyEvent(&src, e, tb);
+    var dst = try b.finish();
+    defer dst.deinit();
+
+    for (src.tracks[0].events, dst.tracks[0].events) |x, y| {
+        try testing.expectEqual(x.at, y.at);
+        try testing.expectEqual(x.kind, y.kind);
+        try testing.expect(x.payload.eqlOutsidePool(y.payload, x.kind));
+        const run = x.payload.poolBytes(x.kind) orelse continue;
+        try testing.expectEqualStrings(src.bytesOf(run), dst.bytesOf(y.payload.poolBytes(y.kind).?));
+    }
+    // Only what the events named came across.
+    try testing.expectEqual(@as(usize, 5 + 2 + 4), dst.pool.len);
 }
 
 test "Builder: an abandoned builder frees everything it took" {
