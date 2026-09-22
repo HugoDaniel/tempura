@@ -32,7 +32,10 @@
 //!      and dropped where it disagrees", and `reconcile` computes
 //!      exactly that — `LaneVerdict.hints`. A document read from a
 //!      `.sjon` carries no verdicts, so on that path there are none to
-//!      pass; on this one there are, and they are passed.
+//!      pass; on this one there are, and they are passed, through
+//!      `Dumped.easeHints` — the step `tpr_exportScore` takes after
+//!      `tpr_loadFile` too, so the browser's score of a file is this
+//!      verb's (the test below pins CLI and core together).
 //!
 //! ## A conducted document whose file is not here is REFUSED
 //!

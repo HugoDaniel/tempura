@@ -231,29 +231,74 @@ const State = struct {
     /// Both null until `tpr_attachAnchor` verifies a file.
     anchor_path: ?[]u8,
     anchor_bytes: ?[]u8,
-    /// The report of the DUMP this document came out of, when one did.
-    /// `pipeline.dump` already carries the re-load's own diagnostics —
-    /// it loads the text it assembled, which is the very text this state
-    /// was rebuilt from — so it REPLACES `result.diags` in the `'TPDG'`
-    /// blob rather than joining it, and nothing is said twice.
-    dump_report: ?Diag.List,
+    /// What the DUMP this document came out of left beside it, when one
+    /// did — only `tpr_loadFile` builds a state with one (`FromDump`).
+    from_dump: ?FromDump,
     result: doc.Result,
     derived: Derived,
 
     /// The document-stage report a host reads: the dump's when this
     /// document came out of a file, the load's otherwise.
     fn report(self: *const State) *const Diag.List {
-        if (self.dump_report) |*d| return d;
+        if (self.from_dump) |*d| return &d.report;
         return &self.result.diags;
+    }
+
+    /// The easing hints `tpr_exportScore` hands the exporter: the dump's,
+    /// or none for a state built from text.
+    fn hints(self: *const State) []const exporter.EaseHint {
+        if (self.from_dump) |*d| return d.hints;
+        return &.{};
     }
 
     fn deinit(self: *State) void {
         self.derived.deinit();
         self.result.deinit();
-        if (self.dump_report) |*d| d.deinit();
+        if (self.from_dump) |*d| d.deinit();
         if (self.anchor_path) |p| gpa.free(p);
         if (self.anchor_bytes) |b| gpa.free(b);
         gpa.free(self.source);
+        self.* = undefined;
+    }
+};
+
+/// What a dump leaves beside the document it produced — the two facts
+/// about the FILE that its text does not carry.
+///
+/// They live exactly as long as the state `tpr_loadFile` built. Every
+/// other verb rebuilds a state from TEXT — `tpr_load`, `tpr_attachAnchor`
+/// (the same text, read again) and `tpr_apply` (a new one) — and a text
+/// carries no verdicts, which is the CLI's rule as well:
+/// `tempura export-score song.it` passes the dump's hints, and `tempura
+/// export-score d.sjon` over the dumped text passes none
+/// (`cli/export_score.zig`'s header).
+const FromDump = struct {
+    /// The dump's report. `pipeline.dump` already carries the re-load's
+    /// own diagnostics — it loads the text it assembled, which is the very
+    /// text this state was rebuilt from — so it REPLACES `result.diags` in
+    /// the `'TPDG'` blob rather than joining it, and nothing is said twice.
+    report: Diag.List,
+    /// `Dumped.easeHints`: plan 04's rule 2, the easing a stale curve lane
+    /// kept, which a score of this file honours exactly as the CLI's does.
+    /// In `arena`, lane names and easings too, so they outlive the dump.
+    hints: []const exporter.EaseHint,
+    arena: std.heap.ArenaAllocator,
+
+    /// Take what outlives `dumped` out of it: the report MOVED (the dump
+    /// is left an empty list), the hints COPIED into an arena of their
+    /// own. `dumped` is still the caller's to deinit either way.
+    fn take(dumped: *doc.pipeline.Dumped) error{OutOfMemory}!FromDump {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        errdefer arena.deinit();
+        const kept = try dumped.easeHints(arena.allocator());
+        const report = dumped.diags;
+        dumped.diags = .init(gpa);
+        return .{ .report = report, .hints = kept, .arena = arena };
+    }
+
+    fn deinit(self: *FromDump) void {
+        self.report.deinit();
+        self.arena.deinit();
         self.* = undefined;
     }
 };
@@ -298,16 +343,16 @@ fn buildState(
     source: [:0]u8,
     anchor_path: ?[]u8,
     anchor_bytes: ?[]u8,
-    dump_report: ?Diag.List,
+    from_dump: ?FromDump,
 ) error{OutOfMemory}!State {
-    // A parameter is const, and the report has to be DEINITED on the
+    // A parameter is const, and the dump's half has to be DEINITED on the
     // failure path — so it is rebound here rather than cast away.
-    var report = dump_report;
+    var dumped = from_dump;
     errdefer {
         gpa.free(source);
         if (anchor_path) |p| gpa.free(p);
         if (anchor_bytes) |b| gpa.free(b);
-        if (report) |*d| d.deinit();
+        if (dumped) |*d| d.deinit();
     }
     const live_schema = liveSchema() orelse return error.OutOfMemory;
 
@@ -328,7 +373,7 @@ fn buildState(
         .source = source,
         .anchor_path = anchor_path,
         .anchor_bytes = anchor_bytes,
-        .dump_report = report,
+        .from_dump = dumped,
         .result = result,
         .derived = derived,
     };
@@ -574,10 +619,10 @@ export fn tpr_loadFile(kind: u32, len: u32) u32 {
 
     var dumped = doc.pipeline.dump(gpa, live_schema, bytes, anchor_kind, .{}) catch
         return @intFromEnum(Status.oom);
-    // Only the TEXT survives the dump: the state is rebuilt from it the
-    // way `tpr_load` rebuilds from a host's text, so one document shape
-    // reaches every query and the dump→reload round trip is exercised on
-    // every call rather than only in a test.
+    // Only the TEXT survives the dump as a document: the state is rebuilt
+    // from it the way `tpr_load` rebuilds from a host's text, so one
+    // document shape reaches every query and the dump→reload round trip
+    // is exercised on every call rather than only in a test.
     const source = gpa.dupeZ(u8, dumped.text) catch {
         dumped.deinit();
         return @intFromEnum(Status.oom);
@@ -587,15 +632,21 @@ export fn tpr_loadFile(kind: u32, len: u32) u32 {
         dumped.deinit();
         return @intFromEnum(Status.oom);
     };
-    // Move the dump's report out before the rest of it goes: it is the
+    // …and beside it, what the text cannot carry: the dump's report — the
     // whole story of the read, the carrier, the reconciliation and the
-    // re-load, and dropping it would make a corrupt residue silent.
-    const report = dumped.diags;
-    dumped.diags = .init(gpa);
+    // re-load, whose loss would make a corrupt residue silent — and the
+    // easing hints a stale curve lane kept, without which this module's
+    // score of the file would not be `tempura export-score`'s.
+    const from_dump = FromDump.take(&dumped) catch {
+        gpa.free(source);
+        gpa.free(path);
+        dumped.deinit();
+        return @intFromEnum(Status.oom);
+    };
     dumped.deinit();
 
     owned = false;
-    const next = buildState(source, path, bytes, report) catch
+    const next = buildState(source, path, bytes, from_dump) catch
         return @intFromEnum(Status.oom);
     return install(next);
 }
@@ -914,7 +965,10 @@ export fn tpr_apply(len: u32) u32 {
 /// A pacer score at `tpr_outPtr`. `flags` is a bit set over plan 10's
 /// switches: bit 0 `--velocity`, bit 1 `--ease linear`, bit 2
 /// `--no-hints`, bit 3 `--section-markers`. Everything else keeps
-/// `export/score.zig`'s defaults, which are the ones the CLI prints.
+/// `export/score.zig`'s defaults, which are the ones the CLI prints. A
+/// document `tpr_loadFile` produced passes its dump's easing hints (plan
+/// 04's rule 2, `Dumped.easeHints`), so the score of a file with a stale
+/// curve lane is `tempura export-score FILE`'s, header name aside.
 ///
 /// Returns the text's length; 0 when nothing is loaded, the score was
 /// refused, or the text is over `tpr_outCap` — the `'TPDG'` blob says
@@ -927,7 +981,9 @@ export fn tpr_apply(len: u32) u32 {
 export fn tpr_exportScore(flags: u32) u32 {
     const s = live() orelse return notLoaded();
     if (doc.conductedPlaceholder(&s.result.doc)) return refuseScore(s);
-    var result = exporter.exportScore(gpa, &s.result.doc, &s.derived, &.{}, .{
+    // The dump's easing hints, when this document came out of a file —
+    // the CLI's `export-score song.it` passes the same ones.
+    var result = exporter.exportScore(gpa, &s.result.doc, &s.derived, s.hints(), .{
         .velocity = flags & 1 != 0,
         .ease_linear = flags & 2 != 0,
         .no_hints = flags & 4 != 0,

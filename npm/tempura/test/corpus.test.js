@@ -27,7 +27,7 @@
 //       comes back is what a human wrote), so it is a different text on
 //       purpose, and no export prints the other one.
 //
-// …and two the wasm serves only in part:
+// …and three the wasm serves only in part:
 //
 //   (build :cc N) — `tpr_build(kind)` carries no `--cc`, so a case that
 //       renders a curve onto a controller is native-only.
@@ -46,11 +46,20 @@
 //       the `(applied …)` form under it, against `tpr_apply` + `tpr_text`
 //       — which is plan 00's ladder item 5 ("edit actions … native and
 //       wasm32") and was skipped whole until 2026-09-21.
+//   (export-score …) — `(score …)`'s `:meter`, `:seconds-mode`,
+//       `:aggregated` and `:hints` are the exporter's result fields, which
+//       the frozen surface does not carry, and `:max-keys` is a switch
+//       `tpr_exportScore` has no bit for. Everything else — the text's
+//       `:bytes` and `:sha256`, the exporter's diagnostics and the `;| `
+//       lines — IS compared against `tpr_exportScore`, and that includes a
+//       FILE's easing hints: a case like `residue-stale-curve` is the
+//       score of a stale curve lane, which the wasm printed as a hold
+//       stair until 2026-09-22 because `tpr_loadFile` kept no hints.
 //
 // Everything else IS compared, byte for byte: the `(fixture …)` line, the
 // whole `(echo …)` block (from 'TPTL' + 'TPDG'), every `(at …)` from
-// `(times …)` and `(at …)`, every `(snapped …)`, every edit action list
-// and every applied document.
+// `(times …)` and `(at …)`, every `(snapped …)`, every edit action list,
+// every applied document and every default-budget score.
 //
 // The last test pins the native-only set, so a directive that stops being
 // comparable — or one that starts being — fails loudly instead of
@@ -86,7 +95,18 @@ const REFUSALS = { 'tick-overflow': 'tick-overflow', 'non-finite-time': 'non-fin
 const nativeOnly = new Set();
 
 /** How many of each form this walk actually compared, byte for byte. */
-const compared = { fixture: 0, echo: 0, at: 0, snapped: 0, built: 0, actions: 0, applied: 0 };
+const compared = {
+  fixture: 0,
+  echo: 0,
+  at: 0,
+  snapped: 0,
+  built: 0,
+  actions: 0,
+  applied: 0,
+  score: 0,
+  // …of which a score that spent a stale curve's easing hints.
+  hinted: 0,
+};
 
 /**
  * Record that a form went uncompared, and why. The case's own name is
@@ -396,6 +416,27 @@ function rawLines(text) {
   const lines = text.split('\n');
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   return lines.map((l) => (l.length === 0 ? ';|\n' : `;| ${l}\n`)).join('');
+}
+
+/**
+ * The first `lines` lines of a score as the runner quotes them under its
+ * `(score …)` form — `src/corpus_runner.zig`'s `renderScore` loop: an
+ * empty line is `;|`, the text's trailing newline yields no line, and the
+ * count includes the empty lines.
+ *
+ * @param {string} text
+ * @param {number} lines
+ * @returns {string}
+ */
+function scoreLines(text, lines) {
+  const parts = text.split('\n');
+  let out = '';
+  for (let n = 0; n < parts.length && n < lines; n++) {
+    const line = parts[n] ?? '';
+    if (line.length === 0 && n === parts.length - 1) break;
+    out += line.length === 0 ? ';|\n' : `;| ${line}\n`;
+  }
+  return out;
 }
 
 /**
@@ -716,14 +757,33 @@ for (const name of cases) {
           loadCase();
         }
       } else if (d.head === 'export-score') {
-        // Same shape: `tpr_exportScore(flags)` produces the text, and its
-        // hash would match — but `(score …)` also pins `:meter`,
-        // `:seconds-mode`, `:aggregated` and `:hints` off the exporter's
-        // result, and takes `:max-keys` and the reconciliation's easing
-        // hints as inputs, none of which the frozen surface spells.
-        skipForms('score');
+        const chunk = take() ?? '';
+        // `:max-keys` is the one input `tpr_exportScore` has no bit for.
+        if (d['max-keys'] !== undefined && d['max-keys'] !== '512') {
+          skipped('(export-score :max-keys N) — tpr_exportScore carries no --max-keys-per-track');
+          continue;
+        }
+        // The text, its diagnostics and its first lines, re-derived; the
+        // head's counters are the exporter's result fields, which the
+        // frozen surface does not carry, so they are read off the golden
+        // and put back rather than compared. For a FILE the score spends
+        // the dump's easing hints — `tpr_loadFile` keeps them, and that
+        // is the claim this comparison makes for a stale curve lane.
+        const text = t.exportScore();
+        assert.ok(text !== null, `a score came back: ${JSON.stringify(t.diagnostics)}`);
+        const head = chunk.match(
+          /^\(score :bytes \d+ :sha256 "[0-9a-f]+"( :meter \[\d+ \d+\] :seconds-mode (?:true|false) :aggregated \d+ :hints (\d+))/,
+        );
+        assert.ok(head, `the (score …) head on ${name}`);
+        const bytes = Buffer.from(text, 'utf8');
+        let want = `(score :bytes ${bytes.length} :sha256 "${sha256(bytes)}"${head[1]}`;
+        want += `${renderDiags(t.diagnostics, '  ')})\n`;
+        want += scoreLines(text, Number(d.lines ?? 12));
+        assert.equal(want, chunk, `(export-score) on ${name}`);
+        compared.score++;
+        if (Number(head[2]) > 0) compared.hinted++;
         skipped(
-          '(export-score …) — (score …) pins exporter counts and takes hints no export spells',
+          "(score …)'s counters — :meter, :seconds-mode, :aggregated and :hints, the exporter's result fields no export carries",
         );
       } else {
         // `read`, `roundtrip`, `walk`, `write`: the golden's form is
@@ -752,7 +812,8 @@ test('what the walk compared, and the closed set of what it could not', () => {
     '(build :cc N) — tpr_build carries no --cc',
     "(build …) over an ANCHORED document — the runner writes the inline tier through the core's own writer, not through pipeline.build",
     '(dump) — the golden hashes a canonical re-print; tpr_text is the source',
-    '(export-score …) — (score …) pins exporter counts and takes hints no export spells',
+    '(export-score :max-keys N) — tpr_exportScore carries no --max-keys-per-track',
+    "(score …)'s counters — :meter, :seconds-mode, :aggregated and :hints, the exporter's result fields no export carries",
     "(planned …) — the plan's own summary counters, which no export carries",
     '(read) — it asks about bytes, which no export hands out',
     '(reconciled …) — the verdict table, which no export hands out',
@@ -779,4 +840,10 @@ test('what the walk compared, and the closed set of what it could not', () => {
   assert.ok(compared.built > 0, 'some (built …) hashes were compared');
   assert.ok(compared.actions > 0, 'some edit action lists were compared');
   assert.ok(compared.applied > 0, 'some applied documents were compared');
+  assert.ok(compared.score > 0, 'some (score …) texts were compared');
+  // …and at least one of them spent a stale curve lane's easing hints,
+  // which is the one input a score of a FILE has that a document's does
+  // not: without such a case the wasm could drop every hint again and
+  // the walk would stay green.
+  assert.ok(compared.hinted > 0, 'some score spent a reconciliation easing hint');
 });
