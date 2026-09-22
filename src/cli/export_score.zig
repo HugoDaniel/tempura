@@ -306,3 +306,47 @@ test "export-score: --eps and --max-keys-per-track reach the exporter" {
     // moves the exit code.
     try t.expectEqual(Cli.Exit.ok, c.code);
 }
+
+test "export-score: a stale curve lane's score is the core's, easing hints and all" {
+    // The verb and the core agree byte for byte on the score of a FILE
+    // whose curve lane is stale — the one input a file's score has and a
+    // document's lacks. `Dumped.easeHints` is the step both take, and the
+    // wasm's `tpr_exportScore` after `tpr_loadFile` too (the npm parity
+    // walk pins that leg against the same case's golden).
+    const a = t.allocator;
+    const path = try Cli.repoPath(a, "corpus/residue-stale-curve/song.mid");
+    defer a.free(path);
+
+    var c = try Cli.invoke(&.{ "tempura", "export-score", path });
+    defer c.deinit();
+    try t.expectEqual(Cli.Exit.ok, c.code);
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 20));
+    defer a.free(bytes);
+    var schema = try tempura.Schema.load(a);
+    defer schema.deinit();
+    var dumped = try pipeline.dump(a, &schema, bytes, .smf, .{ .file = "song.mid" });
+    defer dumped.deinit();
+    var derived = try tempura.time.derive.derive(a, &dumped.doc);
+    defer derived.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(a);
+    defer scratch.deinit();
+    const hints = try dumped.easeHints(scratch.allocator());
+    // The case exists for this: one hint kept, and the score spends it.
+    try t.expectEqual(@as(usize, 1), hints.len);
+
+    var core = try exporter.exportScore(a, &dumped.doc, &derived, hints, .{
+        .source_name = "song.mid",
+        .version = tempura.version,
+    });
+    defer core.deinit();
+    try t.expectEqualStrings(core.text, c.out.written());
+    try t.expect(std.mem.indexOf(u8, core.text, ":ease in-cubic") != null);
+
+    // …and the hint is what made it so: without it the segment is the
+    // file's stair, which is what the wasm printed before it kept hints.
+    var bare = try Cli.invoke(&.{ "tempura", "export-score", path, "--no-hints" });
+    defer bare.deinit();
+    try t.expect(!std.mem.eql(u8, bare.out.written(), c.out.written()));
+    try t.expect(std.mem.indexOf(u8, bare.out.written(), ":ease in-cubic") == null);
+}

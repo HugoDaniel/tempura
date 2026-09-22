@@ -1,0 +1,26 @@
+; Plan 04's RULE 2, second branch, over a CURVE lane — the case the easing
+; hints exist for.
+;
+; The document behind this fixture has one native curve lane, `glow`, of
+; three `in-cubic` segments back to back. `tempura build --cc 74` writes
+; each such segment as its two ends — tempura never evaluates a named
+; curve — so the lane record keeps each easing as a HINT (docs/residue.md,
+; kind 02). A hint is read between two consecutive recorded segment ends,
+; so the second segment (1q to 2q) and the third (2q to 3q) are the two a
+; dump can check; the first has no recorded start.
+;
+; `tools/gen_fixtures.zig` then redraws the automation the way a DAW would
+; leave it: one point pencilled in at 1.5q, far off the second segment's
+; cubic, and the third segment re-sampled at its quarter points along its
+; own cubic. The lane hash no longer matches, so the lane comes back BOUND
+; with `residue_stale`, and each hint is verified against the file's own
+; steps: the second segment's is dropped with `ease_hint_mismatch`, the
+; third's is kept.
+;
+; `(export-score)` is where the kept hint is spent: `:hints 1`, and the
+; third segment's five steps collapse to one `(key … :ease in-cubic)`
+; instead of a hold stair. The npm parity walk re-derives this score in
+; the wasm through `tpr_loadFile` + `tpr_exportScore`, which until
+; 2026-09-22 passed no hints at all and printed the stair.
+(dump)
+(export-score :lines 16)

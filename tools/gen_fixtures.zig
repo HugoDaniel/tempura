@@ -102,6 +102,7 @@ const cases = [_]Case{
     .{ .name = "residue-stale-lane", .file = "song.mid", .build = residueStaleLane },
     .{ .name = "residue-stale-lane-partial", .file = "song.mid", .build = residueStaleLanePartial },
     .{ .name = "residue-stale-conductor", .file = "song.mid", .build = residueStaleConductor },
+    .{ .name = "residue-stale-curve", .file = "song.mid", .build = residueStaleCurve },
     .{ .name = "residue-tail-only", .file = "song.it", .build = residueTailOnly },
     .{ .name = "edit-bound-smf-pair", .file = "x.mid", .build = boundSmfAnchor },
     .{ .name = "edit-bound-it-cell", .file = "x.it", .build = boundItAnchor },
@@ -1023,6 +1024,17 @@ fn residueExact(gpa: Allocator, kind: tempura.doc.AnchorKind) ![]u8 {
 
 /// `source` built into `kind` exactly as `tempura build` would build it.
 fn residueExactOf(gpa: Allocator, source: [:0]const u8, kind: tempura.doc.AnchorKind) ![]u8 {
+    return residueBuiltOf(gpa, source, kind, .{});
+}
+
+/// `source` built into `kind` exactly as `tempura build` with `opts`
+/// would build it.
+fn residueBuiltOf(
+    gpa: Allocator,
+    source: [:0]const u8,
+    kind: tempura.doc.AnchorKind,
+    opts: tempura.doc.pipeline.BuildOptions,
+) ![]u8 {
     var r = try Ready.init(gpa, source);
     defer r.deinit();
 
@@ -1033,7 +1045,7 @@ fn residueExactOf(gpa: Allocator, source: [:0]const u8, kind: tempura.doc.Anchor
         &r.loaded.doc,
         &r.derived,
         kind,
-        .{},
+        opts,
     );
     defer built.deinit();
     if (built.diags.hasErrors()) return Error.FixtureWriterRefused;
@@ -1203,6 +1215,113 @@ fn residueStaleLanePartial(gpa: Allocator) ![]u8 {
 /// the document comes back with `:conductor` set to the anchor.
 fn residueStaleConductor(gpa: Allocator) ![]u8 {
     return editedSmf(gpa, .conductor);
+}
+
+/// The curve cousin of `residue_doc`: one native curve lane of three
+/// `in-cubic` segments back to back. A `.mid` carries only each segment's
+/// two ends, so the lane record keeps the easing as a HINT per segment
+/// (`docs/residue.md`, kind 02) — and a hint is read between two
+/// consecutive segment ends, so the second and the third are the two a
+/// dump can check against the file's steps.
+const residue_curve_doc: [:0]const u8 =
+    \\; residue — a curve whose easing only the record carries
+    \\(timeline :title "residue" :length 1bar)
+    \\
+    \\(tempo-point :at 0bar :qpm 120)
+    \\(meter-point :at 0bar :sig [4 4])
+    \\
+    \\(lane :name glow :kind curve :target glow
+    \\  (keyframe :at 0bar :value 0)
+    \\  (keyframe :at 1q :value 0.25 :ease in-cubic)
+    \\  (keyframe :at 2q :value 0.5 :ease in-cubic)
+    \\  (keyframe :at 3q :value 1 :ease in-cubic))
+    \\
+;
+
+/// The controller `residue_curve_doc` renders onto (`build --cc 74`).
+const curve_cc: u7 = 74;
+
+/// `residue-stale-curve` — rule 2's second branch over a CURVE, the case
+/// the easing hints exist for. `residue_curve_doc` built onto CC 74 and
+/// then redrawn the way a DAW's automation would leave it (`drawnPoints`):
+/// one point pencilled into the SECOND segment far off its cubic, and the
+/// THIRD segment re-sampled along its own cubic. The lane hash no longer
+/// matches, so the lane comes back bound; the second segment's hint is
+/// dropped (`ease_hint_mismatch`), and the third's is kept and has steps
+/// to collapse — the easing a score of this file honours.
+fn residueStaleCurve(gpa: Allocator) ![]u8 {
+    const bytes = try residueBuiltOf(gpa, residue_curve_doc, .smf, .{ .cc = curve_cc });
+    defer gpa.free(bytes);
+
+    var read = try smf.read(gpa, bytes);
+    defer read.deinit();
+    const track = for (read.sequence.tracks) |*tr| {
+        if (ccTicks(tr.events) != null) break tr;
+    } else return Error.FixtureWriterRefused;
+
+    const drawn = try redrawn(gpa, track.events, drawnPoints(ccTicks(track.events).?));
+    defer gpa.free(drawn);
+    const original = track.events;
+    track.events = drawn;
+    defer track.events = original;
+
+    var file = try smf.write(gpa, &read.sequence, .{});
+    defer file.deinit();
+    if (file.diags.hasErrors()) return Error.FixtureWriterRefused;
+    return gpa.dupe(u8, file.bytes);
+}
+
+/// The ticks of the curve's four controller events, one per keyframe, or
+/// null for a track that is not the curve's.
+fn ccTicks(events: []const smf.Event) ?[4]i64 {
+    var ticks: [4]i64 = undefined;
+    var n: usize = 0;
+    for (events) |e| {
+        if (e.kind != .control_change or e.payload.control.num != curve_cc) continue;
+        if (n == ticks.len) return null;
+        ticks[n] = e.at;
+        n += 1;
+    }
+    return if (n == ticks.len) ticks else null;
+}
+
+/// What the DAW drew over the curve whose keyframes sit at `ticks`, in
+/// tick order: a point at 120 halfway through the second segment, where
+/// no cubic from 32 to 64 goes; and the third segment sampled at its
+/// quarter points along its own `in-cubic` from 64 to 127 — `64 + 63·u³`
+/// rounded to the byte, 65, 72 and 91, each well inside the CC quantum
+/// both the reconciliation and the exporter verify within.
+fn drawnPoints(ticks: [4]i64) [4]smf.Event {
+    const quarter = @divFloor(ticks[3] - ticks[2], 4);
+    const Point = struct { at: i64, val: u7 };
+    const points = [4]Point{
+        .{ .at = @divFloor(ticks[1] + ticks[2], 2), .val = 120 },
+        .{ .at = ticks[2] + quarter, .val = 65 },
+        .{ .at = ticks[2] + 2 * quarter, .val = 72 },
+        .{ .at = ticks[2] + 3 * quarter, .val = 91 },
+    };
+    var out: [4]smf.Event = undefined;
+    for (points, &out) |pt, *e| e.* = .{ .at = pt.at, .kind = .control_change, .payload = .{
+        .control = .{ .ch = 0, .num = curve_cc, .val = pt.val },
+    } };
+    return out;
+}
+
+/// `events` with `points` (ascending) merged in, each before the first
+/// event later than it. Caller frees; the events are copied, not
+/// borrowed.
+fn redrawn(gpa: Allocator, events: []const smf.Event, points: [4]smf.Event) ![]smf.Event {
+    var out: std.ArrayList(smf.Event) = .empty;
+    errdefer out.deinit(gpa);
+    var next: usize = 0;
+    for (events) |e| {
+        while (next < points.len and points[next].at < e.at) : (next += 1) {
+            try out.append(gpa, points[next]);
+        }
+        try out.append(gpa, e);
+    }
+    if (next != points.len) return Error.FixtureWriterRefused;
+    return out.toOwnedSlice(gpa);
 }
 
 /// `residue-tail-only` — rule 5: a `.it` with the message tail and no
