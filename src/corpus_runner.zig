@@ -2159,21 +2159,19 @@ fn renderPlan(
     loaded: *Loaded,
     rep: Report,
 ) Error!bool {
-    var parsed = try edit_engine.fromJson(gpa, op_json);
-    defer parsed.deinit();
-
-    const op = parsed.op orelse {
-        try pw(w, "(planned :read false");
-        if (!try renderDiags(w, "  ", &parsed.diags, rep)) return false;
-        try pw(w, ")\n");
-        return true;
+    // The same one call the CLI and the wasm plan through (`edit/host.zig`).
+    const d = loaded.doc_();
+    var planned = try edit_engine.planJson(gpa, d, loaded.source, loaded.map(), op_json);
+    defer planned.deinit();
+    const plan = switch (planned) {
+        .plan => |*it| it,
+        .not_an_op => |*reasons| {
+            try pw(w, "(planned :read false");
+            if (!try renderDiags(w, "  ", reasons, rep)) return false;
+            try pw(w, ")\n");
+            return true;
+        },
     };
-
-    var tree = try sjon.parse(gpa, loaded.source);
-    defer tree.deinit();
-
-    var plan = try edit_engine.planWith(gpa, loaded.doc_(), &tree, loaded.map(), op);
-    defer plan.deinit();
 
     const sum = plan.summary;
     try p(
@@ -2197,7 +2195,7 @@ fn renderPlan(
     defer gpa.free(actions);
     if (!try renderRaw(w, actions, rep)) return false;
 
-    var applied = try edit_engine.apply(gpa, loaded.source, &plan);
+    var applied = try edit_engine.apply(gpa, loaded.source, plan);
     defer applied.deinit();
     try p(w, "(applied :bytes {d} :sha256 \"", .{applied.text.len});
     try writeDigest(w, applied.text);

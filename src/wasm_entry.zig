@@ -780,27 +780,15 @@ export fn tpr_plan(len: u32) u32 {
         p.deinit();
         return 0;
     }
-    // Held only if there is something to commit. A refusal's actions are
-    // `[]` and the diagnostics above say why.
-    if (refusal(&p)) {
+    // Held only if there is something to commit — `Plan.committable`, the
+    // CLI's own rule, spelled once in the edit engine. A refusal's actions
+    // are `[]` and the diagnostics above say why.
+    if (!p.committable()) {
         p.deinit();
         return written;
     }
     pending = p;
     return written;
-}
-
-/// Whether a plan must not reach the document: the planner refused it,
-/// or it came back from a host with a complaint. The CLI's own rule
-/// (`src/cli/edit.zig`: `plan.summary.refused or plan.diags.hasErrors()`)
-/// — and the reason both halves are needed is that they are different
-/// facts. `refused` is the planner saying "this cannot be done", and an
-/// error diagnostic is anything else that went wrong on the way; a plan
-/// with either is an empty action list, and `edit.apply` over an empty
-/// list hands the source straight back — which would read as a clean
-/// no-op edit if nobody looked.
-fn refusal(p: *const edit.Plan) bool {
-    return p.summary.refused or p.diags.hasErrors();
 }
 
 /// The first byte that is not whitespace, or 0 for an empty payload —
@@ -815,22 +803,24 @@ fn firstToken(payload: []const u8) u8 {
     return 0;
 }
 
-/// Plan `op_json` against the live document. Null = the ask was not an
-/// operation and the reasons are already in the zone.
+/// Plan `op_json` against the live document, through `edit.planJson` —
+/// the one call the CLI and the corpus runner plan through too. Null =
+/// the ask was not an operation and the reasons are already in the zone.
+///
+/// The CLI's load gate (`edit.blocksEdit`) is NOT applied: this surface
+/// plans over whatever loaded, as it always has, and whether it should
+/// refuse as `tempura edit` does is a ruling filed in plan 12 ("Filed,
+/// not fixed").
 fn planOp(s: *State, op_json: []const u8) error{OutOfMemory}!?edit.Plan {
-    var parsed = try edit.fromJson(gpa, op_json);
-    defer parsed.deinit();
-    const op = parsed.op orelse {
-        publishDiags(.operation, &parsed.diags);
-        return null;
-    };
-
-    // Parsing is total in SJON — a malformed document is a tree with
-    // diagnostics, not an error — so only an allocation can fail here.
-    var tree = try sjon.parse(gpa, s.source);
-    defer tree.deinit();
-
-    return try edit.planWith(gpa, &s.result.doc, &tree, &s.result.map, op);
+    var planned = try edit.planJson(gpa, &s.result.doc, s.source, &s.result.map, op_json);
+    switch (planned) {
+        .plan => |p| return p,
+        .not_an_op => |*reasons| {
+            publishDiags(.operation, reasons);
+            planned.deinit();
+            return null;
+        },
+    }
 }
 
 /// Commit an edit and re-load the document; `tpr_text()` reads it back.
@@ -880,7 +870,7 @@ export fn tpr_apply(len: u32) u32 {
     // BEFORE the document is touched. `edit.apply` over an empty action
     // list hands the source straight back, so a refusal that got this
     // far would install an identical document and report success.
-    if (refusal(p)) {
+    if (!p.committable()) {
         publishDiags(.operation, &p.diags);
         return @intFromEnum(Status.diagnostics);
     }

@@ -122,6 +122,21 @@ pub const Plan = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Whether this plan may reach the document: the planner did not
+    /// refuse it, AND it carries no error from anywhere else on the way —
+    /// a host's action list that did not read back is one. Both halves,
+    /// because they are different facts: `refused` is the planner saying
+    /// "this cannot be done", an error diagnostic is anything else that
+    /// went wrong. A plan failing either is an empty action list, and
+    /// `apply` over an empty list hands the source straight back — which
+    /// would read as a clean no-op edit if nobody asked this first.
+    ///
+    /// The one spelling of the rule every host commits by: `tempura edit`,
+    /// `tpr_plan` (which holds only a committable plan) and `tpr_apply`.
+    pub fn committable(self: *const Plan) bool {
+        return !self.summary.refused and !self.diags.hasErrors();
+    }
+
     /// What every plan this part hands out satisfies, however it was
     /// made — asserted by `Builder.finish` on the way out (the write
     /// side) and by `apply` on the way in (the read side). Never asked
@@ -443,6 +458,36 @@ test "Plan: a refusal drops the actions and keeps the diagnostic" {
     const text = try p.text(gpa);
     defer gpa.free(text);
     try testing.expectEqualStrings("[]\n", text);
+}
+
+test "Plan.committable: an accepted plan is, a refused one and an unread list are not" {
+    const gpa = testing.allocator;
+
+    var accepted: Builder = .init(gpa);
+    errdefer accepted.deinit();
+    try accepted.setKeyword(.{ .root = 0, .path = &.{} }, "at", "0");
+    var yes = try accepted.finish();
+    defer yes.deinit();
+    try testing.expect(yes.committable());
+
+    // The empty list a host struck every line out of: nothing to do, and
+    // nothing wrong with doing it.
+    var none = try fromActionsJson(gpa, "[]\n");
+    defer none.deinit();
+    try testing.expect(none.committable());
+
+    var refused: Builder = .init(gpa);
+    errdefer refused.deinit();
+    try refused.refuse(.edit_range_empty, .{ .start = 0, .end = 0 }, "nothing to do", .{});
+    var no = try refused.finish();
+    defer no.deinit();
+    try testing.expect(!no.committable());
+
+    // A host's list that did not read back: its empty action list would
+    // splice as a clean no-op, which is exactly what this rule is for.
+    var unread = try fromActionsJson(gpa, "not json at all");
+    defer unread.deinit();
+    try testing.expect(!unread.committable());
 }
 
 // ---------------------------------------------------------------------------

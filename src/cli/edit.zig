@@ -26,15 +26,16 @@
 //!
 //! ## Which load errors stop an edit
 //!
-//! All of them but two, and `blocksEdit` says which two and why: an
-//! anchor's FILE being unreadable or not matching its `:size` /
-//! `:sha256` is not about anything an edit acts on, because a bound
-//! operation walks the inline dump's own forms in the tree. Such a
-//! diagnostic is still PRINTED — it is an error and the user hears it —
-//! and the edit goes through, so the exit code is 0 with an error line
-//! on stderr. That combination is deliberate: the verb's product is the
-//! document's text, the document's text was produced correctly, and the
-//! thing that is wrong is a file this invocation never needed.
+//! All of them but two, and `edit.blocksEdit` (`edit/host.zig`, where
+//! the rule is spelled once) says which two and why: an anchor's FILE
+//! being unreadable or not matching its `:size` / `:sha256` is not about
+//! anything an edit acts on, because a bound operation walks the inline
+//! dump's own forms in the tree. Such a diagnostic is still PRINTED — it
+//! is an error and the user hears it — and the edit goes through, so the
+//! exit code is 0 with an error line on stderr. That combination is
+//! deliberate: the verb's product is the document's text, the document's
+//! text was produced correctly, and the thing that is wrong is a file
+//! this invocation never needed.
 //!
 //! ## A refusal is an answer
 //!
@@ -46,7 +47,6 @@
 //! unknown head) is the INVOCATION's fault and exits 2.
 
 const std = @import("std");
-const sjon = @import("sjon");
 const tempura = @import("tempura");
 
 const Cli = @import("Cli.zig");
@@ -69,9 +69,9 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     // An edit over a document that does not hold together would plan
     // against addresses the document layer has already complained
     // about — so a load error stops the verb, with two exceptions named
-    // in `blocksEdit`. The report goes out either way: a tolerated error
-    // is still an error and the user hears it.
-    const blocking = firstBlocker(loaded.result.diags.items());
+    // in `edit.blocksEdit`. The report goes out either way: a tolerated
+    // error is still an error and the user hears it.
+    const blocking = edit.anyBlocksEdit(loaded.result.diags.items());
     try ctx.report(loaded.space(), loaded.result.diags.items());
     if (blocking) return Cli.Exit.errors;
 
@@ -80,23 +80,21 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
         .failed => |code| return code,
     };
 
-    var parsed = try edit.fromJson(ctx.gpa, op_json);
-    defer parsed.deinit();
-    const op = parsed.op orelse {
-        // The spans index the OPERATION's text, not the document's.
-        try Diags.render(ctx.err, "<--op>", .bytes, parsed.diags.items(), ctx.style);
-        return Cli.Exit.usage;
-    };
-
-    var tree = try sjon.parse(ctx.gpa, loaded.source);
-    defer tree.deinit();
-
     // The map is the one `fromSource` already derived; handing it in is
     // what keeps the document's time from being derived twice.
-    var plan = try edit.planWith(ctx.gpa, &loaded.result.doc, &tree, &loaded.result.map, op);
-    defer plan.deinit();
+    const doc = &loaded.result.doc;
+    var planned = try edit.planJson(ctx.gpa, doc, loaded.source, &loaded.result.map, op_json);
+    defer planned.deinit();
+    const plan = switch (planned) {
+        .plan => |*p| p,
+        .not_an_op => |*reasons| {
+            // The spans index the OPERATION's text, not the document's.
+            try Diags.render(ctx.err, "<--op>", .bytes, reasons.items(), ctx.style);
+            return Cli.Exit.usage;
+        },
+    };
 
-    if (plan.summary.refused or plan.diags.hasErrors()) {
+    if (!plan.committable()) {
         try ctx.report(loaded.space(), plan.diags.items());
         return Cli.Exit.errors;
     }
@@ -104,7 +102,7 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     const artifact: []const u8 = if (ctx.cmd.edit.dry_run) blk: {
         break :blk try plan.text(ctx.gpa);
     } else blk: {
-        var applied = try edit.apply(ctx.gpa, loaded.source, &plan);
+        var applied = try edit.apply(ctx.gpa, loaded.source, plan);
         defer applied.deinit();
         if (applied.diags.hasErrors()) {
             try ctx.report(loaded.space(), applied.diags.items());
@@ -119,45 +117,6 @@ pub fn run(ctx: *const Cli.Ctx) Cli.Error!u8 {
     // `edit_inexact` is a document that is not quite what was asked for.
     try ctx.report(loaded.space(), plan.diags.items());
     return Cli.Exit.ok;
-}
-
-/// Whether any of these diagnostics stops the edit.
-fn firstBlocker(diags: []const tempura.Diag.Diagnostic) bool {
-    for (diags) |d| {
-        if (d.severity == .err and blocksEdit(d.code)) return true;
-    }
-    return false;
-}
-
-/// Which load errors an edit cannot be planned over.
-///
-/// **Every one but two.** A plan's addresses come from a fresh parse of
-/// the document's own text and its targets from the `Doc` the walk built,
-/// so anything that made either of those wrong makes the plan wrong: a
-/// parse error, a duplicate `(timeline …)`, a lane that names itself
-/// twice, an address the schema cannot read. Those stop the verb, for
-/// `build`'s reason — the product is a document somebody keeps.
-///
-/// The two exceptions are the two that are about an anchor's FILE rather
-/// than about the document: `anchor_unavailable` (no resolver could read
-/// it) and `anchor_mismatch` (it was read and does not match the `:size`
-/// or `:sha256` the anchor declares). Neither touches what an edit acts
-/// on. A NATIVE operation never looks at an anchor at all, and a BOUND
-/// one walks the inline dump's own `(midi/mtrk …)` events or
-/// `(it/pattern …)` cells IN THE TREE — the file is where those bytes
-/// came from, not where they are. The one thing the file does carry is an
-/// `it/` tier's `(bin :at :len)` regions, and a selection over a tier
-/// that kept its patterns by reference finds no `(ev …)` form to address,
-/// so the plan comes back empty rather than wrong.
-///
-/// Refusing them was this verb's own bug: every `edit-bound-*` document
-/// names a file that is not beside it, so no bound edit was reachable
-/// through the CLI at all while the engine planned them correctly.
-fn blocksEdit(code: tempura.Diag.Code) bool {
-    return switch (code) {
-        .anchor_unavailable, .anchor_mismatch => false,
-        else => true,
-    };
 }
 
 const Merged = union(enum) { ok: []const u8, failed: u8 };

@@ -36,6 +36,8 @@
 //!     the span of the form it refused on.
 //!   * `apply.zig` — the actions sequenced so every address is valid when
 //!     it is reached, spliced with layout `.preserve`.
+//!   * `host.zig` — what every host does with an operation's JSON
+//!     (`planJson`), and the load errors the CLI will not edit over.
 //!   * `ops_native.zig` — every row of plan 07's table that acts on
 //!     content the document holds itself.
 //!   * `ops_bound.zig` — the front door, and the rows that act on
@@ -116,6 +118,7 @@ const select_file = @import("Select.zig");
 const snap_file = @import("Snap.zig");
 const locate = @import("locate.zig");
 const value = @import("value.zig");
+const host = @import("host.zig");
 
 // ---- the ask ----
 
@@ -164,6 +167,17 @@ pub const planWith = ops_bound.planWith;
 /// re-loaded"). Total: an array that is not one is a refusal with a
 /// diagnostic, never an error.
 pub const fromActionsJson = plan_file.fromActionsJson;
+/// Plan an operation's `--op` JSON over a loaded document — the three
+/// calls every host that edits makes (`host.zig`): the plan, or why the
+/// ask was not an operation.
+pub const planJson = host.planJson;
+/// What `planJson` answers.
+pub const Planned = host.Planned;
+/// Which load errors an edit cannot be planned over — the CLI's gate,
+/// which the wasm does not apply (`host.zig`'s header says why).
+pub const blocksEdit = host.blocksEdit;
+/// `blocksEdit` over a whole report: whether any ERROR in it blocks.
+pub const anyBlocksEdit = host.anyBlocksEdit;
 /// Apply a plan to a document's bytes, layout preserved.
 pub const apply = apply_file.apply;
 /// What `apply` returns.
@@ -204,4 +218,5 @@ test {
     _ = ops_bound;
     _ = ops_quantize;
     _ = inline_anchor;
+    _ = host;
 }
