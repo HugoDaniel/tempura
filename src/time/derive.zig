@@ -216,21 +216,21 @@ pub fn derive(gpa: std.mem.Allocator, doc: *const Doc) Error!Derived {
     const lanes = try laneTable(gpa, arena, doc, &diags, &rowmap);
 
     // Plan 02's `:length` default — "the end of the last event or clip,
-    // rounded up to a bar" — in the document layer's own two terms: what
-    // the DOCUMENT placed (`fromSjon.contentEnd`, the rule `fromSource`
-    // accumulates while it reads) and where the CONDUCTOR's material
-    // ends. Not the derivation's own placed content: a clip's window
-    // already bounds what it placed, and a bound lane's notes are the
-    // anchor's, which the conductor's end already covers.
+    // rounded up to a bar" — in the document layer's own two terms and
+    // through its own `defaultLength`: what the DOCUMENT placed
+    // (`fromSjon.contentEnd`) and where the CONDUCTOR's material ends.
+    // Not the derivation's own placed content: a clip's window already
+    // bounds what it placed, and a bound lane's notes are the anchor's,
+    // which the conductor's end already covers.
     const content_end = @max(fromSjon.contentEnd(doc), conducted.end);
     const length = doc.length orelse
-        try roundUpToBar(gpa, conducted, content_end, doc.end);
+        try fromSjon.defaultLength(gpa, conducted, content_end, doc.end);
 
     var res = try tm.derive(gpa, conducted.tempo, conducted.meter, length, doc.end);
     errdefer res.map.deinit();
     {
         defer res.diags.deinit();
-        try relay(&diags, &res.diags);
+        try diags.extend(res.diags.items());
     }
 
     const derived: Derived = .{
@@ -248,51 +248,37 @@ pub fn derive(gpa: std.mem.Allocator, doc: *const Doc) Error!Derived {
 
 // ---- the conductor ----
 
-/// The points the two tables are built from, and where the conductor's
-/// own material ends (`fromSjon.Conductor.end`; zero for a document that
-/// conducts itself).
-const Conducted = struct {
-    tempo: []const tm.TempoPoint,
-    meter: []const tm.MeterPoint,
-    end: i64 = 0,
-};
-
-/// What a conducted document falls back to when its anchor carries no
-/// dump to read: 120 quarter notes per minute in [4 4], SMF's own
-/// default. `500 000` is an INTEGER, so the fallback never forces the
-/// f64 path on a map that would otherwise be exact.
-const seed_tempo = [_]tm.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
-const seed_meter = [_]tm.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
-
-/// Plan 03's three conductors: the document's own points, or the tables
-/// the DOCUMENT LAYER reads off the anchor the `(timeline :conductor …)`
-/// names.
+/// Plan 03's three conductors, as the DOCUMENT LAYER decides them: the
+/// points the map is built from and where the conductor's material ends
+/// are `fromSjon.timeTables` over `fromSjon.conductorOf`'s answer — the
+/// one rule the load and `mapOf` apply too, so the map a derivation
+/// builds for a `Doc` is the map `fromSource` gave it.
 ///
 /// Rules 2 and 3 are `doc/fromSjon.zig`'s `smfConductor` and
 /// `itConductor` — every merge, seed, diagnostic and conversion of them
 /// — because an anchored document's own positions resolve against those
-/// same tables while it is being read. This chooses which one to ask and
-/// copies the answer into the derivation's arena; an IT walk comes back
-/// with it, and is what `Playhead.orderRowAt` and a bound IT lane read.
+/// same tables while it is being read. This asks, says what this layer
+/// has to say (the conflict, the placeholder), and copies the answer
+/// into the derivation's arena; an IT walk comes back with it, and is
+/// what `Playhead.orderRowAt` and a bound IT lane read.
 fn conduct(
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     doc: *const Doc,
     diags: *Diag.List,
     rowmap: *?walk.RowMap,
-) Error!Conducted {
-    const id = doc.conductor orelse return .{ .tempo = doc.tempo, .meter = doc.meter };
+) Error!fromSjon.TimeTables {
+    const id = doc.conductor orelse return fromSjon.timeTables(doc, null);
     try refuseOwnTime(diags, doc);
 
-    const anchor = doc.anchorById(id) orelse return seeded();
     var built: fromSjon.Conductor = (try fromSjon.conductorOf(
         gpa,
         doc,
         id,
         doc.conductor_bytes,
     )) orelse {
-        try sayPlaceholder(diags, anchor);
-        return seeded();
+        if (doc.anchorById(id)) |anchor| try sayPlaceholder(diags, anchor);
+        return fromSjon.timeTables(doc, null);
     };
     defer built.deinit();
 
@@ -302,14 +288,14 @@ fn conduct(
     rowmap.* = built.rowmap;
     built.rowmap = null;
 
-    try relay(diags, &built.diags);
+    try diags.extend(built.diags.items());
     // Copied out: the conductor's arena dies with this call and the
     // tables outlive it.
-    return .{
+    return fromSjon.timeTables(doc, .{
         .tempo = try arena.dupe(tm.TempoPoint, built.tempo),
         .meter = try arena.dupe(tm.MeterPoint, built.meter),
         .end = built.end,
-    };
+    });
 }
 
 /// One owner of time per document (plan 03, "Three conductors"): with a
@@ -345,35 +331,6 @@ fn sayPlaceholder(diags: *Diag.List, anchor: *const value.Anchor) Error!void {
             "in [4 4] and not the file's time",
         .{ anchor.id, anchor.file },
     );
-}
-
-/// Every diagnostic `from` holds, said again in `diags` word for word:
-/// the one way a report crosses from a part this file asks — the
-/// conductor, the tempo map, a bridge — into the derivation's own.
-fn relay(diags: *Diag.List, from: *const Diag.List) Error!void {
-    for (from.items()) |d| try diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-}
-
-fn seeded() Conducted {
-    return .{ .tempo = &seed_tempo, .meter = &seed_meter };
-}
-
-/// The first bar line at or after `end`, which is the `:length` default.
-///
-/// The round-up falls out of `TimeMap`'s own bar table, which appends bar
-/// starts until one lands at or past the length it was given — so the
-/// LAST entry of a table derived over `end` is exactly that bar line.
-fn roundUpToBar(
-    gpa: std.mem.Allocator,
-    conducted: Conducted,
-    end: i64,
-    end_behaviour: tm.End,
-) Error!i64 {
-    if (end <= 0) return 0;
-    var probe = try tm.derive(gpa, conducted.tempo, conducted.meter, end, end_behaviour);
-    defer probe.deinit();
-    const bars = probe.map.bars;
-    return if (bars.len == 0) end else bars[bars.len - 1];
 }
 
 // ---- the lanes ----
@@ -484,7 +441,7 @@ fn boundSmf(
         .notes => {
             var paired = try bridge_smf.pairNotes(gpa, seq, addr.track, addr.ch, addr.key);
             defer paired.deinit();
-            try relay(diags, &paired.diags);
+            try diags.extend(paired.diags.items());
             for (paired.notes) |n| try onsets.append(arena, smfOnset(n, ppq));
         },
         .curve => {
@@ -2519,6 +2476,56 @@ test "derive: a conducted document whose file nobody can read says anchor_unavai
     try testing.expectEqual(@as(usize, 1), d.map.segments.len);
     try testing.expectEqual(@as(f64, 500_000), d.map.segments[0].us);
     try testing.expect(fromSjon.conductedPlaceholder(&res.doc));
+}
+
+test "derive: a conductor nobody can produce times the document by the placeholder, in all three layers" {
+    // The three derivations of the conductor tables disagreed here. The
+    // load and `mapOf` fell back to the document's OWN points when it
+    // had any, while `conduct` took the placeholder — so the edit engine
+    // (planning against `Result.map`) and the playhead and the exporters
+    // (reading `Derived.map`) read two maps of one document, and the
+    // load's `anchor_unavailable` ("every position is the placeholder's
+    // 120 quarter notes per minute") was false. Plans 02 and 03 decide
+    // it: a conducted document's own points are `conductor_conflict`,
+    // one owner of time, so they never time it — the conductor does, or
+    // the placeholder stands in for it and says so.
+    const gpa = testing.allocator;
+    const sources = [_][:0]const u8{
+        // The anchor is there and its file is not.
+        \\(timeline :conductor song)
+        \\(anchor :id song :kind smf :file "x.mid")
+        \\(tempo-point :at 0q :qpm 90)
+        \\(meter-point :at 0bar :sig [3 4])
+        \\(cue :name "two" :at 2bar)
+        ,
+        // The conductor names no anchor at all.
+        \\(timeline :conductor song)
+        \\(tempo-point :at 0q :qpm 90)
+        \\(meter-point :at 0bar :sig [3 4])
+        \\(cue :name "two" :at 2bar)
+        ,
+    };
+    for (sources) |source| {
+        var res = try test_support.load(gpa, source);
+        defer res.deinit();
+        try testing.expect(res.diags.count(.conductor_conflict) == 2);
+
+        var d = try derive(gpa, &res.doc);
+        defer d.deinit();
+        var mapped = try fromSjon.mapOf(gpa, &res.doc);
+        defer mapped.deinit();
+
+        for ([_]*const TimeMap{ &res.map, &mapped, &d.map }) |m| {
+            try testing.expectEqual(@as(usize, 1), m.segments.len);
+            try testing.expectEqual(@as(f64, 500_000), m.segments[0].us);
+            try testing.expectEqual(@as(u8, 4), m.meters[0].n);
+        }
+        // `2bar` resolved on the placeholder's `[4 4]`, and the default
+        // `:length` is that same bar line in every layer.
+        try testing.expectEqual(@as(i64, 8 * Grid.TPQ), res.doc.cues[0].at);
+        try testing.expectEqual(res.map.length, mapped.length);
+        try testing.expectEqual(res.map.length, d.map.length);
+    }
 }
 
 test "derive: a conducted document with no content of its own is as long as its file" {

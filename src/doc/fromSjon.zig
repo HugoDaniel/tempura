@@ -212,6 +212,66 @@ pub fn contentEnd(doc: *const Doc.Doc) i64 {
     return end;
 }
 
+/// The points a document's map is built from, and where its conductor's
+/// own material ends — what `timeTables` answers. The slices are
+/// BORROWED: from the document, from the conductor they were read out
+/// of, or from the placeholder's static tables.
+pub const TimeTables = struct {
+    tempo: []const Doc.TempoPoint,
+    meter: []const Doc.MeterPoint,
+    /// `Conductor.end`: the other half of plan 02's `:length` default
+    /// for a conducted document. Zero for one timed by its own points or
+    /// by the placeholder.
+    end: i64 = 0,
+};
+
+/// Plan 03's placeholder: 120 quarter notes per minute in `[4 4]`, SMF's
+/// own default. `500 000` is an INTEGER, so the placeholder never forces
+/// the f64 path on a map that would otherwise be exact.
+const placeholder_tempo = [_]Doc.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
+const placeholder_meter = [_]Doc.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
+
+/// THE rule for which points time a document — plan 03's "Three
+/// conductors" in one function, which the load (`Ctx.derive`), `mapOf`
+/// and `time/derive.conduct` all call, so that one document has one map:
+///
+///   * no `:conductor`: the document's own `(tempo-point …)` and
+///     `(meter-point …)` (rule 1);
+///   * a conductor that could be produced — `cond`, from `conductorOf`
+///     (rules 2 and 3): its tables;
+///   * a conductor that could NOT be — an anchor that is absent, whose
+///     file is not in hand, or does not read — the placeholder. The
+///     document's own points never time a conducted document: they are
+///     `conductor_conflict` (plan 02: one owner of time), and the
+///     `anchor_unavailable` both layers raise says the placeholder is
+///     what every position gets.
+pub fn timeTables(doc: *const Doc.Doc, cond: ?TimeTables) TimeTables {
+    if (doc.conductor == null) return .{ .tempo = doc.tempo, .meter = doc.meter };
+    return cond orelse .{ .tempo = &placeholder_tempo, .meter = &placeholder_meter };
+}
+
+/// Plan 02's `:length` default under `tables`: `content` — the end of
+/// the last event or clip — rounded UP to a bar, and 0 for a document
+/// with none.
+///
+/// The round-up falls out of `TimeMap`'s own bar table, which appends
+/// bar starts until one lands at or past the length it was given, so
+/// the LAST entry of a probe derived over `content` is exactly that bar
+/// line. The probe's report is dropped: the map derived at the length
+/// this answers says everything the probe would, once.
+pub fn defaultLength(
+    gpa: Allocator,
+    tables: TimeTables,
+    content: i64,
+    end: TimeMap.End,
+) Error!i64 {
+    if (content <= 0) return 0;
+    var probe = try TimeMap.derive(gpa, tables.tempo, tables.meter, content, end);
+    defer probe.deinit();
+    const bars = probe.map.bars;
+    return if (bars.len == 0) content else bars[bars.len - 1];
+}
+
 /// The map a `Doc` resolves its positions against — `Result.map`, from
 /// the finished value alone.
 ///
@@ -222,25 +282,14 @@ pub fn contentEnd(doc: *const Doc.Doc) i64 {
 /// position with it, the exporters measure with it, and two copies of
 /// plan 02's `:length` rule would be two documents.
 ///
-/// It reproduces `finalMap` exactly:
-///
-///   * the CONDUCTOR's tables when the document names one and either
-///     holds its inline dump or carries the anchor's verified bytes
-///     (plan 03's rules 2 and 3, through `conductorOf`);
-///   * plan 03's placeholder — 500 000 microseconds per quarter note in
-///     `[4 4]` — when it names one and neither is in hand, so a
-///     conducted document is never told it needs a point at tick 0. The
-///     LOAD raised `anchor_unavailable` for that document already
-///     (`conductedPlaceholder`); a map is not the place to hear it
-///     twice;
-///   * otherwise the document's own `(tempo-point …)` and
-///     `(meter-point …)`;
-///   * `:length`, or `contentEnd` — the anchor's own end included —
-///     rounded UP to a bar by a probe derive.
+/// It reproduces `finalMap` exactly, because both are `timeTables` over
+/// `conductorOf`'s answer and `defaultLength` over `contentEnd` and the
+/// conductor's own end.
 ///
 /// The conductor's own diagnostics are dropped: a caller holding a `Doc`
 /// has already been handed them by the load that produced it, and a map
-/// is not the place to hear them twice.
+/// is not the place to hear them twice. So is `anchor_unavailable` for
+/// a placeholder (`conductedPlaceholder`), which the load raised.
 ///
 /// Caller releases with `map.deinit()`.
 pub fn mapOf(gpa: Allocator, doc: *const Doc.Doc) Error!TimeMap.TimeMap {
@@ -249,25 +298,11 @@ pub fn mapOf(gpa: Allocator, doc: *const Doc.Doc) Error!TimeMap.TimeMap {
     defer if (cond) |*c| c.deinit();
     if (doc.conductor) |id| cond = try conductorOf(gpa, doc, id, doc.conductor_bytes);
 
-    const seeded_tempo = [_]Doc.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
-    const seeded_meter = [_]Doc.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
-    const tempo: []const Doc.TempoPoint = if (cond) |c|
-        c.tempo
-    else if (doc.conductor != null and doc.tempo.len == 0) &seeded_tempo else doc.tempo;
-    const meter: []const Doc.MeterPoint = if (cond) |c|
-        c.meter
-    else if (doc.conductor != null and doc.meter.len == 0) &seeded_meter else doc.meter;
+    const tables = timeTables(doc, if (cond) |*c| c.tables() else null);
+    const length = doc.length orelse
+        try defaultLength(gpa, tables, @max(contentEnd(doc), tables.end), doc.end);
 
-    const length = doc.length orelse len: {
-        const content = @max(contentEnd(doc), if (cond) |c| c.end else 0);
-        if (content <= 0) break :len 0;
-        var probe = try TimeMap.derive(gpa, tempo, meter, content, doc.end);
-        defer probe.deinit();
-        const bars = probe.map.bars;
-        break :len if (bars.len == 0) content else bars[bars.len - 1];
-    };
-
-    var final = try TimeMap.derive(gpa, tempo, meter, length, doc.end);
+    var final = try TimeMap.derive(gpa, tables.tempo, tables.meter, length, doc.end);
     final.diags.deinit();
     return final.map;
 }
@@ -434,17 +469,12 @@ const Ctx = struct {
     /// `:length` default rule.
     max_end: i64 = 0,
 
-    /// The CONDUCTOR's tables, built out of the inline tier the
+    /// The CONDUCTOR's tables and where its material ends, copied into
+    /// the document's arena out of the tier or the verified bytes the
     /// `(timeline :conductor …)` names (plan 03, "Three conductors").
-    /// `cond_live` is what says they were built at all: a conducted
-    /// document whose anchor carries no dump has nothing to read and
-    /// falls back to the placeholder in `derive`.
-    cond_tempo: []Doc.TempoPoint = &.{},
-    cond_meter: []Doc.MeterPoint = &.{},
-    cond_live: bool = false,
-    /// Where the conductor's own material ends — `max_end`'s other half
-    /// for an anchored document (see `Conductor.end`).
-    cond_end: i64 = 0,
+    /// Null when there is none to read, and `timeTables` then says what
+    /// times the document instead.
+    cond: ?TimeTables = null,
 
     fn emit(
         self: *Ctx,
@@ -642,7 +672,7 @@ const Ctx = struct {
         try self.conductorTables(&doc);
 
         // ---- the provisional map, and everything that resolves on it ----
-        var provisional = try self.derive(0);
+        var provisional = try self.derive(&doc, 0);
         self.setMap(provisional.intoMap());
         defer self.dropMap();
 
@@ -673,50 +703,29 @@ const Ctx = struct {
     /// diagnostics are forwarded: a defect in the tempo table is
     /// reported once, not once per derive.
     fn finalMap(self: *Ctx, doc: *const Doc.Doc) Error!TimeMap.TimeMap {
-        const length = doc.length orelse len: {
-            // A conducted document's events are its ANCHOR's, so the
-            // file's own end counts alongside what the document placed
-            // (`Conductor.end`). `time/derive.zig` adds the same two
-            // terms, and its agreement test pins that the two layers
-            // give one document one map.
-            const content = @max(self.max_end, self.cond_end);
-            if (content <= 0) break :len 0;
-            var probe = try self.derive(content);
-            defer probe.deinit();
-            const bars = probe.map.bars;
-            break :len if (bars.len == 0) content else bars[bars.len - 1];
-        };
+        // A conducted document's events are its ANCHOR's, so the file's
+        // own end counts alongside what the document placed
+        // (`Conductor.end`) — the same two terms `mapOf` and
+        // `time/derive.zig` add, through the same `defaultLength`.
+        const tables = timeTables(doc, self.cond);
+        const length = doc.length orelse
+            try defaultLength(self.gpa, tables, @max(self.max_end, tables.end), doc.end);
 
-        var final = try self.derive(length);
+        var final = try self.derive(doc, length);
         defer final.diags.deinit();
-        for (final.diags.items()) |d| {
-            try self.diags.add(d.code, d.severity, d.span, "{s}", .{d.message});
-        }
+        try self.diags.extend(final.diags.items());
         return final.map;
     }
 
-    /// `TimeMap.derive` over the document's own points.
-    ///
-    /// With a `:conductor` and no points of its own, the tables are
-    /// SEEDED with 120 quarter notes per minute in `[4 4]`: plan 03 says
-    /// the anchor conducts such a document, so its own map is a
-    /// placeholder until the anchored half reads one — and a placeholder
-    /// must not report the "needs a point at tick 0" defect that having
-    /// a conductor is precisely the answer to.
-    fn derive(self: *Ctx, length: i64) Error!Derived {
-        const seeded_tempo = [_]Doc.TempoPoint{.{ .tick = 0, .tempo = .{ .us = 500_000 } }};
-        const seeded_meter = [_]Doc.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
-        // The CONDUCTOR's tables win when there are any: an anchored
-        // document's positions resolve against the file's own time, not
-        // against the placeholder a conductorless one is seeded with.
-        const tempo: []const Doc.TempoPoint = if (self.cond_live)
-            self.cond_tempo
-        else if (self.conductor != null and self.tempo.len == 0) &seeded_tempo else self.tempo;
-        const meter: []const Doc.MeterPoint = if (self.cond_live)
-            self.cond_meter
-        else if (self.conductor != null and self.meter.len == 0) &seeded_meter else self.meter;
-
-        const res = try TimeMap.derive(self.gpa, tempo, meter, length, self.end);
+    /// `TimeMap.derive` over the points `timeTables` says time `doc`:
+    /// the conductor's once `conductorTables` has read them, the
+    /// placeholder for a conducted document with none to read — which
+    /// is also why such a document is never told it needs a point at
+    /// tick 0, the defect having a conductor is precisely the answer
+    /// to — and the document's own otherwise.
+    fn derive(self: *Ctx, doc: *const Doc.Doc, length: i64) Error!Derived {
+        const tables = timeTables(doc, self.cond);
+        const res = try TimeMap.derive(self.gpa, tables.tempo, tables.meter, length, self.end);
         return .{ .map = res.map, .diags = res.diags };
     }
 
@@ -1144,10 +1153,11 @@ const Ctx = struct {
         // Into the DOCUMENT's arena: the tables outlive the derivation
         // that made them, because every position in the document
         // resolves against them.
-        self.cond_tempo = try self.arena.dupe(Doc.TempoPoint, built.tempo);
-        self.cond_meter = try self.arena.dupe(Doc.MeterPoint, built.meter);
-        self.cond_live = true;
-        self.cond_end = built.end;
+        self.cond = .{
+            .tempo = try self.arena.dupe(Doc.TempoPoint, built.tempo),
+            .meter = try self.arena.dupe(Doc.MeterPoint, built.meter),
+            .end = built.end,
+        };
     }
 
     // ---- sections and cues --------------------------------------------
@@ -1936,10 +1946,18 @@ pub const Conductor = struct {
     /// takes it out and leaves null behind.
     rowmap: ?itf.walk.RowMap = null,
 
+    /// Frees both tables, the report and the walk (when it is still
+    /// here); every slice read out of this conductor dies with it.
     pub fn deinit(self: *Conductor) void {
         if (self.rowmap) |*r| r.deinit();
         self.diags.deinit();
         self.arena.deinit();
+    }
+
+    /// The tables `timeTables` takes, borrowed from this conductor's
+    /// arena: valid until `deinit`.
+    pub fn tables(self: *const Conductor) TimeTables {
+        return .{ .tempo = self.tempo, .meter = self.meter, .end = self.end };
     }
 };
 
