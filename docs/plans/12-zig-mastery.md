@@ -121,6 +121,11 @@ wrap, the docs) ran last on `main`. Each task is one commit shape:
 
 ## Follow-ups (not in this wave)
 
+Closed by the second wave (below): the `lint` verb (`tools/lint.zig`, in `verify`), the two
+fixtures over 70 lines, `sniffSequencerSpecific` (`smf/Sequence.zig` owns the sniffing),
+`smf.zig`'s `Note`, and both property tests. Still open: the `tpr_build` ruling, widened in the
+second wave's "Filed" list.
+
 - **A `tools/zt lint` verb** that fails on a function over 70 lines or a line over 100
   columns outside the two exemptions (a test's name, a raw `\\` line of test data), so the
   rules are gates rather than reviews. Written in Zig, per the set's "scripts in Zig" rule.
@@ -292,3 +297,79 @@ accepted action lists, with a seed per defect above; `lint` joins `verify`.
 - **`tools/*.sh` stay shell.** The set says scripts are Zig; `tools/zt` is the lock around every
   `zig` invocation and cannot be one, and the other five are glue shared with pacer's family, so
   porting them is a family decision. `tools/lint.zig` is Zig, as new tooling is.
+- **Two wrong answers inside the easing-hint feature** (found while making the hints one
+  owner, E1): `export/lanes.verifiedSpans` skips any hint that covers exactly two steps, and a
+  segment tempura rendered itself IS two steps, so its own hint is never spent and the score
+  prints a hold stair; and `residue/reconcile.verifiedHints` takes each hint's start from the
+  previous RECORDED segment, but `render_smf` records only the eased ones and the record holds
+  end ticks only, so the first eased segment is never checked and one after a linear or hold
+  segment is checked over too wide a window. The second needs the residue's lane record to
+  carry a start tick — a wire change (plan 04, `docs/residue.md`), so a ruling. The new
+  `corpus/residue-stale-curve/` golden is written around both (its kept hint spans more than
+  two steps) and will move when they are fixed.
+- **An IT bound lane's content past the grid ceiling is dropped silently** (`derive.boundIt`,
+  `itOnset`) — the SMF side now says `tick_overflow` (D4); the IT side has the same shape and
+  no diagnostic. Small, same fix.
+- **`insert-tempo`'s wall-clock retime reads the f64 `:qpm`** while the document stores the
+  f32 one; the difference is below a tick in every case tried, but it is two spellings of one
+  number.
+- **No `tpr_*` export reaches `edit.inlineAnchor`** — the 26-export set is append-only, so a
+  27th (`tpr_inline`) is a deliberate addition, not a fix; a wasm host that wants to inline
+  today gets the plan through `tpr_plan` with an action list it built itself.
+- **A host may plan and apply over a document that loaded with errors** — restated: the CLI's
+  `blocksEdit` now lives in `edit/` (`edit.blocksEdit`, E2) and the wasm still does not apply
+  it, by design until ruled.
+
+### Progress log
+
+- 2026-09-22 — **Round 1 landed on `main`**: parts C (`8ece7c3`), A (`be06c44`) and B, one
+  agent each in its own worktree, every branch rebased and fast-forwarded behind `tools/zt
+  test` and `tools/zt lint`; then the fuzz gate's extension (`60ae12d`) and `lint` joining
+  `verify` (`f1978cd`). A and B were cut off mid-task by an API overload and resumed from
+  their transcripts with their worktrees intact — no work was lost or redone.
+- 2026-09-28 — **Round 2 landed** (`fb39e30`): D took the seams the reviews had left
+  (`apply`'s ceiling, the f32 infinity, `insert-tempo`'s manifest range, `smfToTicks`'
+  overflow flag, `usOf` as one owner, the `Hasher`) and E the host parity (`Dumped.easeHints`,
+  `edit.planJson`, `pipeline.tierText`, and `tpr_exportScore` spending the hints it dropped).
+  `tools/zt verify` with the node leg and `tools/zt fuzz` are green on the combined tree.
+
+  Measured against the wave's first reading:
+
+  | | First reading (`9c787a9`) | After (`fb39e30`) |
+  |---|---|---|
+  | `tools/zt lint` findings | 156 | 0 — and a gate in `verify` |
+  | undefined behaviour reachable from a host's input | 14 named by the reviews; 6 more the fixes uncovered | none known; each has a test that drove it and a fuzz seed |
+  | rules with more than one owner | conductor map ×3 (disagreeing), clip window ×4, residue head ×5, address keys ×3 (drifted), sniffing ×2, `copyEvent` ×2, `easeAt` ×2, `sceneName` ×2, the 7-bit quantizer ×2, ease hints ×2 (+ the wasm ×0), plan-from-JSON ×3, severity word ×2, magic sniff ×2, the diagnostic-copy loop ×11 | one each |
+  | IO inside the core | `Resolver.Fs` | none — `FsStore.zig` at the border |
+  | structs retaining the caller's `gpa` | `Dumped`, `Report`, `Built`, `locate.Map` | none (`reconcile.Hasher` documented as a transient worker) |
+  | corpus cases | 82 | 83 (`residue-stale-curve`) |
+  | the wasm | 1,381,255 bytes (92%) | 1,395,245 bytes (93%) |
+  | commits | | 88: 39 `fix`, 30 `refactor`, 8 `docs`, 5 `test`, 3 `feat`, 2 `style`, 1 `build` |
+
+  **The gate proved itself before the fixes.** The extended fuzz harness, run against the
+  round-1 tree before A's and B's branches landed, failed at `snap`'s ceiling and crashed in
+  `apply` on a non-finite action — the two paths the reviews had named as unfuzzed — and
+  passes after. Every defect's input is now one of its seeds.
+
+  **Where a reviewer was wrong, and what was done instead** (the reports were verified against
+  the code before acting, as asked): a keyframe `:value 1e999` was NOT loaded silently — SJON's
+  `:repr f32` check diagnoses it — but the reader kept the infinity in the document, which is
+  the defect fixed (`narrow.f32OrZero`, and `Doc.invariants` asserts every keyframe finite);
+  `parseNoteName` bounds octaves to -2..10, not -1..9, because `"B#-2"` is a valid spelling;
+  `skeleton.smfTier` stops at the 65,535th track with no warning of its own (`smf/read` has
+  said `smf_ntrks_mismatch`); a `.mid` has no content end to bound a curve's samples by, so a
+  linear segment gets at most 65,536, evenly, with `render_inexact`; and SJON's `applyEdits`
+  cannot be checked between splices, so `apply` runs one `applyEdit` at a time and checks the
+  length after each.
+
+  **The invariants that changed:** `Doc` — every keyframe value and `:range` finite; every
+  bound SMF event's `:at ≥ 0`. `Plan` — an accepted plan applies (`checkApply` in the fuzz
+  gate), and its actions are JSON (`NotFinite` is a refusal). `Sequence` — a set-tempo is at
+  most `max_tempo_us` (24 bits). `Module` — a builder's counts saturate at u16.
+
+- 2026-09-28 — **The reviews, as a method.** Three read-only reviewers, one per layer, each
+  told what was ruled out (the declined rules, the lint's own findings) and asked for
+  concrete, verifiable defects in five categories, found in one afternoon what a whole wave
+  of mechanical rules had not: the arithmetic on a saturated number, the count that becomes
+  a u16, the rule written three times. The lint keeps the mechanical half; the review is the
+  other half, and the next one starts from this plan's "Filed" list.

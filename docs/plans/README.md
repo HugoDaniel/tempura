@@ -107,7 +107,7 @@ motivates the vocabulary, the batida order.
 | [09-conformance.md](09-conformance.md) | oracles, the golden corpus, round-trip and residue gates, determinism, licenses | Active |
 | [10-hosts-and-cli.md](10-hosts-and-cli.md) | the `tempura` CLI, wasm exports, the npm package, pstudio integration, the payload kind | Active |
 | [11-demos-and-milestones.md](11-demos-and-milestones.md) | E0–E4, the spike, demos, sequencing against the family, effort, decision log | Active |
-| [12-zig-mastery.md](12-zig-mastery.md) | the Zig mastery audit: rulings on assertions, decomposition, allocator names, bounded loops, OOM sweeps, the IO border; the wave's log | Active |
+| [12-zig-mastery.md](12-zig-mastery.md) | the Zig mastery audit: rulings on assertions, decomposition, allocator names, bounded loops, OOM sweeps, the IO border; `tools/zt lint` as the gate; both waves' logs and the rulings filed for Hugo | Active |
 
 Statuses: **Active** (guiding current work), **Draft** (proposed, still moving), **Reference**,
 **Complete**. When a plan completes, mark it in its header and in this table. Decisions changed

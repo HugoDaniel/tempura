@@ -141,7 +141,8 @@ distinct instance; `tools/zt test` runs both roots.
 | Command | Purpose |
 |---|---|
 | `tools/zt test` | all inline tests (root.zig forces submodule discovery); `-Dtest-root=<path-relative-to-src>` for one subtree |
-| `tools/zt verify` | the whole gate: test + the CLI goldens + native corpus + `node --test` + the wasm size budget + the pacer-schema drift check + the generated-docs drift check |
+| `tools/zt verify` | the whole gate: test + lint + the CLI goldens + native corpus + `node --test` + the wasm size budget + the pacer-schema drift check + the generated-docs drift check |
+| `tools/zt lint` | plan 12's mechanical rules over every `.zig` file (`tools/lint.zig`'s header lists them); `verify` runs it |
 | `tools/zt corpus` | the native golden gate; `-- --update` regenerates, diff reviewed |
 | `tools/zt fixtures` | re-derive `corpus/*/song.{mid,it}` from the cores' `Builder`s (the bytes are committed; `git diff` shows drift) |
 | `tools/zt landing` | regenerate `npm/tempura/test/fixtures`; `verify` runs the same tool with `--check` |
@@ -253,9 +254,19 @@ does not. To update it, re-copy the file and review the diff.
 ## Zig mastery (plan 12)
 
 The house discipline beyond the conventions above is the Zig mastery set at
-`~/llm/mastery/zig/` (`00-INDEX.md` and its documents), audited in
+`~/Development/specs-llm/mastery/zig/` (the family's docs spell it
+`~/llm/mastery/zig/`; `00-INDEX.md` and its documents), audited in
 `docs/plans/12-zig-mastery.md` — its table says what is met, what is adopted and
-what is declined with the reason. The rules a reviewer applies:
+what is declined with the reason. The rules a reviewer applies — and the
+mechanical half of them is a GATE, not a review: `tools/zt lint` (`tools/lint.zig`,
+over `std.zig.Ast`, part of `verify`) fails on a function past 70 lines, a line
+past 100 columns, an allocator not named `gpa`/`arena`, a `catch unreachable`
+without its proof, a `while (true)` naming no bound, recursion that is not SJON's
+depth-bounded walk, IO or a container-level `var` in the core, a managed `std`
+container, and a `pub fn`/`export fn` without `///`. Test code (a `test` body, a
+test-only file, a helper only tests reach) is exempt where the rule says so. There
+is no allowlist: a finding is fixed, or the rule is changed in the tool with its
+reason.
 
 - **The seams carry the assertions.** `std.debug.assert` is for what OUR code
   establishes, never for a byte or a form a reader has not diagnosed. In
@@ -268,8 +279,12 @@ what is declined with the reason. The rules a reviewer applies:
   only the reader guarantees is a separate postcondition at the end of the
   reader. Leaf math carries O(1) pre- and post-conditions. `tools/zt fuzz`,
   which drives arbitrary bytes and text through every reader and on through
-  `derive`, the playhead and the exporter, is the proof no assertion is
-  reachable from input.
+  `derive`, the playhead, `snap`, both wire blobs, the exporter, `build` and
+  `apply`, is the proof no assertion is reachable from input — and a defect
+  found anywhere else joins its seeds. The arithmetic is the other half: a
+  number from input is clamped or saturated BEFORE it is subtracted or
+  narrowed (`clamp(x, 1, 16) - 1`, never `clamp(x - 1, 0, 15)`), and a count
+  that becomes a `u16` on a wire or in a header is capped where it is read.
 - **Functions ≤ 70 lines, lines ≤ 100 columns.** The parent keeps the control
   flow; the leaves compute and return. A condition is never split inside its own
   parentheses — name the sub-expression in a local. The only lines past 100 are
@@ -289,9 +304,20 @@ what is declined with the reason. The rules a reviewer applies:
   found eight of the wave's fifteen defects; a new entry point gets one.
 - **IO at the borders.** The core (`smf/`, `itf/`, `doc/`, `time/`, `edit/`,
   `export/`, `residue/`) reaches no filesystem, clock, process or thread outside
-  a `test` block; a `std.Io.Writer` there is a formatting sink over a caller's
-  buffer, not I/O. The borders are `cli/`, `corpus_runner.zig`, `tools/` and the
-  static zones of `wasm_entry.zig`.
+  test code; a `std.Io.Writer` there is a formatting sink over a caller's
+  buffer, not I/O. The core states what it needs as an interface
+  (`doc/Resolver.zig`'s `Resolver`) and a border implements it: `FsStore.zig`
+  reads a disk for the native hosts, `Resolver.Memory` holds what a wasm host
+  attached. The borders are `cli/`, `corpus_runner.zig`, `FsStore.zig`, `tools/`
+  and the static zones of `wasm_entry.zig` — and a verb there reads, calls ONE
+  core function, and writes: computation a second host would need
+  (`edit.inlineAnchor`, the ease hints, planning an operation) lives in the core.
+- **One owner per rule.** A rule written twice drifts — the second wave found
+  the conductor map derived three times and disagreeing, the clip window four
+  times, the residue head five. A second host, a second reader or an import
+  cycle is a reason to MOVE the rule (a std-only file below both, like
+  `Easing.zig`), never to copy it; a sub-producer's report is folded in with
+  `Diag.List.extend`/`extendAt`, never a hand-written loop.
 
 ## Licenses
 

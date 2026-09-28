@@ -431,6 +431,27 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
   the score's bpm spelling. The wire surfaces, the corpus and the CLI goldens are
   byte-identical, and the wasm is 10 KB smaller (93% of its ceiling to 92%). Plan 12 lists the follow-ups; one is a ruling for plan 10 — `tpr_build`
   builds a document that loaded with errors where the CLI refuses.
+- 2026-09-22 → 09-28 — **The Zig mastery wave, second pass** ([12](12-zig-mastery.md), "The
+  second wave"): the same ask a day later, read against the set with fresh eyes. The first
+  wave's table had not survived a mechanical reading — a function had grown back past 70
+  lines, `build.zig` was never measured, and a filesystem reader sat in `doc/` — so the rules
+  became a gate first: `tools/zt lint` (`tools/lint.zig`, over `std.zig.Ast`) fails `verify`
+  on any of them, no allowlist. Then three read-only reviews, one per layer, found what the
+  rules could not: undefined behaviour in the ReleaseSmall wasm reachable from a host's input
+  in twenty places (a 70,000-byte cue name through `tpr_timeline`, `tpr_snap(maxInt)`,
+  `revalue 1e39` meeting an `unreachable` in `apply`, `:channel -2^63` in a message tail,
+  65,536 orders, a 21 GB pattern…), the conductor map derived THREE times and disagreeing on
+  a document whose conductor is absent, the clip window four times, the residue head five,
+  and the ease hints the CLI spends that the wasm dropped — so `tpr_loadFile` +
+  `tpr_exportScore` and `tempura export-score` gave different scores for a stale curve lane.
+  88 commits (39 fixes, each with the test that drove its input, and a fuzz seed): every rule
+  has one owner, IO is at the borders (`FsStore.zig`), no struct retains the caller's `gpa`,
+  and the fuzz gate drives `snap`, both wire blobs, `build` and `apply` — run on the tree
+  before the fixes it failed where the reviews said it would. The wire surfaces, the corpus
+  and the CLI goldens are byte-identical (one corpus case added, `residue-stale-curve`); the
+  wasm is 1,395,245 bytes (93%). Rulings for Hugo in plan 12's "Filed" list: two snap
+  implementations that disagree, a host planning over a document the CLI refuses to edit,
+  two wrong answers inside the hint feature (one a wire change), a 27th export.
 
 ## Status board
 
