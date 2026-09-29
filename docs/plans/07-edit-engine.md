@@ -1,6 +1,8 @@
 # 07 — The Edit Engine: Operations as SJON Edit Actions
 
-Status: Draft — 2026-09-19. Part of the [tempura plan set](README.md). Owns **P105**
+Status: Active — 2026-09-19; Draft until 2026-09-29 (every operation in the table is
+implemented, `src/edit/Op.zig`, and pinned by the 26 `corpus/edit-*` cases). Part of the
+[tempura plan set](README.md). Owns **P105**
 (`src/edit/`).
 
 A timeline editor is a set of operations: move this note, quantise that selection, split a
@@ -143,3 +145,8 @@ audible).
   column). The plan refuses rather than dropping the effect; the editor can quantise to rows
   instead. A `:dur` on an IT note is not writable at all (the end is the next cell); `resize`
   on an IT lane is `edit_inexact` with the reason.
+
+- **Drift, read against the tree on 2026-09-29 (`cfe44a0`).** There is no `Edit.Code`: the
+  `edit_*` codes are variants of the one `Diag.Code` (`src/Diag.zig:103-110`), by
+  [11](11-demos-and-milestones.md)'s ruling 5 (one shared enum, seeded whole). The
+  diagnostics table above reads the same with that substitution.

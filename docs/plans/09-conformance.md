@@ -130,3 +130,21 @@ opens in each DAW.
   corpus manifest until one exists.
 - **DOSBox and DAW checks are manual.** They gate tags, not commits; the checklist records
   the version and the outcome each time.
+
+- **Drift, read against the tree on 2026-09-29 (`cfe44a0`).** Three things the text above
+  says exist and the scripts say do not, in their own words. (1) `tempura inspect --csv` and
+  the midicsv row comparison: no `--csv` flag, and `conformance/conform.sh:20-27` says "NOTHING
+  IMPLEMENTS IT" — the midicsv leg round-trips `midicsv → csvmidi` (`:79-97`) and compares
+  nothing of tempura's; (2) the wiki cases' "row maps equal": `conform.sh:122-130` counts the
+  fetched files and defers to "the conform build verb", which only invokes the script
+  (`build.zig:538-541`); (3) `unverified-by-oracle` marks nothing in `corpus/`, `schema/` or
+  `src/`. [11](11-demos-and-milestones.md)'s 2026-09-21 entry ("`conform` runs the oracle
+  SCRIPT and not plan 09's comparison") filed (1) and (2); this note adds (3) and the
+  `--csv` flag. Also dated: the harness has no `timing` directive — its forms are read,
+  roundtrip, walk, write, times, at, snap, plan, export-score, build, dump
+  (`schema/tempura-corpus.sjon:94-148`) — so the 2026-09-21 correction above (a `timing`
+  collision) was overtaken the day it was written (`tempura-corpus.sjon:20`; CLAUDE.md gives
+  the current reason the harness stays out of the project file); no `diag-*` case was made
+  (the audit script covers the codes instead); `verify` also runs lint, the CLI goldens, the
+  wasm budget and the landing check (`build.zig:56-70`); pacer's dev dependency is
+  `file:../../../pacer/npm/pacer`.

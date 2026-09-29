@@ -267,3 +267,14 @@ fresh module (header defaults: speed 6, tempo from segment 0 as an integer 32..2
   optional `--sample-with-pacer` flag recorded as a candidate, never a dependency.
 - **Simplification changes the music** for bound lanes above the CC quantum. The default is
   the quantum; the header comment states the tolerance used.
+
+- **Drift, read against the tree on 2026-09-29 (`cfe44a0`).** "Three consumers, three
+  outputs" is two: `TimingData` and `export/timing.zig` were dropped with pstudio on
+  2026-09-20 ([11](11-demos-and-milestones.md), ruling 2) and nothing in `src/` spells them;
+  the "`TimingData` for pstudio" section and phase 4's green list stand as the E0 design. The
+  renderer knobs spelled as flags — `--cc-rate` (a 32nd), `--voices` (4), `--fx "Z"` — are
+  `render_smf.Options.cc_rate` (`src/export/render_smf.zig:97-115`), `render_it.Options.voices`
+  and `.fx` (`src/export/render_it.zig:81-85`) at their defaults on every CLI and wasm path;
+  `Args.zig` never grew them (`:273-310`), so a document that needs one today cannot ask. Each
+  is one `Args.zig` row plus a golden; plan 13's `--pattern-per-section` is the first render
+  flag and the template. pacer's dev dependency is `file:../../../pacer/npm/pacer`.

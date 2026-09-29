@@ -156,3 +156,11 @@ the time map without a file, the edit engine without an editor, the exporter wit
   risks that follow from building the sibling sets' halves here, one owner per manifest and
   per format core, and the walk's missing Zig oracle, live in [01](01-part-map.md) and
   [09](09-conformance.md).)
+
+- **Drift, read against the tree on 2026-09-29.** "pstudio draws it" and "pstudio's
+  `TimingData`" above predate the 2026-09-20 ruling that pstudio is not a host
+  ([11](11-demos-and-milestones.md), ruling 2): there is no `TimingData` in `src/`, and the
+  export is score text and the two renderers (`src/export/export.zig`). The hosts that count
+  are the CLI, `npm/tempura` over `tempura.wasm`, expansible-player's payload kind and
+  animader's piece format; the picture is drawn by whatever pacer drives, which for plan 13 is
+  a pngine canvas.

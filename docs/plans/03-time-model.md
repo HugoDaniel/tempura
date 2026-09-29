@@ -239,3 +239,16 @@ The wasm exports mirror these ([10](10-hosts-and-cli.md)).
   `[3 12]` (12 rows per measure, 3 per beat) gives `[4 4]` in quarters only if the rows-per-beat
   matches the speed's quarter; the derivation states the convention and the residue overrides
   it when a real meter map exists.
+
+- **Drift, read against the tree on 2026-09-29 (`cfe44a0`).** `TimeMap` has no `beatOf`:
+  `barOf` answers `{bar, beat, sub_ticks, meter}` (`src/time/TimeMap.zig:299-316`) and the
+  beat is its field. The "lint test greps for `@floor` and `@round` outside those two
+  functions" does not exist: `tools/lint.zig`'s rules (`:57-70`) name no such check, and the
+  two builtins sit at thirteen production sites (`export/pos.zig:117, 314, 365`,
+  `export/quantize.zig:27`, `export/render_it.zig:853`, `export/render_smf.zig:748`,
+  `edit/ops_quantize.zig:39`, `edit/ops_bound.zig:1831`, `doc/toSjon.zig:572, 593`,
+  `residue/it.zig:662`, `corpus_runner.zig:747`), each on a documented seam or a printer.
+  Whether the rule should become a lint (listing those sites as its allowlist, which plan 12's
+  "no allowlist" ruling forbids) or the sentence should say "each seam is named in its file's
+  header" is filed for the user; the determinism gate today is the corpus and the wasm parity
+  walk, not a grep.

@@ -1,6 +1,8 @@
 # 04 — The Residue: a Timeline Inside a `.mid` or a `.it`
 
-Status: Draft — 2026-09-19. Part of the [tempura plan set](README.md). Owns **P104**
+Status: Active — 2026-09-19; Draft until 2026-09-29 (the payloads froze at E3, closed
+2026-09-21; `docs/residue.md` is the statement of record). Part of the
+[tempura plan set](README.md). Owns **P104**
 (`src/residue/`). The payload formats **freeze at E3**.
 
 The user's idea, stated once: **the SJON document is the truth; a `.mid` or a `.it` is a
@@ -372,3 +374,22 @@ score. "Reconciliation must preserve every address belonging to the lane."
   which keys on `restored_native` — leaves every channel of a bound lane in the
   tier for it to read. `residue_stale` names the set (`track 2 ch 1,2`).
   `corpus/residue-stale-lane-partial/` pins it; `docs/residue.md` states it.
+
+### 2026-09-29 — two divergences from `docs/residue.md`, dated here
+
+Read against the tree at `cfe44a0`. `docs/residue.md` stands in both; the prose above is the
+E0 design and is left as written.
+
+- **The `TMPU` chunk's framing.** "The trailing chunk" above says `'TMPU'` then `len u32 LE`
+  then records in the SMF carrier's `ver kind seq total body` framing. What is written is one
+  `len u32 LE` per record after each record's eight-byte envelope —
+  `7D 74 65 6D ver kind seq total len u32 LE <body[len]>` (`src/residue/it.zig:18, 156, 234`;
+  `docs/residue.md`, "The `TMPU` chunk"). The IT lane hash's scope was named as the one live
+  divergence; this is a second, in the framing, and the code and the statement agree with each
+  other.
+- **The tail's lane line.** "(name, kind, address, target, range, default easing)" above: the
+  writer emits `:name`, `:kind`, `:target` when it differs, `:from` with the address for a
+  BOUND lane, `:range`, and the `:query`/`:expr` source (`src/residue/it.zig:519-549`), and no
+  easing — a lane has no easing key. The tail also opens with an `(anchor … :file "self")`
+  line the summary above omits. Plan 13 (P110) adds the rendered address to a native lane's
+  line; until then a tail-only dump restores such a lane as an empty declaration.

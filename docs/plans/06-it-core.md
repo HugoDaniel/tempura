@@ -237,3 +237,9 @@ studio shows as the tracker position ([03](03-time-model.md)).
 - **Velocity from the volume column** is a convention, not IT semantics (the effective volume
   involves instrument and sample volumes tempura does not read). It is what a pacer trigger
   lane's sibling velocity track receives, documented as such in the generated docs.
+
+- **Drift, read against the tree on 2026-09-29 (`cfe44a0`).** "`--loops N` and `--max-rows`
+  bound it for the CLI" above: neither flag exists (`src/cli/Args.zig:273-310`). The bounds
+  are `walk.Options.max_rows` and `loops` (`src/itf/walk.zig:64-71`, whose comment quotes this
+  sentence) at their defaults on every CLI and wasm path; `walk-runaway` in the corpus pins the
+  default's behaviour. A flag is one `Args.zig` row when a document wants it.

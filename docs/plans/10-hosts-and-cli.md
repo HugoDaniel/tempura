@@ -137,3 +137,18 @@ studio can reopen it. Registered when expansible-player X1 assigns the envelope.
   document small when only the timeline tier is being edited.
 - **`tpr_loadFile` runs both readers inside the studio's wasm** on every dialog open; a
   pathological file is bounded by `tpr_fileCap`.
+
+- **Drift, read against the tree and the sibling set on 2026-09-29 (`cfe44a0`; `~/llm`
+  `23ef69d`).** Two threads. **pstudio and `timing`:** ruled out on 2026-09-20
+  ([11](11-demos-and-milestones.md), ruling 2), so the `timing` verb, `tpr_timing`, the npm
+  `timing()` and the three pstudio touch points above do not exist; the CLI's eleven verbs are
+  `src/cli/Args.zig:34-46`, the 26 exports `src/wasm_entry.zig` (CLAUDE.md lists them), and
+  the npm surface `npm/tempura/src/index.js` (load, instantiate, reload, loadFile,
+  attachAnchor, timeline, at, atTick, snap, plan, apply, exportScore, build). There is no
+  `wasm/` directory: the entry is `src/wasm_entry.zig`. **The payload kind:** "reserved in
+  `docs/payload-kinds.md` (expansible-player 02's registry)" is not so — that registry
+  (`02:41-57`, "the whole inventory") lists no `TMPU` and the set never names tempura; the
+  reservation exists in this plan alone and the cross-set ask is still to file. X1 ships the
+  `PNGB`, `PNGF`, `SNTU` and `META` handlers only (`02:59`); the `score` handler that mounts
+  pacer is checkpoint 05.C3 at X4 (`05:118-120`, `07:58-68`); the envelope's shape is 02's
+  and does not wait on a milestone. `demos/e4-packed/README.md` carries the same correction.

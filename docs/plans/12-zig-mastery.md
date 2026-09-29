@@ -1,5 +1,8 @@
 # 12 — Zig Mastery: the audit and its rulings
 
+Status: Active — 2026-09-21 (line added 2026-09-29; the README table said Active with no header
+line here). Part of the [tempura plan set](README.md).
+
 The house discipline tempura is held to, beyond `CLAUDE.md`'s conventions, is the Zig mastery
 set at `~/llm/mastery/zig/` (`00-INDEX.md` and its ten documents, verified against zig 0.16.0
 and TigerBeetle on 2026-05-06). This plan is the audit of the tree against that set, dated
@@ -373,3 +376,11 @@ accepted action lists, with a seed per defect above; `lint` joins `verify`.
   of mechanical rules had not: the arithmetic on a saturated number, the count that becomes
   a u16, the rule written three times. The lint keeps the mechanical half; the review is the
   other half, and the next one starts from this plan's "Filed" list.
+
+- **Dated 2026-09-29.** The lint's rule list above (and CLAUDE.md's) omits one rule the tool
+  enforces: a file without a `//!` module header (`tools/lint.zig:10`, rule `header`, in the
+  `Rule` enum at `:57-70`). Everything else in "Follow-ups" and "Filed" re-checked as stated
+  on 2026-09-29: `sniffSequencerSpecific` gone, `smf.zig` re-exporting `Note`, the
+  `random_seed` property tests in `Pos.zig` and `simplify.zig`, `wasm_entry.zig:861` still
+  not applying `blocksEdit`, the IT-side overflow in `derive.boundIt`/`itOnset` still without
+  a diagnostic, the wasm at 1,395,245 bytes, 83 corpus cases.

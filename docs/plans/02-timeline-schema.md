@@ -1,6 +1,8 @@
 # 02 — The `tempura` SJON Vocabulary
 
-Status: Draft — 2026-09-19. Part of the [tempura plan set](README.md). Owns **P99**
+Status: Active — 2026-09-19; Draft until 2026-09-29 (the manifest is implemented, generated
+into `docs/timeline-language.md` and drift-gated, and frozen with the E3 surfaces). Part of the
+[tempura plan set](README.md). Owns **P99**
 (`schema/`, `src/plugin.zig`) and the tree half of **P102** (`src/doc/`).
 
 Four manifests compose one project. `schema/tempura.sjon` is the timeline tier and the only
@@ -230,3 +232,19 @@ candidate, recorded in the decision log.
   and confusing (most of the time they want `lane`). The generated docs say which is which;
   a lint (`passthrough_preferred_native`, a warning) points a pass-through `(track (key …))`
   at `(lane :kind curve …)`.
+
+- **Drift, read against the tree on 2026-09-29 (`cfe44a0`).** Left as written, dated here:
+  `src/plugin.zig` is `src/Schema.zig`. The curve lane's controller keys are an
+  `(exclusive-group :cardinality at-most-one …)` (`schema/tempura.sjon:472`), not exactly-one,
+  because a native curve lane and an IT-bound lane name none. A note's `:ch` defaults to 1 and
+  never to the lane's (`schema/tempura.sjon:397`; the `default_note_ch` ruling in
+  `doc/fromSjon.zig`, [11](11-demos-and-milestones.md) 2026-09-21). `passthrough_preferred_native`
+  is the one `Diag.Code` nothing raises (`tools/zt audit-diagnostics`: 88 of 89 covered, 1
+  pending). **A live gap, not prose drift:** `:expr` and `:query` are kept as source text
+  (`src/doc/fromSjon.zig:1237-1242`) and never compiled or checked against pacer's
+  environment or `PatternQuery` — nothing in `src/` references either — while the manifest's
+  own `:query` description says "compiled at build" and the generated `docs/timeline-language.md`
+  repeats it. Either the loader compiles them (a diagnostic with a span, as the description
+  promises) or the description says "carried verbatim; pacer compiles it". Filed for the user;
+  the schema text is the smaller change and the wrong one if the exporter is meant to refuse a
+  query that will not compile.

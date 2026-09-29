@@ -16,3 +16,10 @@ that and on nothing in tempura. Plan 11's other E4 items are dropped
 rather than pending: pstudio is not a host (ruled 2026-09-20), so the
 timeline pane, the transport display and `demos/e4-studio/` are gone, and
 the 0.1.0 tag is the user's signal to give.
+
+**2026-09-29.** The reservation above is tempura's alone: expansible-player 02's
+kind registry ("the whole inventory", read at `~/llm` `23ef69d`) lists `PACR`,
+`ITMD` and eleven others and no `TMPU`, and the set never names tempura, so the
+cross-set ask is still to file. X1 ships the `PNGB`, `PNGF`, `SNTU` and `META`
+handlers; the `score` handler that would sit beside this payload is checkpoint
+05.C3 at X4. The interim host is plan 13's `demos/e5-stage/` page.

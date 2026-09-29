@@ -147,3 +147,21 @@ only carry-forward. `docs/timeline-language.md` is generated from the manifest's
 - **The pacer schema copy** is a second spelling of pacer's vocabulary. `verify` diffs it
   against the sibling checkout when one exists and fails on drift; without a sibling the copy
   is trusted and the version it was taken from is written in its header comment.
+
+- **Drift, read against the tree on 2026-09-29 (`cfe44a0`).** Claims above that the code
+  overtook, left as written because the table is the E0 design: `src/plugin.zig` never
+  existed — the schema preloads are `src/Schema.zig`; `TimingData`/`timingData` and
+  `export/timing.zig` were dropped with pstudio on 2026-09-20 ([11](11-demos-and-milestones.md),
+  ruling 2), so `export/` is score, render_smf, render_it and their helpers; the `timing` verb
+  is not one of the CLI's eleven (`src/cli/Args.zig:34-46`: dump, build, validate, inspect,
+  timeline, export-score, export, inline, edit, at, check-residue); there is no `wasm/`
+  directory (`src/wasm_entry.zig`) and no `conformance/harness/` (the runner is
+  `src/corpus_runner.zig`); `TimeMap` has no `beatOf` — the beat is a field of `barOf`'s
+  answer (`src/time/TimeMap.zig:299-316`); pacer's dev dependency is
+  `file:../../../pacer/npm/pacer`; and `verify` is test + lint + CLI goldens + corpus +
+  `node --test` + the wasm budget + the pacer-schema drift check + the docs drift check
+  (`build.zig:56-70`; CLAUDE.md's verb table is current, this one is not). The 2026-09-21
+  correction under "Four manifests, one project file" was overtaken the same day: the harness
+  manifest lost its `timing` verb (`schema/tempura-corpus.sjon:20`), so no head collides and
+  the harness stays out of the project file because it is a script, not a document
+  (CLAUDE.md, "The schema directory").
