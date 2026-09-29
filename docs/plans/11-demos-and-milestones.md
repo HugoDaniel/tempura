@@ -12,6 +12,7 @@ Status: Active — 2026-09-19. Part of the [tempura plan set](README.md). Owns *
 | **E2** | the pacer door | `export-score` for every lane kind within the budget, every skeleton compiling through the real `pacer.wasm`, every position landing (the floor-interval rule); `timing` and the pstudio exact provider for `.it` and `.mid` (pacer 03 P3–P4, unblocked here); `at`; three provisional wasm exports | P106 (score, timing), P108 (phases 2–3) |
 | **E3** | the superset | native lanes, phrases, clips, pass-through pacer forms; the residue in both carriers with the reconciliation table corpus-pinned (rung 3); `build` rendering native lanes to `.mid` and `.it`; survival measured per tool; the edit engine with plans as text; `tempura.wasm` and `npm/tempura` with the corpus parity walk; residue payloads, wasm exports and the diagnostic-code enum frozen | P104, P105, P106 (renderers), P108 (phases 4–5) |
 | **E4** | the studio | pstudio's timeline pane over `'TPTL'` and `tpr_plan`/`tpr_apply` with the fenced-region model; the transport display from `tpr_at`; a packed demo with the `TMPU` payload after expansible-player X1; 0.1.0 tagged, the E3 freezes confirmed at the tag | P108 (phases 6–7), P109 |
+| **E5** | the stage | plan [13](13-stage-pngine-pacer.md): a pngine square conducted by a tempura timeline through pacer, the movements as tracker channels; the residue survival measured on a real tracker; the message tail carrying a rendered lane's address; patterns sized to sections; `examples/square/` as a corpus case; `demos/e5-stage/` running pngine, pacer and tempura in one page | P110 |
 
 Each milestone's demo is the proof; a milestone without its demo is not closed.
 
@@ -58,6 +59,7 @@ carrying.
 | E2 | `demos/e2-exact-import/` | the studio importing the `.it` through the exact provider, its trigger lanes flashing a quad on the snare channel (batida T2's demo, done from here); the same for the `.mid`; the floor-interval landing proof in the node test output |
 | E3 | `demos/e3-one-file/` | a native timeline with sections, a curve lane with springs, a query lane, built to a `.mid` that plays in a DAW and dumps back essence-exact; the DAW quantises the rendered notes, the re-dump shows the bound lane and the `residue_stale` list; the same document built into `impulse-04.it`, reopened in OpenMPT with the message tail visible, re-saved, re-dumped with `residue_partial` naming what the tail lacks |
 | E4 | `demos/e4-studio/` | a short recording of pstudio: the timeline pane over an imported `.it`, a section dragged, the score's fenced region regenerated, the cube following; `e4-packed/`: a `.png` with `PNGB` + `PACR` + `TMPU` |
+| E5 | `demos/e5-stage/` | the square moving on a pngine canvas from the exported score; the `.it` a musician opened, re-saved with a click and a bass channel, dumped, re-built in place and exported again; the survival rows measured on Schism and `openmpt123` |
 
 The December Inércia demo (the launch set, `~/llm/plans/hugodaniel.com/PLAN-schedule.md`) is
 the target composition for E2 and E3: the tracker module conducts, pacer plays the exported
@@ -113,6 +115,7 @@ Sized in bounded sessions of the family's kind (one phase per context window, re
 | E2 | 6–8 (of which 2 in pstudio) | 1.5–2 weeks |
 | E3 | 14–18 | 4 weeks |
 | E4 | 8–10 (of which 5–6 in pstudio) | 2.5–3 weeks |
+| E5 | 9 (½ with the user at a tracker; plan 13's table) | 2–2.5 weeks — added 2026-09-29 |
 
 Roughly three months to 0.1.0, with E2 (the studio imports a tracker module exactly) about
 four weeks in. The uncertain items are E0's survival tables and E3's edit engine over inline
@@ -453,6 +456,50 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
   implementations that disagree, a host planning over a document the CLI refuses to edit,
   two wrong answers inside the hint feature (one a wire change), a 27th export.
 
+- 2026-09-29 — **Plan 13 filed: the stage** ([13](13-stage-pngine-pacer.md), P110, E5). The
+  question was whether tempura with pacer can drive a pngine piece (a moving square) whose
+  movements are defined in the timeline and exported as `.it` channels for musicians to compose
+  against. The forward direction was run with the shipped CLI the same day and needs no code: a
+  lane per movement, `export-score --velocity` for the shader's targets, `build --kind it` for
+  one channel per movement with the channel map in the song message. Four gaps found and
+  routed to P110, two of them measured the same day on the shipped CLI: `tempura inline`
+  consumes nothing (the defect filed 2026-09-21), so the by-reference shape inlined and built
+  `--in-place` renders every movement beside its previous channel even with the `TMPU` chunk
+  intact, where a `dump` of the same file rebuilds in place (the E3 fixed point); a rendered
+  NATIVE lane's tail line carries no address (`residue/it.zig:528-531` writes `:from` for bound
+  lanes only), so with the chunk gone neither shape can put a movement back; patterns are 64
+  rows (`render_it.zig:80`, no CLI flag) so the order list is not the section list — the
+  meter-sizing gap, folded into the phrases→patterns design job on 2026-09-21, moves to plan
+  13's phase 3; a vector keyframe renders its first component only (`render_it.zig:621`). Also
+  measured: a conducted document that keeps its own tempo and meter points is
+  `conductor_conflict`, so the musicians' round trip removes them. The tracker survival
+  measurement E0 never ran is phase 0, because the round trip rests on it. pacer and pngine
+  gain no code; pstudio stays out; the page lives in `demos/`. Seven decisions are in the
+  plan, six filed for the user and the seventh (the lowering hook) ruled below.
+- 2026-09-29 — **The `tempura/score-v1` lowering hook stays parked** (plan 13, decision 7).
+  Plan 13 needs score text, which `export-score` and `tpr_exportScore` already give; a hook would
+  emit forms and restate the exporter's rules under a second owner, and no host links both
+  manifests with a Zig registry. Reopen at expansible-player X3, when the guest contract
+  freezes: a guest supplies both a `registerHooks` and an `emit` (expansible-player `04:58-69`),
+  and tempura's can register nothing and emit the score text as `PACR`.
+- 2026-09-29 — **The `TMPU` reservation is on tempura's side only.** Plan 10, the E4 board
+  entry below and `demos/e4-packed/README.md` say the kind is reserved in expansible-player
+  02's registry. Read on 2026-09-29 (`~/llm` at `23ef69d`): that registry (`02:41-57`, headed
+  "the whole inventory") lists `PACR`, `ITMD` and eleven others and no `TMPU`, and the set
+  never names tempura. The cross-set note E0 was to file (the "Sequencing" list above names
+  it, it and midi, not expansible-player) is still to file. Two more facts from the same read:
+  X1 ships the `PNGB`, `PNGF`, `SNTU` and `META` handlers only (`02:59`), and the `score`
+  handler that would mount pacer is checkpoint 05.C3 at **X4** (`05:118-120`, `07:58-68`),
+  so "registered when X1 assigns the envelope" (plan 10) names the wrong milestone for the
+  handler. Nothing in tempura moves; plan 13's page is the interim host.
+- 2026-09-29 — **The sibling checkouts are on this machine.** `~/Dev/pstudio` (`b8464f5`),
+  `~/Dev/animader` (`ff0eb04`), `~/Dev/2026_impulse` (`impulse.sjon`, `live.score.sjon`,
+  `impulse-04.it`), `~/llm/repositories/{impulsetracker,openmpt,theatre}` populated; `~/llm`
+  is the family path and `~/Development` does not exist. The E0 board's "not on this machine"
+  and the README's pin notes are dated 2026-09-19/21 and stand as history. What it changes:
+  E0 step 5 (the impulsos measure) is RUNNABLE and still unmeasured; the tracker survival rows
+  (step 3) still wait on a tracker, which plan 13's phase 0 installs.
+
 ## Status board
 
 | Milestone | Item | Status |
@@ -462,6 +509,7 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
 | E2 | export-score, landing proof, timing, the studio provider | ☑ minus pstudio |
 | E3 | native lanes, residue ×2 carriers, renderers, edit engine, wasm, npm | ☑ |
 | E4 | studio pane, transport display, payload kind, 0.1.0 | ☐ minus pstudio |
+| E5 | the measurement, the tail address, patterns by section, vector lanes, the square example, the page, the musicians' leg | ☐ planned 2026-09-29, plan 13 |
 
 **2026-09-21 (Task 19, E3 close)** — what each row above means. The "What's next" line
 below this board predates this entry.
@@ -513,8 +561,11 @@ below this board predates this entry.
 
 ## What's next
 
-→ **E0 step 1**: create the build graph in `~/Dev/tempura` from pacer's and get `zig build
-verify` green on zero features. Then step 2, the reader spikes and the grid table.
+→ **Plan 13 phase 0**: the survival measurement at a tracker, with the user
+(`conformance/CHECKLIST.md` section C over `examples/tracker/piece.it` and the square); then
+phases 1 and 5 (the example, the page) beside 2–4. E0–E3 are closed on the board above; E4's
+remainder waits on expansible-player. (Until 2026-09-29 this line read "E0 step 1: create the
+build graph…", the set's first day.)
 
 ## Risks / open questions
 
