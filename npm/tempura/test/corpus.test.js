@@ -769,8 +769,15 @@ for (const name of cases) {
         // and put back rather than compared. For a FILE the score spends
         // the dump's easing hints — `tpr_loadFile` keeps them, and that
         // is the claim this comparison makes for a stale curve lane.
-        const text = t.exportScore();
-        assert.ok(text !== null, `a score came back: ${JSON.stringify(t.diagnostics)}`);
+        const exported = t.exportScore();
+        if (exported === null) {
+          assert.ok(
+            t.diagnostics.some((d) => d.severity === 'error'),
+            'refusal has an error',
+          );
+          assert.match(chunk, /^\(score :bytes 0 /, 'native export also refused the score');
+        }
+        const text = exported ?? '';
         const head = chunk.match(
           /^\(score :bytes \d+ :sha256 "[0-9a-f]+"( :meter \[\d+ \d+\] :seconds-mode (?:true|false) :aggregated \d+ :hints (\d+))/,
         );

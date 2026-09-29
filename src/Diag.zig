@@ -202,6 +202,11 @@ pub const Code = enum(u16) {
     /// `it_command_unknown` is the same shape for a pattern cell (plan
     /// 06, "The binary model").
     it_midi_macro_invalid,
+
+    /// `export-score`: the resolved timeline length is zero. Empty
+    /// documents remain valid, but pacer requires a positive transport
+    /// duration; the author must give this export a positive `:length`.
+    export_zero_length,
 };
 
 /// How much a diagnostic costs its caller. Orthogonal to `Code` — the
@@ -471,6 +476,7 @@ const code_order = [_]Code{
     .export_key_budget,
     .export_tempo_budget,
     .it_midi_macro_invalid,
+    .export_zero_length,
 };
 
 test "Diag.Code: ordinals are dense and unique — the wire contract" {

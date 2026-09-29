@@ -1,0 +1,3 @@
+(timeline)
+(tempo-point :at 0q :qpm 60)
+(meter-point :at 0bar :sig [4 4])

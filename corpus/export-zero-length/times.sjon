@@ -1,0 +1,4 @@
+; An empty timeline remains valid and has length zero. Only the pacer
+; export reports export_zero_length, at the timeline header because the
+; length was inferred. The native and wasm reports must agree.
+(export-score)

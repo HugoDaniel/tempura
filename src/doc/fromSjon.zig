@@ -626,9 +626,12 @@ const Ctx = struct {
     /// lanes, so its complaint (if any) follows theirs.
     fn readLength(self: *Ctx, doc: *Doc.Doc, timeline: NodeIndex) Error!void {
         const children = self.tree.formHeader(timeline).children;
-        const node = kvNode(self.tree, children, "length") orelse return;
-        doc.length_lit = literalOf(self.tree, node);
-        doc.length = try self.resolve(node);
+        const node = kvNode(self.tree, children, "length");
+        const span = self.tree.spanOf(node orelse timeline);
+        doc.length_span = .{ .start = span.start, .end = span.end };
+        const length_node = node orelse return;
+        doc.length_lit = literalOf(self.tree, length_node);
+        doc.length = try self.resolve(length_node);
     }
 
     fn walk(self: *Ctx, forest: []const NodeIndex) Error!Doc.Doc {

@@ -134,7 +134,7 @@ pub const Landing = struct {
 
 /// The score, the report, and what the conversion cost.
 pub const Result = struct {
-    /// The emitted text. Owned by `arena`.
+    /// The emitted text. Empty when a zero length refuses export. Owned by `arena`.
     text: []u8,
     diags: Diag.List,
     /// How many positions left pacer's lattice, and by how much.
@@ -201,20 +201,25 @@ pub fn exportScore(
     // rendering it found (the roundings, the aggregations, the keys) and
     // the warning comments are the diagnostics it raised.
     var body: Io.Writer.Allocating = .init(scratch.allocator());
-    try e.transport(&body.writer);
-    try e.tempoForms(&body.writer);
-    try e.cues(&body.writer);
-    try e.scenes(&body.writer);
-    try e.laneForms(&body.writer);
-    try e.passthrough(&body.writer);
+    try e.checkLength();
+    if (e.map.length != 0) {
+        try e.transport(&body.writer);
+        try e.tempoForms(&body.writer);
+        try e.cues(&body.writer);
+        try e.scenes(&body.writer);
+        try e.laneForms(&body.writer);
+        try e.passthrough(&body.writer);
+    }
 
     // The text allocates from the RESULT's arena and is never `deinit`ed:
     // the arena moves into the `Result`, so the text it hands back
     // outlives this frame and one `Result.deinit()` frees the lot. The
     // body it was copied from is scratch.
     var out: Io.Writer.Allocating = .init(arena.allocator());
-    try e.header(&out.writer);
-    out.writer.writeAll(body.written()) catch return error.OutOfMemory;
+    if (e.map.length != 0) {
+        try e.header(&out.writer);
+        out.writer.writeAll(body.written()) catch return error.OutOfMemory;
+    }
 
     return .{
         .text = out.written(),
@@ -422,6 +427,17 @@ const Emitter = struct {
     }
 
     // ---- the forms ----
+
+    fn checkLength(self: *Emitter) Error!void {
+        if (self.map.length == 0) try self.diags.add(
+            .export_zero_length,
+            .err,
+            self.doc.length_span,
+            "timeline length is zero; pacer requires a positive transport duration; " ++
+                "set a positive :length to export this score",
+            .{},
+        );
+    }
 
     fn transport(self: *Emitter, w: *Io.Writer) Error!void {
         try pr(w, "(transport :bpm ", .{});
@@ -1288,4 +1304,47 @@ test "score.exportScore: every allocation failure is OutOfMemory, cleanly, with 
             break;
         }
     }
+}
+
+test "score.exportScore: export_zero_length preserves the document and names its length source" {
+    const gpa = testing.allocator;
+    inline for (.{ "(timeline)", "(timeline :length 0bar)" }) |header| {
+        const source = "; an empty document is still valid\n" ++ header ++
+            "\n(tempo-point :at 0q :qpm 60)\n(meter-point :at 0bar :sig [4 4])\n";
+        var fx = try support.fromText(gpa, source);
+        defer fx.deinit();
+        try testing.expectEqual(@as(i64, 0), fx.derived.map.length);
+
+        var out = try exportScore(gpa, &fx.doc, &fx.derived, &.{}, .{});
+        defer out.deinit();
+        try testing.expectEqual(@as(usize, 1), out.diags.count(.export_zero_length));
+        try testing.expect(out.diags.hasErrors());
+        const diag = out.diags.items()[0];
+        try testing.expectEqual(Diag.Severity.err, diag.severity);
+        try testing.expectEqualStrings(
+            if (fx.doc.length != null) "0bar" else header,
+            source[diag.span.start..diag.span.end],
+        );
+        try testing.expectEqual(@as(i64, 0), fx.derived.map.length);
+        try testing.expectEqual(@as(usize, 0), out.text.len);
+        try testing.expectEqual(@as(usize, 0), out.landings.len);
+    }
+}
+
+test "score.exportScore: the explicit one-bar identity exports without an error" {
+    const gpa = testing.allocator;
+    var fx = try support.fromText(gpa,
+        \\(timeline :length 1bar :end hold)
+        \\(tempo-point :at 0q :qpm 60)
+        \\(meter-point :at 0bar :sig [4 4])
+    );
+    defer fx.deinit();
+    var out = try exportScore(gpa, &fx.doc, &fx.derived, &.{}, .{});
+    defer out.deinit();
+    try testing.expectEqual(@as(usize, 0), out.diags.items().len);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        out.text,
+        "(transport :bpm 60 :meter [4 4] :dur 1bar :end hold)",
+    ) != null);
 }

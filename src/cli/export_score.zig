@@ -353,3 +353,16 @@ test "export-score: a stale curve lane's score is the core's, easing hints and a
     try t.expect(!std.mem.eql(u8, bare.out.written(), c.out.written()));
     try t.expect(std.mem.indexOf(u8, bare.out.written(), ":ease in-cubic") == null);
 }
+
+test "export-score: an empty timeline validates but exporting it exits with an error" {
+    const path = try Cli.repoPath(t.allocator, "corpus/export-zero-length/doc.sjon");
+    defer t.allocator.free(path);
+    var valid = try Cli.invoke(&.{ "tempura", "validate", path });
+    defer valid.deinit();
+    try t.expectEqual(Cli.Exit.ok, valid.code);
+    var score = try Cli.invoke(&.{ "tempura", "export-score", path });
+    defer score.deinit();
+    try t.expectEqual(Cli.Exit.errors, score.code);
+    try t.expectEqual(@as(usize, 0), score.out.written().len);
+    try t.expect(std.mem.indexOf(u8, score.err.written(), "export_zero_length") != null);
+}

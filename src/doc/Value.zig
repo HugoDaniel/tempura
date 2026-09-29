@@ -426,6 +426,9 @@ pub const Doc = struct {
     length: ?i64 = null,
     /// `:length` as written, so a print is faithful.
     length_lit: ?Pos.Literal = null,
+    /// The authored length literal, or the timeline header when length
+    /// is inferred. Empty for a document constructed without source text.
+    length_span: Diag.Span = .{ .start = 0, .end = 0 },
     end: TimeMap.End = .hold,
     conductor: ?AnchorId = null,
     /// The CONDUCTOR anchor's own bytes, when it conducts BY REFERENCE
@@ -512,6 +515,7 @@ pub const Doc = struct {
     /// one `:id` are both kept. Both are diagnostics on the document, not
     /// defects of the value.
     pub fn invariants(self: *const Doc) void {
+        spanOk(self.length_span);
         for (self.anchors) |a| spanOk(a.span);
         for (self.tempo) |t| spanOk(t.span);
         for (self.meter) |m| spanOk(m.span);
