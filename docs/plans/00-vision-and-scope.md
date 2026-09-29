@@ -164,3 +164,12 @@ the time map without a file, the edit engine without an editor, the exporter wit
   are the CLI, `npm/tempura` over `tempura.wasm`, expansible-player's payload kind and
   animader's piece format; the picture is drawn by whatever pacer drives, which for plan 13 is
   a pngine canvas.
+
+- **Not only music (2026-09-29).** The mission above says "musical time"; the intent is a
+  timeline core for any timeline, After Effects and Blender style included, with animader as
+  a host (its stance now names `:timeline` in the piece manifest). What the grid is does not
+  change: integer ticks under a conductor, `s` a unit already, a bar map with one tempo point
+  a seconds timeline. What changes is one unit and the wording: [03](03-time-model.md)'s ask
+  T2 (frames), and the README's first sentence, which would say conducted time rather than
+  musical time and is left for a rename decision. A `note` reads as an event with onset,
+  duration and amplitude in that case, which [13](13-stage-pngine-pacer.md) already does.

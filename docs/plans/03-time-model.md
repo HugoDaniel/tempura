@@ -252,3 +252,14 @@ The wasm exports mirror these ([10](10-hosts-and-cli.md)).
   "no allowlist" ruling forbids) or the sentence should say "each seam is named in its file's
   header" is filed for the user; the determinism gate today is the corpus and the wasm parity
   walk, not a grep.
+
+- **Ask T2 from animader (2026-09-29): a frame unit.** tempura is meant as the timeline core
+  for any timeline, an After Effects or Blender one included, and those count frames. Wanted:
+  a sixth position unit `f`, frames through a declared rate, with the rate's spelling to
+  decide (a `:fps` on `(timeline …)`, or a fourth conductor kind) and an off-grid frame a
+  `frame_inexact` diagnostic, never a wrap. The units and the printer's spelling rule froze at
+  E1, so this is a deliberate append, and the printer writes `f` only for a document that
+  wrote it. Arithmetic checked on 2026-09-29, not code: with five quarters a second
+  (`:qpm 300`) a frame is `5 · TPQ / fps` ticks, an integer at 24, 25, 30, 48, 50, 60, 90,
+  100, 120, 144 and 240; 29.97 and 23.976 never land, as in SMF. Not built; waits on a piece
+  that counts frames.

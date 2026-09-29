@@ -501,3 +501,9 @@ page) and phase 2 the one that changes what a file says.
   from the score.
 - **The browser cannot play the `.it`.** The page plays a bounce. batida's player is the
   answer and is not this set's.
+
+- **animader names this stage as its proof (2026-09-29).** `07-road.md`'s parked table has
+  the timeline document waiting on "tempura's stage, its plan 13, proving the seam on pngine
+  and pacer", and asks that the page also show a key dragged on the canvas naming the lane
+  it came from, which is [08](08-export.md)'s ask T1. Not a phase here until T1 is ruled; the
+  forward direction needs nothing.

@@ -278,3 +278,35 @@ fresh module (header defaults: speed 6, tempo from segment 0 as an integer 32..2
   `Args.zig` never grew them (`:273-310`), so a document that needs one today cannot ask. Each
   is one `Args.zig` row plus a golden; plan 13's `--pattern-per-section` is the first render
   flag and the template. pacer's dev dependency is `file:../../../pacer/npm/pacer`.
+
+- **Ask T1 from animader (2026-09-29): a source map beside the score text.** animader
+  edits the score's picture (a key in its Timeline) and must land the edit on the timeline
+  node the key came from. SJON provenance covers animader's own lowering, and this export is
+  text, so the join is missing at exactly one stage. Wanted: on `Result`, beside `landings`,
+  one record per emitted position, not per form: each `(key …)`, each element of a
+  `(trigger …)`'s `:at` (two notes export as one trigger with two onsets, checked 2026-09-29),
+  each `(scene …)` and the transport's points, giving its byte span in `text` and the address
+  of the `Doc` node it came from (root index plus path, the edit engine's spelling,
+  [07](07-edit-engine.md)), several addresses when aggregation merged onsets, and a
+  pass-through root mapping to itself; reaching hosts the way
+  `landings` does today (the value, and `tools/zt landing`'s fixtures), then the CLI as an
+  `export-score --map` output and the wasm as a fourth blob appended after `'TPDG'` when a
+  host needs it, an append under the E3 rule with `tpr_abiVersion` unchanged. Text path only:
+  the lowering hook stays parked ([11](11-demos-and-milestones.md), 2026-09-29). Not built.
+  Its first consumer is animader's arc 2, step 12; plan 13's page could show it earlier as a
+  key dragged on the canvas naming its lane.
+- **A zero-length timeline exports a transport pacer refuses (2026-09-29).** `(timeline)`
+  with a tempo point and a meter point at the origin and no lanes validates and exports
+  `(transport :bpm 60 :meter [4 4] :dur 0bar :end hold)`, and `pacer check` answers
+  `transport_invalid: :dur must be positive`. `validate` and `export-score` are green one
+  stage before the score is refused. Ruled 2026-09-29 (user): diagnose it at score export.
+  The default-length rule ([02](02-timeline-schema.md), "the end of the last event or clip,
+  rounded up to a bar"; `src/doc/fromSjon.zig:259`, `defaultLength`) stands: an empty
+  document has length zero and is tested so, and a one-bar floor would change every
+  consumer's reading while leaving an explicit `:length 0bar` unresolved. `export-score`
+  raises an error at `:length`, or at the `(timeline …)` header when the length was
+  inferred, instead of returning a score pacer refuses. Implemented as
+  `export_zero_length` (ordinal 89): the core returns an error diagnostic and empty score
+  text, the CLI exits 1, and the wasm host gets no score. `corpus/export-zero-length`
+  pins the native and wasm answers; unit tests also cover explicit zero and the one-bar
+  identity. animader's identity timeline writes `:length 1bar` regardless.

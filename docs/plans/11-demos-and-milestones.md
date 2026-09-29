@@ -499,6 +499,39 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
   and the README's pin notes are dated 2026-09-19/21 and stand as history. What it changes:
   E0 step 5 (the impulsos measure) is RUNNABLE and still unmeasured; the tracker survival rows
   (step 3) still wait on a tracker, which plan 13's phase 0 installs.
+- 2026-09-29 — **animader's fit is written into its stance, and two asks come back.**
+  `~/Dev/animader/animader/docs/05-model.md` ("The timeline is authored and the score is
+  derived", "Three spellings of time") and `07-road.md` (step 12, the parked and status
+  tables, a `tempura compatibility` gate) now say: tempura is the PROGRAM zone of animader's
+  Timeline; `:timeline` is authored in the piece manifest and the score is tempura's export of
+  the lowered forest's tempura and pacer roots, so a `param`'s `(control …)` passes through,
+  the export writes the transport, no pacer root is authored beside a timeline, and the
+  timeline partition validates as `tempura validate` does, pacer's manifest beside tempura's;
+  a `.mid` or `.it` is an anchor naming a piece file, inlined in the aggregate. The identity
+  timeline is the smallest document whose export pacer loads: a tempo point and a meter point
+  at the origin, 60 qpm in `[4 4]`, `:length 1bar`, `:end hold`; without the length the
+  export's `:dur 0bar` is pacer's `transport_invalid`, so `validate` and `export-score` alone
+  stop one stage early (checked through `pacer check` the same day; [08](08-export.md) has
+  the finding). A key drag is a
+  tempura plan against the lowered timeline, landed on the authored span by SJON provenance;
+  animader's bridge commits and undoes. Animader's `Time` capability now owns `beat`, `bar`,
+  `tempo` and `song-time`; `tick` inside a formula lane is pacer's. The two asks: **T1**, a
+  source map beside the score text ([08](08-export.md), risks), and **T2**, a frame unit
+  ([03](03-time-model.md), risks). Item 4 of "Sequencing" above stands as the E0 reading.
+  What moves here: nothing before animader's arc 2, step 12; plan 13's stage is the proof both
+  sides name, and T1 is what it could also show.
+- 2026-09-29 — **A zero-length timeline is an export error, not a floored length** (user
+  ruling, [08](08-export.md), risks). An empty document keeps length zero, the default-length
+  rule stands, and `export-score` refuses with a diagnostic at `:length` or at the header
+  when the length was inferred, so no consumer receives a score pacer rejects. — cost if
+  wrong: one diagnostic code and one corpus case, reversible.
+
+- 2026-09-29 — **Zero-length score export implemented.** `export_zero_length` is appended
+  at ordinal 89. The length's source span travels through `Doc`; zero length leaves the
+  document valid but returns an export error and no score text. The CLI exits 1 and the
+  wasm host receives no score. One new corpus case pins native/wasm parity; unit tests
+  cover inferred zero, explicit zero and the positive one-bar identity. `tools/zt verify`,
+  the diagnostic coverage audit and the changed JS file's Biome check pass.
 
 ## Status board
 
@@ -563,7 +596,9 @@ below this board predates this entry.
 
 → **Plan 13 phase 0**: the survival measurement at a tracker, with the user
 (`conformance/CHECKLIST.md` section C over `examples/tracker/piece.it` and the square); then
-phases 1 and 5 (the example, the page) beside 2–4. E0–E3 are closed on the board above; E4's
+phases 1 and 5 (the example, the page) beside 2–4. The zero-length export error ruled the same day
+is built (`export_zero_length`, ordinal 89, `corpus/export-zero-length`; the decision log has
+the entry). E0–E3 are closed on the board above; E4's
 remainder waits on expansible-player. (Until 2026-09-29 this line read "E0 step 1: create the
 build graph…", the set's first day.)
 
