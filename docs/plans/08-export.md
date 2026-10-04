@@ -310,3 +310,111 @@ fresh module (header defaults: speed 6, tempo from segment 0 as an integer 32..2
   text, the CLI exits 1, and the wasm host gets no score. `corpus/export-zero-length`
   pins the native and wasm answers; unit tests also cover explicit zero and the one-bar
   identity. animader's identity timeline writes `:length 1bar` regardless.
+
+## T1 ruled (2026-10-04): the map is the exporter's to emit, and SJON's part is already built
+
+Ruled on the ask dated 2026-09-29 (risks, above), with its cross-references of the same date
+([11](11-demos-and-milestones.md), [13](13-stage-pngine-pacer.md)), read against both trees as they stand:
+tempura at `58133d0`, SJON at `b792ed53`. Four findings, one per question of the ruling. "Root material"
+below is the owner's standing rule's own word: a thing several tools share, fixed once in SJON; "leaf" is
+the one tool that owns the only copy of the knowledge.
+
+1. **Decomposed, a T1 record is two ends and a binding, and SJON already carries both ends.** The record
+   the ask wants is: a span in `text`, an address in the document, and the claim that the first came from
+   the second. The address end is SJON's twice over. The vocabulary is §11.2 (root index plus path); the
+   edit engine already speaks it ([07](07-edit-engine.md), "an address is a path plus a root"), and
+   `src/edit/locate.zig:127-163` (`Map.at`) already turns a `Doc` node's span into that address over the
+   document text, on SJON's own `Edit.nodeTable`. For a host the same turn is a live export:
+   `sjon_address_of_span(src, start, end)` (`SJON/src/wasm.zig:298`), mirrored in both parity hosts
+   (`SJON/hosts/web/sjon-reader.ts:518`, `SJON/hosts/rust/src/host.rs:199`). This is the mechanism
+   animader's step 12 already names, "landed on the authored span by SJON provenance"
+   ([11](11-demos-and-milestones.md), 2026-09-29), and it is built. The span-in-`text` end is answerable at
+   the root too, because the score text is itself SJON syntax: every position is a number-with-unit
+   literal (`0bar`, `8.5b`, `0s`; `SJON/docs/LANGUAGE.md` §2.6, whose own examples include `4b`), so
+   `sjon_node_table` (`SJON/src/wasm.zig:331`) over the emitted text returns a row per form, per
+   `(key …)`, per `:at` element and per scene, with byte spans; a host holding the text can have its spans
+   from the export that exists. What no SJON surface can answer, on any future design, is the binding:
+   which emitted position came from which document node is known only where the emission happens.
+   Aggregation merges onsets after lattice conversion and keeps only the count (`src/export/lanes.zig:85-97`:
+   `Trigger` carries `ticks`, `vel`, `aggregated`, and the merged set is discarded); a derived onset carries
+   no span and no note link (`src/time/derive.zig:58-68`); a bound curve lane's keys are collapsed by
+   equal-run and simplification ("The key budget", items 1 and 2), so a key's sources are a run of steps;
+   a `(tempo …)` form can coalesce several document tempo points (`planTempo`, `src/export/score.zig:314-355`);
+   the `(transport …)` is four document nodes at once (segment 0, the first meter, `:length`, `:end`). One
+   merge is lossy by design: the loudest velocity of an aggregated set is the only one that exists after
+   export (`src/export/score.zig:791-797`), so the binding cannot be reconstructed from the output even in
+   principle. SJON's form-level provenance does not reach here on its own terms: ask 16's `lowering_stages`
+   and `provenanceChain` (`SJON/docs/plans/asks/16-lowering-provenance-across-stages.md`) bind forms that
+   SJON's own hooks emit to forms SJON read, and this export is not a lowering layer: `fromSjon` releases
+   the SJON tree before it returns (`src/doc/fromSjon.zig:125-127`), the score is printed by tempura's own
+   writer in tempura's own layout, and the hook registry is SJON's fourth parity boundary, Zig-only, while
+   T1's consumer is a browser. So the ask does not collapse into SJON's exports, but the only part missing
+   was never root material to begin with.
+
+2. **Each remaining part is tempura's leaf.** Per the ask's own parts: the per-position record (not per
+   form) is the exporter's emission structure, decided here and nowhere else (scenes padded to a width,
+   keys on their own lines, `:at` lists spelled by the shortest-floor-decimal rule, this plan, "The pacer
+   grid"); the byte spans in the printed score text are spans in tempura's layout, and the binding that
+   makes them mean anything is the exporter's arithmetic (lattice rounding, aggregation, equal-run and
+   RDP), which no second tool in the family performs: pacer receives `:at` lists, SJON has no notion of a
+   position on a tempo grid; the many-to-many join when aggregation merged onsets is the clearest case,
+   since the merge set exists only inside `lanes.triggers` and is deleted there today; the pass-through
+   root mapping to itself is 1:1 and already half-done, in that a `Doc.Passthrough` carries its span
+   (`p.span`, `src/export/score.zig:587`) and its text is copied verbatim, so the record joins the
+   printed offset to that span with no aggregation at all; and the CLI and wasm legs are tempura's
+   channels (`export-score`, the `tpr_*` zones). The instructive contrast for why the root needs no new
+   facility of this shape: a layout-only re-print keeps §11.2 paths stable, so `sjon fmt` cannot orphan
+   an address and SJON's own printer needs no source map. This export is not a re-print; it aggregates
+   and simplifies, which is exactly why it must carry its own binding, and why that binding cannot be
+   lifted into a shared layer that only one emitter can feed.
+
+3. **SJON should carry none of it, so there is no "what SJON gains" to spell, and no ask is filed.** The
+   bill for each alternative, argued the way SJON's own verdicts argue a decline. A generic
+   "emitted-text provenance" facility in SJON would be wire, docs and three host mirrors for records
+   exactly one tool can produce and one consumer can read: SJON cannot compute the binding or check it,
+   so the surface would be a second provenance vocabulary beside `LoweringProvenance` (form indices
+   there, text spans here), two spellings of one thing, which is the shape SJON's register declines on
+   principle (ask 23 declined `splice` as "a record weaker than the op it lowers from"; ask 26 declined a
+   rule two implementations would have to agree on). Making the export a SJON lowering hook, to inherit
+   ask 16's chain, is worse on three counts: the score would have to be emitted as a tree and lose its
+   printed layout (the padded scenes, the indented keys, the shortest-floor decimals are printer choices
+   in `score.zig`); the hook registry is Zig-only while the consumer is the wasm host; and the inputs (a
+   `TimeMap`, an aggregation grid, a simplification tolerance) are not SJON concepts. Declined. The cost
+   of the decline, stated honestly: the leaf record is a `Result` field plus fixtures, small, and if a
+   second emitter of derived score text ever appears it would have to copy the pattern rather than share
+   it; no such emitter exists on any road today (plan 13's page consumes this export, animader's arcs
+   read it).
+
+4. **The ask's delivery claim is not sound as written: `landings` reaches no host.** "Reaching hosts the
+   way `landings` does today" reaches the `Result` value (`src/export/score.zig:148-149`) and nothing
+   else that leaves the process: the fixtures `zig build landing` writes (`tools/gen_landing.zig:288`,
+   `:327-337`) feed the node proof (`npm/tempura/test/landing.test.js`), which is a test, not a host; the
+   CLI prints `res.text` and nothing else (`src/cli/export_score.zig:163`); `tpr_exportScore` fills the
+   out zone with the text and returns its length, and the `Result`, `landings` included, is dropped at
+   return (`src/wasm_entry.zig:981-995`). The honest channel is the ask's own next clauses, in order:
+   the value on `Result` beside `landings`, pinned the same way (fixtures a tool writes and the node or
+   Zig suite reads); the CLI as an `export-score --map` sidecar, because a map means nothing without the
+   text it maps, so the flag writes a sibling of the `-o` score or of stdout's text, never a zone; and
+   the wasm as an appended blob under the E3 rule (`src/TprAbi.zig`, release policy: an append is a
+   MINOR, `tpr_abiVersion` unchanged), with its own zone and `tpr_*` pointer pair. "When a host needs
+   it" has a name and a date: animader's arc 2, step 12 ([11](11-demos-and-milestones.md), 2026-09-29:
+   nothing moves here before it), and animader is a browser consumer, so the wasm leg is the one the ask
+   is actually for. Plan 13's page is "not a phase here until T1 is ruled"
+   ([13](13-stage-pngine-pacer.md), 2026-09-29); this ruling settles T1 and leaves the phase question
+   plan 13's own, the forward direction still needing nothing.
+
+Two scope notes the build should keep. First, the record can only name what a `Doc` node can name, and
+every `Doc` node carries a span into its document text: the exporter's own diagnostics say so
+(`src/cli/export_score.zig:166-168`), and `tpr_attachAnchor` keeps the text unchanged so its offsets keep
+naming (`src/wasm_entry.zig:687-689`); on the file path the document is the dump text, so the addresses
+are addresses into that, which is still the text a host reloads. Second, two small joins the ask did not
+spell: a cue is emitted as a comment (`src/export/score.zig:462-466`) and a comment has no node, so a
+cue's record, if ever wanted, points at the comment's bytes; a scene is 1:1 with a section, but the
+derived list drops the span (`src/time/derive.zig:42`, the copy at `:210-213`), so the record joins back
+through `doc.sections[i].span` (`src/doc/Value.zig:135-140`), which the exporter can do because it walks
+both lists in document order.
+
+Not checked, and this ruling stands on reading alone: nothing was built or run (no `zig`, `cargo` or
+`node_modules` on the ruling host), so `sjon_node_table` over a score text is argued from the grammar and
+the export's documented contract, not observed; animader's step 12 text is known here only through plan
+11's quote of it, animader's tree not being in these worktrees.
