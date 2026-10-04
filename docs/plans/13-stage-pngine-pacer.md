@@ -507,3 +507,8 @@ page) and phase 2 the one that changes what a file says.
   and pacer", and asks that the page also show a key dragged on the canvas naming the lane
   it came from, which is [08](08-export.md)'s ask T1. Not a phase here until T1 is ruled; the
   forward direction needs nothing.
+
+- **T1 is ruled (2026-10-04).** [08](08-export.md)'s section "T1 ruled (2026-10-04)" settles the
+  ask the bullet above records, so its condition, "not a phase here until T1 is ruled", is
+  discharged: the ruling leaves the phase question to this plan. Whether the page takes up the
+  key-drag read is this plan's to decide; the forward direction still needs nothing.
