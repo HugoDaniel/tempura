@@ -766,10 +766,13 @@ test "tempura: no head this set declares collides with a sibling vocabulary" {
     defer composed.deinit();
 
     // Not "nothing in this aggregate is ambiguous" — the siblings collide
-    // with each other in ways that are theirs to resolve (pngine and
-    // pacer both declare `target`). The claim is about THIS set: every
-    // head tempura, midi and it declare still resolves to exactly one
-    // form when every sibling is in the room.
+    // with each other in ways that are theirs to resolve (pngine and pacer
+    // both declared `target` until pngine's 2026-09-04 rename to
+    // `color-target`; the one same-name pair that remains, `stage`, is
+    // slot-local on both sides and plan 02's table classifies it as
+    // non-colliding). The claim is about THIS set: every head tempura,
+    // midi and it declare still resolves to exactly one form when every
+    // sibling is in the room.
     var schema = try Schema.load(gpa);
     defer schema.deinit();
     for (schema.preloaded.plugins) |plugin| {
