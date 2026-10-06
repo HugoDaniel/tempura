@@ -151,6 +151,51 @@ pub fn fromSource(
         );
     }
 
+    const loaded = try loadValidated(
+        gpa,
+        &validated,
+        source,
+        validated.data_forest,
+        resolver,
+        &diags,
+    );
+    return .{ .doc = loaded.doc, .diags = diags, .map = loaded.map };
+}
+
+/// The walk's second door: a forest ALREADY validated by the caller's own
+/// (wider) preload, with `source` the text its spans index. A composing
+/// host hands over exactly the roots it judged tempura's, in document
+/// order; the SJON diagnostics of the caller's own pass are the caller's
+/// to report, so this result carries tempura's own only. Everything the
+/// walk copies lands in the document's arena, so the result keeps no
+/// reference to `validated`, `source` or `resolver` (fromSource's rule).
+pub fn fromForest(
+    gpa: Allocator,
+    validated: *const sjon.Host.HostResult,
+    source: [:0]const u8,
+    forest: []const Ast.NodeIndex,
+    resolver: ?Resolver.Resolver,
+) Error!Result {
+    var diags: Diag.List = .init(gpa);
+    errdefer diags.deinit();
+    const loaded = try loadValidated(gpa, validated, source, forest, resolver, &diags);
+    return .{ .doc = loaded.doc, .diags = diags, .map = loaded.map };
+}
+
+const LoadedForest = struct { doc: Doc.Doc, map: TimeMap.TimeMap };
+
+/// The shared tail of both doors. Borrows `diags`: the caller owns the
+/// list (already seeded, in fromSource's case, with the sjon_diagnostic
+/// copies, so insertion order stays the report's print order) and packs
+/// it into the Result itself.
+fn loadValidated(
+    gpa: Allocator,
+    validated: *const sjon.Host.HostResult,
+    source: [:0]const u8,
+    forest: []const Ast.NodeIndex,
+    resolver: ?Resolver.Resolver,
+    diags: *Diag.List,
+) Error!LoadedForest {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena.deinit();
 
@@ -160,24 +205,24 @@ pub fn fromSource(
         .tree = &validated.tree,
         .source = source,
         .view = .init(&validated.tree, &validated.materialized_defaults),
-        .diags = &diags,
+        .diags = diags,
         .resolver = resolver,
     };
 
-    var doc = try ctx.walk(validated.data_forest);
+    var doc = try ctx.walk(forest);
     // The arena's `errdefer` above frees the document's own slices; the
     // tiers each own an arena of their own, which it does not reach.
     errdefer releaseTiers(&doc);
     const map = try ctx.finalMap(&doc);
     doc.arena = arena;
     doc.invariants();
-    return .{ .doc = doc, .diags = diags, .map = map };
+    return .{ .doc = doc, .map = map };
 }
 
 /// Release the arenas the inline tiers own, on a load that failed after
 /// `readTiers` handed them over. A finished document releases them in
 /// `Doc.deinit`; this is the same loop for one that never finished, whose
-/// own arena is `undefined` until `fromSource` sets it.
+/// own arena is `undefined` until `loadValidated` sets it.
 fn releaseTiers(doc: *Doc.Doc) void {
     for (doc.midi) |*t| t.sequence.deinit();
     for (doc.it) |*t| t.module.deinit();
@@ -2511,6 +2556,34 @@ test "fromSjon: the smallest document a timeline can be loads clean" {
 
 test "fromSjon: a second (timeline …) is timeline_duplicate" {
     try expectCode(preamble ++ "(timeline :title \"again\")", .timeline_duplicate);
+}
+
+test "fromForest: the forest door walks exactly what fromSource walks" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    const source: [:0]const u8 =
+        \\(timeline :title "doors" :length 2bar)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0q :sig [4 4])
+        \\(lane :name a :kind curve
+        \\  (keyframe :at 0q :value 0.0)
+        \\  (keyframe :at 2bar :value 1.0))
+    ;
+    var direct = try fromSource(gpa, &schema, source, null);
+    defer direct.deinit();
+    var validated = try Schema.validate(gpa, &schema, source);
+    defer validated.deinit();
+    var sliced = try fromForest(gpa, &validated, source, validated.data_forest, null);
+    defer sliced.deinit();
+    try testing.expect(!direct.diags.hasErrors());
+    try testing.expect(!sliced.diags.hasErrors());
+    const toSjon = @import("toSjon.zig");
+    const a = try toSjon.print(gpa, &direct.doc, &direct.map, .{});
+    defer gpa.free(a);
+    const b = try toSjon.print(gpa, &sliced.doc, &sliced.map, .{});
+    defer gpa.free(b);
+    try testing.expectEqualStrings(a, b);
 }
 
 test "fromSjon: no (timeline …), or one that is not first, is timeline_missing" {

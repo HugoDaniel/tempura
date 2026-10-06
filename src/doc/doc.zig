@@ -105,6 +105,8 @@ pub const verify = resolver_file.verify;
 pub const Result = fromSjon.Result;
 /// Validate one `(timeline …)` source and lower it to a `Doc`.
 pub const fromSource = fromSjon.fromSource;
+/// Walk an already-validated forest (the composing host's door).
+pub const fromForest = fromSjon.fromForest;
 /// The conductor's tables for one anchor — plan 03's rules 2 and 3 over
 /// a finished value, inline tier or verified bytes alike. One owner.
 pub const conductorOf = fromSjon.conductorOf;
