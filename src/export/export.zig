@@ -42,7 +42,10 @@ pub const test_support = @import("test_support.zig");
 pub const Options = score.Options;
 pub const Result = score.Result;
 pub const EaseHint = score.EaseHint;
+pub const MapEntry = score.MapEntry;
 pub const exportScore = score.exportScore;
+/// The map as JSON: `{"entries":[…]}`. See `score.mapJson`.
+pub const mapJson = score.mapJson;
 pub const renderSmf = render_smf.renderSmf;
 pub const renderIt = render_it.renderIt;
 

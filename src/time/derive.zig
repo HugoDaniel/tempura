@@ -65,6 +65,11 @@ pub const Onset = struct {
     /// The release velocity, or null for "whatever the format's default
     /// is" — 64 for a `.mid`.
     off_vel: ?u7 = null,
+    /// The document node this onset came from: the `(note …)` span, the
+    /// phrase note's span a clip placed, or the lane's own span for a
+    /// bound lane, whose content lives in the anchor. Zero for an onset
+    /// a test built without one.
+    span: Diag.Span = .{ .start = 0, .end = 0 },
 };
 
 /// One point on a curve lane — a keyframe of plan 02 with its tick
@@ -74,6 +79,10 @@ pub const Step = struct {
     value: [4]f32,
     ncomp: u3,
     ease_src: []const u8,
+    /// The document node this step came from, as `Onset.span` is for a
+    /// note: the `(keyframe …)` span, the phrase keyframe's span a clip
+    /// placed, or the lane's own span for a bound lane.
+    span: Diag.Span = .{ .start = 0, .end = 0 },
 };
 
 /// One lane's content, placed.
@@ -360,12 +369,14 @@ fn laneTable(
                 .vel = n.vel,
                 .ch = n.ch,
                 .off_vel = n.off_vel,
+                .span = n.span,
             });
             for (src.keyframes) |k| try steps.append(arena, .{
                 .tick = k.at,
                 .value = k.value,
                 .ncomp = k.ncomp,
                 .ease_src = try arena.dupe(u8, k.ease_src),
+                .span = k.span,
             });
             for (src.clips) |c| try place(arena, doc, src, c, &onsets, &steps, diags);
         }
@@ -417,7 +428,7 @@ fn bound(
                 local = try walk.derive(gpa, &tier.module, .{});
                 break :map &local.?;
             };
-            try boundIt(gpa, arena, &tier.module, map, lane.kind, addr, onsets, steps);
+            try boundIt(gpa, arena, &tier.module, map, lane, lane.kind, addr, onsets, steps);
         },
     }
 }
@@ -453,7 +464,7 @@ fn boundSmf(
             defer paired.deinit();
             try diags.extend(paired.diags.items());
             for (paired.notes) |n| {
-                const onset, const over = smfOnset(n, ppq);
+                const onset, const over = smfOnset(n, ppq, lane.span);
                 if (over) past_ceiling += 1;
                 try onsets.append(arena, onset);
             }
@@ -465,7 +476,7 @@ fn boundSmf(
             for (read) |s| {
                 const at = Grid.smfToTicks(s.at, ppq);
                 if (at.overflow) past_ceiling += 1;
-                try steps.append(arena, normalised(at.tick, s.value));
+                try steps.append(arena, normalised(at.tick, s.value, lane.span));
             }
         },
         // A `query` or a `formula` lane cannot bind
@@ -490,6 +501,7 @@ fn boundIt(
     arena: std.mem.Allocator,
     module: *const Module.Module,
     map: *const walk.RowMap,
+    lane: *const value.Lane,
     kind: value.LaneKind,
     addr: ItAddress,
     onsets: *std.ArrayList(Onset),
@@ -500,7 +512,7 @@ fn boundIt(
             const notes = try bridge_it.boundNotes(gpa, module, map, addr.channel);
             defer gpa.free(notes);
             for (notes) |n| {
-                const onset = itOnset(n) orelse continue;
+                const onset = itOnset(n, lane.span) orelse continue;
                 try onsets.append(arena, onset);
             }
         },
@@ -510,7 +522,7 @@ fn boundIt(
             defer gpa.free(read);
             for (read) |s| {
                 const at = itToTicks(s.at) orelse continue;
-                try steps.append(arena, normalised(at, s.value));
+                try steps.append(arena, normalised(at, s.value, lane.span));
             }
         },
         .query, .formula => {},
@@ -536,7 +548,7 @@ fn conductorWalk(
 /// BOTH ends are converted, so the duration is the distance between two
 /// grid ticks rather than a converted span, and a note carries its
 /// channel and release velocity.
-fn smfOnset(n: bridge_smf.PairedNote, ppq: u15) struct { Onset, bool } {
+fn smfOnset(n: bridge_smf.PairedNote, ppq: u15, span: Diag.Span) struct { Onset, bool } {
     const at = Grid.smfToTicks(n.at, ppq);
     // Saturating: a `Sequence` carries any `i64` tick, and past the
     // ceiling `smfToTicks` answers `MAX_TICK` either way.
@@ -550,17 +562,18 @@ fn smfOnset(n: bridge_smf.PairedNote, ppq: u15) struct { Onset, bool } {
         .vel = n.vel,
         .ch = n.ch,
         .off_vel = n.off_vel,
+        .span = span,
     };
     return .{ onset, at.overflow or end.overflow };
 }
 
 /// One IT note as an onset on the grid, or null when it starts past the
 /// ceiling; a note that ENDS past it is cut at the ceiling.
-fn itOnset(n: bridge_smf.PairedNote) ?Onset {
+fn itOnset(n: bridge_smf.PairedNote, span: Diag.Span) ?Onset {
     const at = itToTicks(n.at) orelse return null;
     const end = itToTicks(n.at +| @max(n.dur, 0)) orelse Grid.MAX_TICK;
     std.debug.assert(end >= at);
-    return .{ .tick = at, .dur = end - at, .key = n.key, .vel = n.vel };
+    return .{ .tick = at, .dur = end - at, .key = n.key, .vel = n.vel, .span = span };
 }
 
 /// IT ticks to tempura ticks, or null past the grid ceiling. The product
@@ -574,8 +587,14 @@ fn itToTicks(it_ticks: i64) ?i64 {
 /// One step of a bound curve. A bound lane has no authored easing, so
 /// the segment between two of its values is `linear` — the name pacer
 /// gives a straight line.
-fn normalised(tick: i64, v: f32) Step {
-    return .{ .tick = tick, .value = .{ v, 0, 0, 0 }, .ncomp = 1, .ease_src = "linear" };
+fn normalised(tick: i64, v: f32, span: Diag.Span) Step {
+    return .{
+        .tick = tick,
+        .value = .{ v, 0, 0, 0 },
+        .ncomp = 1,
+        .ease_src = "linear",
+        .span = span,
+    };
 }
 
 /// The inline dump paired with `id`, or null when the anchor is
@@ -664,6 +683,9 @@ fn place(
                 .vel = n.vel,
                 .ch = n.ch,
                 .off_vel = n.off_vel,
+                // The phrase note is the node the onset came from; the
+                // repeat that placed it changes WHERE, not what.
+                .span = n.span,
             });
         }
         for (from.keyframes) |k| {
@@ -673,6 +695,7 @@ fn place(
                 .value = k.value,
                 .ncomp = k.ncomp,
                 .ease_src = try arena.dupe(u8, k.ease_src),
+                .span = k.span,
             });
         }
     }
@@ -872,12 +895,12 @@ test "derive: a native notes lane, its clip expanded by :repeat and :transpose" 
 
     const lane = d.laneByName("flash").?;
     try testing.expectEqualSlices(Onset, &.{
-        .{ .tick = 0, .dur = 23_063_040, .key = 36, .vel = 110 },
-        .{ .tick = 46_126_080, .dur = 23_063_040, .key = 38, .vel = 90 },
-        .{ .tick = 184_504_320, .dur = 11_531_520, .key = 50, .vel = 100 },
-        .{ .tick = 207_567_360, .dur = 11_531_520, .key = 50, .vel = 80 },
-        .{ .tick = 230_630_400, .dur = 11_531_520, .key = 50, .vel = 100 },
-        .{ .tick = 253_693_440, .dur = 11_531_520, .key = 50, .vel = 80 },
+        .{ .tick = 0, .dur = 23_063_040, .key = 36, .vel = 110, .span = span },
+        .{ .tick = 46_126_080, .dur = 23_063_040, .key = 38, .vel = 90, .span = span },
+        .{ .tick = 184_504_320, .dur = 11_531_520, .key = 50, .vel = 100, .span = span },
+        .{ .tick = 207_567_360, .dur = 11_531_520, .key = 50, .vel = 80, .span = span },
+        .{ .tick = 230_630_400, .dur = 11_531_520, .key = 50, .vel = 100, .span = span },
+        .{ .tick = 253_693_440, .dur = 11_531_520, .key = 50, .vel = 80, .span = span },
     }, lane.onsets);
 }
 
@@ -961,9 +984,25 @@ test "derive: an onset carries its note's :ch and :off-vel, through a clip too" 
 
     const lane = d.laneByName("kit").?;
     try testing.expectEqualSlices(Onset, &.{
-        .{ .tick = 0, .dur = TPQ / 2, .key = 36, .vel = 110, .ch = 3, .off_vel = 20 },
-        .{ .tick = TPQ, .dur = TPQ / 2, .key = 60, .vel = 90, .ch = 0, .off_vel = null },
-        .{ .tick = 2 * TPQ, .dur = TPQ / 4, .key = 38, .vel = 100, .ch = 9, .off_vel = 7 },
+        .{ .tick = 0, .dur = TPQ / 2, .key = 36, .vel = 110, .ch = 3, .off_vel = 20, .span = span },
+        .{
+            .tick = TPQ,
+            .dur = TPQ / 2,
+            .key = 60,
+            .vel = 90,
+            .ch = 0,
+            .off_vel = null,
+            .span = span,
+        },
+        .{
+            .tick = 2 * TPQ,
+            .dur = TPQ / 4,
+            .key = 38,
+            .vel = 100,
+            .ch = 9,
+            .off_vel = 7,
+            .span = span,
+        },
     }, lane.onsets);
 }
 
@@ -1050,8 +1089,8 @@ test "derive: a clip's :offset and :length window, content past it not placed" {
 
     const lane = d.laneByName("spark").?;
     try testing.expectEqualSlices(Onset, &.{
-        .{ .tick = 0, .dur = 11_531_520, .key = 38, .vel = 80 },
-        .{ .tick = 23_063_040, .dur = 11_531_520, .key = 38, .vel = 100 },
+        .{ .tick = 0, .dur = 11_531_520, .key = 38, .vel = 80, .span = span },
+        .{ .tick = 23_063_040, .dur = 11_531_520, .key = 38, .vel = 100, .span = span },
     }, lane.onsets);
 }
 
@@ -1761,7 +1800,15 @@ test "derive: a bound SMF notes lane, paired and converted to the grid" {
     // on the onset: a renderer writes the pair back on `:ch`, and the
     // playhead simply ignores both.
     try testing.expectEqualSlices(Onset, &.{
-        .{ .tick = 0, .dur = 23_063_040, .key = 60, .vel = 100, .ch = 0, .off_vel = 64 },
+        .{
+            .tick = 0,
+            .dur = 23_063_040,
+            .key = 60,
+            .vel = 100,
+            .ch = 0,
+            .off_vel = 64,
+            .span = span,
+        },
     }, lead.onsets);
 
     // A bound curve's value stays NORMALISED; `:range` scales it at
@@ -1898,7 +1945,13 @@ test "derive: a bound IT notes lane reads the module through the walk" {
     const bass = d.laneByName("bass").?;
     try testing.expect(bass.bound);
     try testing.expectEqualSlices(Onset, &.{
-        .{ .tick = 0, .dur = 23_063_040, .key = 60, .vel = 127 },
+        .{
+            .tick = 0,
+            .dur = 23_063_040,
+            .key = 60,
+            .vel = 127,
+            .span = .{ .start = 0, .end = 1 },
+        },
     }, bass.onsets);
 }
 
@@ -1983,7 +2036,7 @@ test "derive: a clip whose repeats overflow the grid places its window and stops
     // repeats past the window never formed a tick.
     const lane = d.laneByName("flash").?;
     try testing.expectEqualSlices(Onset, &.{
-        .{ .tick = 0, .dur = 11_531_520, .key = 38, .vel = 100 },
+        .{ .tick = 0, .dur = 11_531_520, .key = 38, .vel = 100, .span = span },
     }, lane.onsets);
 }
 
@@ -2194,9 +2247,9 @@ test "derive: one clip with :repeat, :offset, :length and :transpose at once" {
 
     const lane = d.laneByName("flash").?;
     try testing.expectEqualSlices(Onset, &.{
-        .{ .tick = 553_512_960, .dur = 11_531_520, .key = 36, .vel = 80 },
-        .{ .tick = 576_576_000, .dur = 11_531_520, .key = 36, .vel = 100 },
-        .{ .tick = 599_639_040, .dur = 11_531_520, .key = 36, .vel = 80 },
+        .{ .tick = 553_512_960, .dur = 11_531_520, .key = 36, .vel = 80, .span = span },
+        .{ .tick = 576_576_000, .dur = 11_531_520, .key = 36, .vel = 100, .span = span },
+        .{ .tick = 599_639_040, .dur = 11_531_520, .key = 36, .vel = 80, .span = span },
     }, lane.onsets);
     // The window's end is the `:length` default's input too: 3bar + 1.5q
     // rounded up to a bar is bar 4.

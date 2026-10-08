@@ -93,12 +93,30 @@ pub const Trigger = struct {
     vel: []u7,
     /// How many onsets landed on a tick another onset already held.
     aggregated: u32,
+    /// One span per onset, grouped by the tick it landed on: tick `i`'s
+    /// onsets are `sources[starts[i]..starts[i+1]]`. Aggregation keeps
+    /// every onset's node even when it keeps one event, because the
+    /// merge set is the one fact only the conversion has.
+    sources: []Diag.Span,
+    /// `sources` run boundaries, `ticks.len + 1` long; `starts[0]` is 0
+    /// and `starts[ticks.len]` is `sources.len`.
+    starts: []u32,
 
-    /// Frees `ticks` and `vel` with the `gpa` `triggers` was given; the
-    /// value is spent. A caller that handed `triggers` an arena may skip it.
+    /// The document spans of every onset on the `i`-th kept tick; never
+    /// empty for a tick `ticks` has.
+    pub fn sourcesAt(self: *const Trigger, i: usize) []const Diag.Span {
+        std.debug.assert(i + 1 < self.starts.len);
+        return self.sources[self.starts[i]..self.starts[i + 1]];
+    }
+
+    /// Frees `ticks`, `vel`, `sources` and `starts` with the `gpa`
+    /// `triggers` was given; the value is spent. A caller that handed
+    /// `triggers` an arena may skip it.
     pub fn deinit(self: *Trigger, gpa: Allocator) void {
         gpa.free(self.ticks);
         gpa.free(self.vel);
+        gpa.free(self.sources);
+        gpa.free(self.starts);
         self.* = undefined;
     }
 };
@@ -109,11 +127,18 @@ pub const Curve = struct {
     /// How many steps the lane started with, for the header comment's
     /// `A → B` count.
     source_steps: u32,
+    /// One document span per key, aligned with `keys`: the keyframe's own
+    /// span on a native lane (or the phrase keyframe a clip placed), the
+    /// LANE's span on a bound one — a bound lane's steps live in the
+    /// anchor, and the lane is the one node a Doc has for them, whatever
+    /// run of steps a key stands for after the budget.
+    sources: []Diag.Span,
 
-    /// Frees `keys` with the `gpa` `curve` was given; the value is spent.
-    /// The keys' `ease` texts are borrowed and outlive it.
+    /// Frees `keys` and `sources` with the `gpa` `curve` was given; the
+    /// value is spent. The keys' `ease` texts are borrowed and outlive it.
     pub fn deinit(self: *Curve, gpa: Allocator) void {
         gpa.free(self.keys);
+        gpa.free(self.sources);
         self.* = undefined;
     }
 };
@@ -137,8 +162,15 @@ pub fn triggers(
     errdefer ticks.deinit(gpa);
     var vels: std.ArrayList(u7) = .empty;
     errdefer vels.deinit(gpa);
+    var sources: std.ArrayList(Diag.Span) = .empty;
+    errdefer sources.deinit(gpa);
+    var starts: std.ArrayList(u32) = .empty;
+    errdefer starts.deinit(gpa);
     try ticks.ensureTotalCapacity(gpa, onsets.len);
     try vels.ensureTotalCapacity(gpa, onsets.len);
+    try sources.ensureTotalCapacity(gpa, onsets.len);
+    try starts.ensureTotalCapacity(gpa, onsets.len + 1);
+    starts.appendAssumeCapacity(0);
 
     var aggregated: u32 = 0;
     for (onsets) |o| {
@@ -149,16 +181,25 @@ pub fn triggers(
             aggregated +|= 1;
             const last = &vels.items[vels.items.len - 1];
             if (o.vel > last.*) last.* = o.vel;
+            sources.appendAssumeCapacity(o.span);
             continue;
         }
+        // A new tick CLOSES the run before it, so the boundary goes in
+        // before this onset's span does.
+        if (ticks.items.len != 0) starts.appendAssumeCapacity(@intCast(sources.items.len));
         ticks.appendAssumeCapacity(tick);
         vels.appendAssumeCapacity(o.vel);
+        sources.appendAssumeCapacity(o.span);
     }
+    // The last run's end.
+    starts.appendAssumeCapacity(@intCast(sources.items.len));
 
     return .{
         .ticks = try ticks.toOwnedSlice(gpa),
         .vel = try vels.toOwnedSlice(gpa),
         .aggregated = aggregated,
+        .sources = try sources.toOwnedSlice(gpa),
+        .starts = try starts.toOwnedSlice(gpa),
     };
 }
 
@@ -180,9 +221,14 @@ pub fn curve(
     const source_steps: u32 = @intCast(index.steps.len);
 
     // A NATIVE lane is printed as authored — every keyframe, its easing
-    // verbatim, its value literal. Nothing below this line runs for one.
+    // verbatim, its value literal, and each key its own document node.
+    // Nothing below this line runs for one.
     if (!index.bound) {
-        return .{ .keys = try nativeKeys(gpa, index, mapper), .source_steps = source_steps };
+        const keys = try nativeKeys(gpa, index, mapper);
+        errdefer gpa.free(keys);
+        const sources = try gpa.alloc(Diag.Span, keys.len);
+        for (index.steps, sources) |src, *dst| dst.* = src.span;
+        return .{ .keys = keys, .source_steps = source_steps, .sources = sources };
     }
 
     const mode: simplify.Mode = if (opts.ease_linear) .linear else .hold;
@@ -223,7 +269,13 @@ pub fn curve(
         }
     }
 
-    return .{ .keys = try out.toOwnedSlice(gpa), .source_steps = source_steps };
+    // A bound lane's keys all name the lane: the steps behind them are the
+    // anchor's, and no Doc node stands for one.
+    const keys = try out.toOwnedSlice(gpa);
+    errdefer gpa.free(keys);
+    const sources = try gpa.alloc(Diag.Span, keys.len);
+    @memset(sources, lane.span);
+    return .{ .keys = keys, .source_steps = source_steps, .sources = sources };
 }
 
 // ---- the pieces ----

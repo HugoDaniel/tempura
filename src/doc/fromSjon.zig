@@ -779,6 +779,15 @@ const Ctx = struct {
         if (kvNode(self.tree, children, "title")) |node| {
             doc.title = try self.text(node);
         }
+        // The `:end` value's own span, or the header when the key is
+        // absent: `readLength`'s convention, for the export map's fourth
+        // transport point (the default is the schema's, and the header
+        // is the node whose silence produced it).
+        const end_span = if (kvNode(self.tree, children, "end")) |node|
+            self.tree.spanOf(node)
+        else
+            self.tree.spanOf(form);
+        doc.end_span = .{ .start = end_span.start, .end = end_span.end };
         if (self.effSymbol(form, "end")) |name| {
             doc.end = std.meta.stringToEnum(TimeMap.End, name) orelse .hold;
         }
