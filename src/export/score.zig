@@ -1033,15 +1033,21 @@ test "score.exportScore: the position map binds every emitted token to its docum
     try expectBound(&out, src, "0bar", "(section :name intro :at 0bar :dur 2bar)");
     try expectBound(&out, src, "2bar", "(section :name drop  :at 2bar :dur 2bar)");
 
-    // The chord at 0q: one emitted token, two document notes.
+    // The chord at 0q: one emitted token, two document notes, and BOTH
+    // identities are named. The claim is the binding, so the check is
+    // the two notes themselves and not the shape of two `(note ` spans.
     var chord = false;
     for (out.map) |e| {
         if (!std.mem.eql(u8, out.text[e.text.start..e.text.end], "0bar")) continue;
         if (e.doc.len != 2) continue;
+        var key_36 = false;
+        var key_43 = false;
         for (e.doc) |d| {
-            try testing.expect(std.mem.startsWith(u8, src[d.start..d.end], "(note "));
+            const node = src[d.start..d.end];
+            if (std.mem.eql(u8, node, "(note :at 0q   :dur 0.5q :key 36 :vel 110)")) key_36 = true;
+            if (std.mem.eql(u8, node, "(note :at 0q   :dur 0.5q :key 43 :vel 96)")) key_43 = true;
         }
-        chord = true;
+        if (key_36 and key_43) chord = true;
     }
     try testing.expect(chord);
 

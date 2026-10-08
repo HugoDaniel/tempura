@@ -297,6 +297,15 @@ fn renderAll(
 /// fixture, all copied into `arena`: the exporter's own storage dies
 /// here. A score the exporter complains of is no fixture: the complaints
 /// are printed and the run fails.
+///
+/// The map fixture is the exporter's own answer serialised straight out
+/// (`res.map` below), so the node suite comparing the wasm's map against
+/// it is a CONSISTENCY CHECK and not an oracle: both ends run the same
+/// binding code, and a wrong binding agrees with itself. The binding
+/// oracle is the hand-written expectations in `src/export/score.zig`'s
+/// tests (the literal document node each emitted token must name) and
+/// the synthetic tempo case with explicit source spans; this writer pins
+/// that the two builds agree with the tree the gate checks.
 fn renderScore(
     gpa: Allocator,
     arena: Allocator,
