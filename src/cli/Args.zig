@@ -128,6 +128,9 @@ pub const ScoreOpts = struct {
     tempo_eps: ?f64 = null,
     /// `--max-keys-per-track N`: the per-track share of pacer's MAX_KEYS.
     max_keys_per_track: ?u32 = null,
+    /// `--map`: write the position map beside the score — as `<score>.map`
+    /// for `-o`'s file, or on stderr when the score goes to stdout.
+    map: bool = false,
     /// `--section-markers`. Read by THREE verbs and stored once: the
     /// exporter ignores it (a pacer score gets `(scene …)` forms, which
     /// is the same information in pacer's own vocabulary) and plan 08's
@@ -299,6 +302,7 @@ const flags = [_]Flag{
     .{ .name = "--no-hints", .group = .score, .set = .{ .flag = setNoHints } },
     .{ .name = "--tempo-eps", .group = .score, .set = .{ .valued = setTempoEps } },
     .{ .name = "--max-keys-per-track", .group = .score, .set = .{ .valued = setMaxKeysPerTrack } },
+    .{ .name = "--map", .group = .score, .set = .{ .flag = setMap } },
     // at
     .{ .name = "--seconds", .group = .at, .set = .{ .valued = setSeconds } },
     .{ .name = "--pos", .group = .at, .set = .{ .valued = setPos } },
@@ -528,6 +532,11 @@ fn setMaxKeysPerTrack(arena: Allocator, out: *Command, value: []const u8) ?[]con
         "--max-keys-per-track takes a positive count",
     );
     out.score.max_keys_per_track = n;
+    return null;
+}
+
+fn setMap(out: *Command) ?[]const u8 {
+    out.score.map = true;
     return null;
 }
 

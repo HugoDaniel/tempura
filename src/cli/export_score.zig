@@ -2,11 +2,19 @@
 //!
 //! Plan 10's row: "the pacer skeleton (08): `--velocity`, `--ease
 //! linear`, `--eps`, `--no-hints`, `--tempo-eps`, `--max-keys-per-track`,
-//! `--section-markers`".
+//! `--section-markers`", plus T1's `--map` (plan 08's ruling, 2026-10-04).
 //!
 //! Every flag is one field of `export/score.zig`'s `Options`, so this
 //! verb is the exporter plus the channel policy — with two decisions of
 //! its own.
+//!
+//! ## `--map`, and where it rides
+//!
+//! `--map` writes the position map as JSON beside the score: `<score>.map`
+//! when `-o` named a file. A stdout score has no path to be a sibling of,
+//! and the text must keep stdout to itself, so the map rides stderr — the
+//! remaining channel — before the diagnostics. It is never a zone: the
+//! wasm's `tpr_exportScoreMap` is the host's way to one.
 //!
 //! ## The source name
 //!
@@ -161,6 +169,7 @@ fn emit(
     // changes …"), so a person reads the score and the reason together,
     // and the exit code carries the verdict.
     if (!try ctx.emit(res.text)) return Cli.Exit.usage;
+    if (ctx.cmd.score.map and !try writeMap(ctx, res.map)) return Cli.Exit.usage;
 
     try Diags.render(ctx.err, ctx.cmd.path, space, before, ctx.style);
     // The exporter's own spans index the DOCUMENT, and on the file path
@@ -168,6 +177,25 @@ fn emit(
     // honest space for both halves.
     try Diags.render(ctx.err, ctx.cmd.path, space, res.diags.items(), ctx.style);
     return @max(Diags.exitCode(before), Diags.exitCode(res.diags.items()));
+}
+
+/// `--map`: the position map as JSON, written BESIDE the score — a
+/// sibling file named `<score>.map` when `-o` named one, or stderr when
+/// the score went to stdout, because a map means nothing without the
+/// text it maps and the text must keep stdout to itself. Never a zone:
+/// the CLI is not the wasm, and a host that wants a blob calls
+/// `tpr_exportScoreMap`. False when a named sibling could not be
+/// written, having said so on stderr.
+fn writeMap(ctx: *const Cli.Ctx, map: []const exporter.MapEntry) Cli.Error!bool {
+    var json: std.Io.Writer.Allocating = .init(ctx.arena);
+    try exporter.mapJson(&json.writer, map);
+    try json.writer.writeByte('\n');
+    if (ctx.cmd.out) |score_path| {
+        const map_path = try std.fmt.allocPrint(ctx.arena, "{s}.map", .{score_path});
+        return ctx.writeFile(map_path, json.written());
+    }
+    try ctx.err.writeAll(json.written());
+    return true;
 }
 
 /// The flags, as one `Options`. A flag that was not given is absent
@@ -251,6 +279,60 @@ test "export-score: the artifact goes where -o names, and stdout stays empty" {
     const written = try tmp.dir.readFileAlloc(std.testing.io, "s.score.sjon", a, .limited(1 << 20));
     defer a.free(written);
     try t.expect(std.mem.indexOf(u8, written, "(transport ") != null);
+}
+
+test "export-score --map: -o's score gets a sibling .map of the same records" {
+    const a = t.allocator;
+    const path = try Cli.repoPath(a, "corpus/export-quintuplets/doc.sjon");
+    defer a.free(path);
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dest = try std.fmt.allocPrintSentinel(
+        a,
+        ".zig-cache/tmp/{s}/s.score.sjon",
+        .{tmp.sub_path},
+        0,
+    );
+    defer a.free(dest);
+
+    var c = try Cli.invoke(&.{ "tempura", "export-score", path, "--map", "-o", dest });
+    defer c.deinit();
+    try t.expectEqual(Cli.Exit.ok, c.code);
+    try t.expectEqualStrings("", c.out.written());
+
+    const score = try tmp.dir.readFileAlloc(std.testing.io, "s.score.sjon", a, .limited(1 << 20));
+    defer a.free(score);
+    const map = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "s.score.sjon.map",
+        a,
+        .limited(1 << 20),
+    );
+    defer a.free(map);
+    try t.expect(std.mem.startsWith(u8, map, "{\"entries\":["));
+    try t.expect(std.mem.endsWith(u8, map, "]}\n"));
+    // The first record is the transport's `:bpm`, and its text span
+    // slices the very score the sidecar sits beside.
+    const at = std.mem.indexOf(u8, map, "\"text\":[").? + "\"text\":[".len;
+    const comma = std.mem.indexOfScalarPos(u8, map, at, ',').?;
+    const close = std.mem.indexOfScalarPos(u8, map, comma + 1, ']').?;
+    const start = try std.fmt.parseInt(usize, map[at..comma], 10);
+    const end = try std.fmt.parseInt(usize, map[comma + 1 .. close], 10);
+    try t.expect(start < end and end <= score.len);
+    try t.expect(std.mem.indexOfAny(u8, score[start..end], " \n") == null);
+}
+
+test "export-score --map: a stdout score's map is the sibling channel" {
+    const path = try Cli.repoPath(t.allocator, "corpus/export-quintuplets/doc.sjon");
+    defer t.allocator.free(path);
+
+    var c = try Cli.invoke(&.{ "tempura", "export-score", path, "--map" });
+    defer c.deinit();
+    try t.expectEqual(Cli.Exit.ok, c.code);
+    // The text keeps stdout to itself; the map rides stderr.
+    try t.expect(std.mem.indexOf(u8, c.out.written(), "(transport ") != null);
+    try t.expect(std.mem.startsWith(u8, c.err.written(), "{\"entries\":["));
 }
 
 test "export-score: a .mid is dumped first, and the score is of that document" {

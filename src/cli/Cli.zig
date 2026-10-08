@@ -144,6 +144,8 @@ pub const usage_text =
     \\  --no-hints              Ignore every easing hint.
     \\  --tempo-eps F           How close two tempo segments coalesce, in pacer bpm.
     \\  --max-keys-per-track N  The per-track share of pacer's key budget.
+    \\  --map                   A .map sidecar of the emitted positions: -o's
+    \\                          path plus .map, or stderr for a stdout score.
     \\  --section-markers       Also a .mid build's section markers (see above).
     \\
     \\Options for at:

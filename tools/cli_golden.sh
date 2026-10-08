@@ -255,6 +255,12 @@ corpus/render-smf/doc.sjon
 --velocity
 --section-markers"
 
+# A stdout score keeps stdout to itself and its position map rides
+# stderr, the sibling channel (`--map`; see `src/cli/export_score.zig`).
+run_case export-score-map 0 "export-score
+corpus/export-quintuplets/doc.sjon
+--map"
+
 # The 512 fallback's whole report: the warning comment, the dropped
 # tempo table and every position in seconds.
 run_case export-score-512 0 "export-score
