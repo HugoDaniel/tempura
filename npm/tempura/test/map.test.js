@@ -9,7 +9,10 @@
 //   * SJON's own wasm answers the score end (`sjon_node_table`: every
 //     text span must be a node of the score, or a cue comment, which is
 //     a comment and has none) and the document end
-//     (`sjon_address_of_span`: every doc span must name a node).
+//     (`sjon_address_of_span`: every doc span of a fixture whose
+//     document text is written beside it must name a node; a
+//     constructed Doc has spans and no text, so only the span shape
+//     above is checked for those).
 //   * tempura's own wasm must produce the same bindings as the native
 //     fixture for the cases whose document text is written beside it.
 //
@@ -91,6 +94,9 @@ test(
           );
           continue;
         }
+        // A constructed Doc has no text to address: its spans were
+        // shape-checked above, and this end cannot be resolved without
+        // the bytes.
         if (docText === null) continue;
         for (const d of e.doc) {
           const answer = sjon.addressOfSpan(docText, d[0], d[1]);
