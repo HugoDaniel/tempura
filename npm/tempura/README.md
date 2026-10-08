@@ -103,10 +103,10 @@ A plan the engine refused is the empty action list `[]` with the reason in
 
 ## The blobs
 
-`tempura/blobs` exports the four decoders — `decodeTimeline` (`'TPTL'`),
+`tempura/blobs` exports the four decoders for a host that drives the `tpr_*`
+exports itself through `t.exports`: `decodeTimeline` (`'TPTL'`),
 `decodePlayhead` (`'TPPH'`), `decodeMap` (`'TPMP'`) and `decodeDiagnostics`
-(`'TPDG'`) — for a host that drives the `tpr_*` exports itself through
-`t.exports`. They mirror `src/TprAbi.zig`, which is the format's definition.
+(`'TPDG'`). They mirror `src/TprAbi.zig`, which is the format's definition.
 
 The map is the source-map seam: `t.exportScoreMap()` answers one record per
 emitted position with a `text` span into the score and the `doc` span (or

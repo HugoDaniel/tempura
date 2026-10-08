@@ -5,7 +5,7 @@
 //   'TPTL' (out) — the derivation: tempo segments, meters, the bar
 //                  table's shape, sections, cues, the lane index
 //   'TPPH' (out) — one playhead record, or the guard that refused it
-//   'TPMP' (out) — the position map of the score, one record per
+//   'TPMP' (out): the position map of the score, one record per
 //                  emitted position with its document spans
 //   'TPDG' (out) — diagnostics, pacer's 'PACD' layout with tempura's
 //                  `Diag.Code` ordinals and three severities
@@ -241,7 +241,7 @@ export function decodePlayhead(bytes) {
 }
 
 /**
- * Decode a `'TPMP'` blob — what `tpr_exportScoreMap()` wrote.
+ * Decode a `'TPMP'` blob, what `tpr_exportScoreMap()` wrote.
  *
  * One entry per emitted position, in emission order. `text` is a
  * `[start, end]` byte span into the score text `tpr_exportScore()` handed

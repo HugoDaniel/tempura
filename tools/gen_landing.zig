@@ -16,7 +16,7 @@
 //!     driver (plan 08: "Every emitted score is compiled through the
 //!     real `pacer.wasm` in `node --test` … with zero error
 //!     diagnostics").
-//!   - `scores/*.pacer.map.json` — that score's position map (T1), with
+//!   - `scores/*.pacer.map.json` - that score's position map (T1), with
 //!     `scores/*.pacer.doc.sjon` its document text for the cases whose
 //!     document came from text. The node suite checks every text span
 //!     against SJON's `sjon_node_table` over the score and every doc span
@@ -294,7 +294,7 @@ fn renderAll(
 }
 
 /// One golden score, exported: its text, its landing claims and its map
-/// fixture, all copied into `arena` — the exporter's own storage dies
+/// fixture, all copied into `arena`: the exporter's own storage dies
 /// here. A score the exporter complains of is no fixture: the complaints
 /// are printed and the run fails.
 fn renderScore(

@@ -12,8 +12,8 @@
 //!
 //! `--map` writes the position map as JSON beside the score: `<score>.map`
 //! when `-o` named a file. A stdout score has no path to be a sibling of,
-//! and the text must keep stdout to itself, so the map rides stderr — the
-//! remaining channel — before the diagnostics. It is never a zone: the
+//! and the text must keep stdout to itself, so the map rides stderr, the
+//! remaining channel, before the diagnostics. It is never a zone: the
 //! wasm's `tpr_exportScoreMap` is the host's way to one.
 //!
 //! ## The source name
@@ -179,7 +179,7 @@ fn emit(
     return @max(Diags.exitCode(before), Diags.exitCode(res.diags.items()));
 }
 
-/// `--map`: the position map as JSON, written BESIDE the score — a
+/// `--map`: the position map as JSON, written BESIDE the score, as a
 /// sibling file named `<score>.map` when `-o` named one, or stderr when
 /// the score went to stdout, because a map means nothing without the
 /// text it maps and the text must keep stdout to itself. Never a zone:

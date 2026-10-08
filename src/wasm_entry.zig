@@ -92,7 +92,7 @@
 //! ## Append-only
 //!
 //! The export set freezes at E3 together with `Diag.Code` and the blobs:
-//! never remove or re-type an export — bump `tpr_abiVersion` if the
+//! never remove or re-type an export; bump `tpr_abiVersion` if the
 //! contract itself must change. `'TPMP'` and its `tpr_*` pair are an
 //! APPEND in that sense (T1's map, plan 08's ruling), so the version
 //! stays 1.
@@ -1033,8 +1033,8 @@ fn scoreOptions(flags: u32) exporter.Options {
 /// deterministic export over the same loaded document. Call it with the
 /// same flags; the map's text spans index that exact text. Returns the
 /// blob's length; 0 when nothing is loaded, the score is refused (the
-/// same refusal `tpr_exportScore` spells), or the blob is past `MAP_CAP`
-/// — the `'TPDG'` blob says which. Fills ONLY the map zone.
+/// same refusal `tpr_exportScore` spells), or the blob is past `MAP_CAP`,
+/// which the `'TPDG'` blob says. Fills ONLY the map zone.
 export fn tpr_exportScoreMap(flags: u32) u32 {
     const s = live() orelse return notLoaded();
     if (doc.conductedPlaceholder(&s.result.doc)) return refuseScore(s);

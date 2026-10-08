@@ -46,7 +46,7 @@ const cases = readdirSync(scoresDir)
 const wasmBytes = readFileSync(fromRoot('tempura.wasm'));
 
 test('map: every fixture records a span in the text and a span in the document', () => {
-  assert.ok(cases.length > 0, 'no map fixtures — run `zig build landing`');
+  assert.ok(cases.length > 0, 'no map fixtures; run `zig build landing`');
   for (const c of cases) {
     assert.ok(c.map.entries.length > 0, `${c.file}: no entries`);
     for (const e of c.map.entries) {
@@ -68,7 +68,7 @@ test('map: the glue decodes the blob and refuses a corrupt one', () => {
 const sjonAvailable = existsSync(sjonWasmPath);
 
 test(
-  'map: SJON answers both ends — a score node per text span, a document node per doc span',
+  'map: SJON answers both ends, a score node per text span and a document node per doc span',
   { skip: sjonAvailable ? false : 'no sibling SJON wasm (build SJON first)' },
   () => {
     const sjon = loadSjon(readFileSync(sjonWasmPath));

@@ -342,7 +342,7 @@ export class Tempura {
    * over `text`.
    *
    * Null when nothing is loaded, the score was refused, or the map is
-   * past the zone — `diagnostics` says which.
+   * past the zone; `diagnostics` says which.
    * @param {ScoreOptions} [opts]
    * @returns {import('./blobs.js').PositionMap | null}
    */

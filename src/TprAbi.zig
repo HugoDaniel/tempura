@@ -114,7 +114,7 @@
 //!              outside, so the two host guards ride out with it; on a
 //!              refusal every other field is zero.
 //!
-//! ## `'TPMP'` — the position map out
+//! ## `'TPMP'`, the position map out
 //!
 //! `Result.map`, one record per emitted position (plan 08's T1 ruling,
 //! 2026-10-04). Layout:
@@ -536,7 +536,7 @@ fn writeF64(dest: *[8]u8, x: f64) void {
 }
 
 // ---------------------------------------------------------------------------
-// 'TPMP' — the position map out
+// 'TPMP', the position map out
 // ---------------------------------------------------------------------------
 
 /// Exact encoded size of a position map: the header, then per record its
@@ -1053,7 +1053,7 @@ test "TprAbi: 'TPDG' — a record that does not fit is dropped, and the count sa
     try testing.expectEqualStrings("first", blob[DIAGS_HEADER_LEN + DIAG_RECORD_LEN ..][0..5]);
 }
 
-test "TprAbi: 'TPMP' — the header, then one record per mapped position" {
+test "TprAbi: 'TPMP', the header, then one record per mapped position" {
     const gpa = testing.allocator;
     var loaded = try deriveDoc(gpa, two_segment_doc);
     defer loaded.result.deinit();
@@ -1100,7 +1100,7 @@ test "TprAbi: 'TPMP' — the header, then one record per mapped position" {
     try testing.expectEqual(blob.len, off);
 }
 
-test "TprAbi: 'TPMP' — one byte short is a refusal, never a partial blob" {
+test "TprAbi: 'TPMP', one byte short is a refusal, never a partial blob" {
     const gpa = testing.allocator;
     var loaded = try deriveDoc(gpa, two_segment_doc);
     defer loaded.result.deinit();

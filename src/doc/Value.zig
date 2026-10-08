@@ -430,7 +430,7 @@ pub const Doc = struct {
     /// is inferred. Empty for a document constructed without source text.
     length_span: Diag.Span = .{ .start = 0, .end = 0 },
     /// The authored `:end` value, or the timeline header when the key is
-    /// absent — the same convention `length_span` keeps, because the
+    /// absent, the same convention `length_span` keeps, because the
     /// transport's `:end` is a position the export's map has to name even
     /// when the schema supplied the default. Empty for a constructed
     /// document with no source text.

@@ -129,7 +129,7 @@ pub const Curve = struct {
     source_steps: u32,
     /// One document span per key, aligned with `keys`: the keyframe's own
     /// span on a native lane (or the phrase keyframe a clip placed), the
-    /// LANE's span on a bound one — a bound lane's steps live in the
+    /// LANE's span on a bound one: a bound lane's steps live in the
     /// anchor, and the lane is the one node a Doc has for them, whatever
     /// run of steps a key stands for after the budget.
     sources: []Diag.Span,

@@ -65,7 +65,7 @@ const time = @import("../time/time.zig");
 const lanes = @import("lanes.zig");
 const pos = @import("pos.zig");
 const simplify = @import("simplify.zig");
-/// `tempo.zig`'s `Walk` — the map's own segment-to-point pairing, which
+/// `tempo.zig`'s `Walk`: the map's own segment-to-point pairing, which
 /// the map record observes rather than repeats.
 const Tempo = @import("tempo.zig");
 
@@ -140,7 +140,7 @@ pub const Landing = struct {
 /// The span END is the exporter's alone: `text` is a byte span into
 /// `Result.text`, and `doc` the byte span(s) into the document text, one
 /// per document node that fed the position. Several means the exporter's
-/// own arithmetic merged sources — aggregation onto one pacer tick, a
+/// own arithmetic merged sources: aggregation onto one pacer tick, a
 /// tempo run coalesced, a key whose run of steps the budget collapsed.
 ///
 /// A consumer turns a `doc` span into the edit engine's address (root
@@ -265,7 +265,7 @@ const TempoForm = struct { tick: i64, bpm: f64 };
 const SegRun = struct { start: usize, end: usize };
 
 /// `planTempo`'s answer: the forms to print and, per form, the segment
-/// range it coalesced — the run the map's record has to name.
+/// range it coalesced: the run the map's record has to name.
 const Planned = struct { forms: []TempoForm, runs: []SegRun };
 
 const Emitter = struct {
@@ -318,7 +318,7 @@ const Emitter = struct {
 
     // ---- the run ----
 
-    /// The body, rendered into scratch — every form in the order plan 08
+    /// The body, rendered into scratch: every form in the order plan 08
     /// prints them, and the map's records against it.
     fn renderBody(self: *Emitter) Error!Io.Writer.Allocating {
         var body: Io.Writer.Allocating = .init(self.scratch_arena);
@@ -913,7 +913,7 @@ fn value(w: *Io.Writer, key: simplify.Key) Error!void {
     w.writeByte(']') catch return error.OutOfMemory;
 }
 
-/// The position map as JSON — what `export-score --map` writes beside a
+/// The position map as JSON, what `export-score --map` writes beside a
 /// score and what the landing fixtures carry: `{"entries":[…]}` with
 /// `text` a `[start, end]` span into the emitted text and `doc` an array
 /// of spans into the document text. No trailing newline; a file writer
@@ -994,7 +994,7 @@ test "score.exportScore: the native golden — plan 08's shape, line for line" {
 }
 
 /// The entry whose text span slices `text_slice` AND one of whose document
-/// spans slices `doc_slice` — the test's one join, so a binding is claimed
+/// spans slices `doc_slice`: the test's one join, so a binding is claimed
 /// by naming both ends.
 fn expectBound(
     out: *const Result,
@@ -1134,8 +1134,8 @@ test "score.exportScore: a --velocity key carries the same merged onset set as i
     });
     defer out.deinit();
 
-    // The chord's tick is printed twice — once in the trigger, once in
-    // the `-vel` key — and both records carry both notes.
+    // The chord's tick is printed twice: once in the trigger, once in
+    // the `-vel` key, and both records carry both notes.
     var merged: usize = 0;
     for (out.map) |e| {
         if (!std.mem.eql(u8, out.text[e.text.start..e.text.end], "0bar")) continue;

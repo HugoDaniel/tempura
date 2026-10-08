@@ -128,8 +128,8 @@ pub const ScoreOpts = struct {
     tempo_eps: ?f64 = null,
     /// `--max-keys-per-track N`: the per-track share of pacer's MAX_KEYS.
     max_keys_per_track: ?u32 = null,
-    /// `--map`: write the position map beside the score — as `<score>.map`
-    /// for `-o`'s file, or on stderr when the score goes to stdout.
+    /// `--map`: write the position map beside the score, as `<score>.map`
+    /// for `-o`'s file or on stderr when the score goes to stdout.
     map: bool = false,
     /// `--section-markers`. Read by THREE verbs and stored once: the
     /// exporter ignores it (a pacer score gets `(scene …)` forms, which
