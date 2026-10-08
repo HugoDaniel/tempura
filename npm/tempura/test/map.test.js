@@ -77,9 +77,11 @@ test(
     const sjon = loadSjon(readFileSync(sjonWasmPath));
     for (const c of cases) {
       const scoreText = decoder.decode(c.score);
-      const rows = new Set(
-        sjon.nodeTable(scoreText).nodes.map((n) => `${n.span[0]}:${n.span[1]}`),
-      );
+      const table = sjon.nodeTable(scoreText);
+      // The score text is real SJON and parses clean: the observation the
+      // record is argued from, not just the node spans it yields.
+      assert.equal(table.diagnostics.length, 0, `${c.file}: score diagnostics`);
+      const rows = new Set(table.nodes.map((n) => `${n.span[0]}:${n.span[1]}`));
       const docText = c.doc === null ? null : decoder.decode(c.doc);
       for (const e of c.map.entries) {
         const key = `${e.text[0]}:${e.text[1]}`;
@@ -102,9 +104,47 @@ test(
           const answer = sjon.addressOfSpan(docText, d[0], d[1]);
           assert.notEqual(answer, null, `${c.file}: doc span ${d} names no node`);
           assert.deepEqual(answer.span, d, `${c.file}: doc span ${d} resolved elsewhere`);
+          assert.equal(typeof answer.root, 'number', `${c.file}: doc span ${d} has no root`);
+          assert.ok(Array.isArray(answer.path), `${c.file}: doc span ${d} has no path`);
         }
       }
     }
+
+    // The observation native.pacer carries in the T1 record, committed in
+    // full: the score table is 75 rows, one per form (20), per `(key …)`,
+    // per `:at` element (14 number_with_unit) and per scene, with no
+    // diagnostics; and the 8.5b phrase-note binding is answered by SJON
+    // at both ends, the score node first and the document node it came
+    // from second.
+    const native = cases.find((c) => c.file === 'native.pacer.map.json');
+    assert.ok(native, 'native.pacer.map.json is missing');
+    const nativeText = decoder.decode(native.score);
+    const nativeTable = sjon.nodeTable(nativeText);
+    assert.equal(nativeTable.diagnostics.length, 0, 'native.pacer: score diagnostics');
+    assert.equal(nativeTable.nodes.length, 75, 'native.pacer: node table rows');
+    const kindCount = (kind) => nativeTable.nodes.filter((n) => n.kind === kind).length;
+    assert.equal(kindCount('form'), 20, 'native.pacer: form rows');
+    assert.equal(kindCount('number_with_unit'), 14, 'native.pacer: number_with_unit rows');
+
+    const nativeDoc = decoder.decode(native.doc);
+    const phrase = native.map.entries.find(
+      (e) => e.text[0] === 368 && e.text[1] === 372 && e.doc.length === 1 &&
+        e.doc[0][0] === 879 && e.doc[0][1] === 921,
+    );
+    assert.ok(phrase, 'native.pacer: the 8.5b phrase-note entry');
+    assert.equal(decoder.decode(native.score.subarray(...phrase.text)), '8.5b');
+    assert.deepEqual(sjon.addressOfSpan(nativeText, 368, 372), {
+      root: 3,
+      path: ['at', 3],
+      span: [368, 372],
+      kind: 'number_with_unit',
+    });
+    assert.deepEqual(sjon.addressOfSpan(nativeDoc, 879, 921), {
+      root: 10,
+      path: [0, 1],
+      span: [879, 921],
+      kind: 'form',
+    });
   },
 );
 
