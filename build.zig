@@ -627,12 +627,24 @@ fn addLint(ctx: Ctx) *std.Build.Step {
     return &run_lint.step;
 }
 
-/// …and the landing proof, through the REAL `pacer.wasm` (pacer's
+/// The landing proof, through the REAL `pacer.wasm` (pacer's
 /// `node_test` shape). tempura's own tests cannot catch its model of
 /// pacer's `mul + floor` drifting from pacer's own, so this leg is where
-/// a printed position is actually read back by the driver. Skip with a
-/// printed reason when `node` is not on PATH: a Zig-only checkout still
-/// gets the rest of the gate.
+/// a printed position is actually read back by the driver.
+///
+/// `node` is REQUIRED, and the leg must not be gated on
+/// `Build.findProgram`: on OpenBSD in Zig 0.16 that call cannot answer
+/// (`Io.Dir.realPathFileAlloc` reaches `realPathPosix`, whose OpenBSD
+/// case is `error.OperationUnsupported`), so a probe would skip this leg
+/// on a host where node runs perfectly well. The Run step resolves
+/// `node` through PATH at spawn, so the leg runs; a host with no node
+/// fails the gate instead of passing it by omission.
+///
+/// The fixtures the suite reads are DERIVED, so the gate proves they
+/// match this tree (`--check`) rather than rewriting them. That
+/// dependency is wired FIRST, before any early return below: a reduced
+/// node leg must never drop fixture freshness, which is the half of T1
+/// the fixtures carry.
 fn addNodeLeg(
     ctx: Ctx,
     verify: *std.Build.Step,
@@ -641,27 +653,23 @@ fn addNodeLeg(
     install_cli: *std.Build.Step,
 ) void {
     const b = ctx.b;
-    _ = b.findProgram(&.{"node"}, &.{}) catch {
-        std.debug.print(
-            "verify: `node` is not on PATH — skipping the npm/tempura pacer landing test\n",
-            .{},
-        );
-        return;
-    };
-    // The fixtures the suite reads are DERIVED, so the gate proves they
-    // match this tree (`--check`) rather than rewriting them.
+    // Unconditional, with or without node: the fixtures are what the map
+    // records are pinned to, so the gate checks them on every run.
     verify.dependOn(landing_check);
 
     // `npm/tempura` needs its one `file:` dev dependency installed before
     // `node --test` can import the pacer package. A fresh clone has not
     // run `npm install` yet, and failing the whole gate on that would say
-    // nothing about the code — so the leg announces itself missing
-    // instead.
+    // nothing about the code, so the leg announces itself missing
+    // instead. This is a REDUCED gate and the announcement says what it
+    // does not prove: the node suite, the wasm map blob and the SJON map
+    // proof all live only in the run being skipped.
     b.build_root.handle.access(b.graph.io, "npm/tempura/node_modules/pacer", .{}) catch {
         std.debug.print(
-            "verify: npm/tempura/node_modules is missing — skipping the pacer landing test " ++
-                "(run `cd npm/tempura && npm install`, and `cd ../pacer && zig build wasm` " ++
-                "with pacer's `build:wasm-copy`)\n",
+            "verify: npm/tempura/node_modules is missing; skipping the npm/tempura pacer " ++
+                "landing test. This reduced gate does not prove the node suite, the wasm map " ++
+                "blob or the SJON map proof (run `cd npm/tempura && npm install`, and " ++
+                "`cd ../pacer && zig build wasm` with pacer's `build:wasm-copy`)\n",
             .{},
         );
         return;
