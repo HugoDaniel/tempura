@@ -147,10 +147,13 @@ test('the wasm declares exactly the frozen tpr_* surface', () => {
     'tpr_docCap',
     'tpr_docPtr',
     'tpr_exportScore',
+    'tpr_exportScoreMap',
     'tpr_fileCap',
     'tpr_filePtr',
     'tpr_load',
     'tpr_loadFile',
+    'tpr_mapCap',
+    'tpr_mapPtr',
     'tpr_opCap',
     'tpr_opPtr',
     'tpr_outCap',
@@ -182,6 +185,7 @@ test('the handshake: abi version and every cap', async () => {
   assert.ok(t.caps.file >= t.caps.doc, 'the file zone holds a whole module');
   assert.ok(t.caps.op >= 1 << 10, 'the op zone holds an operation');
   assert.ok(t.caps.out >= t.caps.doc, 'the out zone holds a built file');
+  assert.ok(t.caps.map >= 1 << 10, 'the map zone holds a real position map');
 });
 
 test('load → text → timeline → at → atTick → snap, one document', async () => {

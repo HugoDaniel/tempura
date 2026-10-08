@@ -59,6 +59,7 @@ t.at(12.5); // where a clock lands: tick, bar, beat, the cues either side
 t.atTick(184504320n); // the same answer, asked on the grid
 t.snap(1000n, 'q16'); // the nearest grid line under the meter in force
 t.exportScore(); // the pacer score this arrangement conducts
+t.exportScoreMap(); // each emitted position: its score span and the document node it came from
 t.build('mid'); // the document as a file, residue attached
 ```
 
@@ -102,10 +103,17 @@ A plan the engine refused is the empty action list `[]` with the reason in
 
 ## The blobs
 
-`tempura/blobs` exports the three decoders — `decodeTimeline` (`'TPTL'`),
-`decodePlayhead` (`'TPPH'`) and `decodeDiagnostics` (`'TPDG'`) — for a host that
-drives the `tpr_*` exports itself through `t.exports`. They mirror
-`src/TprAbi.zig`, which is the format's definition.
+`tempura/blobs` exports the four decoders — `decodeTimeline` (`'TPTL'`),
+`decodePlayhead` (`'TPPH'`), `decodeMap` (`'TPMP'`) and `decodeDiagnostics`
+(`'TPDG'`) — for a host that drives the `tpr_*` exports itself through
+`t.exports`. They mirror `src/TprAbi.zig`, which is the format's definition.
+
+The map is the source-map seam: `t.exportScoreMap()` answers one record per
+emitted position with a `text` span into the score and the `doc` span (or
+spans, when the export merged onsets or tempo points) it came from. Hand a
+`doc` span to SJON's `sjon_address_of_span` over the document text and the
+edit engine has an address to land on; call `exportScore()` and
+`exportScoreMap()` with the same options, because both run the same export.
 
 ## Licence
 

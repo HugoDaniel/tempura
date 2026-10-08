@@ -23,6 +23,7 @@
 //! out        4 MiB  → module writes actions, a     (tpr_outPtr/tpr_outCap)
 //!                     score, or a built file
 //! timeline 256 KiB  → module writes 'TPTL'         (tpr_timelinePtr/tpr_timeline)
+//! map      256 KiB  → module writes 'TPMP'         (tpr_mapPtr/tpr_mapCap)
 //! playhead   4 KiB  → module writes 'TPPH'         (tpr_playheadPtr/tpr_at, tpr_atTick)
 //! diags     64 KiB  → module writes 'TPDG'         (tpr_diagPtr/tpr_diagLen)
 //! heap              ← the schema, the document, the derivation, the
@@ -90,9 +91,11 @@
 //!
 //! ## Append-only
 //!
-//! The export set freezes at E3 together with `Diag.Code` and the three
-//! blobs: never remove or re-type an export — bump `tpr_abiVersion` if
-//! the contract itself must change.
+//! The export set freezes at E3 together with `Diag.Code` and the blobs:
+//! never remove or re-type an export — bump `tpr_abiVersion` if the
+//! contract itself must change. `'TPMP'` and its `tpr_*` pair are an
+//! APPEND in that sense (T1's map, plan 08's ruling), so the version
+//! stays 1.
 
 const std = @import("std");
 const sjon = @import("sjon");
@@ -138,6 +141,10 @@ const OUT_CAP: usize = 4 << 20;
 /// roomy for a document with thousands of tempo segments and hundreds of
 /// lanes.
 const TIMELINE_CAP: usize = 256 << 10;
+/// `'TPMP'`. One record per emitted position: a score of a megabyte of
+/// keys still fits here for the ordinary single-source record, and a map
+/// past it is refused with its size said rather than truncated.
+const MAP_CAP: usize = 256 << 10;
 /// `'TPPH'` — one record plus its section-id tail.
 const PLAYHEAD_CAP: usize = 4 << 10;
 /// `'TPDG'`. A full zone still holds hundreds of diagnostics.
@@ -155,6 +162,7 @@ comptime {
     // Every cap is reported through a u32 accessor.
     std.debug.assert(FILE_CAP <= std.math.maxInt(u32));
     std.debug.assert(OUT_CAP <= std.math.maxInt(u32));
+    std.debug.assert(MAP_CAP <= std.math.maxInt(u32));
 }
 
 /// The status every lifecycle verb returns. See the header.
@@ -194,6 +202,7 @@ var op_buffer: [OP_CAP]u8 = undefined;
 var text_buffer: [TEXT_CAP]u8 = undefined;
 var out_buffer: [OUT_CAP]u8 = undefined;
 var timeline_buffer: [TIMELINE_CAP]u8 = undefined;
+var map_buffer: [MAP_CAP]u8 = undefined;
 var playhead_buffer: [PLAYHEAD_CAP]u8 = undefined;
 var diags_buffer: [DIAGS_CAP]u8 = undefined;
 var diags_len: u32 = 0;
@@ -559,6 +568,18 @@ export fn tpr_outCap() u32 {
 /// `TIMELINE_CAP` bytes (256 KiB). Valid until the next `tpr_timeline`.
 export fn tpr_timelinePtr() [*]const u8 {
     return &timeline_buffer;
+}
+
+/// The map zone: `'TPMP'` as `tpr_exportScoreMap` wrote it, `MAP_CAP`
+/// bytes (256 KiB). Valid until the next `tpr_exportScoreMap`.
+export fn tpr_mapPtr() [*]const u8 {
+    return &map_buffer;
+}
+
+/// The map zone's capacity, `MAP_CAP`: the largest position map the verb
+/// hands back. Past it the answer is 0 and a reason in the `'TPDG'` blob.
+export fn tpr_mapCap() u32 {
+    return MAP_CAP;
 }
 
 /// The playhead zone: `'TPPH'` as `tpr_at` or `tpr_atTick` wrote it,
@@ -983,14 +1004,55 @@ export fn tpr_exportScore(flags: u32) u32 {
     if (doc.conductedPlaceholder(&s.result.doc)) return refuseScore(s);
     // The dump's easing hints, when this document came out of a file —
     // the CLI's `export-score song.it` passes the same ones.
-    var result = exporter.exportScore(gpa, &s.result.doc, &s.derived, s.hints(), .{
+    var result = exporter.exportScore(
+        gpa,
+        &s.result.doc,
+        &s.derived,
+        s.hints(),
+        scoreOptions(flags),
+    ) catch return outOfMemory("exporting the score");
+    defer result.deinit();
+    return fillOrSay(&out_buffer, result.text, "score", &result.diags);
+}
+
+/// `tpr_exportScore`'s and `tpr_exportScoreMap`'s flags, one spelling:
+/// bit 0 `--velocity`, bit 1 `--ease linear`, bit 2 `--no-hints`, bit 3
+/// `--section-markers`. Everything else keeps `export/score.zig`'s
+/// defaults, which are the ones the CLI prints.
+fn scoreOptions(flags: u32) exporter.Options {
+    return .{
         .velocity = flags & 1 != 0,
         .ease_linear = flags & 2 != 0,
         .no_hints = flags & 4 != 0,
         .section_markers = flags & 8 != 0,
-    }) catch return outOfMemory("exporting the score");
+    };
+}
+
+/// `'TPMP'` at `tpr_mapPtr`: the position map of the score
+/// `tpr_exportScore(flags)` hands back, because both verbs run the same
+/// deterministic export over the same loaded document. Call it with the
+/// same flags; the map's text spans index that exact text. Returns the
+/// blob's length; 0 when nothing is loaded, the score is refused (the
+/// same refusal `tpr_exportScore` spells), or the blob is past `MAP_CAP`
+/// — the `'TPDG'` blob says which. Fills ONLY the map zone.
+export fn tpr_exportScoreMap(flags: u32) u32 {
+    const s = live() orelse return notLoaded();
+    if (doc.conductedPlaceholder(&s.result.doc)) return refuseScore(s);
+
+    var result = exporter.exportScore(
+        gpa,
+        &s.result.doc,
+        &s.derived,
+        s.hints(),
+        scoreOptions(flags),
+    ) catch return outOfMemory("exporting the score map");
     defer result.deinit();
-    return fillOrSay(&out_buffer, result.text, "score", &result.diags);
+    const blob = TprAbi.encodeMap(result.map, &map_buffer) catch {
+        const len = TprAbi.mapEncodedLen(result.map);
+        return tooBig("position map", len, MAP_CAP, &result.diags);
+    };
+    publishDiags(.operation, &result.diags);
+    return @intCast(blob.len);
 }
 
 /// `tpr_exportScore`'s refusal, said: one `anchor_unavailable` at the

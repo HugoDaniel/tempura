@@ -17,7 +17,7 @@
 // still a value an editor can show, and it is what lets a host attach an
 // anchor's bytes to a document that just told it they were missing.
 
-import { decodeDiagnostics, decodePlayhead, decodeTimeline } from './blobs.js';
+import { decodeDiagnostics, decodeMap, decodePlayhead, decodeTimeline } from './blobs.js';
 
 // sjon.wasm's executable-plugin dispatch import. tempura documents never
 // declare `:impl "wasm:…"` plugins, so this is never called for a valid
@@ -119,11 +119,17 @@ export class Tempura {
   /**
    * Every zone's ceiling, in bytes. A host that would write past one
    * checks here rather than being refused.
-   * @returns {{ doc: number, file: number, op: number, out: number }}
+   * @returns {{ doc: number, file: number, op: number, out: number, map: number }}
    */
   get caps() {
     const e = this.#exports;
-    return { doc: e.tpr_docCap(), file: e.tpr_fileCap(), op: e.tpr_opCap(), out: e.tpr_outCap() };
+    return {
+      doc: e.tpr_docCap(),
+      file: e.tpr_fileCap(),
+      op: e.tpr_opCap(),
+      out: e.tpr_outCap(),
+      map: e.tpr_mapCap(),
+    };
   }
 
   /**
@@ -321,14 +327,31 @@ export class Tempura {
    * @returns {string | null}
    */
   exportScore(opts = {}) {
-    const flags =
-      (opts.velocity ? 1 : 0) |
-      (opts.easeLinear ? 2 : 0) |
-      (opts.noHints ? 4 : 0) |
-      (opts.sectionMarkers ? 8 : 0);
-    const len = this.#exports.tpr_exportScore(flags);
+    const len = this.#exports.tpr_exportScore(scoreFlags(opts));
     this.diagnostics = this.#readDiags();
     return len === 0 ? null : this.#outText(len);
+  }
+
+  /**
+   * The position map of `exportScore()`'s score: one record per emitted
+   * position, with a byte span into the score text and the document span
+   * (or spans, when the export merged sources) it came from. Call it
+   * with the same options as `exportScore()`: both verbs run the same
+   * deterministic export, so the map's spans index that exact text.
+   * Turn a doc span into an address with SJON's `sjon_address_of_span`
+   * over `text`.
+   *
+   * Null when nothing is loaded, the score was refused, or the map is
+   * past the zone — `diagnostics` says which.
+   * @param {ScoreOptions} [opts]
+   * @returns {import('./blobs.js').PositionMap | null}
+   */
+  exportScoreMap(opts = {}) {
+    const e = this.#exports;
+    const len = e.tpr_exportScoreMap(scoreFlags(opts));
+    this.diagnostics = this.#readDiags();
+    if (len === 0) return null;
+    return decodeMap(new Uint8Array(e.memory.buffer, e.tpr_mapPtr(), len).slice());
   }
 
   /**
@@ -413,6 +436,22 @@ export class Tempura {
     if (len === 0) return [];
     return decodeDiagnostics(new Uint8Array(e.memory.buffer, e.tpr_diagPtr(), len).slice());
   }
+}
+
+/**
+ * `tpr_exportScore` and `tpr_exportScoreMap`'s flag bits, one spelling:
+ * the two verbs are different answers about one export, so they must be
+ * asked with the same options for the map's spans to index the text.
+ * @param {ScoreOptions} opts
+ * @returns {number}
+ */
+function scoreFlags(opts) {
+  return (
+    (opts.velocity ? 1 : 0) |
+    (opts.easeLinear ? 2 : 0) |
+    (opts.noHints ? 4 : 0) |
+    (opts.sectionMarkers ? 8 : 0)
+  );
 }
 
 /**

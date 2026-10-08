@@ -1,10 +1,12 @@
-// The three packed blobs `tempura.wasm` writes, decoded with one
+// The four packed blobs `tempura.wasm` writes, decoded with one
 // `DataView` pass each. Mirror of `src/TprAbi.zig`, which is the format's
 // definition and its native test; read that header for the layouts.
 //
 //   'TPTL' (out) — the derivation: tempo segments, meters, the bar
 //                  table's shape, sections, cues, the lane index
 //   'TPPH' (out) — one playhead record, or the guard that refused it
+//   'TPMP' (out) — the position map of the score, one record per
+//                  emitted position with its document spans
 //   'TPDG' (out) — diagnostics, pacer's 'PACD' layout with tempura's
 //                  `Diag.Code` ordinals and three severities
 //
@@ -24,6 +26,9 @@ export const TIMELINE_VERSION = 1;
 /** `"TPPH"` read little-endian. */
 export const PLAYHEAD_MAGIC = 0x48505054;
 export const PLAYHEAD_VERSION = 1;
+/** `"TPMP"` read little-endian. */
+export const MAP_MAGIC = 0x504d5054;
+export const MAP_VERSION = 1;
 /** `"TPDG"` read little-endian. */
 export const DIAGS_MAGIC = 0x47445054;
 export const DIAGS_VERSION = 1;
@@ -41,6 +46,10 @@ const LANES_ID = 0x4e414c54; // 'TLAN'
 const LANE_REC_LEN = 32;
 
 const PLAYHEAD_LEN = 80;
+
+const MAP_HEADER_LEN = 12;
+const MAP_RECORD_LEN = 12;
+const MAP_SPAN_LEN = 8;
 
 const DIAGS_HEADER_LEN = 12;
 const DIAG_RECORD_LEN = 16;
@@ -61,6 +70,7 @@ const decoder = new TextDecoder();
 /** @typedef {import('./types.js').Timeline} Timeline */
 /** @typedef {import('./types.js').Playhead} Playhead */
 /** @typedef {import('./types.js').Diagnostic} Diagnostic */
+/** @typedef {import('./types.js').PositionMap} PositionMap */
 
 /**
  * Check a blob's frame: long enough, the right magic, a version this
@@ -228,6 +238,44 @@ export function decodePlayhead(bytes) {
           }
         : null,
   };
+}
+
+/**
+ * Decode a `'TPMP'` blob — what `tpr_exportScoreMap()` wrote.
+ *
+ * One entry per emitted position, in emission order. `text` is a
+ * `[start, end]` byte span into the score text `tpr_exportScore()` handed
+ * back under the same flags; `doc` is an array of `[start, end]` byte
+ * spans into the document text (`Tempura.text`), one per document node
+ * the position came from, several when the exporter's arithmetic merged
+ * sources. Turn a doc span into an edit-engine address with SJON's
+ * `sjon_address_of_span` over that text.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {PositionMap}
+ */
+export function decodeMap(bytes) {
+  const dv = frame(bytes, MAP_MAGIC, MAP_VERSION, MAP_HEADER_LEN, 'map');
+  const count = dv.getUint32(8, true);
+  /** @type {Array<{text: [number, number], doc: Array<[number, number]>}>} */
+  const entries = [];
+  let off = MAP_HEADER_LEN;
+  for (let i = 0; i < count; i++) {
+    const text = /** @type {[number, number]} */ ([
+      dv.getUint32(off, true),
+      dv.getUint32(off + 4, true),
+    ]);
+    const docCount = dv.getUint32(off + 8, true);
+    off += MAP_RECORD_LEN;
+    /** @type {Array<[number, number]>} */
+    const doc = [];
+    for (let j = 0; j < docCount; j++) {
+      doc.push([dv.getUint32(off, true), dv.getUint32(off + 4, true)]);
+      off += MAP_SPAN_LEN;
+    }
+    entries.push({ text, doc });
+  }
+  return { entries };
 }
 
 /**

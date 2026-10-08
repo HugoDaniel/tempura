@@ -4,7 +4,7 @@
 //! discipline, which is SJON's `wasm_common` one). The JS glue in
 //! `npm/tempura/src/blobs.js` mirrors each with one `DataView` pass.
 //!
-//! Three blobs, all outbound: tempura's inbound zones carry TEXT and
+//! Four blobs, all outbound: tempura's inbound zones carry TEXT and
 //! BYTES, never a packed structure, so there is no `'PACT'` twin here.
 //!
 //! ## `'TPDG'` — diagnostics out
@@ -114,6 +114,28 @@
 //!              outside, so the two host guards ride out with it; on a
 //!              refusal every other field is zero.
 //!
+//! ## `'TPMP'` — the position map out
+//!
+//! `Result.map`, one record per emitted position (plan 08's T1 ruling,
+//! 2026-10-04). Layout:
+//!
+//!     [magic u32]['TPMP'][version u32][count u32]
+//!     count × { text_start u32, text_end u32, doc_count u32,
+//!               doc_count × { start u32, end u32 } }
+//!
+//!     text_*: byte offsets into the score text, in the count's emission
+//!             order.
+//!     doc_*:  byte offsets into the document text, one pair per
+//!             document node the position came from; several when the
+//!             exporter's arithmetic merged sources (aggregation, a
+//!             coalesced tempo run, a budgeted key's step run).
+//!
+//! A host turns a `doc` span into an address with SJON's
+//! `sjon_address_of_span` over the document text it already holds; that
+//! end is SJON's and is deliberately not spelled here. `tpr_exportScoreMap`
+//! writes this blob; `tpr_exportScore` writes the text it maps, and the
+//! same flags export both, so the spans index that exact text.
+//!
 //! ## Release policy
 //!
 //! Every surface here is append-only from E3, together with the `tpr_*`
@@ -128,6 +150,7 @@ const Diag = @import("Diag.zig");
 const time = @import("time/time.zig");
 const Doc = @import("doc/Value.zig");
 const walk = @import("itf/walk.zig");
+const exporter = @import("export/export.zig");
 const time_test_support = @import("time/test_support.zig");
 
 const Derived = time.derive.Derived;
@@ -162,6 +185,9 @@ pub const TIMELINE_VERSION: u32 = 1;
 /// `"TPPH"` read LE.
 pub const PLAYHEAD_MAGIC: u32 = fourcc("TPPH");
 pub const PLAYHEAD_VERSION: u32 = 1;
+/// `"TPMP"` read LE.
+pub const MAP_MAGIC: u32 = fourcc("TPMP");
+pub const MAP_VERSION: u32 = 1;
 
 pub const DIAGS_HEADER_LEN: usize = 12;
 /// Fixed bytes per diagnostic record, before its message.
@@ -191,6 +217,13 @@ pub const LANE_REC_LEN: usize = 32;
 
 /// The whole `'TPPH'` record, before its section-id tail.
 pub const PLAYHEAD_LEN: usize = 80;
+
+/// magic + version (8) + count (4).
+pub const MAP_HEADER_LEN: usize = 12;
+/// `text_start`, `text_end`, `doc_count`.
+pub const MAP_RECORD_LEN: usize = 12;
+/// One document span: `start`, `end`.
+pub const MAP_SPAN_LEN: usize = 8;
 
 /// Which producer's list a `'TPDG'` record came from: the document's
 /// load, its derivation, or the verb a host called (a plan, an apply, an
@@ -503,6 +536,44 @@ fn writeF64(dest: *[8]u8, x: f64) void {
 }
 
 // ---------------------------------------------------------------------------
+// 'TPMP' — the position map out
+// ---------------------------------------------------------------------------
+
+/// Exact encoded size of a position map: the header, then per record its
+/// fixed part and its document spans. The sum `encodeMap`'s own bounds
+/// check reads too, so the format is stated once.
+pub fn mapEncodedLen(map: []const exporter.MapEntry) usize {
+    var len: usize = MAP_HEADER_LEN;
+    for (map) |e| len += MAP_RECORD_LEN + e.doc.len * MAP_SPAN_LEN;
+    return len;
+}
+
+/// Encode a position map as a `'TPMP'` blob. Never partial: a `dest`
+/// that cannot hold the whole thing is `error.BufferTooSmall` and
+/// nothing is written, because half a map is a wrong map.
+pub fn encodeMap(map: []const exporter.MapEntry, dest: []u8) Error![]u8 {
+    if (dest.len < mapEncodedLen(map)) return error.BufferTooSmall;
+
+    std.mem.writeInt(u32, dest[0..4], MAP_MAGIC, .little);
+    std.mem.writeInt(u32, dest[4..8], MAP_VERSION, .little);
+    std.mem.writeInt(u32, dest[8..12], @intCast(map.len), .little);
+    var off: usize = MAP_HEADER_LEN;
+    for (map) |e| {
+        std.mem.writeInt(u32, dest[off..][0..4], e.text.start, .little);
+        std.mem.writeInt(u32, dest[off + 4 ..][0..4], e.text.end, .little);
+        std.mem.writeInt(u32, dest[off + 8 ..][0..4], @intCast(e.doc.len), .little);
+        off += MAP_RECORD_LEN;
+        for (e.doc) |d| {
+            std.mem.writeInt(u32, dest[off..][0..4], d.start, .little);
+            std.mem.writeInt(u32, dest[off + 4 ..][0..4], d.end, .little);
+            off += MAP_SPAN_LEN;
+        }
+    }
+    std.debug.assert(off == mapEncodedLen(map));
+    return dest[0..off];
+}
+
+// ---------------------------------------------------------------------------
 // 'TPPH' — one playhead out
 // ---------------------------------------------------------------------------
 
@@ -641,6 +712,10 @@ test "TprAbi: the magics are four-character codes read little-endian" {
     try testing.expectEqualStrings(
         "TPPH",
         &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, PLAYHEAD_MAGIC))),
+    );
+    try testing.expectEqualStrings(
+        "TPMP",
+        &@as([4]u8, @bitCast(std.mem.nativeToLittle(u32, MAP_MAGIC))),
     );
     try testing.expectEqualStrings(
         "TSEG",
@@ -976,4 +1051,68 @@ test "TprAbi: 'TPDG' — a record that does not fit is dropped, and the count sa
     try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, blob[8..12], .little));
     try testing.expectEqual(DIAGS_HEADER_LEN + DIAG_RECORD_LEN + 5, blob.len);
     try testing.expectEqualStrings("first", blob[DIAGS_HEADER_LEN + DIAG_RECORD_LEN ..][0..5]);
+}
+
+test "TprAbi: 'TPMP' — the header, then one record per mapped position" {
+    const gpa = testing.allocator;
+    var loaded = try deriveDoc(gpa, two_segment_doc);
+    defer loaded.result.deinit();
+    var derived = loaded.derived;
+    defer derived.deinit();
+    var score = try exporter.exportScore(gpa, &loaded.result.doc, &derived, &.{}, .{});
+    defer score.deinit();
+    try testing.expect(score.map.len > 0);
+
+    const buf = try gpa.alloc(u8, mapEncodedLen(score.map));
+    defer gpa.free(buf);
+    const blob = try encodeMap(score.map, buf);
+    try testing.expectEqual(buf.len, blob.len);
+    try testing.expectEqual(MAP_MAGIC, std.mem.readInt(u32, blob[0..4], .little));
+    try testing.expectEqual(MAP_VERSION, std.mem.readInt(u32, blob[4..8], .little));
+    try testing.expectEqual(
+        @as(u32, @intCast(score.map.len)),
+        std.mem.readInt(u32, blob[8..12], .little),
+    );
+
+    // Every record: the text span, the doc count, then the doc spans, in
+    // the map's own order.
+    var off: usize = MAP_HEADER_LEN;
+    for (score.map) |e| {
+        try testing.expectEqual(e.text.start, std.mem.readInt(u32, blob[off..][0..4], .little));
+        try testing.expectEqual(
+            e.text.end,
+            std.mem.readInt(u32, blob[off + 4 ..][0..4], .little),
+        );
+        try testing.expectEqual(
+            @as(u32, @intCast(e.doc.len)),
+            std.mem.readInt(u32, blob[off + 8 ..][0..4], .little),
+        );
+        off += MAP_RECORD_LEN;
+        for (e.doc) |d| {
+            try testing.expectEqual(d.start, std.mem.readInt(u32, blob[off..][0..4], .little));
+            try testing.expectEqual(
+                d.end,
+                std.mem.readInt(u32, blob[off + 4 ..][0..4], .little),
+            );
+            off += MAP_SPAN_LEN;
+        }
+    }
+    try testing.expectEqual(blob.len, off);
+}
+
+test "TprAbi: 'TPMP' — one byte short is a refusal, never a partial blob" {
+    const gpa = testing.allocator;
+    var loaded = try deriveDoc(gpa, two_segment_doc);
+    defer loaded.result.deinit();
+    var derived = loaded.derived;
+    defer derived.deinit();
+    var score = try exporter.exportScore(gpa, &loaded.result.doc, &derived, &.{}, .{});
+    defer score.deinit();
+
+    const exact = mapEncodedLen(score.map);
+    const buf = try gpa.alloc(u8, exact);
+    defer gpa.free(buf);
+    @memset(buf, 0xaa);
+    try testing.expectError(error.BufferTooSmall, encodeMap(score.map, buf[0 .. exact - 1]));
+    for (buf) |b| try testing.expectEqual(@as(u8, 0xaa), b);
 }

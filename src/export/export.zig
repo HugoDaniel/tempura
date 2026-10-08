@@ -46,6 +46,8 @@ pub const MapEntry = score.MapEntry;
 pub const exportScore = score.exportScore;
 /// The map as JSON: `{"entries":[…]}`. See `score.mapJson`.
 pub const mapJson = score.mapJson;
+/// The map's entries array alone, for a wrapper with facts of its own.
+pub const mapEntriesJson = score.mapEntriesJson;
 pub const renderSmf = render_smf.renderSmf;
 pub const renderIt = render_it.renderIt;
 

@@ -1,0 +1,33 @@
+(timeline :title "impulsos" :length 4bar :end loop)
+
+(tempo-point :at 0q   :qpm 125)
+(meter-point :at 0bar :sig [4 4])
+
+(section :name intro :at 0bar :dur 2bar)
+(section :name drop  :at 2bar :dur 2bar)
+(cue :name "the drop" :at 2bar)
+
+(lane :name kick :kind notes :target kick
+  (note :at 0q   :dur 0.5q :key 36 :vel 110)
+  (note :at 0q   :dur 0.5q :key 43 :vel 96)
+  (note :at 1q   :dur 0.5q :key 36 :vel 64)
+  (clip :at 2bar :phrase fill :repeat 2))
+(lane :name glow :kind curve :target glow
+  (keyframe :at 0q :value 0.2 :ease hold)
+  (keyframe :at 4q :value 0.9 :ease in-cubic)
+  (keyframe :at 8q :value 0.1 :ease (spring :damping 0.5)))
+(lane :name hats  :kind query   :target hats  :query (euclid 3 8 1))
+(lane :name pulse :kind formula :target pulse :expr (* beat 2))
+
+(phrase :name fill :length 1bar
+  (lane :name kick
+    (note :at 0q   :dur 0.25q :key 38 :vel 100)
+    (note :at 0.5q :dur 0.25q :key 38 :vel 80)))
+
+(control :id glow-amt :type slider :min 0 :max 1 :value 0.5 :target glow-amt)
+(target :name kick :arity 4)
+(target :name kick-vel :arity 1)
+(target :name glow :arity 1)
+(target :name hats :arity 1)
+(target :name pulse :arity 1)
+(target :name glow-amt :arity 1)
