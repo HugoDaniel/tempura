@@ -127,8 +127,12 @@
 //!             order.
 //!     doc_*:  byte offsets into the document text, one pair per
 //!             document node the position came from; several when the
-//!             exporter's arithmetic merged sources (aggregation, a
-//!             coalesced tempo run, a budgeted key's step run).
+//!             exporter's arithmetic merged sources (aggregation onto
+//!             one pacer tick, a coalesced tempo run). A bound curve
+//!             lane's key names the lane, one pair however many steps
+//!             the budget collapsed: no document node stands for those
+//!             steps, while a native keyframe keeps its own span and
+//!             bypasses the budget.
 //!
 //! A host turns a `doc` span into an address with SJON's
 //! `sjon_address_of_span` over the document text it already holds; that
