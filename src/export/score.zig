@@ -65,9 +65,6 @@ const time = @import("../time/time.zig");
 const lanes = @import("lanes.zig");
 const pos = @import("pos.zig");
 const simplify = @import("simplify.zig");
-/// `tempo.zig`'s `Walk`: the map's own segment-to-point pairing, which
-/// the map record observes rather than repeats.
-const Tempo = @import("tempo.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -140,8 +137,12 @@ pub const Landing = struct {
 /// The span END is the exporter's alone: `text` is a byte span into
 /// `Result.text`, and `doc` the byte span(s) into the document text, one
 /// per document node that fed the position. Several means the exporter's
-/// own arithmetic merged sources: aggregation onto one pacer tick, a
-/// tempo run coalesced, a key whose run of steps the budget collapsed.
+/// own arithmetic merged sources: aggregation onto one pacer tick, or a
+/// tempo run coalesced. A bound curve lane's key is NOT one of those
+/// cases: its steps live in the anchor and no `Doc` node stands for one,
+/// so every key names the lane, one span however many steps the budget
+/// collapsed (`lanes.curve`); a native keyframe keeps its own span and
+/// bypasses the budget entirely.
 ///
 /// A consumer turns a `doc` span into the edit engine's address (root
 /// index plus path) with SJON's `sjon_address_of_span` over the document
@@ -310,11 +311,6 @@ const Emitter = struct {
     tempo_runs: []SegRun = &.{},
     /// The transport's `:bpm` run over `map.segments`.
     transport_run: SegRun = .{ .start = 0, .end = 0 },
-    /// Per `map.segments` index, the document point's span that made it
-    /// (`export/tempo.Walk`'s own pairing), empty for a segment the map
-    /// supplied. Empty for a conducted document, whose segments are the
-    /// anchor's and whose runs name the anchor instead.
-    tempo_spans: []Diag.Span = &.{},
 
     // ---- the run ----
 
@@ -384,12 +380,14 @@ const Emitter = struct {
 
     /// The tempo table, coalesced to something pacer can hold — or the
     /// decision to print seconds instead. The runs each form coalesced
-    /// are kept, because the map's records name them.
+    /// are kept, because the map's records name them; the segments
+    /// themselves carry the span of the point that made each one, so a
+    /// record's document end is read where the point became a segment
+    /// and never paired a second time.
     fn planTempo(self: *Emitter) Error!void {
         const segments = self.map.segments;
         self.bpm = self.pacerBpm(segments[0].us);
         try self.checkBpm(self.bpm, self.tempoSpan(0));
-        try self.pairTempoPoints();
 
         // Adjacent EQUAL tempi always coalesce: a `T0x` slide's per-tick
         // segments collapse wherever the value repeats.
@@ -446,28 +444,17 @@ const Emitter = struct {
         self.scratch_arena.free(planned.runs);
     }
 
-    /// The segment-to-point pairing `export/tempo.Walk` owns, kept for the
-    /// map: one span per `map.segments` entry, empty for a supplied or
-    /// refused segment. A conducted document has no document points, so
-    /// its runs name the anchor instead.
-    fn pairTempoPoints(self: *Emitter) Error!void {
-        if (self.doc.tempo.len == 0) return;
-        const spans = try self.scratch_arena.alloc(Diag.Span, self.map.segments.len);
-        var walk = Tempo.Walk.init(self.map, self.doc.tempo);
-        for (spans) |*s| {
-            // The walk answers one `Kept` per segment by construction, so
-            // it cannot run out before the segments do.
-            s.* = walk.next().?.span;
-        }
-        self.tempo_spans = spans;
-    }
-
     /// Segments 1.. whose bpm differs from the last KEPT one by more
     /// than `eps`. `eps == 0` is the always-on adjacent-equal collapse.
     /// Each kept form's run starts at its OWN segment and runs to where
     /// the next form begins: a skipped segment matched the rate before
     /// it, so it belongs to the form the rate came from, not to the one
     /// that follows.
+    ///
+    /// The runs are kept because the map's records name them, and the
+    /// document end of such a record is read from each segment's own
+    /// `span`: `TimeMap.derive` retains the authored point's span where
+    /// the point became a segment, so the pairing is never walked again.
     fn coalesce(self: *Emitter, segments: []const TimeMap.Segment, eps: f64) Error!Planned {
         var out: std.ArrayList(TempoForm) = .empty;
         errdefer out.deinit(self.scratch_arena);
@@ -811,7 +798,8 @@ const Emitter = struct {
     }
 
     /// The document spans behind one coalesced run of tempo segments:
-    /// every point `tempo.Walk` paired, skipping supplied segments. On a
+    /// each segment's own span, the authored point the map retained when
+    /// the point became a segment, skipping supplied segments. On a
     /// conducted document the run's source is the `(anchor …)` node that
     /// owns the file the tempo came from.
     fn runSpans(self: *Emitter, run: SegRun) Error![]const Diag.Span {
@@ -820,14 +808,14 @@ const Emitter = struct {
             return self.spanSources(anchor);
         }
         var n: usize = 0;
-        for (self.tempo_spans[run.start..run.end]) |s| {
-            if (s.end > s.start) n += 1;
+        for (self.map.segments[run.start..run.end]) |seg| {
+            if (seg.span.end > seg.span.start) n += 1;
         }
         const out = try self.scratch_arena.alloc(Diag.Span, n);
         var i: usize = 0;
-        for (self.tempo_spans[run.start..run.end]) |s| {
-            if (s.end > s.start) {
-                out[i] = s;
+        for (self.map.segments[run.start..run.end]) |seg| {
+            if (seg.span.end > seg.span.start) {
+                out[i] = seg.span;
                 i += 1;
             }
         }

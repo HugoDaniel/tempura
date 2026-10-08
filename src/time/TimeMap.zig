@@ -61,6 +61,12 @@ pub const Segment = struct {
     start_sec: f64,
     /// The integer seconds origin, valid only when the map is `integral`.
     t_i: i128,
+    /// The span of the authored point this segment came from, empty for a
+    /// segment the map supplied (a document with no usable point at tick
+    /// 0). This is the segment-to-point identity, captured by the table
+    /// that makes the pairing (`tempoTable`) so a consumer never has to
+    /// recover it by matching tick and rate.
+    span: Diag.Span = .{ .start = 0, .end = 0 },
 };
 
 /// One derived meter segment.
@@ -812,7 +818,7 @@ fn tempoTable(
                 .{DEFAULT_US},
             );
         }
-        try segs.append(arena, blank(0, DEFAULT_US));
+        try segs.append(arena, blank(0, DEFAULT_US, .{ .start = 0, .end = 0 }));
     }
 
     for (tempo) |p| {
@@ -858,7 +864,7 @@ fn tempoStep(
     // capped on the way in — but the map's contract is the value's.
     if (p.tick > Grid.MAX_TICK) return .{ .refuse = .past_ceiling };
     if (count == MAX_TEMPO_SEGMENTS) return .{ .refuse = .over_budget };
-    return .{ .keep = blank(p.tick, us) };
+    return .{ .keep = blank(p.tick, us, p.span) };
 }
 
 /// The diagnostic a dropped tempo point earns, with its own span.
@@ -1104,8 +1110,8 @@ pub fn usOf(p: TempoPoint) ?f64 {
     return us;
 }
 
-fn blank(tick: i64, us: f64) Segment {
-    return .{ .tick = tick, .us = us, .tps = 0, .start_sec = 0, .t_i = 0 };
+fn blank(tick: i64, us: f64, span: Diag.Span) Segment {
+    return .{ .tick = tick, .us = us, .tps = 0, .start_sec = 0, .t_i = 0, .span = span };
 }
 
 /// Which of plan 03's two paths this map takes, decided ONCE: the
@@ -1207,6 +1213,37 @@ test "TimeMap.derive: the segment table builds in plan 03's op order" {
         @as(u64, 0x4003BB97CF96C22B),
         @as(u64, @bitCast(pin.map.segments[1].start_sec)),
     );
+}
+
+test "TimeMap.derive: a segment keeps the span of the point that made it" {
+    // The map's own provenance, so a consumer that has to name the
+    // document node behind a segment (the export position map) reads it
+    // here instead of pairing tick and rate a second time. A point the
+    // map refused is behind no segment, and the origin the map supplies
+    // at tick 0 has no point: both carry the empty span.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 125 }, .span = .{ .start = 10, .end = 11 } },
+        .{ .tick = 184_504_320, .tempo = .{ .qpm = 150 }, .span = .{ .start = 20, .end = 21 } },
+        .{ .tick = 369_008_640, .tempo = .{ .qpm = -5 }, .span = .{ .start = 30, .end = 31 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 738_017_280, .hold);
+    defer r.deinit();
+
+    try testing.expectEqual(@as(usize, 2), r.map.segments.len);
+    try testing.expectEqual(@as(u32, 10), r.map.segments[0].span.start);
+    try testing.expectEqual(@as(u32, 11), r.map.segments[0].span.end);
+    try testing.expectEqual(@as(u32, 20), r.map.segments[1].span.start);
+    try testing.expectEqual(@as(u32, 21), r.map.segments[1].span.end);
+
+    // A document whose only point is not at tick 0: the map supplies
+    // segment 0, which names no document node, and keeps the point as
+    // segment 1 with its own span.
+    var supplied = try derive(testing.allocator, &.{
+        .{ .tick = 46_126_080, .tempo = .{ .qpm = 125 }, .span = .{ .start = 10, .end = 11 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 92_252_160, .hold);
+    defer supplied.deinit();
+    try testing.expectEqual(@as(usize, 2), supplied.map.segments.len);
+    try testing.expectEqual(@as(u32, 0), supplied.map.segments[0].span.end);
+    try testing.expectEqual(@as(u32, 10), supplied.map.segments[1].span.start);
 }
 
 test "TimeMap.derive: every allocation failure is OutOfMemory, cleanly, with nothing leaked" {
