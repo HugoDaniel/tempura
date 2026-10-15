@@ -520,6 +520,14 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
   ([03](03-time-model.md), risks). Item 4 of "Sequencing" above stands as the E0 reading.
   What moves here: nothing before animader's arc 2, step 12; plan 13's stage is the proof both
   sides name, and T1 is what it could also show.
+  *(Correction appended 2026-10-15: T2 is BUILT — the ask above stands as history. The `f`
+  position unit with `:fps` on `(timeline …)` landed through commits `c6f72b2`, `a2d308d`,
+  `da84f68`, `ecc777b` and `dc57775`, ruled in [03](03-time-model.md)'s risks and completed
+  by corpus cases `frames-25` and `frames-ntsc` (`0911345`), native and wasm parity green.
+  The ask's own gate — "waits on a piece that counts frames" — was waived by the owner on
+  2026-10-14 and recorded in [03](03-time-model.md). T1, the source map, remains an ask.
+  The code is LOCAL, committed on `agent/animader-init`, and NOT published to or accepted
+  by animader: no integration, browser verification or independent review has run.)*
 - 2026-09-29 — **A zero-length timeline is an export error, not a floored length** (user
   ruling, [08](08-export.md), risks). An empty document keeps length zero, the default-length
   rule stands, and `export-score` refuses with a diagnostic at `:length` or at the header

@@ -65,7 +65,14 @@ Rules, each a diagnostic with a span when broken. Positions are the `position` k
   id whose tempo and meter conduct ([03](03-time-model.md), "Three conductors"). With a
   conductor, `tempo-point` and `meter-point` forms are `conductor_conflict`; without one, a
   `tempo-point` and a `meter-point` at tick 0 are required (`tempo_map_invalid`,
-  `meter_map_invalid`).
+  `meter_map_invalid`). `:fps` the document's frame rate for the `f` position unit —
+  appended 2026-10-15 with that unit (the T2 ruling, [03](03-time-model.md), risks), so
+  this row dates itself against the keys above, which froze at E1: an integer
+  (`:fps 25`) or an exact `[num den]` rational (`:fps [30000 1001]`), never a bare
+  decimal — the manifest's `frame-rate` kind refuses one (`sjon_diagnostic`; 29.97 would
+  mean 2997/100, and NTSC does not). No default: an `f` position with no `:fps` is
+  `frame_rate_missing` and is not placed; a declared rate with no `f` position is
+  harmless, changes no position's spelling and prints only the header's `:fps`.
 - **`(anchor …)`**: the it set's `(source …)` generalised to both formats (it 03, "The
   anchor"). `:id` symbol (a cross-ref target), `:kind` `smf | it`, `:file` resolved relative
   to the document, `:size` and `:sha256` verified before any `(bin …)` or bound lane is

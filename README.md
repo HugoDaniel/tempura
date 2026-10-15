@@ -87,7 +87,7 @@ machine's memory. If it prints `waiting`, wait.
 | — | one answer, two hosts: the golden corpus re-derived from `tempura.wasm` in `node` | `npm/tempura/test/corpus.test.js`, inside `verify` |
 | — | every printed position lands on the tick tempura claims, read back by the real `pacer.wasm` | `npm/tempura/test/landing.test.js`, with a mutation test that fails on a one-tick error |
 
-78 corpus cases, and every shipped example is one of them.
+86 corpus cases, and every shipped example is one of them.
 
 ## What is unmeasured
 
