@@ -4,11 +4,12 @@
 //! number is `{"$num":[4,"bar"]}`, a symbol `{"$sym":"flash"}`, a form
 //! `{"$form":"note","at":…}`. SJON decodes it through the JSON bridge and
 //! PRINTS it, so what these writers spell is what lands in the document —
-//! which is why a position goes through the same two functions the
-//! canonical printer uses (`TimeMap.spell` for a position,
-//! `TimeMap.spellDuration` for a duration measured from its form's own
-//! `:at`, plan 03's frozen rule). An edit writes what the printer would
-//! have written.
+//! which is why a position goes through the same functions the canonical
+//! printer uses (`TimeMap.spell` for a position, `TimeMap.spellDuration`
+//! for a duration measured from its form's own `:at`, plan 03's frozen
+//! rule, and `TimeMap.spellGrid` — the frame-free spelling — for the one
+//! form family whose `:at` is a `grid-position` and refuses the unit). An
+//! edit writes what the printer would have written.
 //!
 //! Numbers are spelled by `Pos`'s own printer and copied VERBATIM into
 //! the JSON — the text `Pos.spell` produces is a valid JSON number
@@ -58,6 +59,29 @@ pub fn position(
     // `Nbar` and `Nt` are shorter. A fixed writer's one failure is a full
     // buffer, which 64 bytes cannot reach.
     map.spell(&w, tick) catch unreachable;
+    try literal(gpa, out, w.buffered());
+}
+
+/// A POSITION on a form whose `:at` is a `grid-position` — the tempo
+/// and meter points — spelled frame-free (`TimeMap.spellGrid`, the one
+/// owner of that rule): the schema refuses `f` on those forms exactly
+/// as it refuses `s`, so an edit that wrote the frame spelling the
+/// document's own map would offer leaves a document that does not
+/// reload. The buffer proof is `position`'s: `spellGrid` writes
+/// `Pos.spell`'s frame-free text, never wider.
+pub fn positionGrid(
+    gpa: std.mem.Allocator,
+    out: *Buf,
+    map: *const TimeMap.TimeMap,
+    tick: i64,
+) Error!void {
+    var text: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&text);
+    // `spellGrid`'s text is `spell`'s minus the frame branch, and the
+    // proof is `position`'s above: the widest thing `Pos.spell` writes
+    // is 32 bytes, so a fixed writer's one failure — a full buffer — is
+    // out of reach at 64.
+    map.spellGrid(&w, tick) catch unreachable;
     try literal(gpa, out, w.buffered());
 }
 
@@ -348,6 +372,20 @@ pub const Form = struct {
     ) Error!void {
         try self.key(name);
         try vals.position(self.gpa, &self.buf, map, tick);
+    }
+
+    /// `:name` as a position on a `grid-position` form — frame-free,
+    /// by `vals.positionGrid` (`TimeMap.spellGrid`): the tempo and
+    /// meter points refuse `f`, so the edit that builds one must not
+    /// write it however frame-fluent the document is.
+    pub fn positionGrid(
+        self: *Form,
+        name: []const u8,
+        map: *const TimeMap.TimeMap,
+        tick: i64,
+    ) Error!void {
+        try self.key(name);
+        try vals.positionGrid(self.gpa, &self.buf, map, tick);
     }
 
     /// `:name` as a duration measured from `at` (`vals.duration`).

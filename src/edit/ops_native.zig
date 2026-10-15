@@ -851,6 +851,15 @@ const Ctx = struct {
     /// `:at` — the ones a move can silently change the meaning of.
     const duration_keys = [_][]const u8{ "dur", "offset", "length" };
 
+    /// Whether `head` names one of the two forms whose `:at` is a
+    /// `grid-position` — the only forms that refuse the frame unit, so
+    /// the only ones an edit must spell frame-free however frame-fluent
+    /// the document is. The schema says this first; this is the edit
+    /// engine's own statement of the same rule, spelled where it writes.
+    fn isMapPoint(head: []const u8) bool {
+        return std.mem.eql(u8, head, "tempo-point") or std.mem.eql(u8, head, "meter-point");
+    }
+
     /// Everything a move writes on its form: the new `:at`, the duration
     /// the operation asked for, and the durations whose SPELLING has to
     /// follow the anchor.
@@ -1600,7 +1609,9 @@ const Ctx = struct {
 
         var f = try value.Form.init(self.gpa, "tempo-point");
         defer f.deinit();
-        try f.position("at", self.map, x.point.tick);
+        // A tempo point's `:at` is a `grid-position`: frame-free, or
+        // the text this edit writes does not reload.
+        try f.positionGrid("at", self.map, x.point.tick);
         const written = switch (x.point.tempo) {
             .us => |us| f.integer("us", us),
             .qpm => |qpm| f.float("qpm", @floatCast(qpm)),
@@ -1720,7 +1731,9 @@ const Ctx = struct {
 
         var f = try value.Form.init(self.gpa, "meter-point");
         defer f.deinit();
-        try f.position("at", self.map, x.point.tick);
+        // The meter twin of the tempo insert above: a `grid-position`
+        // `:at`, spelled frame-free whatever the document wrote.
+        try f.positionGrid("at", self.map, x.point.tick);
         try f.raw(
             "sig",
             try std.fmt.allocPrint(self.arena, "[{d},{d}]", .{ x.point.n, x.point.d }),
@@ -1729,7 +1742,10 @@ const Ctx = struct {
     }
 
     /// Re-spell every position and duration of `node` (and of its
-    /// children) that `after` would read as a different tick.
+    /// children) that `after` would read as a different tick. A tempo
+    /// or meter point's own `:at` is re-spelled frame-free
+    /// (`isMapPoint`, `value.positionGrid`): `grid-position` refuses
+    /// `f`, so a frames document must survive its own meter edits.
     fn respellUnder(
         self: *Ctx,
         after: *const TimeMap.TimeMap,
@@ -1760,7 +1776,15 @@ const Ctx = struct {
                 const w = (try self.where(span)) orelse return;
                 var out: value.Buf = .empty;
                 defer out.deinit(self.gpa);
-                try value.position(self.gpa, &out, after, anchor);
+                // The one head pair whose `:at` is a `grid-position`: a
+                // tempo or meter point refuses `f` as it refuses `s`, so
+                // its respelling is frame-free (`TimeMap.spellGrid`) —
+                // a frames document must survive its own meter edits.
+                if (isMapPoint(hdr.head)) {
+                    try value.positionGrid(self.gpa, &out, after, anchor);
+                } else {
+                    try value.position(self.gpa, &out, after, anchor);
+                }
                 try self.b.setKeyword(w.site, "at", out.items);
             }
         }
@@ -2737,6 +2761,77 @@ test "ops: insert-meter respells every bar literal the change would move" {
             },
         },
     );
+}
+
+test "ops: insert-tempo in a frames document writes a grid spelling" {
+    // A frame-authored document: :fps 25, and the new point sits at 4q
+    // — two seconds at 120 qpm, frame 50 exactly, a spelling the
+    // document's own map would offer. A tempo point's `:at` is a
+    // `grid-position`, which refuses `f` as it refuses `s`, so the
+    // plan must write the grid's own `1bar` — and the proof is the
+    // reload: the text an accepted plan produces has to load clean.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa,
+        \\(timeline :fps 25)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(cue :name "hit" :at 20f)
+        \\
+    );
+    defer fx.deinit();
+
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .insert_tempo = .{ .point = .{ .tick = 4 * TPQ, .tempo = .{ .qpm = 240 } } },
+    });
+    defer p.deinit();
+
+    var back = try test_support.Reloaded.init(gpa, fx.source, &p);
+    defer back.deinit();
+    try testing.expect(std.mem.indexOf(u8, back.text(), ":at 50f") == null);
+    try testing.expect(std.mem.indexOf(u8, back.text(), "(tempo-point :at 1bar :qpm 240)") != null);
+    // Semantics kept: the new point means tick 4·TPQ in the reloaded
+    // document, and the frame-authored cue is exactly where it was.
+    try testing.expectEqual(@as(i64, 4 * TPQ), back.doc_().tempo[1].tick);
+    try testing.expect(std.mem.indexOf(u8, back.text(), ":at 20f") != null);
+}
+
+test "ops: a meter edit in a frames document respells map points grid-freely" {
+    // The deeper shape: 2bar under [4 4] at :qpm 300 is 8q = 369 008 640
+    // ticks = 1.6 s, frame 40 exactly at :fps 25. An [3 4] point at 1bar
+    // moves what `2bar` means, so the tempo point is re-spelled from the
+    // tick it MEANT — and that tick's frame spelling, which the after-map
+    // would happily write on a position form, must not appear on a map
+    // point: grid-position refuses it, and the applied text reloads
+    // clean with the point meaning the same tick (`8q` is 369 008 640
+    // under any meter). The cue at the same tick MAY take the frame —
+    // it is a position form, the unit is legal there.
+    const gpa = testing.allocator;
+    var fx = try test_support.Fixture.init(gpa,
+        \\(timeline :fps 25)
+        \\(tempo-point :at 0q :qpm 300)
+        \\(tempo-point :at 2bar :qpm 240)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(cue :name "drop" :at 10f)
+        \\(cue :name "hold" :at 2bar)
+        \\
+    );
+    defer fx.deinit();
+
+    var p = try plan(gpa, fx.doc_(), &fx.tree, .{
+        .insert_meter = .{ .point = .{ .tick = 4 * TPQ, .n = 3, .d = 4 } },
+    });
+    defer p.deinit();
+
+    var back = try test_support.Reloaded.init(gpa, fx.source, &p);
+    defer back.deinit();
+    try testing.expect(std.mem.indexOf(u8, back.text(), "(tempo-point :at 40f") == null);
+    try testing.expect(
+        std.mem.indexOf(u8, back.text(), "(meter-point :at 1bar :sig [3 4])") != null,
+    );
+    try testing.expect(std.mem.indexOf(u8, back.text(), "(tempo-point :at 8q :qpm 240)") != null);
+    // The point keeps the tick it meant; the cue takes the frame.
+    try testing.expectEqual(@as(i64, 8 * TPQ), back.doc_().tempo[1].tick);
+    try testing.expect(std.mem.indexOf(u8, back.text(), ":at 40f)") != null);
 }
 
 test "ops: insert-meter off a bar line is edit_off_bar" {
