@@ -549,6 +549,24 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
   cover inferred zero, explicit zero and the positive one-bar identity. `tools/zt verify`,
   the diagnostic coverage audit and the changed JS file's Biome check pass.
 
+- 2026-10-16 — **T2 ledger follow-up: locally integrated and verified, not published.**
+  The corrections above end "no integration, browser verification or independent
+  review has run" — superseded on the local tree: animader `284f66d` consumes tempura
+  `2a72105` through the composed piece path (real `PieceHost.score`/`scoreMap` →
+  pacer → run core, PROBE PASS), the real-browser matrix passed per engine and
+  viewport (Chromium and WebKit, 1280x900 and 390x844; tempura 8/8, consumer 4/4),
+  an independent confirm review returned MERGE-WORTHY (its one LOW test-helper
+  finding fixed by `2a72105`, fail-first), and the design acceptance is a PASS with
+  two optional fixture nits. The aggregate tempura `verify` stays host-red on one
+  environmental CLI leg (sanctioned shim leg green). Nothing is published, merged
+  upstream or released; the hello-player vendor copy was re-synced locally,
+  byte-identical. Record of record: [03](03-time-model.md)'s dated final entry,
+  with the browser report at
+  [evidence/t2-browser-verification.md](evidence/t2-browser-verification.md) — whose
+  copy note also corrects the acceptance log's "T1 frame-clock consumer" phrase:
+  T1 is the source map, built and consumed 2026-10-08; frame-clock is animader's
+  existing provider, identity-load only, execution still unimplemented.
+
 ## Status board
 
 | Milestone | Item | Status |

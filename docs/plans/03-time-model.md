@@ -382,3 +382,61 @@ The wasm exports mirror these ([10](10-hosts-and-cli.md)).
   LOCALLY on `agent/animader-init`, not published to or accepted by animader; the
   animader-side rebuild, vendor sync and consumer gates are the next task's, and until
   they run, T2's integration is pending, not claimed.** README's corpus count stays 87.
+
+- **T2's final LOCAL verification and acceptance record (appended 2026-10-16; every
+  run it cites is dated 2026-10-15).** The standing sentence two entries above —
+  "the animader-side rebuild, vendor sync and consumer gates are the next task's,
+  and until they run, T2's integration is pending, not claimed" — is superseded
+  here: those three have run, LOCALLY, and so have the browser verification, the
+  independent confirm review and the design acceptance. Nothing is published,
+  merged upstream, tagged or released. The evidence is control-plane fresh runs
+  read from logs, not worker claims; every hash below was re-derived at this close
+  with Python `hashlib` (the host `sha256sum` is broken). Tips: tempura `2a72105`
+  (tracked tree clean; only the preexisting `zig-pkg/` scratch), animader `284f66d`,
+  pacer `5f28aaa`, pngine `741ce92b`. Artifacts: `tempura.wasm` 1 417 077 B, sha256
+  `8014cc8a6ff4e194bc24cec19a7970bc224372e0174b6ab5a45720aa93f3c33b`;
+  `animader.wasm` 1 176 321 B, sha256
+  `00f923da8e5a46b3fa2ca49e3b82aba44efc61fd6ae35f84339170836f373262`; the
+  hello-player vendor copy was re-synced locally and is byte-identical to `zig-out`
+  — a local sync, not a deployment or a release. tempura gates at `2a72105`:
+  native 1024/1024, corpus 87/87, npm 137/137 with 0 skipped, wasm 95% of its
+  ceiling — and the aggregate `verify` is NOT a pass on this host: 25/27 steps,
+  the one failure the environmental `cli_golden.sh` (obs ksh93, missing `shasum`),
+  whose sanctioned bash+t2-shim leg is green ("CLI output is current", exit 0).
+  animader: 18/18 steps, 403/403 tests, npm 112/112 with 0 skipped, corpora
+  log 8 / machine 7 / session 3 / piece 4, and the composed probe PROBE PASS
+  through the real `PieceHost.score`/`scoreMap` → pacer → run core. The two
+  rounding semantics, kept apart all the way through: a tempura frame's exactness
+  is tempura's own — NTSC `25f` IS tick 192 384 192 — while pacer's grid rounds
+  (`mul + floor`): that exact tick maps UP to pacer tick 751 501, the wall-clock
+  floor of 1001/1200 s is 751 500 (one pacer tick under the event), and the
+  floored `1f` lane begins at pacer 300 60. T1, the source map, stays BUILT and
+  consumed (2026-10-08), its `'TPMP'` spans verified against the document by the
+  probe; the frame-clock world provider's part in the matrix is a clean identity
+  load (`scoreMap` state `identity+null`) — its provider EXECUTION remains
+  unimplemented, exactly as before. Real-browser matrix, Chromium and WebKit at
+  1280x900 and 390x844: tempura 8/8 and the composed consumer 4/4 on every engine
+  and viewport, every artifact digest equal to the disk pins — the report is
+  copied verbatim to
+  [evidence/t2-browser-verification.md](evidence/t2-browser-verification.md) (line
+  references as measured; the eight screenshots live only in the ignored `.agent/`;
+  the copy note beside it corrects the acceptance log's concluding phrase "T1
+  frame-clock consumer", which conflates the source map with the provider and is
+  repeated nowhere as a claim). Design acceptance: PASS, no blocker or important
+  finding, two optional fixture nits (a benign favicon 404; mid-token wrap of
+  long monospace lines at 390px). Independent confirm review: MERGE-WORTHY at
+  `3345301` with one LOW test-helper finding, fixed AFTER the review by `2a72105`
+  with both fail-first tests (a segfault red and a leak red, then 1009/1009 on the
+  full suite, 1024/1024 with lint in the fresh verify) — the verdict's exact tail
+  with its annotations is
+  [evidence/t2-confirm-review-verdict.md](evidence/t2-confirm-review-verdict.md).
+  The consumer-side kind collision that the composed-manifest guard exists for was
+  resolved by the rename to `timeline-frame-rate` (`3345301`,
+  [02](02-timeline-schema.md)). And nothing above adds or implies a default rate:
+  an `f` position with no `:fps` is still `frame_rate_missing`, and a rate alone
+  still spells nothing. The ruling stays committed at
+  [evidence/t2-final-ruling.md](evidence/t2-final-ruling.md). **Standing: T2 is
+  built, ruled, fixed, locally integrated and locally verified — not published,
+  not accepted by animader beyond this machine, no artwork or GPU-motion claim,
+  and the aggregate tempura `verify` stays host-red on the one environmental CLI
+  leg.** README's corpus count stays 87.
