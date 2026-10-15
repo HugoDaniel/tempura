@@ -136,7 +136,7 @@
     :underlying vector
     :vector (vector-shape :len 2 :element frame-rate-scalar))
 
-  (value-kind :name frame-rate
+  (value-kind :name timeline-frame-rate
     :description "The document's frame rate for the f position unit (plan 03): an integer or an exact [num den] rational."
     :underlying union
     :union (union-shape :alternatives [frame-rate-scalar frame-rate-pair]))
@@ -332,7 +332,7 @@
       :description "The piece's title. Prose, not an identifier.")
     (key :name length :type position :optional true
       :description "The piece's length. Omitted, it is the end of the last event or clip rounded up to a bar.")
-    (key :name fps :type frame-rate :optional true
+    (key :name fps :type timeline-frame-rate :optional true
       :description "The document's frame rate, for the `f` position unit (plan 03): frames per second as an integer (`:fps 25`) or an exact rational (`:fps [30000 1001]`). Never a bare decimal — 29.97 would mean 2997/100, and NTSC is 30000/1001. A rate alone changes no position's spelling; the header keeps `:fps`. An `f` position without this key is a tempura frame_rate_missing.")
     (key :name end :type timeline-end :optional true :default hold
       :description "What the playhead does past :length. Exported as pacer's transport :end.")

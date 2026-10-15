@@ -260,7 +260,7 @@ A frame rate as an exact [num den] rational, e.g. [30000 1001] for NTSC or [2400
 
 Type: `vector<number>` — len 2; integer; min 1; max 16777215.
 
-### frame-rate
+### timeline-frame-rate
 
 The document's frame rate for the f position unit (plan 03): an integer or an exact [num den] rational.
 

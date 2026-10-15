@@ -808,6 +808,163 @@ test "tempura: no head this set declares collides with a sibling vocabulary" {
 }
 
 // ---------------------------------------------------------------------
+// The animader composition: the sibling's live manifests in the same
+// aggregate (the 2026-10-15 `frame-rate` collision's regression)
+// ---------------------------------------------------------------------
+
+/// animader's `schema/*.sjon` manifests, read and sorted by name, when
+/// a checkout is discoverable; `null` when absent — announced by ONE
+/// printed line naming the override and the candidate, so absence is a
+/// fact and never silence. `override_root` is `TEMPURA_ANIMADER`'s
+/// value as `build.zig` read it (`null` when unset); a relative
+/// override resolves against the repo root, an absolute one is taken as
+/// is, and one that points nowhere is an ABSENCE — no fallback to the
+/// workspace default, so a typo'd override cannot quietly compose the
+/// default checkout instead. The caller frees the slice and each source.
+fn animaderManifests(
+    gpa: std.mem.Allocator,
+    override_root: ?[]const u8,
+) !?[][:0]u8 {
+    const repo_root = @import("build_options").repo_root;
+
+    var root: []u8 = undefined;
+    if (override_root) |over| {
+        root = if (std.fs.path.isAbsolute(over))
+            try gpa.dupe(u8, over)
+        else
+            try std.fs.path.join(gpa, &.{ repo_root, over });
+    } else {
+        root = try std.fs.path.join(gpa, &.{ repo_root, "..", "animader", "animader" });
+    }
+    defer gpa.free(root);
+    const schema_dir = try std.fs.path.join(gpa, &.{ root, "schema" });
+    defer gpa.free(schema_dir);
+
+    var dir = std.Io.Dir.cwd().openDir(t_.io, schema_dir, .{ .iterate = true }) catch {
+        std.debug.print(
+            "sibling-compose: no animader checkout — TEMPURA_ANIMADER={s}, " ++
+                "candidate `{s}` not found; point the override at a checkout " ++
+                "(or check the sibling out) — SKIPPING, nothing composed, nothing claimed\n",
+            .{ override_root orelse "(unset)", schema_dir },
+        );
+        return null;
+    };
+    defer dir.close(t_.io);
+
+    var names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (names.items) |n| gpa.free(n);
+        names.deinit(gpa);
+    }
+    var it = dir.iterate();
+    // Bounded by the directory's own entries, walked once.
+    while (try it.next(t_.io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".sjon")) continue;
+        try names.append(gpa, try gpa.dupe(u8, entry.name));
+    }
+    // A checkout whose schema/ holds no manifest is broken, not absent —
+    // composing zero manifests would claim cleanliness vacuously.
+    if (names.items.len == 0) return error.EmptySiblingSchemaDir;
+    std.mem.sort([]u8, names.items, {}, nameBefore);
+
+    const sources = try gpa.alloc([:0]u8, names.items.len);
+    errdefer {
+        for (sources) |s| gpa.free(s);
+        gpa.free(sources);
+    }
+    for (names.items, sources) |name, *src| {
+        const path = try std.fs.path.join(gpa, &.{ schema_dir, name });
+        defer gpa.free(path);
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(
+            t_.io,
+            path,
+            gpa,
+            .limited(8 * 1024 * 1024),
+        );
+        defer gpa.free(bytes);
+        src.* = try gpa.dupeZ(u8, bytes);
+    }
+    return sources;
+}
+
+fn nameBefore(_: void, x: []u8, y: []u8) bool {
+    return std.mem.lessThan(u8, x, y);
+}
+
+test "tempura: the animader composition preloads with zero diagnostics" {
+    // tempura's bundle and animader's vocabulary load in ONE aggregate
+    // inside animader's piece loader, and a kind name claimed by both
+    // plugins is `ambiguous_element_kind` on every reference to it — the
+    // T2 `frame-rate` collision landed with every tempura gate green
+    // precisely because nothing here composed the two sets. This leg
+    // does, through the same preload walk the runtime runs
+    // (`preloadSchema`'s aggregate validators), and claims ZERO
+    // diagnostics — the strength of animader's own preload test, from
+    // the declaring side. The sibling's manifests are DISCOVERED, not
+    // pinned: every `schema/*.sjon` joins, so a manifest added there
+    // composes here the day it lands.
+    const gpa = t_.allocator;
+
+    const sources = (try animaderManifests(
+        gpa,
+        @import("build_options").animader_root,
+    )) orelse return error.SkipZigTest; // the loud line above said why
+    defer {
+        for (sources) |s| gpa.free(s);
+        gpa.free(sources);
+    }
+
+    var all: std.ArrayList([:0]const u8) = .empty;
+    defer all.deinit(gpa);
+    for (Schema.timeline_manifest_srcs) |s| try all.append(gpa, s);
+    for (sources) |s| try all.append(gpa, s);
+
+    var composed = try Schema.loadSourcesUnchecked(gpa, all.items);
+    defer composed.deinit();
+
+    for (composed.preloaded.diagnostics) |d| {
+        std.debug.print("animader composition: {s} {s}: {s}\n", .{
+            @tagName(d.phase), @tagName(d.code), d.message,
+        });
+    }
+    try t_.expectEqual(@as(usize, 0), composed.preloaded.diagnostics.len);
+
+    // The composition actually composed: the sibling's five manifests
+    // beside tempura's four (nine plugins), one of animader's own heads
+    // resolvable bare, and every head tempura declares still resolving
+    // qualified with the sibling in the room.
+    try t_.expectEqual(
+        @as(usize, Schema.timeline_manifest_srcs.len + sources.len),
+        composed.preloaded.plugins.len,
+    );
+    try t_.expect(
+        composed.preloaded.schema.lookupForm("frame-clock", null) == .found,
+    );
+    var own = try Schema.load(gpa);
+    defer own.deinit();
+    for (own.preloaded.plugins) |plugin| {
+        for (plugin.forms) |form| {
+            try t_.expect(
+                composed.preloaded.schema.lookupForm(form.name, plugin.name) == .found,
+            );
+        }
+    }
+}
+
+test "tempura: an absent animader checkout is a loud skip, not a pass" {
+    // The other half of the leg's contract: a machine without the
+    // sibling (a fresh clone, CI, or a `TEMPURA_ANIMADER` that points
+    // nowhere — the forced case here) must answer ABSENT, and the
+    // composition test then skips rather than claims anything. A
+    // present-but-wrong override never falls back to the default
+    // candidate, and a checkout is never "present but empty".
+    const gpa = t_.allocator;
+    const sources = try animaderManifests(gpa, "no-such-animader-checkout");
+    try t_.expect(sources == null);
+}
+
+// ---------------------------------------------------------------------
 // The collision table, and the prose that renders the docs page
 // ---------------------------------------------------------------------
 

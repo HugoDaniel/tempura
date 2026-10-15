@@ -100,6 +100,20 @@ fn context(b: *std.Build) Ctx {
     const build_options = b.addOptions();
     build_options.addOptionPath("repo_root", b.path("."));
 
+    // `TEMPURA_ANIMADER`: where the sibling-composition test looks for
+    // animader's checkout, overriding the workspace default
+    // `../animader/animader` (the consumer of that leg is
+    // `src/schema_tests.zig`). Read here, at the build border, so the
+    // test binary holds no process state of its own — a changed value
+    // re-hashes the options module and the leg rebuilds rather than
+    // runs stale. An empty value counts as unset.
+    const animader_env = b.graph.environ_map.get("TEMPURA_ANIMADER");
+    build_options.addOption(
+        ?[]const u8,
+        "animader_root",
+        if (animader_env != null and animader_env.?.len > 0) animader_env else null,
+    );
+
     return .{
         .b = b,
         .target = target,

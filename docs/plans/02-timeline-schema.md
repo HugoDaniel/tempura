@@ -73,6 +73,27 @@ Rules, each a diagnostic with a span when broken. Positions are the `position` k
   mean 2997/100, and NTSC does not). No default: an `f` position with no `:fps` is
   `frame_rate_missing` and is not placed; a declared rate with no `f` position is
   harmless, changes no position's spelling and prints only the header's `:fps`.
+  *(Correction appended 2026-10-15, later the same day: the union kind this row types
+  `:fps` by is RENAMED `frame-rate` → `timeline-frame-rate` — read the "manifest's
+  `frame-rate` kind" above with the new name, which refuses exactly what it refused.
+  animader claimed `frame-rate` first (`ff6c57d`, 2026-10-07: the family's generic
+  paint-clock rate, `frame-clock`'s positional), and T2's `c6f72b2` declared the same
+  name for what is ONE HEADER SLOT's type — two concepts, one seat, and SJON's
+  plugin-model note (2026-10-06) seats a kind name with exactly one claimant:
+  qualifying one side's references does not discharge the name. The final T2 ruling
+  ([evidence](evidence/t2-final-ruling.md), copied byte-exact from the control file)
+  ruled tempura the claimant to move — later claim, one-manifest cost, and the distinct
+  name states tempura's own concept better; slot types here already name their domain
+  (`timeline-end`, `anchor-ref`). The helpers `frame-rate-scalar` and `frame-rate-pair`
+  KEEP their names (one claimant each); no animader file, no qualified spellings, no
+  namespace shim, no validator change. The regression that makes it stick: the
+  sibling-composition test (`src/schema_tests.zig`) now loads animader's five live
+  `schema/*.sjon` manifests with this bundle through one real SJON aggregate and
+  requires zero diagnostics — the kind-name collision class the heads test cannot see;
+  it found this one red the day it was written (`ambiguous_element_kind` ×2,
+  `[tempura, animader]`) and green after the rename. Without an animader checkout it
+  prints one line naming the `TEMPURA_ANIMADER` override and the workspace default
+  `../animader/animader`, and skips that single check.)*
 - **`(anchor …)`**: the it set's `(source …)` generalised to both formats (it 03, "The
   anchor"). `:id` symbol (a cross-ref target), `:kind` `smf | it`, `:file` resolved relative
   to the document, `:size` and `:sha256` verified before any `(bin …)` or bound lane is
