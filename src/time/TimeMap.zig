@@ -294,6 +294,165 @@ pub const TimeMap = struct {
         return n * @as(f64, @floatFromInt(rate.den)) / @as(f64, @floatFromInt(rate.num));
     }
 
+    /// `TICK_US` as the exact integer the frame path's
+    /// cross-multiplication runs on — `TPQ · 1e6` folded at comptime,
+    /// the same number the f64 constant holds.
+    const TICK_US_I: i128 = @as(i128, Grid.TPQ) * 1_000_000;
+
+    /// The widest whole `us` the exact frame path admits. Schema-legal
+    /// `us` stops at 16 777 215 and a `:qpm` at one names 60 000 000,
+    /// both far under it; the bound is the proof below that no `i128`
+    /// product the path forms can overflow, so a map a HOST built by
+    /// hand past it takes the f64 seam rather than a wrapped product.
+    /// With every `us` ≤ 2^36: each origin `t_i ≤ MAX_TICK · us ≤ 2^89`
+    /// (the anchor's own numerator likewise), a frame literal inside
+    /// the grid satisfies `p · den · TICK_US ≤ 2^53 · 2^24 · 2^46 <
+    /// 2^123`, and the segment walk only ever compares origins against
+    /// the anchor's — a difference the same `2^123` term bounds on
+    /// either side (checked, so even a hand-built map past the bound
+    /// answers rather than wraps).
+    const EXACT_US_MAX: f64 = 0x1p36;
+
+    /// An f64 frame literal as the exact rational it names: `value ==
+    /// p · 2^-shift` with `p` the literal's whole IEEE significand, so
+    /// the exact path never re-associates a float. `huge` marks a
+    /// literal of 2^127 frames or more, which no grid this map can
+    /// hold lands (any schema-legal rate puts it past `MAX_TICK`
+    /// ticks); `tiny` marks one whose instant sits inside a single
+    /// tick of every grid (under 2^-76 s where one tick is at least
+    /// `us / TICK_US ≥ 2^-45.4` s), so its floor is the anchor itself.
+    const FrameParts = struct {
+        p: i128,
+        shift: u32,
+        huge: bool = false,
+        tiny: bool = false,
+    };
+
+    fn frameParts(n: f64) FrameParts {
+        const raw: u64 = @bitCast(n);
+        const mant = raw & 0x000F_FFFF_FFFF_FFFF;
+        const biased: u32 = @intCast((raw >> 52) & 0x7FF);
+        if (biased == 0) {
+            // Zero, or a denormal: `mant · 2^-1074`.
+            return .{ .p = @intCast(mant), .shift = 1074, .tiny = mant != 0 };
+        }
+        const p: i128 = (@as(i128, 1) << 52) | @as(i128, mant);
+        const e: i32 = @as(i32, @intCast(biased)) - 1075;
+        if (e >= 0) {
+            // A whole literal of 2^52 frames or more. A shift past 74
+            // would leave `p` alone near `i128`'s ceiling while every
+            // product it feeds is bounded by `2^123` — such a literal
+            // is `huge`, and the caller answers `tick_overflow`.
+            if (e > 74) return .{ .p = 0, .shift = 0, .huge = true };
+            return .{ .p = p << @intCast(e), .shift = 0 };
+        }
+        const shift: u32 = @intCast(-e);
+        if (shift > 100) return .{ .p = p, .shift = shift, .tiny = true };
+        return .{ .p = p, .shift = shift };
+    }
+
+    /// Where an instant measured from `anchor` lands, exactly: the
+    /// tick and whether the instant IS that tick's start — the frame
+    /// seam's own two questions, answered in integers so neither the
+    /// floor nor the verdict depends on any float association.
+    const ExactLanding = struct { tick: i64, exact: bool };
+
+    /// The exact landing of frame literal `n` at `rate`, measured from
+    /// tick `anchor` (tick 0 for a position): the instant
+    /// `n · den / num` seconds is `p · 2^-shift · den / num`, located
+    /// on the segment table by integer cross-multiplication — the same
+    /// floor `tickFromSeconds` would take, computed without the f64
+    /// detour that can round an exact frame one tick short, and the
+    /// same read-back, judged as the exact rational instead of a float
+    /// sum against a float division. Null when this map is not
+    /// integral or one of its `us` is past `EXACT_US_MAX`: the caller
+    /// takes the f64 seam, which stays deterministic (the declared
+    /// limit of the f64 tempo path).
+    fn exactLanding(
+        self: *const TimeMap,
+        rate: FrameRate,
+        n: f64,
+        anchor: i64,
+    ) ?(Error!ExactLanding) {
+        if (!self.exactMap()) return null;
+
+        const parts = frameParts(n);
+        if (parts.huge) return Error.TickOverflow;
+        // Zero frames is the anchor itself; a literal too small to
+        // leave the anchor's own tick never starts it either.
+        if (parts.p == 0) return ExactLanding{ .tick = anchor, .exact = true };
+        if (parts.tiny) return ExactLanding{ .tick = anchor, .exact = false };
+
+        // The ceiling pre-check, in f64 where it only ever classifies:
+        // an instant past the grid's own last second by a relative band
+        // 2^-40 wide — four orders wider than any rounding in either
+        // chain — is `tick_overflow` exactly as the seam answers it,
+        // and an instant inside the band is one whose every integer
+        // product below is inside the envelope `EXACT_US_MAX` proves.
+        const secs = frameSeconds(rate, n);
+        const ceil_secs = self.secondsFromTick(Grid.MAX_TICK);
+        if (secs > ceil_secs * (1.0 + 0x1p-40)) return Error.TickOverflow;
+
+        return self.exactFloor(rate, parts, anchor) catch |e| return e;
+    }
+
+    /// `exactLanding`'s arithmetic, apart so the parent stays the
+    /// guard: the anchor's own numerator, the literal's length in
+    /// microseconds as an exact integer-plus-remainder, the segment
+    /// walk, and the one division that floors.
+    fn exactFloor(
+        self: *const TimeMap,
+        rate: FrameRate,
+        parts: FrameParts,
+        anchor: i64,
+    ) Error!ExactLanding {
+        const a_seg = self.segments[self.segmentOfTick(anchor)];
+        const anchor_num = a_seg.t_i +
+            @as(i128, anchor - a_seg.tick) * @as(i128, @intFromFloat(a_seg.us));
+
+        // The literal's length in MICROSECONDS: `r = p · den · TICK_US
+        // / (num · 2^shift)`, split into its integer part and the
+        // remainder over its own denominator, so the floor below is
+        // two exact divisions and never a common-denominator product.
+        const r_num = parts.p * @as(i128, rate.den) * TICK_US_I;
+        const r_den = @as(i128, rate.num) << @intCast(parts.shift);
+        const r_int = @divFloor(r_num, r_den);
+        const r_rem = r_num - r_int * r_den;
+
+        // The segment the instant lands in: the last one whose start
+        // is at or before it — `segmentOfSeconds`' walk, judged
+        // exactly. `start ≤ instant` cross-multiplies to
+        // `(anchor_num − t_i) · r_den + r_num ≥ 0`, and the product is
+        // checked: an overflowed positive difference is certainly ≥ 0
+        // and an overflowed negative one certainly is not, so even a
+        // map past the envelope answers rather than wraps.
+        var i: usize = self.segments.len - 1;
+        while (i > 0) : (i -= 1) {
+            const d = anchor_num - self.segments[i].t_i;
+            const dt, const ov = @mulWithOverflow(d, r_den);
+            const reached = if (ov != 0) d > 0 else dt + r_num >= 0;
+            if (reached) break;
+        }
+        const seg = self.segments[i];
+        const us: i128 = @intFromFloat(seg.us);
+
+        // The floor: `anchor_num − t_i + r_int` microseconds into the
+        // segment, over `us` per tick. The fraction `r_rem / r_den` is
+        // under one whole microsecond-count division away (it is under
+        // one `us`, which is a whole number ≥ 1), so this quotient IS
+        // the floor of the whole instant — and the two remainders
+        // together ARE the exactness verdict: the instant is the tick
+        // it landed on exactly when both are zero.
+        const whole = (anchor_num - seg.t_i) + r_int;
+        std.debug.assert(whole >= 0); // the segment chosen starts at or before the instant
+        const k = @divFloor(whole, us);
+        const rem = whole - k * us;
+        const into = std.math.cast(i64, k) orelse return Error.TickOverflow;
+        const tick = seg.tick + into;
+        if (tick > Grid.MAX_TICK) return Error.TickOverflow;
+        return .{ .tick = tick, .exact = rem == 0 and r_rem == 0 };
+    }
+
     /// The frame seam: frame `n`'s instant, floored at the one clock,
     /// with the floor read back — `exact` iff `secondsFromTick(tick)`
     /// returns the instant bit for bit, which is the whole of
@@ -318,17 +477,79 @@ pub const TimeMap = struct {
     /// `isBarLine` twin, and the INTEGER statement of the discipline:
     /// `writableFrame` below is its decimal twin, the one the printer
     /// reads, extended to a frame's fractions.
+    ///
+    /// On an integral map the statement is integer arithmetic outright
+    /// (`exactFrameValue`): a tick is on a frame line exactly when the
+    /// tick's own numerator times the rate's numerator divides
+    /// `TICK_US` times the denominator, and the frame is the quotient —
+    /// no nomination to miss. The f64 path keeps the float nomination.
     pub fn frameLine(self: *const TimeMap, tick: i64) ?i64 {
         const frames = self.frames orelse return null;
+        if (self.exactMap()) {
+            // The integer statement: a tick is on a frame line exactly
+            // when the reduced frame value is a whole number. Its null
+            // is an answer — no frame line — never a case for the float
+            // nomination below, which an exact map must not consult.
+            const value = self.exactFrameValue(frames.rate, tick) orelse return null;
+            const whole = @trunc(value);
+            if (whole != value or whole > 9_007_199_254_740_992.0) return null;
+            return @intFromFloat(whole);
+        }
         const num: f64 = @floatFromInt(frames.rate.num);
         const den: f64 = @floatFromInt(frames.rate.den);
-        // The nomination is capped where an i64 could not hold it, and a
-        // non-finite seconds (a near-zero rate) nominates nothing.
+        // The nomination is capped where its double could not name a
+        // tick of this grid again, and a non-finite seconds (a
+        // near-zero rate) nominates nothing.
         const nominated = @round(self.secondsFromTick(tick) * num / den);
         if (!(nominated >= 0 and nominated <= 9_007_199_254_740_992.0)) return null;
         const landed = self.frameTick(frames.rate, nominated) catch return null;
         if (!landed.exact or landed.tick != tick) return null;
         return @intFromFloat(nominated);
+    }
+
+    /// Whether this map's frame questions are answered by the exact
+    /// integer path: every segment whole (the map is `integral`) and
+    /// inside `EXACT_US_MAX`'s envelope. The f64 tempo path is the one
+    /// map shape that answers no.
+    fn exactMap(self: *const TimeMap) bool {
+        if (!self.integral) return false;
+        for (self.segments) |s| if (s.us > EXACT_US_MAX) return false;
+        return true;
+    }
+
+    /// The frame a tick sits at, as this map's INTEGRAL arithmetic
+    /// spells it: `A · num / (TICK_US · den)` over the tick's own
+    /// segment, reduced — or null when the value is not a whole number
+    /// of frames, is past 2^53 (where f64 stops being integer-exact, so
+    /// no decimal could name the tick back), or has no decimal an f64
+    /// holds bit for bit. Called only on an `exactMap` map.
+    fn exactFrameValue(self: *const TimeMap, rate: FrameRate, tick: i64) ?f64 {
+        // A position is never negative (plan 03), and this map's first
+        // segment starts at tick 0, so a tick at or after 0 has a
+        // numerator at or after 0 — anything else is no frame's.
+        if (tick < 0) return null;
+        const seg = self.segments[self.segmentOfTick(tick)];
+        const top: u128 = @intCast((seg.t_i +
+            @as(i128, tick - seg.tick) * @as(i128, @intFromFloat(seg.us))) * rate.num);
+        const bottom: u128 = @intCast(TICK_US_I * rate.den);
+        const g: u128 = std.math.gcd(top, bottom);
+        const n = @divExact(top, g);
+        const d = @divExact(bottom, g);
+        // A spelling the printer could emit and read back BIT FOR BIT:
+        // the reduced denominator a power of two and the numerator's
+        // own significant bits within f64's 53 — else no decimal names
+        // this frame exactly. (Tick 0 is frame 0: the empty numerator
+        // divides everything.)
+        if (d != 1 and (d & (d - 1)) != 0) return null;
+        if (n == 0) return 0;
+        const odd = n >> @intCast(@ctz(n));
+        if (odd > (@as(u128, 1) << 53)) return null;
+        const value = @as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(d));
+        // IEEE division is exact whenever the quotient is
+        // representable, and both operands above are, so this is the
+        // frame itself or nothing the caller may spell.
+        if (!(value >= 0 and value <= 9_007_199_254_740_992.0)) return null;
+        return value;
     }
 
     /// The frame a tick's seconds name, as the printer may spell it —
@@ -342,9 +563,24 @@ pub const TimeMap = struct {
     /// through rather than lie. Null when the document wrote no frames,
     /// the map holds no rate, the nomination misses, or a floor was not
     /// exact.
+    ///
+    /// On an integral map the read-back is the integer statement above
+    /// (`exactFrameValue`): the printed decimal must resolve to the
+    /// tick EXACTLY, not to within a float collision — a tick between
+    /// frames has no `f` spelling at all under this rule, where the
+    /// float nomination once printed the long decimal that happened to
+    /// land back inside one ulp. The f64 path keeps that nomination.
     fn writableFrame(self: *const TimeMap, tick: i64) ?f64 {
         const frames = self.frames orelse return null;
         if (!frames.wrote) return null;
+        if (self.exactMap()) {
+            // The integer read-back: the exact frame value, or no
+            // spelling. Its null is an answer — this tick has no `f`
+            // spelling that reads back exactly — never a case for the
+            // float nomination below, whose long decimals are "exact"
+            // only where two float chains collide.
+            return self.exactFrameValue(frames.rate, tick);
+        }
         const num: f64 = @floatFromInt(frames.rate.num);
         const den: f64 = @floatFromInt(frames.rate.den);
         // The nomination is capped where its decimal could not name a
@@ -556,13 +792,35 @@ pub const TimeMap = struct {
     /// clock value already takes: a frame never round-to-nearests and
     /// never wraps, and an instant that is not a tick start is `inexact`
     /// — the floored tick, said.
+    ///
+    /// On an integral map the `f` arm takes `exactLanding`: the same
+    /// floor and read-back in exact integers, because the f64 chain can
+    /// round an exact frame's instant one tick short (fl(1.4) seconds is
+    /// BELOW 1.4, and the floor of the product can land there) and can
+    /// read a between-frames instant back as "exact" when the two floats
+    /// collide. The f64 tempo path keeps the float seam below, which is
+    /// deterministic and nothing more — its declared limit.
     fn clockTick(self: *const TimeMap, lit: Pos.Literal) Error!LiteralTick {
+        const rate = switch (lit.unit) {
+            .s => null,
+            .f => if (self.frames) |frames| frames.rate else return .{
+                .err = .frame_rate_missing,
+            },
+            else => unreachable, // the parent sends only the clock units
+        };
+        if (lit.unit == .f) {
+            if (self.exactLanding(rate.?, lit.value, 0)) |answer| {
+                const landed = answer catch |e| switch (e) {
+                    error.TickOverflow => return .{ .err = .tick_overflow },
+                    error.NonFiniteTime => return e,
+                };
+                return if (landed.exact) .{ .tick = landed.tick } else .{ .inexact = landed.tick };
+            }
+        }
         const secs = switch (lit.unit) {
             .s => lit.value,
-            .f => frameSeconds((self.frames orelse return .{
-                .err = .frame_rate_missing,
-            }).rate, lit.value),
-            else => unreachable, // the parent sends only the clock units
+            .f => frameSeconds(rate.?, lit.value),
+            else => unreachable,
         };
         const tick = self.tickFromSeconds(secs) catch |e| switch (e) {
             error.TickOverflow => return .{ .err = .tick_overflow },
@@ -695,10 +953,29 @@ pub const TimeMap = struct {
     /// seconds count — wall-clock from the anchor, at the document's
     /// declared rate, through the one clock seam, with the landing read
     /// back for exactness exactly as `clockTick` reads a position.
+    ///
+    /// On an integral map that read-back is `exactLanding`'s integer
+    /// judgment: the asked instant is the anchor's own exact numerator
+    /// plus `n · den / num`, and comparing float associations of it (a
+    /// three-rounded sum against a one-rounded division) calls truly
+    /// exact frames inexact — `:at 20f :dur 1f` at `:fps 25`/`:qpm 300`
+    /// is 21/25 s, tick 19 37 29 536 exactly, and the float chain
+    /// said `frame_inexact`. The f64 tempo path keeps the float chain.
     fn frameDuration(self: *const TimeMap, lit: Pos.Literal, anchor: i64) Error!Resolved {
         const rate = (self.frames orelse return .{
             .err = .frame_rate_missing,
         }).rate;
+        if (self.exactLanding(rate, lit.value, anchor)) |answer| {
+            const landed = answer catch |e| switch (e) {
+                error.TickOverflow => return .{ .err = .tick_overflow },
+                error.NonFiniteTime => return e,
+            };
+            // Never a distance backwards: the instant is at or after
+            // the anchor's own, so its floor is at or after the anchor.
+            const d = landed.tick - anchor;
+            std.debug.assert(d >= 0);
+            return if (landed.exact) .{ .tick = d } else .{ .inexact = d };
+        }
         const want = self.secondsFromTick(anchor) + frameSeconds(rate, lit.value);
         const abs = self.tickFromSeconds(want) catch |e| switch (e) {
             error.TickOverflow => return .{ .err = .tick_overflow },
@@ -747,15 +1024,28 @@ pub const TimeMap = struct {
     /// `spellDuration`'s `f` branch, the `Nbar` rule's shape at the
     /// document's declared rate — or null when it is no answer: either
     /// end is not a frame line, or the count itself does not resolve
-    /// back exactly (`frameDuration`'s own read-back, the same
-    /// expression), so the spelling falls through to the bar / quarter /
-    /// tick spellings rather than lie.
+    /// back exactly, so the spelling falls through to the bar / quarter
+    /// / tick spellings rather than lie.
+    ///
+    /// On an integral map the count's own read-back is the integer
+    /// judgment (`exactLanding` from the anchor): the float sum below
+    /// compares three roundings against one and drops exact spans —
+    /// one frame from `20f` at `:fps 25`/`:qpm 300` printed as `q`
+    /// rather than the `1f` both ends are. The f64 path keeps the sum.
     fn frameSpan(self: *const TimeMap, dur: i64, at: i64) ?f64 {
         const from = self.writableFrame(at) orelse return null;
         const end = at +| dur;
         const to = self.writableFrame(end) orelse return null;
         // `writableFrame` answered, so the map holds the rate.
-        const want = self.secondsFromTick(at) + frameSeconds(self.frames.?.rate, to - from);
+        const rate = self.frames.?.rate;
+        if (self.exactLanding(rate, to - from, at)) |answer| {
+            // The count's instant from `at` is `end`'s own, or this is
+            // no answer: the spelling falls through rather than lie.
+            const landed = answer catch return null;
+            if (!landed.exact or landed.tick != end) return null;
+            return to - from;
+        }
+        const want = self.secondsFromTick(at) + frameSeconds(rate, to - from);
         if (self.secondsFromTick(end) != want) return null;
         return to - from;
     }
@@ -2149,6 +2439,118 @@ test "TimeMap.tickFromLiteral: an off-grid frame is floored and said" {
     try testing.expectEqual(@as(?i64, null), m.frameLine(7_695_367));
 }
 
+test "TimeMap.tickFromLiteral: NTSC frames land where the rational puts them" {
+    // Plan 03's historic T2 bullet said "29.97 and 23.976 never land",
+    // and the truth is finer: at :qpm 300 (tps 230 630 400) a
+    // `[30000 1001]` frame is 192 384 192/25 ticks, so every 25th frame
+    // IS a tick start — frame 25 is tick 192 384 192 exactly — and a
+    // `[24000 1001]` frame is 48 096 048/5, so every 5th one is (frame
+    // 5 is tick 48 096 048). Frame 1 of the NTSC pair stays between
+    // ticks, floored and said, as the test above pins.
+    var ntsc = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 300 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 30000, .den = 1001 },
+        .wrote = true,
+    });
+    defer ntsc.deinit();
+
+    switch (try ntsc.map.tickFromLiteral(.{ .value = 25, .unit = .f })) {
+        .tick => |t| try testing.expectEqual(@as(i64, 192_384_192), t),
+        .inexact => return error.TestExactFrameSaidInexact,
+        .err => return error.TestFrameRefused,
+    }
+    try testing.expectEqual(@as(?i64, 25), ntsc.map.frameLine(192_384_192));
+
+    var film = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 300 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 24000, .den = 1001 },
+        .wrote = true,
+    });
+    defer film.deinit();
+    switch (try film.map.tickFromLiteral(.{ .value = 5, .unit = .f })) {
+        .tick => |t| try testing.expectEqual(@as(i64, 48_096_048), t),
+        .inexact => return error.TestExactFrameSaidInexact,
+        .err => return error.TestFrameRefused,
+    }
+}
+
+test "TimeMap.tickFromLiteral: an exact frame is its tick, not one the f64 chain shorted" {
+    // The plainest case of the defect this map no longer has: at 120
+    // qpm (us 500 000, the fallback tempo) with :fps 25, frame 35 is
+    // 1.4 s = 129 153 024 ticks exactly (1.4 · 92 252 160). The f64
+    // chain floors it one short — fl(1.4) is BELOW 1.4, the product's
+    // own rounding does not buy it back, and the floor answers
+    // 129 153 023 — and then reads its landing back as "between ticks".
+    // The exact path answers the tick the rational names, the frame
+    // line names frame 35 for it, and the printer spells it.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 120 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 25, .den = 1 },
+        .wrote = true,
+    });
+    defer r.deinit();
+    const m = &r.map;
+
+    switch (try m.tickFromLiteral(.{ .value = 35, .unit = .f })) {
+        .tick => |t| try testing.expectEqual(@as(i64, 129_153_024), t),
+        .inexact => return error.TestExactFrameSaidInexact,
+        .err => return error.TestFrameRefused,
+    }
+    try testing.expectEqual(@as(?i64, 35), m.frameLine(129_153_024));
+
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try m.spell(&w, 129_153_024);
+    try testing.expectEqualStrings("35f", w.buffered());
+
+    // A tick between frames has NO f spelling under the exact rule —
+    // not the long decimal that once collided back inside one ulp —
+    // so the printer falls through to the grid's own spellings.
+    w = std.Io.Writer.fixed(&buf);
+    try m.spell(&w, 129_153_025);
+    try testing.expect(!std.mem.endsWith(u8, w.buffered(), "f"));
+}
+
+test "TimeMap.durationTicks: an f duration's exactness is not the float sum's" {
+    // The observed defect, with its own arithmetic: :fps 25 at :qpm 300,
+    // `:at 20f :dur 1f`. Twenty frames is 0.8 s — tick 184 504 320,
+    // whose seconds are not dyadic — and one frame more is 21/25 s =
+    // 193 729 536 exactly ((21/25) · 5 · TPQ), so the duration is one
+    // frame, 9 225 216 ticks. The float `want` (fl(0.8) + fl(0.04))
+    // and the read-back (fl(0.84)) differ by an ulp and the verdict
+    // said `frame_inexact`; the exact judgment says what is true.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 300 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 25, .den = 1 },
+        .wrote = true,
+    });
+    defer r.deinit();
+    const m = &r.map;
+
+    switch (try m.durationTicks(.{ .value = 1, .unit = .f }, 184_504_320)) {
+        .tick => |d| try testing.expectEqual(@as(i64, 9_225_216), d),
+        .inexact => return error.TestExactFrameSaidInexact,
+        .err => return error.TestDurationRefused,
+    }
+    // A HALF frame is exact the same way: 2.5 frames is 0.1 s =
+    // 23 063 040 ticks from anywhere.
+    switch (try m.durationTicks(.{ .value = 2.5, .unit = .f }, 184_504_320)) {
+        .tick => |d| try testing.expectEqual(@as(i64, 23_063_040), d),
+        .inexact => return error.TestExactFrameSaidInexact,
+        .err => return error.TestDurationRefused,
+    }
+    // And `spellDuration` prints the frame count both ends are — the
+    // float sum once dropped this to the delta's own `q` spelling.
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try m.spellDuration(&w, 9_225_216, 184_504_320);
+    try testing.expectEqualStrings("1f", w.buffered());
+}
+
 test "TimeMap.durationTicks: an f duration anchors at its form's :at" {
     // 120 qpm doubling to 240 at 4q (tick 184 504 320, exactly 2 s): a
     // second of wall clock is 92 252 160 ticks before the change and
@@ -2412,12 +2814,16 @@ test "TimeMap: durationTicks(spellDuration(d, at), at) is d, across a tempo chan
             .inexact => |t| t,
             .err => continue,
         };
+        // Every frame is 18 450 432 or 36 900 864 ticks at this rate
+        // (both integers), so EVERY drawn pair is a pair of tick starts
+        // and the exactness claim has teeth: an `inexact` payload here
+        // is the claim failing, not another tick to read through.
         const d = switch (try m.durationTicks(
             .{ .value = @floatFromInt(f1 - f0), .unit = .f },
             at,
         )) {
             .tick => |t| t,
-            .inexact => |t| t,
+            .inexact => return error.TestExactDurationSaidInexact,
             .err => continue,
         };
         var w2 = std.Io.Writer.fixed(&buf);
