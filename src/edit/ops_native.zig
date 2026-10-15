@@ -974,11 +974,12 @@ const Ctx = struct {
             .err => return null,
         };
         const was = switch (self.map.durationTicks(lit, t.at) catch return null) {
-            .tick => |v| v,
+            // An inexact landing is its tick — the floored tick stands.
+            .tick, .inexact => |v| v,
             .err => return null,
         };
         const now = switch (self.map.durationTicks(lit, to) catch return null) {
-            .tick => |v| v,
+            .tick, .inexact => |v| v,
             .err => return null,
         };
         if (was == now) return null;
@@ -1629,6 +1630,7 @@ const Ctx = struct {
             self.d.meter,
             self.map.length,
             self.d.end,
+            self.d.frames(),
         );
         defer after.deinit();
 
@@ -1707,6 +1709,7 @@ const Ctx = struct {
             points.items,
             self.map.length,
             self.d.end,
+            self.d.frames(),
         );
         defer after.deinit();
 
@@ -1742,14 +1745,15 @@ const Ctx = struct {
         var anchor: i64 = 0;
         if (self.literalOf(node, "at")) |lit| {
             anchor = switch (self.map.tickFromLiteral(lit) catch return) {
-                .tick => |t| t,
+                // An inexact landing is its tick — the floored one stands.
+                .tick, .inexact => |t| t,
                 .err => 0,
             };
         }
 
         if (self.literalOf(node, "at")) |lit| {
             const now = switch (after.tickFromLiteral(lit) catch return) {
-                .tick => |t| t,
+                .tick, .inexact => |t| t,
                 .err => anchor,
             };
             if (now != anchor) {
@@ -1763,11 +1767,14 @@ const Ctx = struct {
         for (duration_keys) |key| {
             const lit = self.literalOf(node, key) orelse continue;
             const was = switch (self.map.durationTicks(lit, anchor) catch continue) {
-                .tick => |t| t,
+                // An `f` duration never moves under a METER edit — its
+                // tick comes from the tempo map's seam alone — so the
+                // `was == now` test below leaves it exactly where it was.
+                .tick, .inexact => |t| t,
                 .err => continue,
             };
             const now = switch (after.durationTicks(lit, anchor) catch continue) {
-                .tick => |t| t,
+                .tick, .inexact => |t| t,
                 .err => continue,
             };
             if (was == now) continue;

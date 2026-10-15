@@ -214,6 +214,7 @@ fn changingMeter(gpa: std.mem.Allocator) !TimeMap.Result {
         },
         16 * TPQ,
         .hold,
+        null,
     );
 }
 
@@ -253,6 +254,7 @@ test "Snap.lines: a subdivision that does not divide the bar stops at the bar li
         &.{.{ .tick = 0, .n = 7, .d = 8 }},
         16 * TPQ,
         .hold,
+        null,
     );
     defer res.deinit();
 

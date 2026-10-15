@@ -90,6 +90,7 @@ fn fourFour(gpa: std.mem.Allocator) !TimeMap.Result {
         &.{.{ .tick = 0, .n = 4, .d = 4 }},
         16 * TPQ,
         .hold,
+        null,
     );
 }
 
@@ -163,6 +164,7 @@ test "ops_quantize: a bar step crosses a meter change by the bars themselves" {
         },
         16 * TPQ,
         .hold,
+        null,
     );
     defer res.deinit();
 

@@ -308,7 +308,9 @@ pub fn defaultLength(
     end: TimeMap.End,
 ) Error!i64 {
     if (content <= 0) return 0;
-    var probe = try TimeMap.derive(gpa, tables.tempo, tables.meter, content, end);
+    // No frame state: the probe answers only the bar table's round-up,
+    // and no position ever resolves against it.
+    var probe = try TimeMap.derive(gpa, tables.tempo, tables.meter, content, end, null);
     defer probe.deinit();
     const bars = probe.map.bars;
     return if (bars.len == 0) content else bars[bars.len - 1];
@@ -344,7 +346,7 @@ pub fn mapOf(gpa: Allocator, doc: *const Doc.Doc) Error!TimeMap.TimeMap {
     const length = doc.length orelse
         try defaultLength(gpa, tables, @max(contentEnd(doc), tables.end), doc.end);
 
-    var final = try TimeMap.derive(gpa, tables.tempo, tables.meter, length, doc.end);
+    var final = try TimeMap.derive(gpa, tables.tempo, tables.meter, length, doc.end, doc.frames());
     final.diags.deinit();
     return final.map;
 }
@@ -507,6 +509,11 @@ const Ctx = struct {
     meter: []Doc.MeterPoint = &.{},
     conductor: ?[]const u8 = null,
     end: TimeMap.End = .hold,
+    /// Whether any position literal the walk has met names `f` — the
+    /// derived half of the frame state, copied onto the document at the
+    /// end of the walk (`Doc.wrote_frames`, the printer's per-document
+    /// rule).
+    wrote_frames: bool = false,
 
     /// The CONDUCTOR's tables and where its material ends, copied into
     /// the document's arena out of the tier or the verified bytes the
@@ -523,6 +530,19 @@ const Ctx = struct {
         args: anytype,
     ) Error!void {
         try self.diags.add(code, .err, .{ .start = span.start, .end = span.end }, fmt, args);
+    }
+
+    /// `emit`, at WARNING severity — the value is usable, and something
+    /// about it is not what the document said (`Severity.warning`'s own
+    /// definition). `frame_inexact` is the current caller.
+    fn warn(
+        self: *Ctx,
+        code: Diag.Code,
+        span: Ast.Span,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) Error!void {
+        try self.diags.add(code, .warning, .{ .start = span.start, .end = span.end }, fmt, args);
     }
 
     /// Replace the working map, freeing the one it stands in for.
@@ -676,6 +696,9 @@ const Ctx = struct {
         doc.length_span = .{ .start = span.start, .end = span.end };
         const length_node = node orelse return;
         doc.length_lit = literalOf(self.tree, length_node);
+        if (doc.length_lit) |lit| {
+            if (lit.unit == .f) self.wrote_frames = true;
+        }
         doc.length = try self.resolve(length_node);
     }
 
@@ -724,6 +747,9 @@ const Ctx = struct {
         doc.lanes = try self.readLanes(roots.lanes.items, &doc);
         doc.passthrough = try self.readPassthrough(roots.passthrough.items);
         if (roots.timelines.items.len > 0) try self.readLength(&doc, roots.timelines.items[0]);
+        // The derived half of the frame state, once every literal has
+        // been met — a position, a duration, a grid point or the length.
+        doc.wrote_frames = self.wrote_frames;
 
         // ---- the relations that need the whole document ----
         try checks.clipPlacement(self.diags, &doc);
@@ -760,15 +786,23 @@ const Ctx = struct {
     /// to — and the document's own otherwise.
     fn derive(self: *Ctx, doc: *const Doc.Doc, length: i64) Error!Derived {
         const tables = timeTables(doc, self.cond);
-        const res = try TimeMap.derive(self.gpa, tables.tempo, tables.meter, length, self.end);
+        const res = try TimeMap.derive(
+            self.gpa,
+            tables.tempo,
+            tables.meter,
+            length,
+            self.end,
+            doc.frames(),
+        );
         return .{ .map = res.map, .diags = res.diags };
     }
 
     /// A map over the meter table alone, at 120 quarter notes per
     /// minute. Enough to answer a `bar` or a `b` literal, which is all a
-    /// tempo or meter point's `:at` can be (plan 03 forbids `s` there).
+    /// tempo or meter point's `:at` can be (plan 03 forbids `s` and `f`
+    /// there), so no frame state either.
     fn deriveMeters(self: *Ctx, meters: []const Doc.MeterPoint) Error!Derived {
-        const res = try TimeMap.derive(self.gpa, &.{}, meters, 0, .hold);
+        const res = try TimeMap.derive(self.gpa, &.{}, meters, 0, .hold, null);
         return .{ .map = res.map, .diags = res.diags };
     }
 
@@ -794,6 +828,9 @@ const Ctx = struct {
         if (kvNode(self.tree, children, "conductor")) |node| {
             doc.conductor = try self.symbol(node);
         }
+        // The `f` unit's declared rate (plan 03), read before any map is
+        // derived so every derive this load makes carries it.
+        doc.frame_rate = frameRateOf(self.tree, children);
         // `:length` needs the map, and the map needs the points — it is
         // read at the end of `walk`.
     }
@@ -872,23 +909,36 @@ const Ctx = struct {
         self.tempo = try out.toOwnedSlice(self.arena);
     }
 
-    /// A `grid-position` `:at` — `q`, `t`, `bar` or `b`, never `s`.
+    /// A `grid-position` `:at` — `q`, `t`, `bar` or `b`, never `s` and
+    /// never `f`.
     ///
-    /// The manifest already refuses the seconds unit on these two forms
-    /// (`grid-position`'s `:allowed` list); the check is repeated here
-    /// because this is the rule's home: seconds are derived FROM this
-    /// map, so a seconds position on the form that defines it is
-    /// circular, and tempura says so in its own vocabulary too.
+    /// The manifest already refuses both units on these two forms
+    /// (`grid-position`'s `:allowed` list); each check is repeated here
+    /// because this is the rule's home: seconds and frames are both
+    /// counted THROUGH this map, so a position in either on the form
+    /// that defines it is circular, and tempura says so in its own
+    /// vocabulary too.
     fn gridTick(self: *Ctx, form: NodeIndex) Error!?i64 {
         const children = self.tree.formHeader(form).children;
         const node = kvNode(self.tree, children, "at") orelse return null;
         if (literalOf(self.tree, node)) |lit| {
+            if (lit.unit == .f) self.wrote_frames = true;
             if (lit.unit == .s) {
                 try self.emit(
                     .unit_required,
                     self.tree.spanOf(node),
                     "a tempo or meter point is never placed in seconds: seconds are what this " ++
                         "map defines",
+                    .{},
+                );
+                return null;
+            }
+            if (lit.unit == .f) {
+                try self.emit(
+                    .unit_required,
+                    self.tree.spanOf(node),
+                    "a tempo or meter point is never placed in frames: frames are counted " ++
+                        "through the tempo map, which these forms define",
                     .{},
                 );
                 return null;
@@ -1823,11 +1873,12 @@ const Ctx = struct {
             try self.emit(
                 .unit_required,
                 self.tree.spanOf(node),
-                "a position needs a unit: q, t, bar, b or s",
+                "a position needs a unit: q, t, bar, b, s or f",
                 .{},
             );
             return null;
         };
+        if (lit.unit == .f) self.wrote_frames = true;
         const answer = self.map.tickFromLiteral(lit) catch {
             try self.emit(
                 .tick_overflow,
@@ -1839,13 +1890,35 @@ const Ctx = struct {
         };
         switch (answer) {
             .tick => |t| return t,
-            .err => |code| {
-                try self.emit(
-                    code,
+            // A frame that landed between ticks: the floored tick stands,
+            // never a wrap — the warning says what the document's own
+            // rate could not place exactly.
+            .inexact => |t| {
+                try self.warn(
+                    .frame_inexact,
                     self.tree.spanOf(node),
-                    "this position is not a point on the grid",
+                    "this frame position lands between ticks at this document's rate; it names " ++
+                        "the tick beneath it, never a wrapped one",
                     .{},
                 );
+                return t;
+            },
+            .err => |code| {
+                if (code == .frame_rate_missing) {
+                    try self.emit(
+                        code,
+                        self.tree.spanOf(node),
+                        "this document declares no :fps, so a frame position cannot resolve",
+                        .{},
+                    );
+                } else {
+                    try self.emit(
+                        code,
+                        self.tree.spanOf(node),
+                        "this position is not a point on the grid",
+                        .{},
+                    );
+                }
                 return null;
             },
         }
@@ -1854,12 +1927,13 @@ const Ctx = struct {
     /// A DURATION — `:dur`, `:offset`, a clip's `:length` — measured
     /// from the form's own `:at` (plan 03, "Positions").
     ///
-    /// All five units go through `TimeMap.durationTicks`, which owns the
+    /// All six units go through `TimeMap.durationTicks`, which owns the
     /// anchoring: a `bar` lands in the bar it reaches rather than in the
     /// bar the origin's meter would have made it, a `b` is its beat
-    /// twin, an `s` is wall-clock from `at`, and `q` / `t` are grid
-    /// units that no anchor can change. Under one meter every answer is
-    /// bit for bit the one the unanchored reader gives.
+    /// twin, an `s` and an `f` are wall-clock from `at` — the frame at
+    /// the document's declared rate — and `q` / `t` are grid units that
+    /// no anchor can change. Under one meter every answer is bit for bit
+    /// the one the unanchored reader gives.
     ///
     /// The printer inverts exactly this, through
     /// `TimeMap.spellDuration` with the same `at`, which is what keeps
@@ -1869,11 +1943,12 @@ const Ctx = struct {
             try self.emit(
                 .unit_required,
                 self.tree.spanOf(node),
-                "a duration needs a unit: q, t, bar, b or s",
+                "a duration needs a unit: q, t, bar, b, s or f",
                 .{},
             );
             return null;
         };
+        if (lit.unit == .f) self.wrote_frames = true;
         const answer = self.map.durationTicks(lit, at) catch {
             try self.emit(
                 .tick_overflow,
@@ -1885,13 +1960,35 @@ const Ctx = struct {
         };
         switch (answer) {
             .tick => |t| return t,
-            .err => |code| {
-                try self.emit(
-                    code,
+            // The frame twin of `resolve`'s arm: the floored landing
+            // stands, and the warning says the duration's end is not a
+            // tick start of this document's rate.
+            .inexact => |t| {
+                try self.warn(
+                    .frame_inexact,
                     self.tree.spanOf(node),
-                    "this duration is not a span of the grid",
+                    "this frame duration's end lands between ticks at this document's rate; it " ++
+                        "spans to the tick beneath it, never a wrapped one",
                     .{},
                 );
+                return t;
+            },
+            .err => |code| {
+                if (code == .frame_rate_missing) {
+                    try self.emit(
+                        code,
+                        self.tree.spanOf(node),
+                        "this document declares no :fps, so a frame duration cannot resolve",
+                        .{},
+                    );
+                } else {
+                    try self.emit(
+                        code,
+                        self.tree.spanOf(node),
+                        "this duration is not a span of the grid",
+                        .{},
+                    );
+                }
                 return null;
             },
         }
@@ -2420,6 +2517,25 @@ fn ccAddress(tree: *const Ast.Tree, children: []const NodeIndex) ?Doc.SmfCurve {
     return .{ .cc = narrow.orZero(u7, readNumber(tree, node)) };
 }
 
+/// `:fps` as the header spells it — one integer (`25`), or an exact
+/// `[num den]` pair (`[30000 1001]`) — or null when the key is absent.
+/// The manifest's bounds and integer rules have already spoken by the
+/// time the walk reads (a validated document cannot name a zero or a
+/// decimal here), the `ccAddress` shape for the frame rate: read once,
+/// so the document and every map the load derives cannot disagree.
+fn frameRateOf(tree: *const Ast.Tree, children: []const NodeIndex) ?TimeMap.FrameRate {
+    const node = kvNode(tree, children, "fps") orelse return null;
+    if (tree.tagOf(node) == .vector) {
+        const elems = tree.vectorElements(node);
+        if (elems.len != 2) return null;
+        return .{
+            .num = narrow.orZero(u32, readNumber(tree, elems[0])),
+            .den = narrow.orZero(u32, readNumber(tree, elems[1])),
+        };
+    }
+    return .{ .num = narrow.orZero(u32, readNumber(tree, node)), .den = 1 };
+}
+
 /// `:range` as a curve lane spells it — `[lo hi]` — or null when the key
 /// is absent or not a pair. Each end is `:repr f32` in the manifest and
 /// narrowed as a keyframe's value is (`narrow.f32OrZero`).
@@ -2905,6 +3021,116 @@ test "fromSjon: seconds on a tempo or meter point is unit_required" {
         \\(tempo-point :at 0q :qpm 120)
         \\(meter-point :at 0s :sig [4 4])
     , .unit_required);
+}
+
+test "fromSjon: :fps reaches the document and the map" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var res = try fromSource(gpa, &schema,
+        \\(timeline :fps [30000 1001])
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0q :sig [4 4])
+        \\(lane :name flash :kind notes
+        \\  (note :at 1f :dur 1q :key 38))
+    , null);
+    defer res.deinit();
+
+    // The authored rate on the document… (the note's `1f` is off-grid at
+    // 120 qpm, so one `frame_inexact` warning rides along — the floored
+    // tick stands, and the document is still clean of errors).
+    try testing.expectEqual(
+        @as(?TimeMap.FrameRate, .{ .num = 30000, .den = 1001 }),
+        res.doc.frame_rate,
+    );
+    // …and, with an `f` position written, on the map the load answers
+    // with — `wrote` included, which is the printer's per-document rule.
+    try testing.expect(res.doc.wrote_frames);
+    try testing.expectEqual(
+        @as(?TimeMap.Frames, .{ .rate = .{ .num = 30000, .den = 1001 }, .wrote = true }),
+        res.map.frames,
+    );
+    try testing.expectEqual(@as(usize, 1), res.diags.count(.frame_inexact));
+    try testing.expect(!res.diags.hasErrors());
+
+    // The integer spelling is den 1, and a rate with no `f` position
+    // written is harmless: no diagnostic at all, `wrote` stays false.
+    var plain = try fromSource(gpa, &schema,
+        \\(timeline :fps 25)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0q :sig [4 4])
+    , null);
+    defer plain.deinit();
+    try testing.expectEqual(
+        @as(?TimeMap.FrameRate, .{ .num = 25, .den = 1 }),
+        plain.doc.frame_rate,
+    );
+    try testing.expect(!plain.doc.wrote_frames);
+    try testing.expectEqual(
+        @as(?TimeMap.Frames, .{ .rate = .{ .num = 25, .den = 1 }, .wrote = false }),
+        plain.map.frames,
+    );
+    try testing.expectEqual(@as(usize, 0), plain.diags.items().len);
+}
+
+test "fromSjon: an f literal with no :fps is frame_rate_missing, the note not placed" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    var res = try fromSource(gpa, &schema,
+        \\(timeline)
+        \\(tempo-point :at 0q :qpm 120)
+        \\(meter-point :at 0q :sig [4 4])
+        \\(lane :name flash :kind notes
+        \\  (note :at 25f :dur 1q :key 38))
+    , null);
+    defer res.deinit();
+
+    // The value the caller asked for is not usable as asked for: an ERR
+    // (not a warning), with its own words; the note is not placed; the
+    // document still loads.
+    const got = res.diags.items();
+    try testing.expectEqual(@as(usize, 1), got.len);
+    try testing.expectEqual(Diag.Code.frame_rate_missing, got[0].code);
+    try testing.expectEqual(Diag.Severity.err, got[0].severity);
+    try testing.expectEqualStrings(
+        "this document declares no :fps, so a frame position cannot resolve",
+        got[0].message,
+    );
+    try testing.expectEqual(@as(usize, 0), res.doc.lanes[0].notes.len);
+}
+
+test "fromSjon: a tempo or meter point is never placed in frames" {
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+
+    // The manifest refuses the unit (`unit_not_allowed`, SJON's own
+    // words, carried as `sjon_diagnostic`); tempura restates the rule
+    // beside its seconds twin, in its own vocabulary, with the span of
+    // the offending literal.
+    var res = try fromSource(gpa, &schema,
+        \\(timeline :fps 25)
+        \\(tempo-point :at 25f :qpm 120)
+        \\(meter-point :at 0bar :sig [4 4])
+    , null);
+    defer res.deinit();
+    var seen = false;
+    for (res.diags.items()) |d| {
+        if (d.code != .unit_required) continue;
+        try testing.expectEqualStrings(
+            "a tempo or meter point is never placed in frames: frames are counted through the " ++
+                "tempo map, which these forms define",
+            d.message,
+        );
+        seen = true;
+    }
+    try testing.expect(seen);
+    // The point is refused before it is placed, so the map says what a
+    // document with no tempo point at tick 0 always says.
+    try testing.expectEqual(@as(usize, 1), res.diags.count(.tempo_map_invalid));
 }
 
 test "fromSjon: a note name that will not read is note_key_invalid" {

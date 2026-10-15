@@ -421,6 +421,7 @@ fn fourFour(gpa: std.mem.Allocator) !TimeMap.Result {
         &.{.{ .tick = 0, .n = 4, .d = 4 }},
         32 * @import("../time/Grid.zig").TPQ,
         .hold,
+        null,
     );
 }
 

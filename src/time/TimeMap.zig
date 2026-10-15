@@ -46,10 +46,40 @@ pub const MeterPoint = struct {
 /// What happens at `:length` (plan 03, "Tempo", loop and hold).
 pub const End = enum { loop, hold };
 
+/// A declared frame rate (plan 03's `f` unit): `num/den` frames per
+/// second, from `:fps 25` (num 25, den 1) or `:fps [30000 1001]` (NTSC —
+/// never a bare decimal, which would bake 2997/100 into every NTSC
+/// document). Both components are bounded `1..16 777 215` by the
+/// manifest, mirroring `us-per-quarter`, to catch typos.
+pub const FrameRate = struct {
+    num: u32,
+    den: u32,
+};
+
+/// The frame state a map carries: the declared rate, and whether the
+/// document wrote an `f` position — the printer's per-document rule,
+/// which a rate alone never triggers.
+pub const Frames = struct {
+    rate: FrameRate,
+    wrote: bool,
+};
+
 /// A resolved position: the tick, or the diagnostic the document earned.
-/// `durationTicks` answers in this shape.
+/// An `f` literal whose frame lands on no tick start answers `inexact`
+/// instead — the floored tick, which stands (never a wrap), with the
+/// warning the caller raises. `durationTicks` answers in this shape.
 pub const Resolved = union(enum) {
     tick: i64,
+    inexact: i64,
+    err: Diag.Code,
+};
+
+/// `tickFromLiteral`'s answer, the position twin of `Resolved`: the
+/// tick, an off-grid frame's floored tick, or the diagnostic the
+/// document earned.
+pub const LiteralTick = union(enum) {
+    tick: i64,
+    inexact: i64,
     err: Diag.Code,
 };
 
@@ -85,6 +115,10 @@ pub const TimeMap = struct {
     bars: []i64,
     length: i64,
     end: End,
+    /// The document's declared frame state, or null when it declared no
+    /// `:fps` — the one state an `f` literal refuses. Set once, by
+    /// `derive`; nothing below writes it.
+    frames: ?Frames,
     integral: bool,
     loop_secs: f64,
     arena: std.heap.ArenaAllocator,
@@ -251,6 +285,50 @@ pub const TimeMap = struct {
         return tick;
     }
 
+    /// Frame `n` at `rate`, as seconds — `n · den / num`, ONE multiply
+    /// and ONE divide, in that order. This is the whole of a frame
+    /// literal's own arithmetic (plan 03's op-order discipline); the
+    /// only rounding a frame ever takes is the clock seam every clock
+    /// value already takes.
+    fn frameSeconds(rate: FrameRate, n: f64) f64 {
+        return n * @as(f64, @floatFromInt(rate.den)) / @as(f64, @floatFromInt(rate.num));
+    }
+
+    /// The frame seam: frame `n`'s instant, floored at the one clock,
+    /// with the floor read back — `exact` iff `secondsFromTick(tick)`
+    /// returns the instant bit for bit, which is the whole of
+    /// "off-grid": a frame's instant either is a tick start or is not.
+    fn frameTick(self: *const TimeMap, rate: FrameRate, n: f64) Error!struct {
+        tick: i64,
+        exact: bool,
+    } {
+        const secs = frameSeconds(rate, n);
+        const tick = try self.tickFromSeconds(secs);
+        return .{ .tick = tick, .exact = self.secondsFromTick(tick) == secs };
+    }
+
+    /// The frame-line test — `Pos.spell`'s read-back discipline made
+    /// policy: `tick` is on a frame line of the map's declared rate
+    /// exactly when the frame its own seconds nominate
+    /// (`n = @round(secondsFromTick(tick) · num / den)`) resolves back
+    /// to `tick` itself, exact. Anything else — no declared rate, a
+    /// nomination that misses, a floor that was not exact — answers
+    /// null, so a spelling that would not round-trip falls through to
+    /// the bar / quarter / tick spellings rather than lie. The
+    /// `isBarLine` twin; `spell`'s frame branch (phase 3) reads here.
+    pub fn frameLine(self: *const TimeMap, tick: i64) ?i64 {
+        const frames = self.frames orelse return null;
+        const num: f64 = @floatFromInt(frames.rate.num);
+        const den: f64 = @floatFromInt(frames.rate.den);
+        // The nomination is capped where an i64 could not hold it, and a
+        // non-finite seconds (a near-zero rate) nominates nothing.
+        const nominated = @round(self.secondsFromTick(tick) * num / den);
+        if (!(nominated >= 0 and nominated <= 9_007_199_254_740_992.0)) return null;
+        const landed = self.frameTick(frames.rate, nominated) catch return null;
+        if (!landed.exact or landed.tick != tick) return null;
+        return @intFromFloat(nominated);
+    }
+
     /// The last segment starting at or before `tick`; segment 0 extends
     /// backward. A linear scan, deterministic, over at most
     /// `MAX_TEMPO_SEGMENTS` entries (plan 03).
@@ -359,26 +437,18 @@ pub const TimeMap = struct {
     /// `q` and `t` are the grid's own and go through `Pos`; `bar` and `b`
     /// are counted from 0 through the meter map, their fraction scaled by
     /// the bar's or the beat's length IN QUARTERS and rounded by the one
-    /// shared half-to-even seam, `Pos.tickFromQuarters`; `s` goes through
-    /// the tempo map's clock floor. A negative position is
-    /// `position_negative`, and the grid ceiling is `tick_overflow` — a
-    /// document's mistakes are diagnostics. The one ERROR is a literal
-    /// that is not a number at all (a NaN or an infinity), which no
-    /// document can spell and no map can answer.
+    /// shared half-to-even seam, `Pos.tickFromQuarters`; `s` and `f` go
+    /// through the tempo map's clock floor — `f` at the document's
+    /// declared `:fps` rate, and `frame_rate_missing` on a map that holds
+    /// none. A negative position is `position_negative`, and the grid
+    /// ceiling is `tick_overflow` — a document's mistakes are diagnostics.
+    /// The one ERROR is a literal that is not a number at all (a NaN or
+    /// an infinity), which no document can spell and no map can answer.
     ///
     /// A `bar` or `b` past `:length` still answers: the last meter
     /// carries on past the bar table, because a position may name a bar
     /// the timeline does not reach.
-    ///
-    /// `f` is the frame unit (plan 03's T2): frames resolve through the
-    /// tempo map's one clock seam at the document's declared `:fps` rate.
-    /// Until that resolution lands, the arm refuses every frame literal
-    /// with `frame_rate_missing` — the code the layer that owns the rate
-    /// will answer with.
-    pub fn tickFromLiteral(self: *const TimeMap, lit: Pos.Literal) Error!union(enum) {
-        tick: i64,
-        err: Diag.Code,
-    } {
+    pub fn tickFromLiteral(self: *const TimeMap, lit: Pos.Literal) Error!LiteralTick {
         if (!std.math.isFinite(lit.value)) return error.NonFiniteTime;
         if (lit.value < 0) return .{ .err = .position_negative };
         const ceiling: f64 = @floatFromInt(Grid.MAX_TICK);
@@ -391,12 +461,7 @@ pub const TimeMap = struct {
                 // its own; `Pos` never asks a map about them.
                 .needs_map => unreachable,
             },
-            .s => return .{
-                .tick = self.tickFromSeconds(lit.value) catch |e| switch (e) {
-                    error.TickOverflow => return .{ .err = .tick_overflow },
-                    error.NonFiniteTime => return e,
-                },
-            },
+            .s, .f => return self.clockTick(lit),
             .bar => {
                 const whole = @trunc(lit.value);
                 if (whole > ceiling) return .{ .err = .tick_overflow };
@@ -439,9 +504,35 @@ pub const TimeMap = struct {
                     .tick = capped(beat_start + into) catch return .{ .err = .tick_overflow },
                 };
             },
-            // The frame arm's refusal until the rate lands (phase 2).
-            .f => return .{ .err = .frame_rate_missing },
         }
+    }
+
+    /// The two CLOCK units' arm of `tickFromLiteral`, apart so the parent
+    /// stays the parent: `s` straight through the one clock floor, and
+    /// `f` at the document's declared rate through the same floor —
+    /// `frame_rate_missing` when the map holds none (no default rate
+    /// exists to guess with), and the seam read back for exactness when
+    /// it does. The only rounding either takes is the clock floor every
+    /// clock value already takes: a frame never round-to-nearests and
+    /// never wraps, and an instant that is not a tick start is `inexact`
+    /// — the floored tick, said.
+    fn clockTick(self: *const TimeMap, lit: Pos.Literal) Error!LiteralTick {
+        const secs = switch (lit.unit) {
+            .s => lit.value,
+            .f => frameSeconds((self.frames orelse return .{
+                .err = .frame_rate_missing,
+            }).rate, lit.value),
+            else => unreachable, // the parent sends only the clock units
+        };
+        const tick = self.tickFromSeconds(secs) catch |e| switch (e) {
+            error.TickOverflow => return .{ .err = .tick_overflow },
+            error.NonFiniteTime => return e,
+        };
+        if (lit.unit == .s) return .{ .tick = tick };
+        // The frame seam read back, bit for bit: the frame's instant is
+        // this tick's seconds exactly, or the floor stands and is said.
+        if (self.secondsFromTick(tick) == secs) return .{ .tick = tick };
+        return .{ .inexact = tick };
     }
 
     /// A DURATION literal — `:dur`, `:offset`, a clip's `:length` —
@@ -459,8 +550,10 @@ pub const TimeMap = struct {
     ///     the fraction scaled by the LANDING bar's length;
     ///   * `b` is the beat twin, over the cumulative beat count;
     ///   * `s` is wall-clock from `at`, through the one clock seam;
-    ///   * `f` refuses with `frame_rate_missing` until the frame
-    ///     resolution lands (phase 2), mirroring `tickFromLiteral`'s arm.
+    ///   * `f` is the frame twin of `s`: wall-clock from `at`, at the
+    ///     document's declared rate, with the landing read back for
+    ///     exactness (`inexact` when the frame's instant is no tick
+    ///     start, `frame_rate_missing` on a map that holds no rate).
     ///
     /// Both roundings stay where plan 03 put them: a fraction goes
     /// through `Pos.tickFromQuarters` (half to even) and seconds through
@@ -475,8 +568,9 @@ pub const TimeMap = struct {
     pub fn durationTicks(self: *const TimeMap, lit: Pos.Literal, at: i64) Error!Resolved {
         const answer = try self.resolveDuration(lit, at);
         switch (answer) {
-            // Never a distance backwards, and never past the ceiling.
-            .tick => |t| {
+            // Never a distance backwards, and never past the ceiling —
+            // an inexact landing no less than an exact one.
+            .tick, .inexact => |t| {
                 std.debug.assert(t >= 0);
                 std.debug.assert(t <= Grid.MAX_TICK);
             },
@@ -502,6 +596,9 @@ pub const TimeMap = struct {
             // there is nothing for an anchor to change.
             .q, .t => return switch (try self.tickFromLiteral(lit)) {
                 .tick => |t| .{ .tick = t },
+                // Only the clock units answer inexact; on the grid this
+                // is the tick it already was.
+                .inexact => |t| .{ .tick = t },
                 .err => |c| .{ .err = c },
             },
             .s => {
@@ -513,6 +610,7 @@ pub const TimeMap = struct {
                 };
                 return .{ .tick = @max(0, abs - anchor) };
             },
+            .f => return self.frameDuration(lit, anchor),
             .bar => {
                 const whole = @trunc(lit.value);
                 if (whole > ceiling) return .{ .err = .tick_overflow };
@@ -549,9 +647,28 @@ pub const TimeMap = struct {
                     ) catch return .{ .err = .tick_overflow },
                 };
             },
-            // The frame arm's refusal until the rate lands (phase 2).
-            .f => return .{ .err = .frame_rate_missing },
         }
+    }
+
+    /// The `f` arm of `resolveDuration`, apart so the parent stays the
+    /// parent: the `s` arm's shape with a frame instant in place of the
+    /// seconds count — wall-clock from the anchor, at the document's
+    /// declared rate, through the one clock seam, with the landing read
+    /// back for exactness exactly as `clockTick` reads a position.
+    fn frameDuration(self: *const TimeMap, lit: Pos.Literal, anchor: i64) Error!Resolved {
+        const rate = (self.frames orelse return .{
+            .err = .frame_rate_missing,
+        }).rate;
+        const want = self.secondsFromTick(anchor) + frameSeconds(rate, lit.value);
+        const abs = self.tickFromSeconds(want) catch |e| switch (e) {
+            error.TickOverflow => return .{ .err = .tick_overflow },
+            error.NonFiniteTime => return e,
+        };
+        const d = @max(0, abs - anchor);
+        // Exact iff the asked instant is the tick it landed on; the
+        // floored distance stands otherwise, never a wrap.
+        if (self.secondsFromTick(anchor + d) == want) return .{ .tick = d };
+        return .{ .inexact = d };
     }
 
     /// The canonical spelling of a DURATION measured from `at`.
@@ -765,12 +882,20 @@ comptime {
 /// first entry is bar 0 — the invariant every lookup here relies on. A
 /// `length` below 0 gives the one-entry bar table and a loop point with
 /// nothing in it, which `wrapSeconds` passes through.
+///
+/// `frames` is the document's declared frame state — its `:fps`, and
+/// whether the document wrote an `f` position — delivered as one
+/// parameter so a caller cannot forget it the way a post-construction
+/// field can be forgotten. Null for a document with no `:fps`, and for
+/// every map derived without one (a conductor's probe, a file's own
+/// seconds: no file format carries a rate).
 pub fn derive(
     gpa: std.mem.Allocator,
     tempo: []const TempoPoint,
     meter: []const MeterPoint,
     length: i64,
     end: End,
+    frames: ?Frames,
 ) error{OutOfMemory}!Result {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     var diags: Diag.List = .init(gpa);
@@ -793,6 +918,7 @@ pub fn derive(
         .bars = bars,
         .length = length,
         .end = end,
+        .frames = frames,
         .integral = integral,
         .loop_secs = 0,
         .arena = arena_state,
@@ -1191,7 +1317,7 @@ test "TimeMap.derive: the segment table builds in plan 03's op order" {
         .{ .tick = 553_512_960, .tempo = .{ .qpm = 97.3 } },
     }, &.{
         .{ .tick = 0, .n = 4, .d = 4 },
-    }, 553_512_960, .loop);
+    }, 553_512_960, .loop, null);
     defer r.deinit();
 
     try testing.expectEqual(@as(usize, 3), r.map.segments.len);
@@ -1220,7 +1346,7 @@ test "TimeMap.derive: the segment table builds in plan 03's op order" {
     var pin = try derive(testing.allocator, &.{
         .{ .tick = 0, .tempo = .{ .qpm = 97.3 } },
         .{ .tick = 184_504_320, .tempo = .{ .qpm = 150 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 184_504_320, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 184_504_320, .hold, null);
     defer pin.deinit();
     try testing.expectEqual(false, pin.map.integral);
     try testing.expectEqual(
@@ -1239,7 +1365,7 @@ test "TimeMap.derive: a segment keeps the span of the point that made it" {
         .{ .tick = 0, .tempo = .{ .qpm = 125 }, .span = .{ .start = 10, .end = 11 } },
         .{ .tick = 184_504_320, .tempo = .{ .qpm = 150 }, .span = .{ .start = 20, .end = 21 } },
         .{ .tick = 369_008_640, .tempo = .{ .qpm = -5 }, .span = .{ .start = 30, .end = 31 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 738_017_280, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 738_017_280, .hold, null);
     defer r.deinit();
 
     try testing.expectEqual(@as(usize, 2), r.map.segments.len);
@@ -1253,7 +1379,7 @@ test "TimeMap.derive: a segment keeps the span of the point that made it" {
     // segment 1 with its own span.
     var supplied = try derive(testing.allocator, &.{
         .{ .tick = 46_126_080, .tempo = .{ .qpm = 125 }, .span = .{ .start = 10, .end = 11 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 92_252_160, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 92_252_160, .hold, null);
     defer supplied.deinit();
     try testing.expectEqual(@as(usize, 2), supplied.map.segments.len);
     try testing.expectEqual(@as(u32, 0), supplied.map.segments[0].span.end);
@@ -1286,7 +1412,7 @@ test "TimeMap.derive: every allocation failure is OutOfMemory, cleanly, with not
             testing.allocator,
             .{ .fail_index = fail_index },
         );
-        const result = derive(failing.allocator(), &tempo, &meter, 1_014_773_760, .loop);
+        const result = derive(failing.allocator(), &tempo, &meter, 1_014_773_760, .loop, null);
         if (failing.has_induced_failure) {
             try testing.expectError(error.OutOfMemory, result);
         } else {
@@ -1312,7 +1438,7 @@ fn threeSegmentMap() error{OutOfMemory}!Result {
         .{ .tick = 553_512_960, .tempo = .{ .qpm = 97.3 } },
     }, &.{
         .{ .tick = 0, .n = 4, .d = 4 },
-    }, 738_017_280, .loop);
+    }, 738_017_280, .loop, null);
 }
 
 test "TimeMap: seconds and ticks are exact at a segment boundary, both ways" {
@@ -1368,7 +1494,7 @@ test "TimeMap: :qpm 97.3 then 150 at 13q returns the boundary tick from its own 
         .{ .tick = 599_639_040, .tempo = .{ .qpm = 150 } },
     }, &.{
         .{ .tick = 0, .n = 4, .d = 4 },
-    }, 599_639_040, .hold);
+    }, 599_639_040, .hold, null);
     defer r.deinit();
     const m = &r.map;
 
@@ -1409,7 +1535,7 @@ test "TimeMap: the same fixture in :us takes the integer path to the same tick" 
         .{ .tick = 599_639_040, .tempo = .{ .us = 400_000 } },
     }, &.{
         .{ .tick = 0, .n = 4, .d = 4 },
-    }, 599_639_040, .hold);
+    }, 599_639_040, .hold, null);
     defer r.deinit();
     const m = &r.map;
 
@@ -1428,11 +1554,11 @@ test "TimeMap: :us 480000 and :qpm 125 derive one identical segment" {
     //   tps = (TPQ · 1e6) / 480 000 = 96 096 000 = 768 768 · 125.
     var by_us = try derive(testing.allocator, &.{
         .{ .tick = 0, .tempo = .{ .us = 480_000 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, null);
     defer by_us.deinit();
     var by_qpm = try derive(testing.allocator, &.{
         .{ .tick = 0, .tempo = .{ .qpm = 125 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, null);
     defer by_qpm.deinit();
 
     try testing.expectEqual(@as(usize, 1), by_us.map.segments.len);
@@ -1455,7 +1581,7 @@ fn meterChangeMap() error{OutOfMemory}!Result {
     }, &.{
         .{ .tick = 0, .n = 3, .d = 4 },
         .{ .tick = 276_756_480, .n = 4, .d = 4 },
-    }, 1_014_773_760, .hold);
+    }, 1_014_773_760, .hold, null);
 }
 
 test "TimeMap.derive: the bar table under a [3 4] → [4 4] change" {
@@ -1533,7 +1659,7 @@ test "TimeMap.derive: a meter point off a bar line of the meter before it is met
     }, &.{
         .{ .tick = 0, .n = 4, .d = 4 },
         .{ .tick = 92_252_160, .n = 3, .d = 4, .span = .{ .start = 7, .end = 11 } },
-    }, 369_008_640, .hold);
+    }, 369_008_640, .hold, null);
     defer r.deinit();
 
     try testing.expectEqual(@as(usize, 1), r.diags.count(.meter_off_bar));
@@ -1551,7 +1677,7 @@ test "TimeMap.derive: a meter map with no point at 0, a bad signature or a step 
         .{ .tick = 0, .tempo = .{ .qpm = 120 } },
     }, &.{
         .{ .tick = 184_504_320, .n = 3, .d = 4 },
-    }, 184_504_320, .hold);
+    }, 184_504_320, .hold, null);
     defer none.deinit();
     try testing.expectEqual(@as(usize, 1), none.diags.count(.meter_map_invalid));
     try testing.expectEqual(@as(usize, 2), none.map.meters.len);
@@ -1567,7 +1693,7 @@ test "TimeMap.derive: a meter map with no point at 0, a bad signature or a step 
         .{ .tick = 184_504_320, .n = 5, .d = 3 },
         .{ .tick = 369_008_640, .n = 0, .d = 4 },
         .{ .tick = 553_512_960, .n = 65, .d = 4 },
-    }, 184_504_320, .hold);
+    }, 184_504_320, .hold, null);
     defer bad.deinit();
     try testing.expectEqual(@as(usize, 3), bad.diags.count(.meter_map_invalid));
     try testing.expectEqual(@as(usize, 1), bad.map.meters.len);
@@ -1579,7 +1705,7 @@ test "TimeMap.derive: a meter map with no point at 0, a bad signature or a step 
         .{ .tick = 0, .n = 4, .d = 4 },
         .{ .tick = 184_504_320, .n = 3, .d = 4 },
         .{ .tick = 184_504_320, .n = 2, .d = 4 },
-    }, 184_504_320, .hold);
+    }, 184_504_320, .hold, null);
     defer back.deinit();
     try testing.expectEqual(@as(usize, 1), back.diags.count(.meter_map_invalid));
     try testing.expectEqual(@as(usize, 2), back.map.meters.len);
@@ -1592,7 +1718,7 @@ test "TimeMap.derive: a tempo map with no point at 0, a step back or too many se
     // is an INTEGER, so it never drags a `:us` document onto the f64 path.
     var none = try derive(testing.allocator, &.{
         .{ .tick = 46_126_080, .tempo = .{ .us = 400_000 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, null);
     defer none.deinit();
     try testing.expectEqual(@as(usize, 1), none.diags.count(.tempo_map_invalid));
     try testing.expectEqual(@as(usize, 2), none.map.segments.len);
@@ -1606,7 +1732,7 @@ test "TimeMap.derive: a tempo map with no point at 0, a step back or too many se
         .{ .tick = 46_126_080, .tempo = .{ .us = 400_000 } },
         .{ .tick = 46_126_080, .tempo = .{ .us = 300_000 } },
         .{ .tick = 1, .tempo = .{ .us = 200_000 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, null);
     defer twice.deinit();
     try testing.expectEqual(@as(usize, 2), twice.diags.count(.tempo_map_invalid));
     try testing.expectEqual(@as(usize, 2), twice.map.segments.len);
@@ -1618,7 +1744,14 @@ test "TimeMap.derive: a tempo map with no point at 0, a step back or too many se
     for (many, 0..) |*p, i| {
         p.* = .{ .tick = @as(i64, @intCast(i)) * 46_126_080, .tempo = .{ .us = 500_000 } };
     }
-    var capped = try derive(testing.allocator, many, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold);
+    var capped = try derive(
+        testing.allocator,
+        many,
+        &.{.{ .tick = 0, .n = 4, .d = 4 }},
+        0,
+        .hold,
+        null,
+    );
     defer capped.deinit();
     try testing.expectEqual(@as(usize, 1), capped.diags.count(.tempo_map_invalid));
     try testing.expectEqual(MAX_TEMPO_SEGMENTS, capped.map.segments.len);
@@ -1633,7 +1766,7 @@ fn twoSegmentMap(end: End) error{OutOfMemory}!Result {
         .{ .tick = 184_504_320, .tempo = .{ .qpm = 240 } },
     }, &.{
         .{ .tick = 0, .n = 4, .d = 4 },
-    }, 369_008_640, end);
+    }, 369_008_640, end, null);
 }
 
 /// 120 qpm, `[4 4]`, and no length at all — the map a document has
@@ -1643,7 +1776,7 @@ fn zeroLengthMap(end: End) error{OutOfMemory}!Result {
         .{ .tick = 0, .tempo = .{ .qpm = 120 } },
     }, &.{
         .{ .tick = 0, .n = 4, .d = 4 },
-    }, 0, end);
+    }, 0, end, null);
 }
 
 test "TimeMap: :end loop wraps SECONDS first, into the early segment" {
@@ -1712,7 +1845,7 @@ test "TimeMap.derive: a bar table past MAX_TICK is tick_overflow" {
         .{ .tick = 0, .tempo = .{ .qpm = 120 } },
     }, &.{
         .{ .tick = 0, .n = 64, .d = 1 },
-    }, Grid.MAX_TICK + 1, .hold);
+    }, Grid.MAX_TICK + 1, .hold, null);
     defer r.deinit();
 
     try testing.expectEqual(@as(usize, 1), r.diags.count(.tick_overflow));
@@ -1738,7 +1871,7 @@ test "TimeMap.derive: a tempo or meter point past the grid ceiling is tick_overf
             .d = 4,
             .span = .{ .start = 12, .end = 20 },
         },
-    }, 4 * Grid.TPQ, .hold);
+    }, 4 * Grid.TPQ, .hold, null);
     defer r.deinit();
 
     try testing.expect(48_818_366 * (4 * Grid.TPQ) > Grid.MAX_TICK);
@@ -1846,12 +1979,10 @@ test "TimeMap.tickFromLiteral: a bar, a beat and a seconds literal each resolve"
     );
 }
 
-test "TimeMap.tickFromLiteral: a frame literal is frame_rate_missing until the rate lands" {
-    // The `f` arm's first landing (phase 1) is the refusal the coming
-    // resolution replaces: no map holds a declared rate yet, so every
-    // frame literal — position or duration — answers the code the layer
-    // that owns the rate will raise. The test pins the arm's existence
-    // and the code, and phase 2 re-cuts it against a real rate.
+test "TimeMap.tickFromLiteral: a frame literal with no rate is frame_rate_missing" {
+    // No map can resolve a frame without the document's declared `:fps`
+    // — there is no default rate to guess with — so the refusal is the
+    // answer whatever the literal says.
     var r = try meterChangeMap();
     defer r.deinit();
     const m = &r.map;
@@ -1868,6 +1999,150 @@ test "TimeMap.tickFromLiteral: a frame literal is frame_rate_missing until the r
         Diag.Code.frame_rate_missing,
         (try m.durationTicks(.{ .value = 25, .unit = .f }, 0)).err,
     );
+}
+
+test "TimeMap.tickFromLiteral: frames at the declared rate" {
+    // :qpm 300 is us 200 000 — an integer, so the integral path — and
+    // tps 230 630 400 (768 768 · 300). A frame at 25 fps is 1/25 s =
+    // 9 225 216 ticks exactly; a second is 25 of them.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 300 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 25, .den = 1 },
+        .wrote = true,
+    });
+    defer r.deinit();
+    const m = &r.map;
+
+    try testing.expectEqual(
+        @as(i64, 0),
+        (try m.tickFromLiteral(.{ .value = 0, .unit = .f })).tick,
+    );
+    try testing.expectEqual(
+        @as(i64, 9_225_216),
+        (try m.tickFromLiteral(.{ .value = 1, .unit = .f })).tick,
+    );
+    try testing.expectEqual(
+        @as(i64, 23_063_040),
+        (try m.tickFromLiteral(.{ .value = 2.5, .unit = .f })).tick,
+    );
+    try testing.expectEqual(
+        @as(i64, 184_504_320),
+        (try m.tickFromLiteral(.{ .value = 20, .unit = .f })).tick,
+    );
+    try testing.expectEqual(
+        @as(i64, 230_630_400),
+        (try m.tickFromLiteral(.{ .value = 25, .unit = .f })).tick,
+    );
+    // Every one of them lands on a tick start at this tempo, so each is
+    // exact and the frame-line test names the frame itself.
+    try testing.expectEqual(@as(?i64, 20), m.frameLine(184_504_320));
+    try testing.expectEqual(@as(?i64, null), m.frameLine(184_504_321));
+}
+
+test "TimeMap.tickFromLiteral: an off-grid frame is floored and said" {
+    // NTSC `[30000 1001]` at the same tempo: frame 1's instant is
+    // 1001/30000 s, which at tps 230 630 400 is 7 695 367.68 ticks —
+    // between two. The clock floor answers the tick beneath, the seam
+    // read back says the frame landed on no tick start, and the `inexact`
+    // payload is the floored tick that stands — never a wrap, never a
+    // round to nearest.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 300 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 30000, .den = 1001 },
+        .wrote = true,
+    });
+    defer r.deinit();
+    const m = &r.map;
+
+    // Frame 0 is tick 0, exact.
+    try testing.expectEqual(
+        @as(i64, 0),
+        (try m.tickFromLiteral(.{ .value = 0, .unit = .f })).tick,
+    );
+    const one = try m.tickFromLiteral(.{ .value = 1, .unit = .f });
+    try testing.expectEqual(@as(i64, 7_695_367), one.inexact);
+    // The floored tick is refused by the frame-line test: it is not any
+    // frame's start at this rate.
+    try testing.expectEqual(@as(?i64, null), m.frameLine(7_695_367));
+}
+
+test "TimeMap.durationTicks: an f duration anchors at its form's :at" {
+    // 120 qpm doubling to 240 at 4q (tick 184 504 320, exactly 2 s): a
+    // second of wall clock is 92 252 160 ticks before the change and
+    // 184 504 320 after it. A 25-frame duration (one second at 25 fps)
+    // measured from an `:at` before the change is two quarters; from the
+    // change itself, four — the anchor's tempo, not the origin's.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 120 } },
+        .{ .tick = 184_504_320, .tempo = .{ .qpm = 240 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 25, .den = 1 },
+        .wrote = true,
+    });
+    defer r.deinit();
+    const m = &r.map;
+
+    try testing.expectEqual(
+        @as(i64, 92_252_160),
+        (try m.durationTicks(.{ .value = 25, .unit = .f }, 0)).tick,
+    );
+    try testing.expectEqual(
+        @as(i64, 184_504_320),
+        (try m.durationTicks(.{ .value = 25, .unit = .f }, 184_504_320)).tick,
+    );
+    // A quarter of a second (6.25 frames) from the change is a quarter
+    // of its four quarters — one quarter, exact.
+    try testing.expectEqual(
+        @as(i64, Grid.TPQ),
+        (try m.durationTicks(.{ .value = 6.25, .unit = .f }, 184_504_320)).tick,
+    );
+}
+
+test "TimeMap: the f64 path's frame seam is deterministic" {
+    // :qpm 143 makes us = 60e6/143 — not a whole number — so the map
+    // takes the f64 path, where a frame's answer is only as good as the
+    // op order. Determinism is the claim (plan 03: same document + same
+    // f64 ⇒ same tick): two independent derives agree, tag for tag and
+    // payload for payload, and the frame-line test answers exactly what
+    // the literal's own read-back said.
+    const tempo = [_]TempoPoint{.{ .tick = 0, .tempo = .{ .qpm = 143 } }};
+    const meter = [_]MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
+    const frames: Frames = .{ .rate = .{ .num = 25, .den = 1 }, .wrote = true };
+
+    var a = try derive(testing.allocator, &tempo, &meter, 0, .hold, frames);
+    defer a.deinit();
+    var b = try derive(testing.allocator, &tempo, &meter, 0, .hold, frames);
+    defer b.deinit();
+    try testing.expectEqual(false, a.map.integral);
+
+    for (0..1_000) |i| {
+        const n: f64 = @floatFromInt(i);
+        const x = try a.map.tickFromLiteral(.{ .value = n, .unit = .f });
+        const y = try b.map.tickFromLiteral(.{ .value = n, .unit = .f });
+        const exact = switch (x) {
+            .tick => true,
+            .inexact => false,
+            .err => return error.TestFrameSeamRefused,
+        };
+        const tick = switch (x) {
+            .tick => |t| t,
+            .inexact => |t| t,
+            .err => return error.TestFrameSeamRefused,
+        };
+        try testing.expectEqual(std.meta.activeTag(x), std.meta.activeTag(y));
+        try testing.expectEqual(tick, switch (y) {
+            .tick => |t| t,
+            .inexact => |t| t,
+            .err => return error.TestFrameSeamRefused,
+        });
+        // The frame-line test agrees with the literal's own exactness:
+        // an exact frame reads back as the very frame that named it, an
+        // off-grid one is refused — the printer's fall-through rule.
+        const line: ?i64 = if (exact) @intCast(i) else null;
+        try testing.expectEqual(line, a.map.frameLine(tick));
+    }
 }
 
 test "TimeMap.spell: the printer's rule, with this map's bar table" {
@@ -1940,7 +2215,7 @@ test "TimeMap.derive: a tempo point at tick 0 that names no tempo still leaves a
     // past its end computing `loop_secs`.
     var lone = try derive(testing.allocator, &.{
         .{ .tick = 0, .tempo = .{ .us = 0 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, null);
     defer lone.deinit();
     try testing.expectEqual(@as(usize, 1), lone.diags.count(.tempo_map_invalid));
     try testing.expectEqual(@as(usize, 1), lone.map.segments.len);
@@ -1954,7 +2229,7 @@ test "TimeMap.derive: a tempo point at tick 0 that names no tempo still leaves a
     var then_good = try derive(testing.allocator, &.{
         .{ .tick = 0, .tempo = .{ .qpm = 0 } },
         .{ .tick = 184_504_320, .tempo = .{ .us = 400_000 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 184_504_320, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 184_504_320, .hold, null);
     defer then_good.deinit();
     try testing.expectEqual(@as(usize, 1), then_good.diags.count(.tempo_map_invalid));
     try testing.expectEqual(@as(usize, 2), then_good.map.segments.len);
@@ -1969,7 +2244,7 @@ test "TimeMap.derive: a tempo point at tick 0 that names no tempo still leaves a
     var not_numbers = try derive(testing.allocator, &.{
         .{ .tick = 0, .tempo = .{ .qpm = std.math.nan(f64) } },
         .{ .tick = 46_126_080, .tempo = .{ .qpm = -120 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, null);
     defer not_numbers.deinit();
     try testing.expectEqual(@as(usize, 2), not_numbers.diags.count(.tempo_map_invalid));
     try testing.expectEqual(@as(usize, 1), not_numbers.map.segments.len);
@@ -1987,7 +2262,7 @@ test "TimeMap.derive: a whole-microsecond us too wide for the i128 origins takes
     var wide = try derive(testing.allocator, &.{
         .{ .tick = 0, .tempo = .{ .qpm = 1e-30 } },
         .{ .tick = Grid.TPQ, .tempo = .{ .qpm = 120 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 8 * Grid.TPQ, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 8 * Grid.TPQ, .hold, null);
     defer wide.deinit();
     try testing.expectEqual(false, wide.map.integral);
     try testing.expectEqual(@as(usize, 2), wide.map.segments.len);
@@ -2007,7 +2282,7 @@ test "TimeMap.derive: a whole-microsecond us too wide for the i128 origins takes
     var narrow = try derive(testing.allocator, &.{
         .{ .tick = 0, .tempo = .{ .qpm = 1e-10 } },
         .{ .tick = Grid.TPQ, .tempo = .{ .qpm = 120 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 8 * Grid.TPQ, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 8 * Grid.TPQ, .hold, null);
     defer narrow.deinit();
     try testing.expectEqual(true, narrow.map.integral);
     const us_0: i128 = @intFromFloat(narrow.map.segments[0].us);
@@ -2025,7 +2300,7 @@ fn threeThenFour(gpa: std.mem.Allocator) error{OutOfMemory}!Result {
     return derive(gpa, &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }}, &.{
         .{ .tick = 0, .n = 3, .d = 4 },
         .{ .tick = 6 * Grid.TPQ, .n = 4, .d = 4 },
-    }, 24 * Grid.TPQ, .hold);
+    }, 24 * Grid.TPQ, .hold, null);
 }
 
 test "TimeMap.durationTicks: a bar is the bar it lands in, not the bar at the origin" {
@@ -2166,7 +2441,7 @@ test "TimeMap.durationTicks: under ONE meter the anchor changes nothing, bit for
     // The compatibility claim: every existing document reads the same.
     var r = try derive(testing.allocator, &.{.{ .tick = 0, .tempo = .{ .qpm = 120 } }}, &.{
         .{ .tick = 0, .n = 4, .d = 4 },
-    }, 64 * Grid.TPQ, .hold);
+    }, 64 * Grid.TPQ, .hold, null);
     defer r.deinit();
     const map = &r.map;
 
@@ -2192,7 +2467,7 @@ test "TimeMap.tempoOk: the tempo table's own test, by name" {
     // `tempo_map_invalid`, one it keeps does not.
     var res = try derive(testing.allocator, &.{.{ .tick = 0, .tempo = .{ .qpm = -5 } }}, &.{
         .{ .tick = 0, .n = 4, .d = 4 },
-    }, 0, .hold);
+    }, 0, .hold, null);
     defer res.deinit();
     try testing.expectEqual(@as(usize, 1), res.diags.count(.tempo_map_invalid));
 }
@@ -2273,7 +2548,10 @@ test "TimeMap: durationTicks(spellDuration(d, at), at) is d, across a meter chan
             },
         };
         switch (try map.durationTicks(lit, at)) {
-            .tick => |got| if (got != dur) {
+            // `spellDuration` never writes `f` (the printer's frame
+            // branch is phase 3), so an inexact landing cannot reach
+            // here; treated as the tick it is, the same assertion holds.
+            .tick, .inexact => |got| if (got != dur) {
                 std.debug.print(
                     "duration {d} at {d} spelled {s}, which reads back as {d}\n",
                     .{ dur, at, text, got },

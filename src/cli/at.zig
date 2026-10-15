@@ -129,6 +129,16 @@ fn ask(ctx: *const Cli.Ctx, derived: *const tempura.time.derive.Derived) Cli.Err
         return try refuse(ctx, "`--pos {s}` is not a time", .{text});
     const tick = switch (resolved) {
         .tick => |x| x,
+        // The floored tick stands, and the person asking is told what the
+        // frame they named could not land on.
+        .inexact => |x| blk: {
+            try ctx.err.print(
+                "tempura: --pos {s} lands between ticks at this document's frame rate; " ++
+                    "answering the tick beneath it\n",
+                .{text},
+            );
+            break :blk x;
+        },
         .err => |code| return try refuse(
             ctx,
             "`--pos {s}` does not resolve ({t})",

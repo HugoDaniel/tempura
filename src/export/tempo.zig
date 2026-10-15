@@ -123,7 +123,7 @@ fn qpmOf(p: TimeMap.TempoPoint) f64 {
 
 fn deriveMap(points: []const TimeMap.TempoPoint) !TimeMap.Result {
     const meter = [_]TimeMap.MeterPoint{.{ .tick = 0, .n = 4, .d = 4 }};
-    return TimeMap.derive(testing.allocator, points, &meter, 4 * Grid.TPQ, .hold);
+    return TimeMap.derive(testing.allocator, points, &meter, 4 * Grid.TPQ, .hold, null);
 }
 
 test "tempo.Walk: every segment with the point behind it, spelled as written" {

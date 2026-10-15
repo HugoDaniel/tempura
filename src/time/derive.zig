@@ -237,7 +237,7 @@ pub fn derive(gpa: std.mem.Allocator, doc: *const Doc) Error!Derived {
     const length = doc.length orelse
         try fromSjon.defaultLength(gpa, conducted, content_end, doc.end);
 
-    var res = try tm.derive(gpa, conducted.tempo, conducted.meter, length, doc.end);
+    var res = try tm.derive(gpa, conducted.tempo, conducted.meter, length, doc.end, doc.frames());
     errdefer res.map.deinit();
     {
         defer res.diags.deinit();

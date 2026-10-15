@@ -437,6 +437,20 @@ pub const Doc = struct {
     end_span: Diag.Span = .{ .start = 0, .end = 0 },
     end: TimeMap.End = .hold,
     conductor: ?AnchorId = null,
+    /// The document's declared frame rate — `(timeline :fps 25)` or
+    /// `:fps [30000 1001]` (plan 03's `f` unit). AUTHORED content: two
+    /// documents disagree when their rates do, so `eql` compares it.
+    /// Null when the document declared none, which is the one state an
+    /// `f` position cannot resolve (`frame_rate_missing`).
+    frame_rate: ?TimeMap.FrameRate = null,
+    /// Whether any position literal in the document names `f` — derived
+    /// state the load marks as it resolves, and the printer's
+    /// per-document rule reads (a rate alone changes no spelling).
+    /// EXCLUDED from `eql`, the `length_lit` precedent below: the tick a
+    /// position resolved to is what two documents must agree on, and an
+    /// off-grid frame that floored has no `f` spelling to round-trip
+    /// anyway.
+    wrote_frames: bool = false,
     /// The CONDUCTOR anchor's own bytes, when it conducts BY REFERENCE
     /// and the host could read and verify them — arena-owned, like every
     /// other slice here.
@@ -495,6 +509,17 @@ pub const Doc = struct {
             if (std.mem.eql(u8, p.name, name)) return p;
         }
         return null;
+    }
+
+    /// The map-side frame state of this document — its declared rate
+    /// with `wrote_frames` beside it — or null when no `:fps` was
+    /// declared, the one case an `f` literal answers `frame_rate_missing`
+    /// whatever `wrote_frames` says. One owner for the pairing, so the
+    /// callers threading `TimeMap.derive`'s frames parameter cannot
+    /// disagree about it. Pure; borrows nothing.
+    pub fn frames(self: *const Doc) ?TimeMap.Frames {
+        const rate = self.frame_rate orelse return null;
+        return .{ .rate = rate, .wrote = self.wrote_frames };
     }
 
     /// The properties every `Doc` this part hands out satisfies —
@@ -556,6 +581,13 @@ pub const Doc = struct {
     /// `length_lit` rides along for the edit engine and for a host that
     /// wants to show what was typed; nothing downstream compares it.
     ///
+    /// `wrote_frames` joins it in the exclusion — whether the author
+    /// happened to spell a position in frames is derived state, and the
+    /// ticks those positions resolved to are already compared — while
+    /// `frame_rate` beside it is AUTHORED content and IS compared: two
+    /// documents of different rates are different documents, whatever
+    /// their positions spelled.
+    ///
     /// A PASS-THROUGH form is compared structurally for the same reason
     /// (`passthroughEql`): its `text` is a source slice, and two
     /// documents that say the same thing in two layouts are one
@@ -575,6 +607,7 @@ pub const Doc = struct {
         if (!optEql(i64, a.length, b.length)) return false;
         if (a.end != b.end) return false;
         if (!optStrEql(a.conductor, b.conductor)) return false;
+        if (!frameRateEql(a.frame_rate, b.frame_rate)) return false;
         if (!allEql(Anchor, a.anchors, b.anchors, anchorEql)) return false;
         if (!allEql(TempoPoint, a.tempo, b.tempo, tempoPointEql)) return false;
         if (!allEql(MeterPoint, a.meter, b.meter, meterPointEql)) return false;
@@ -851,6 +884,13 @@ fn clipEql(x: Clip, y: Clip) bool {
 fn optEql(comptime T: type, a: ?T, b: ?T) bool {
     if (a == null or b == null) return a == null and b == null;
     return a.? == b.?;
+}
+
+/// `?FrameRate` — a plain value comparison; `?T` with a struct has no
+/// `==` of its own.
+fn frameRateEql(a: ?TimeMap.FrameRate, b: ?TimeMap.FrameRate) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return a.?.num == b.?.num and a.?.den == b.?.den;
 }
 
 fn optStrEql(a: ?[]const u8, b: ?[]const u8) bool {

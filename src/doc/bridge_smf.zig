@@ -1481,7 +1481,7 @@ fn conductedSeconds(gpa: Allocator, seq: *const smf.Sequence, smf_tick: i64) !f6
     var c = try fromSjon.smfConductor(gpa, seq, .{ .start = 0, .end = 1 });
     defer c.deinit();
     try testing.expect(!c.diags.hasErrors());
-    var res = try TimeMap.derive(gpa, c.tempo, c.meter, c.end, .hold);
+    var res = try TimeMap.derive(gpa, c.tempo, c.meter, c.end, .hold, null);
     defer res.deinit();
     const tick = Grid.smfToTicks(smf_tick, seq.division.pulsesPerQuarter()).tick;
     return res.map.secondsFromTick(tick);

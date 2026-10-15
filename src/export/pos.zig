@@ -672,7 +672,7 @@ test "pos.Mapper: a duration is the span of [at, at+dur), not the seconds over [
     var res = try time.TimeMap.derive(gpa, &.{
         .{ .tick = 0, .tempo = .{ .qpm = 60 } },
         .{ .tick = 4 * Grid.TPQ, .tempo = .{ .qpm = 240 } },
-    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 8 * Grid.TPQ, .hold);
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 8 * Grid.TPQ, .hold, null);
     defer res.diags.deinit();
     defer res.map.deinit();
 
