@@ -333,7 +333,7 @@
     (key :name length :type position :optional true
       :description "The piece's length. Omitted, it is the end of the last event or clip rounded up to a bar.")
     (key :name fps :type frame-rate :optional true
-      :description "The document's frame rate, for the `f` position unit (plan 03): frames per second as an integer (`:fps 25`) or an exact rational (`:fps [30000 1001]`). Never a bare decimal — 29.97 would mean 2997/100, and NTSC is 30000/1001. Declaring a rate without writing an `f` position is harmless and prints nothing; an `f` position without this key is a tempura frame_rate_missing.")
+      :description "The document's frame rate, for the `f` position unit (plan 03): frames per second as an integer (`:fps 25`) or an exact rational (`:fps [30000 1001]`). Never a bare decimal — 29.97 would mean 2997/100, and NTSC is 30000/1001. A rate alone changes no position's spelling; the header keeps `:fps`. An `f` position without this key is a tempura frame_rate_missing.")
     (key :name end :type timeline-end :optional true :default hold
       :description "What the playhead does past :length. Exported as pacer's transport :end.")
     (key :name conductor :type anchor-ref :optional true

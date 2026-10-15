@@ -528,6 +528,14 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
   2026-10-14 and recorded in [03](03-time-model.md). T1, the source map, remains an ask.
   The code is LOCAL, committed on `agent/animader-init`, and NOT published to or accepted
   by animader: no integration, browser verification or independent review has run.)*
+  *(Correction appended 2026-10-15, later the same day: the sentence above — "T1, the
+  source map, remains an ask" — is wrong and is superseded. T1 is BUILT and consumed:
+  ruled 2026-10-04 ([08](08-export.md)), built 2026-10-08 by tempura `f2e8c43`, `6fd8d44`,
+  `fcf2cc1`, `4732aab`, `ee21c33` (`export-score --map`, the `'TPMP'` sidecar,
+  `tpr_exportScoreMap`), and consumed the same day by animader's piece boundary
+  (`7e14dfa`, `e3d16a1`, `ec66db9`, `2634aa7`, `88a370c`; `anm_piece_score_map`, npm
+  `scoreMap`), recorded in animader's own `docs/07-road.md` stance. The LOCAL /
+  not-published sentences above stand for T2 only.)*
 - 2026-09-29 — **A zero-length timeline is an export error, not a floored length** (user
   ruling, [08](08-export.md), risks). An empty document keeps length zero, the default-length
   rule stands, and `export-score` refuses with a diagnostic at `:length` or at the header

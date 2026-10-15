@@ -535,6 +535,13 @@ pub const TimeMap = struct {
     /// tick's own numerator times the rate's numerator divides
     /// `TICK_US` times the denominator, and the frame is the quotient —
     /// no nomination to miss. The f64 path keeps the float nomination.
+    ///
+    /// No in-crate production caller today: the printer reads the
+    /// decimal twin (`writableFrame` through `frameSpan`), and only this
+    /// file's tests call this. It stays `pub` deliberately — the
+    /// host-queryable statement of the frame seam's read-back policy,
+    /// the integer `isBarLine` twin's companion for any future query
+    /// surface, and the oracle the frame tests pin against.
     pub fn frameLine(self: *const TimeMap, tick: i64) ?i64 {
         const frames = self.frames orelse return null;
         if (self.exactMap()) {
@@ -1011,7 +1018,7 @@ pub const TimeMap = struct {
     /// plus `n · den / num`, and comparing float associations of it (a
     /// three-rounded sum against a one-rounded division) calls truly
     /// exact frames inexact — `:at 20f :dur 1f` at `:fps 25`/`:qpm 300`
-    /// is 21/25 s, tick 19 37 29 536 exactly, and the float chain
+    /// is 21/25 s, tick 193 729 536 exactly, and the float chain
     /// said `frame_inexact`. The f64 tempo path keeps the float chain.
     fn frameDuration(self: *const TimeMap, lit: Pos.Literal, anchor: i64) Error!Resolved {
         const rate = (self.frames orelse return .{
@@ -3483,9 +3490,12 @@ test "TimeMap: durationTicks(spellDuration(d, at), at) is d, across a meter chan
             },
         };
         switch (try map.durationTicks(lit, at)) {
-            // `spellDuration` never writes `f` (the printer's frame
-            // branch is phase 3), so an inexact landing cannot reach
-            // here; treated as the tick it is, the same assertion holds.
+            // `spellDuration`'s frame branch writes `f` only when BOTH
+            // ends read back exactly (`frameSpan`'s own rule), so a
+            // spelling this test round-trips never resolves `.inexact` —
+            // and this fixture declares no rate, so `f` cannot appear
+            // here at all. An inexact landing, treated as the tick it
+            // is, satisfies the same assertion.
             .tick, .inexact => |got| if (got != dur) {
                 std.debug.print(
                     "duration {d} at {d} spelled {s}, which reads back as {d}\n",
