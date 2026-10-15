@@ -1,0 +1,18 @@
+; The f unit's EXACT case: 25 fps under :qpm 300, where every frame is
+; a tick start and no frame_inexact exists to pin. The review's own
+; repro is the third note — :at 20f :dur 1f, one whole frame wide.
+(timeline :fps 25 :length 100f :end loop)
+
+(tempo-point :at 0q :qpm 300)
+(meter-point :at 0bar :sig [4 4])
+
+(section :name shot :at 0f :dur 20f)
+(cue :name "origin" :at 0f)
+(cue :name "half" :at 2.5f)
+(cue :name "cut" :at 20f)
+
+(lane :name flash :kind notes
+  (note :at 0f :dur 1f :key 38)
+  (note :at 2.5f :dur 0.5f :key 38)
+  (note :at 20f :dur 1f :key 38)
+  (note :at 1q :dur 1t :key 38))

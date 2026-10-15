@@ -1,0 +1,31 @@
+; frames-25 — plan 03's T2, the frame unit's exact regime (plan 03's
+; dated 2026-10-15 ruling): an INTEGER :fps under a whole-:us tempo, so
+; the literal, the duration and the printer's frame line all judge in
+; exact integers and frame_inexact cannot occur. The oracle arithmetic,
+; derived from Grid.TPQ and the authored tempo — never from output:
+;
+;   TPQ                    = 46 126 080 ticks per quarter note
+;   :qpm 300 = 5 quarters to the second, so one second = 5 · TPQ
+;                           = 230 630 400 ticks
+;   one frame = 1/25 s     = 230 630 400 / 25 = 9 225 216 ticks, exact
+;   one quarter = 5 frames (46 126 080 = 5 · 9 225 216), one bar = 20
+;
+;   0f = 0 · 9 225 216 = 0                     (= 0bar; the frame wins)
+;   2.5f = 23 063 040, 0.5f = 4 612 608 = TPQ/10 — f is a DECIMAL unit,
+;          a half frame is a frame line like any other
+;   20f = 184 504 320 = 1bar — the printer's frame branch is checked
+;          AHEAD of the bar branch, so the dump says 20f
+;   20f + 1f = 21f = 193 729 536, one whole frame — the span the float
+;          judgment once called inexact one ulp apart; ZERO frame_inexact
+;          rides in the echo below, and that silence is the case's point
+;   the length 100f = 922 521 600 = 5 bars = exactly 4 s, so the loop
+;          point is a whole double (0x4010000000000000)
+;
+; 0.8 s is twenty frames asked of the CLOCK instead of the rate: the
+; nearest double to 4/5 sits a hair above it and the clock's floor
+; answers the tick 20f names, 184 504 320 = bar 1.
+(times "3FE999999999999A")
+; The document re-printed. Every landing position in a document that
+; WROTE f spells Nf ahead of Nbar — the 1q note reads back 5f — and the
+; header keeps :fps last.
+(dump)

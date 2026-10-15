@@ -1,0 +1,26 @@
+; frames-ntsc — plan 03's T2, the frame unit's rational rate: :fps
+; [30000 1001] under :qpm 300, on the map's exact integer path (the
+; tempo is whole-:us). The oracle arithmetic, derived from Grid.TPQ and
+; the authored tempo — never from output:
+;
+;   one second = 5 · TPQ = 230 630 400 ticks (:qpm 300, as frames-25)
+;   one frame  = 1001/30000 s = 230 630 400 · 1001 / 30000
+;              = 192 384 192 / 25 ticks = 7 695 367.68 — OFF the grid
+;
+; The note at 1f therefore floors to the tick beneath, 7 695 367, and
+; its 1f duration spans to the tick beneath ITS end — 7 695 367 +
+; 192 384 192/25 = 15 390 734.68, so 15 390 734, a span of 7 695 367 —
+; which is TWO frame_inexact warnings in the echo below, one per
+; literal, the floored answers standing, never a wrap.
+;
+; And every 25th frame IS a tick start: 25f = 25 · 192 384 192/25
+; = 192 384 192 exactly — the exact multiple of an otherwise off-grid
+; rate — so the second note lands with no warning, prints 25f (the
+; frame branch wins; 192 384 192 is no bar line), spans 25f to 50f, and
+; the length 50f = 384 768 384 is exact too. The playhead query below
+; asks that tick back by number.
+(at :tick 192384192)
+; The re-printed document: the floored first note keeps the frozen
+; rule's spelling — 7695367t, 1/6 of a quarter, no terminating decimal
+; and no frame line — while the exact one reads in frames.
+(dump)

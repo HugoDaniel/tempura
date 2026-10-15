@@ -1,0 +1,14 @@
+; The f unit's RATIONAL case: NTSC's exact 30000/1001 — a [num den]
+; pair, never a bare decimal (29.97 would mean 2997/100, and NTSC does
+; not) — under the same :qpm 300, where a frame lands OFF the grid and
+; the 25th one lands on it.
+(timeline :fps [30000 1001] :length 50f)
+
+(tempo-point :at 0q :qpm 300)
+(meter-point :at 0bar :sig [4 4])
+
+(cue :name "twenty-five" :at 25f)
+
+(lane :name flash :kind notes
+  (note :at 1f :dur 1f :key 38)
+  (note :at 25f :dur 25f :key 38))
