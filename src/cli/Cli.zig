@@ -150,7 +150,7 @@ pub const usage_text =
     \\
     \\Options for at:
     \\  --seconds F             Where on the clock.
-    \\  --pos P                 Where on the grid — 17bar, 2.5q, 1t, 0.5b, 12.5s.
+    \\  --pos P                 Where on the grid — 17bar, 2.5q, 1t, 0.5b, 12.5s, 25f.
     \\
     \\Options for inline:
     \\  --anchor ID             Which anchor to dump in; the default is the only one.

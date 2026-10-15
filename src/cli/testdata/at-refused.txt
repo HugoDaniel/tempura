@@ -3,6 +3,6 @@
 exit: 2
 --- stdout (0 bytes)
 
---- stderr (114 bytes)
-tempura: `--pos 17` is not a position (unit_required); a position carries a unit — 17bar, 2.5q, 1t, 0.5b, 12.5s
+--- stderr (119 bytes)
+tempura: `--pos 17` is not a position (unit_required); a position carries a unit — 17bar, 2.5q, 1t, 0.5b, 12.5s, 25f
 

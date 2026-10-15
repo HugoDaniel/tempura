@@ -14,15 +14,22 @@
 //! **Positions go through `map.spell`**, which is plan 03's frozen rule:
 //! `Nbar` on a bar line, else `Nq` when the tick has an exact short
 //! decimal in quarters, else `Nt`. Quantised material reads as music and
-//! triplets read as ticks.
+//! triplets read as ticks. In a document that WROTE an `f` position the
+//! rule has one earlier branch (plan 03's `f` unit): a frame line prints
+//! `Nf`, ahead of `Nbar`, checked by reading back — the frame prints only
+//! when it resolves exactly to the tick again. A document that declared
+//! `:fps` and wrote no `f` position takes no branch at all: its
+//! positions print exactly as the rule always printed them.
 //!
 //! **A DURATION goes through `map.spellDuration` with its own `:at`**,
 //! because plan 03 measures one from the form's own `:at` and a bar is
 //! not the same length everywhere: `Nbar` when both ends sit on bar
 //! lines (the honest count of bars between them), else the delta's own
-//! `Nq` / `Nt`. That is exactly the set of spellings the bridge's
-//! `durationTicks` inverts from the same anchor, which is what keeps the
-//! round trip an identity across a meter change.
+//! `Nq` / `Nt`. In a document that wrote frames, `Nf` when both ends sit
+//! on frame lines, the same shape at the document's rate. That is
+//! exactly the set of spellings the bridge's `durationTicks` inverts
+//! from the same anchor, which is what keeps the round trip an identity
+//! across a meter change.
 //!
 //! **A default is not printed.** `:end hold`, `:vel 100`, `:repeat 1`,
 //! `:transpose 0`, `:ease linear`, `:offset 0` and a `:target` equal to
@@ -180,6 +187,18 @@ const Printer = struct {
             try self.raw(" :conductor ");
             try self.raw(c);
         }
+        if (d.frame_rate) |rate| {
+            try self.raw(" :fps ");
+            if (rate.den == 1) {
+                try self.int(rate.num);
+            } else {
+                try self.raw("[");
+                try self.int(rate.num);
+                try self.raw(" ");
+                try self.int(rate.den);
+                try self.raw("]");
+            }
+        }
         try self.raw(")\n");
 
         try self.group(d.anchors.len > 0);
@@ -275,7 +294,10 @@ const Printer = struct {
 
     fn tempoPoint(self: *Printer, t: Doc.TempoPoint) Error!void {
         try self.raw("(tempo-point :at ");
-        try self.pos(t.tick);
+        // A map point's `:at` is a `grid-position`, which refuses `f` as
+        // it refuses `s` — so it prints frame-free however frame-fluent
+        // the document is, or the dump would not reload.
+        try self.posGrid(t.tick);
         switch (t.tempo) {
             .us => |u| {
                 try self.raw(" :us ");
@@ -291,7 +313,7 @@ const Printer = struct {
 
     fn meterPoint(self: *Printer, m: Doc.MeterPoint) Error!void {
         try self.raw("(meter-point :at ");
-        try self.pos(m.tick);
+        try self.posGrid(m.tick);
         try self.raw(" :sig [");
         try self.int(m.n);
         try self.raw(" ");
@@ -524,6 +546,21 @@ const Printer = struct {
         // failure a fixed writer has is a full buffer, which this one
         // cannot reach.
         self.map.spell(&w, tick) catch unreachable;
+        return self.raw(w.buffered());
+    }
+
+    /// A tick on a form whose `:at` is a `grid-position` — the two map
+    /// points — spelled frame-free (`TimeMap.spellGrid`): the schema
+    /// refuses `f` there as it refuses `s`, so the print must not offer
+    /// one however frame-fluent the document is.
+    fn posGrid(self: *Printer, tick: i64) Error!void {
+        var buf: [64]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        // `spellGrid` writes `Pos.spell`'s frame-free text — at most a
+        // sign, nineteen integer digits, a point, ten fraction digits
+        // and a unit — so the fixed writer's one failure, a full buffer,
+        // is out of reach at 64 bytes.
+        self.map.spellGrid(&w, tick) catch unreachable;
         return self.raw(w.buffered());
     }
 
@@ -831,6 +868,96 @@ test "toSjon: positions print by the rule — Nbar on a bar line, Nq when it ter
     try testing.expect(std.mem.indexOf(u8, fx.text, ":at 2.5q") != null);
     try testing.expect(std.mem.indexOf(u8, fx.text, ":at 15375360t") != null);
     try testing.expect(std.mem.indexOf(u8, fx.text, ":length 16bar") != null);
+}
+
+test "toSjon: a document that wrote frames prints frames" {
+    // Plan 03's per-document rule: in a document whose rate is declared
+    // AND that wrote an `f` position, a frame line prints `Nf` AHEAD of
+    // `Nbar` — a document that wrote frames reads in frames. The
+    // frames-25 shape (plan 03's corpus case) as a unit test: at 25 fps
+    // under `:qpm 300` a frame is 9 225 216 ticks exactly, so `20f` is
+    // 184 504 320 — which is also `1bar`, and the frame wins.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var fx = try loaded(gpa, &schema,
+        \\(timeline :fps 25)
+        \\(tempo-point :at 0q :qpm 300)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(cue :name "twenty" :at 20f)
+        \\(cue :name "origin" :at 0f)
+        \\(cue :name "half" :at 2.5f)
+    );
+    defer fx.deinit(gpa);
+
+    // The frame spellings, and the old ones refused for those forms.
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":name \"twenty\" :at 20f)") != null);
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":name \"twenty\" :at 1bar)") == null);
+    // Tick 0 is bar 0 AND frame 0; the frame wins there too.
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":name \"origin\" :at 0f)") != null);
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":name \"origin\" :at 0bar)") == null);
+    // A HALF frame is a frame line like any other: `f` is a decimal unit,
+    // and the one exactness rule covers integers and fractions alike.
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":name \"half\" :at 2.5f)") != null);
+    try testing.expect(std.mem.indexOf(u8, fx.text, ":name \"half\" :at 0.5q)") == null);
+}
+
+test "toSjon: a rate without an f position prints byte-identical to today" {
+    // The golden-protection half of the per-document rule: `wrote` is
+    // false, no branch fires, and every position spells exactly as the
+    // rate-free rule always spelled it. The one new byte is the rate
+    // itself on the header — authored content the print has to carry or
+    // it would not read back as the same document (`Doc.eql` compares
+    // `frame_rate`). The positions are the point: none of them is a
+    // frame spelling.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    var fx = try loaded(gpa, &schema,
+        \\(timeline :fps 25 :length 2bar :end loop)
+        \\(tempo-point :at 0q :qpm 300)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(section :name intro :at 0bar :dur 1bar)
+        \\(cue :name "half" :at 2.5q)
+        \\(lane :name flash :kind notes
+        \\  (note :at 1bar :dur 0.5q :key 36))
+    );
+    defer fx.deinit(gpa);
+
+    try testing.expectEqualStrings(
+        \\(timeline :length 2bar :end loop :fps 25)
+        \\
+        \\(tempo-point :at 0bar :qpm 300)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\
+        \\(section :name intro :at 0bar :dur 1bar)
+        \\
+        \\(cue :name "half" :at 2.5q)
+        \\
+        \\(lane :name flash :kind notes
+        \\  (note :at 1bar :dur 0.5q :key 36))
+        \\
+    , fx.text);
+}
+
+test "toSjon: an f document round-trips" {
+    // The full loop of the per-document rule: the header carries `:fps`,
+    // every landing position prints `Nf` (so the re-read marks
+    // `wrote_frames` again), and `fromSource(print(d)) ≡ d` holds — the
+    // rate by the header, the ticks by the spellings, `wrote_frames`
+    // excluded from `eql` as derived state.
+    const gpa = testing.allocator;
+    var schema = try Schema.load(gpa);
+    defer schema.deinit();
+    try expectRoundTrip(gpa, &schema,
+        \\(timeline :fps 25 :length 30f)
+        \\(tempo-point :at 0q :qpm 300)
+        \\(meter-point :at 0bar :sig [4 4])
+        \\(section :name a :at 0f :dur 20f)
+        \\(cue :name "half" :at 2.5f)
+        \\(lane :name flash :kind notes
+        \\  (note :at 0f :dur 2.5f :key 36))
+    );
 }
 
 test "toSjon: a tempo point keeps the spelling it was authored in" {

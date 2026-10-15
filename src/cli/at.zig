@@ -121,7 +121,7 @@ fn ask(ctx: *const Cli.Ctx, derived: *const tempura.time.derive.Derived) Cli.Err
         .err => |code| return try refuse(
             ctx,
             "`--pos {s}` is not a position ({t}); a position carries a unit — 17bar, 2.5q, 1t, " ++
-                "0.5b, 12.5s",
+                "0.5b, 12.5s, 25f",
             .{ text, code },
         ),
     };

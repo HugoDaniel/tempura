@@ -1037,6 +1037,38 @@ test "Doc.eql: ignores spans and notices every other field" {
     try testing.expect(!a.eql(&b));
 }
 
+test "Doc.eql: frame_rate compares, wrote_frames does not" {
+    // Plan 03's `f` unit, the two halves of its per-document fact: the
+    // RATE is authored content — two documents of different rates are
+    // different documents, whatever their positions spelled — while
+    // `wrote_frames` is derived state the load marks as it resolves, the
+    // `length_lit` precedent: the ticks those positions resolved to are
+    // already compared, and an off-grid frame that floored has no `f`
+    // spelling to round-trip anyway.
+    const gpa = testing.allocator;
+    var a: Doc = .empty(gpa);
+    defer a.deinit();
+    var b: Doc = .empty(gpa);
+    defer b.deinit();
+
+    try testing.expect(a.eql(&b));
+    a.frame_rate = .{ .num = 25, .den = 1 };
+    try testing.expect(!a.eql(&b));
+    b.frame_rate = .{ .num = 25, .den = 1 };
+    try testing.expect(a.eql(&b));
+
+    // Whether the author happened to spell a position in frames is not
+    // a difference between documents.
+    a.wrote_frames = true;
+    try testing.expect(a.eql(&b));
+    b.wrote_frames = true;
+    try testing.expect(a.eql(&b));
+
+    // The rate itself is: NTSC is not 25, and `[num den]` is not `[25 1]`.
+    b.frame_rate = .{ .num = 30000, .den = 1001 };
+    try testing.expect(!a.eql(&b));
+}
+
 /// A native curve lane with nothing in it, for the test above.
 fn bareCurve(name: []const u8) Lane {
     return .{

@@ -315,7 +315,9 @@ pub const TimeMap = struct {
     /// nomination that misses, a floor that was not exact — answers
     /// null, so a spelling that would not round-trip falls through to
     /// the bar / quarter / tick spellings rather than lie. The
-    /// `isBarLine` twin; `spell`'s frame branch (phase 3) reads here.
+    /// `isBarLine` twin, and the INTEGER statement of the discipline:
+    /// `writableFrame` below is its decimal twin, the one the printer
+    /// reads, extended to a frame's fractions.
     pub fn frameLine(self: *const TimeMap, tick: i64) ?i64 {
         const frames = self.frames orelse return null;
         const num: f64 = @floatFromInt(frames.rate.num);
@@ -327,6 +329,44 @@ pub const TimeMap = struct {
         const landed = self.frameTick(frames.rate, nominated) catch return null;
         if (!landed.exact or landed.tick != tick) return null;
         return @intFromFloat(nominated);
+    }
+
+    /// The frame a tick's seconds name, as the printer may spell it —
+    /// `frameLine`'s DECIMAL twin, for a document that WROTE an `f`
+    /// position (the printer's per-document rule: a rate alone changes
+    /// no spelling). `secondsFromTick(tick) · num / den` names the
+    /// frame — an integer, or a fraction, because `f` is a decimal unit
+    /// like `q` — and the naming is an answer only when it resolves
+    /// EXACTLY back to `tick` through the frame seam, `Pos.spell`'s
+    /// read-back discipline: a spelling that would not round-trip falls
+    /// through rather than lie. Null when the document wrote no frames,
+    /// the map holds no rate, the nomination misses, or a floor was not
+    /// exact.
+    fn writableFrame(self: *const TimeMap, tick: i64) ?f64 {
+        const frames = self.frames orelse return null;
+        if (!frames.wrote) return null;
+        const num: f64 = @floatFromInt(frames.rate.num);
+        const den: f64 = @floatFromInt(frames.rate.den);
+        // The nomination is capped where its decimal could not name a
+        // tick of this grid again, and a non-finite seconds (a near-zero
+        // rate) nominates nothing.
+        const named = self.secondsFromTick(tick) * num / den;
+        if (!(named >= 0 and named <= 9_007_199_254_740_992.0)) return null;
+        const landed = self.frameTick(frames.rate, named) catch return null;
+        if (!landed.exact or landed.tick != tick) return null;
+        return named;
+    }
+
+    /// One frame value as the printer spells it — `toSjon`'s own number
+    /// rule, so `20f` and `2.5f` are the spellings: an integral frame
+    /// prints as the integer it is, everything else takes the shortest
+    /// decimal that reads back as the same float.
+    fn writeFrame(writer: anytype, frame: f64) !void {
+        const exact_int_max: f64 = @floatFromInt(@as(i64, 1) << 53);
+        if (@floor(frame) == frame and frame < exact_int_max) {
+            return writer.print("{d}f", .{@as(i64, @intFromFloat(frame))});
+        }
+        return writer.print("{d}f", .{frame});
     }
 
     /// The last segment starting at or before `tick`; segment 0 extends
@@ -681,8 +721,15 @@ pub const TimeMap = struct {
     /// `t` one carries no anchor at all. The property
     /// `durationTicks(parse(spellDuration(d, at)), at) == d` is pinned by
     /// the test below, across a meter change.
+    ///
+    /// In a document that WROTE an `f` position there is one earlier
+    /// branch, the `Nbar` rule's shape at the document's own rate: `Nf`
+    /// when both ends sit on FRAME lines — the honest count of frames
+    /// between them, whatever tempos they cross, read back exactly or
+    /// not at all.
     pub fn spellDuration(self: *const TimeMap, writer: anytype, dur: i64, at: i64) !void {
         if (dur >= 0 and at >= 0) {
+            if (self.frameSpan(dur, at)) |frames| return writeFrame(writer, frames);
             if (self.isBarLine(at)) |from| {
                 const end = at +| dur;
                 if (self.isBarLine(end)) |to| {
@@ -694,6 +741,23 @@ pub const TimeMap = struct {
             }
         }
         return Pos.spell(writer, dur, null);
+    }
+
+    /// The frame count of a duration whose BOTH ends are frame lines —
+    /// `spellDuration`'s `f` branch, the `Nbar` rule's shape at the
+    /// document's declared rate — or null when it is no answer: either
+    /// end is not a frame line, or the count itself does not resolve
+    /// back exactly (`frameDuration`'s own read-back, the same
+    /// expression), so the spelling falls through to the bar / quarter /
+    /// tick spellings rather than lie.
+    fn frameSpan(self: *const TimeMap, dur: i64, at: i64) ?f64 {
+        const from = self.writableFrame(at) orelse return null;
+        const end = at +| dur;
+        const to = self.writableFrame(end) orelse return null;
+        // `writableFrame` answered, so the map holds the rate.
+        const want = self.secondsFromTick(at) + frameSeconds(self.frames.?.rate, to - from);
+        if (self.secondsFromTick(end) != want) return null;
+        return to - from;
     }
 
     /// The canonical text of the map: one line per tempo segment, one
@@ -730,7 +794,24 @@ pub const TimeMap = struct {
     /// The canonical spelling of a tick (plan 03, "The printer's rule"),
     /// which is `Pos.spell`'s — this map only answers the one question
     /// `Pos` owns no table for: is that tick a bar line, and which bar?
+    /// In a document that WROTE an `f` position there is one earlier
+    /// question still: is that tick a frame line, and which frame — `Nf`
+    /// ahead of `Nbar`, ahead of `Nq`, ahead of `Nt`, so a document that
+    /// wrote frames reads in frames. A document that declared a rate and
+    /// wrote none takes no branch here at all.
     pub fn spell(self: *const TimeMap, writer: anytype, tick: i64) !void {
+        if (self.writableFrame(tick)) |frame| return writeFrame(writer, frame);
+        return self.spellGrid(writer, tick);
+    }
+
+    /// `spell` with the `f` branch withheld: the spelling for the forms
+    /// whose `:at` is a `grid-position` (plan 03's `tempo-point` and
+    /// `meter-point`), which refuse the frame unit as they refuse `s` —
+    /// a frame is counted through the tempo map, and these forms are
+    /// the map. A dump that spelled one of their positions in frames
+    /// would not reload, so the map's own points print `Nbar` / `Nq` /
+    /// `Nt` whatever the document wrote.
+    pub fn spellGrid(self: *const TimeMap, writer: anytype, tick: i64) !void {
         const bar_line = self.isBarLine(tick);
         if (bar_line) |bar| {
             // A bar line is only ever found at or after tick 0, and bars
@@ -2182,6 +2263,191 @@ test "TimeMap.spell: the printer's rule, with this map's bar table" {
         (try m.tickFromLiteral(.{ .value = 7, .unit = .bar })).tick,
     );
 }
+
+test "TimeMap.spell: spell ∘ parse is the identity in a document that wrote frames" {
+    // The `Pos.zig` fixed-point property at MAP level, in a document
+    // that wrote frames: whatever `spell` prints for a tick — `Nf` on a
+    // frame line, else `Nbar` / `Nq` / `Nt` — parses back and resolves
+    // through this map as the SAME tick, and spelling it again gives the
+    // same text. The `f` branch is emission-checked (a frame prints only
+    // when it resolves exactly back), so the property cannot fail from a
+    // fired branch; the count proves the branch really fires.
+    //
+    // Both regimes: the integral path (`:qpm 300`, us 200 000, a frame
+    // at 25 fps exactly 9 225 216 ticks) and the f64 path (`:qpm 143`,
+    // where almost no frame lands and the honest spellings fall through).
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    const rand = prng.random();
+
+    var integral = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 300 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 25, .den = 1 },
+        .wrote = true,
+    });
+    defer integral.deinit();
+    try testing.expect(integral.map.integral);
+
+    var floating = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 143 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 25, .den = 1 },
+        .wrote = true,
+    });
+    defer floating.deinit();
+    try testing.expect(!floating.map.integral);
+
+    var buf: [64]u8 = undefined;
+    var again: [64]u8 = undefined;
+    var f_spellings: usize = 0;
+    for ([_]*const TimeMap{ &integral.map, &floating.map }) |m| {
+        for (0..2_000) |i| {
+            // Four regimes: anywhere on the grid; a frame literal this
+            // map resolves (exact or floored — the tick is the thing the
+            // property spells either way); the `9009` lattice; a bar.
+            const k = switch (i % 4) {
+                0 => rand.intRangeAtMost(i64, 0, Grid.MAX_TICK),
+                1 => lit: {
+                    const lit: Pos.Literal = .{
+                        .value = @floatFromInt(rand.intRangeAtMost(u32, 0, 100_000)),
+                        .unit = .f,
+                    };
+                    break :lit switch (try m.tickFromLiteral(lit)) {
+                        .tick => |t| t,
+                        .inexact => |t| t,
+                        .err => continue,
+                    };
+                },
+                2 => 9009 * rand.intRangeAtMost(i64, 0, @divFloor(Grid.MAX_TICK, 9009)),
+                else => lit: {
+                    const lit: Pos.Literal = .{
+                        .value = @floatFromInt(rand.intRangeAtMost(i64, 0, 1 << 20)),
+                        .unit = .bar,
+                    };
+                    break :lit switch (try m.tickFromLiteral(lit)) {
+                        .tick => |t| t,
+                        .inexact => |t| t,
+                        .err => continue,
+                    };
+                },
+            };
+            var w = std.Io.Writer.fixed(&buf);
+            try m.spell(&w, k);
+            const text = w.buffered();
+            if (m == &integral.map and std.mem.endsWith(u8, text, "f")) f_spellings += 1;
+
+            const back_lit = switch (Pos.parse(text)) {
+                .ok => |l| l,
+                .err => |code| {
+                    std.debug.print("tick {d} spelled {s}: {t}\n", .{ k, text, code });
+                    return error.TestSpellingDoesNotParse;
+                },
+            };
+            const back = switch (try m.tickFromLiteral(back_lit)) {
+                .tick => |t| t,
+                .inexact => |t| t,
+                .err => |code| {
+                    std.debug.print("tick {d} spelled {s}: {t}\n", .{ k, text, code });
+                    return error.TestSpellingDoesNotResolve;
+                },
+            };
+            if (back != k) {
+                std.debug.print("tick {d} spelled {s} reads {d}\n", .{ k, text, back });
+                return error.TestRoundTripDrifted;
+            }
+            // And the print of the print is the same text — a fixed point.
+            var w2 = std.Io.Writer.fixed(&again);
+            try m.spell(&w2, back);
+            try testing.expectEqualStrings(text, w2.buffered());
+        }
+    }
+    // The `f` branch really fired — a printer that never spells frames
+    // passes every clause above vacuously.
+    try testing.expect(f_spellings > 50);
+}
+
+test "TimeMap: durationTicks(spellDuration(d, at), at) is d, across a tempo change, in frames" {
+    // The duration twin of the property above, on the printer's own
+    // fixture: 120 qpm doubling to 240 at 4q, with `:fps 5` declared and
+    // written — a rate whose frames land on tick starts in BOTH segments
+    // (92 252 160 / 5 = 18 450 432 and 184 504 320 / 5 = 36 900 864), so
+    // a duration measured across the change in frames is exactly the
+    // frame count between its ends, and reads back as itself.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .qpm = 120 } },
+        .{ .tick = 184_504_320, .tempo = .{ .qpm = 240 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 5, .den = 1 },
+        .wrote = true,
+    });
+    defer r.deinit();
+    const m = &r.map;
+
+    var buf: [64]u8 = undefined;
+    // The pinned pair: frame 1 (0.2 s = 18 450 432) to frame 11
+    // (2.2 s = 184 504 320 + 36 900 864), ten frames across the change.
+    var w = std.Io.Writer.fixed(&buf);
+    try m.spellDuration(&w, 221_405_184 - 18_450_432, 18_450_432);
+    try testing.expectEqualStrings("10f", w.buffered());
+    try testing.expectEqual(
+        @as(i64, 221_405_184 - 18_450_432),
+        (try m.durationTicks(.{ .value = 10, .unit = .f }, 18_450_432)).tick,
+    );
+
+    // The property, over drawn frame pairs: whatever spelling
+    // `spellDuration` chooses — `Nf` when both ends are frame lines,
+    // else `Nbar` / `Nq` / `Nt` — resolves from the same anchor as the
+    // same duration. The draws stay inside 180 s, where this fixture's
+    // integer origins are still exact in f64 and the frame seam can
+    // fire; past it the honest spellings fall through and the property
+    // covers those too.
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    const rand = prng.random();
+    var f_spellings: usize = 0;
+    for (0..2_000) |_| {
+        const f0 = rand.intRangeAtMost(u32, 0, 850);
+        const f1 = f0 + rand.intRangeAtMost(u32, 1, 900 -| f0);
+        const at = switch (try m.tickFromLiteral(.{ .value = @floatFromInt(f0), .unit = .f })) {
+            .tick => |t| t,
+            .inexact => |t| t,
+            .err => continue,
+        };
+        const d = switch (try m.durationTicks(
+            .{ .value = @floatFromInt(f1 - f0), .unit = .f },
+            at,
+        )) {
+            .tick => |t| t,
+            .inexact => |t| t,
+            .err => continue,
+        };
+        var w2 = std.Io.Writer.fixed(&buf);
+        try m.spellDuration(&w2, d, at);
+        const text = w2.buffered();
+        if (std.mem.endsWith(u8, text, "f")) f_spellings += 1;
+
+        const lit = switch (Pos.parse(text)) {
+            .ok => |l| l,
+            .err => |code| {
+                std.debug.print("dur {d} at {d} spelled {s}: {t}\n", .{ d, at, text, code });
+                return error.TestSpellingDoesNotParse;
+            },
+        };
+        const back = switch (try m.durationTicks(lit, at)) {
+            .tick => |t| t,
+            .inexact => |t| t,
+            .err => |code| {
+                std.debug.print("dur {d} at {d} spelled {s}: {t}\n", .{ d, at, text, code });
+                return error.TestSpellingDoesNotResolve;
+            },
+        };
+        if (back != d) {
+            std.debug.print("dur {d} at {d} spelled {s} spans {d}\n", .{ d, at, text, back });
+            return error.TestDurationRoundTripDrifted;
+        }
+    }
+    try testing.expect(f_spellings > 50);
+}
+
 
 test "TimeMap.echo: the canonical text of a map, floats as bit patterns" {
     var r = try twoSegmentMap(.loop);
