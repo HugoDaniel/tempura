@@ -861,7 +861,13 @@ fn animaderManifests(
     while (try it.next(t_.io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".sjon")) continue;
-        try names.append(gpa, try gpa.dupe(u8, entry.name));
+        // The duplicated name is the helper's the instant the dupe
+        // returns: if the append cannot take it (its growth
+        // allocation failed) the list does not own it yet, so it is
+        // freed here rather than leaked.
+        const owned = try gpa.dupe(u8, entry.name);
+        errdefer gpa.free(owned);
+        try names.append(gpa, owned);
     }
     // A checkout whose schema/ holds no manifest is broken, not absent —
     // composing zero manifests would claim cleanliness vacuously.
@@ -869,23 +875,37 @@ fn animaderManifests(
     std.mem.sort([]u8, names.items, {}, nameBefore);
 
     const sources = try gpa.alloc([:0]u8, names.items.len);
+    // `sources` starts UNINITIALIZED: an error mid-loop (join, read,
+    // dupeZ) unwinds through the FILLED PREFIX only — the unwritten
+    // tail is undefined pointers, not allocations to free.
+    var filled: usize = 0;
     errdefer {
-        for (sources) |s| gpa.free(s);
+        for (sources[0..filled]) |s| gpa.free(s);
         gpa.free(sources);
     }
     for (names.items, sources) |name, *src| {
-        const path = try std.fs.path.join(gpa, &.{ schema_dir, name });
-        defer gpa.free(path);
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(
-            t_.io,
-            path,
-            gpa,
-            .limited(8 * 1024 * 1024),
-        );
-        defer gpa.free(bytes);
-        src.* = try gpa.dupeZ(u8, bytes);
+        src.* = try readManifestZ(gpa, schema_dir, name);
+        filled += 1;
     }
     return sources;
+}
+
+/// One sibling manifest as sentinel-terminated bytes the CALLER owns.
+/// The joined path and the raw read buffer are this function's own and
+/// are freed before it returns; only the `dupeZ` escapes. The read is
+/// limited the way the loop above always limited it — 8 MiB per
+/// manifest, an error rather than a climb on a pathological file.
+fn readManifestZ(gpa: std.mem.Allocator, schema_dir: []const u8, name: []const u8) ![:0]u8 {
+    const path = try std.fs.path.join(gpa, &.{ schema_dir, name });
+    defer gpa.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        t_.io,
+        path,
+        gpa,
+        .limited(8 * 1024 * 1024),
+    );
+    defer gpa.free(bytes);
+    return try gpa.dupeZ(u8, bytes);
 }
 
 fn nameBefore(_: void, x: []u8, y: []u8) bool {
@@ -962,6 +982,115 @@ test "tempura: an absent animader checkout is a loud skip, not a pass" {
     const gpa = t_.allocator;
     const sources = try animaderManifests(gpa, "no-such-animader-checkout");
     try t_.expect(sources == null);
+}
+
+/// One run of `animaderManifests` over the scratch checkout, shaped the
+/// way `std.testing.checkAllAllocationFailures` needs: the allocator
+/// comes first, a clean return frees what the helper handed back, and
+/// every failure must already have been freed by the helper itself.
+fn manifestErrorPathRun(gpa: std.mem.Allocator, override_root: []const u8) !void {
+    const sources = (try animaderManifests(gpa, override_root)) orelse
+        return error.ScratchCheckoutAbsent;
+    defer {
+        for (sources) |s| gpa.free(s);
+        gpa.free(sources);
+    }
+    try t_.expectEqual(@as(usize, 3), sources.len);
+    try t_.expectEqualStrings("(timeline :name alpha)\n", sources[0]);
+    try t_.expectEqualStrings("(timeline :name beta)\n", sources[1]);
+    try t_.expectEqualStrings("(timeline :name gamma)\n", sources[2]);
+}
+
+test "tempura: animaderManifests error paths free only what they own" {
+    // The confirm review's LOW finding, made mechanical: every
+    // allocation the helper makes can fail, and each failure must
+    // unwind CLEAN — a name duplicated for `names` is the helper's
+    // until the append takes it (an append failure must not leak it),
+    // and the `sources` slots past the one being filled are
+    // UNINITIALIZED, so an error path may free only the filled prefix,
+    // never the undefined tail. `checkAllAllocationFailures` sweeps
+    // every allocation index with a failing allocator across the REAL
+    // helper, requiring `error.OutOfMemory` and a byte-balanced ledger
+    // from each run. The checkout is a SCRATCH one under the repo's
+    // ignored `.zig-cache`, not the sibling: the sweep runs on machines
+    // without `../animader/animader` (injection is independent of the
+    // sibling's presence — an absolute override never consults the
+    // default candidate) and reads three tiny deterministic manifests
+    // once per run instead of walking the sibling's real ones.
+    const gpa = t_.allocator;
+    const repo_root = @import("build_options").repo_root;
+
+    var uniq: [8]u8 = undefined;
+    t_.io.random(&uniq);
+    const scratch = try std.fmt.allocPrint(
+        gpa,
+        "{s}/.zig-cache/t2-helper-hygiene-{x}",
+        .{ repo_root, uniq },
+    );
+    defer gpa.free(scratch);
+    defer std.Io.Dir.cwd().deleteTree(t_.io, scratch) catch {};
+    var dir = try std.Io.Dir.cwd().createDirPathOpen(t_.io, scratch, .{});
+    defer dir.close(t_.io);
+    try dir.createDirPath(t_.io, "schema");
+    try dir.writeFile(t_.io, .{
+        .sub_path = "schema/aa-alpha.sjon",
+        .data = "(timeline :name alpha)\n",
+    });
+    try dir.writeFile(t_.io, .{
+        .sub_path = "schema/bb-beta.sjon",
+        .data = "(timeline :name beta)\n",
+    });
+    try dir.writeFile(t_.io, .{
+        .sub_path = "schema/cc-gamma.sjon",
+        .data = "(timeline :name gamma)\n",
+    });
+    // A non-manifest in the same directory pins the `.sjon` filter the
+    // sweep relies on: only three names, three sources, every run.
+    try dir.writeFile(t_.io, .{
+        .sub_path = "schema/notes.txt",
+        .data = "not a manifest; filtered out of the sweep\n",
+    });
+
+    try t_.checkAllAllocationFailures(gpa, manifestErrorPathRun, .{scratch});
+}
+
+test "tempura: a manifest past the read limit fails the helper cleanly" {
+    // The mid-loop error that needs no fault injection at all: a real
+    // file-read error. A `.sjon` past the helper's per-manifest read
+    // limit makes the read answer `error.StreamTooLong` after the
+    // earlier manifests are already duplicated into `sources` — the
+    // helper returns that error with the FILLED PREFIX freed and
+    // nothing leaked (the testing allocator fails this test on any
+    // residue), the same ownership the sweep demands, from the file
+    // side rather than the allocator side.
+    const gpa = t_.allocator;
+    const repo_root = @import("build_options").repo_root;
+
+    var uniq: [8]u8 = undefined;
+    t_.io.random(&uniq);
+    const scratch = try std.fmt.allocPrint(
+        gpa,
+        "{s}/.zig-cache/t2-helper-hygiene-readerr-{x}",
+        .{ repo_root, uniq },
+    );
+    defer gpa.free(scratch);
+    defer std.Io.Dir.cwd().deleteTree(t_.io, scratch) catch {};
+    var dir = try std.Io.Dir.cwd().createDirPathOpen(t_.io, scratch, .{});
+    defer dir.close(t_.io);
+    try dir.createDirPath(t_.io, "schema");
+    try dir.writeFile(t_.io, .{
+        .sub_path = "schema/aa-alpha.sjon",
+        .data = "(timeline :name alpha)\n",
+    });
+    // One byte past the 8 MiB the helper reads per manifest; `zz-`
+    // sorts after `aa-`, so the first manifest is already IN `sources`
+    // when this one's read refuses.
+    const huge = try gpa.alloc(u8, 8 * 1024 * 1024 + 1);
+    defer gpa.free(huge);
+    @memset(huge, 'z');
+    try dir.writeFile(t_.io, .{ .sub_path = "schema/zz-past-limit.sjon", .data = huge });
+
+    try t_.expectError(error.StreamTooLong, animaderManifests(gpa, scratch));
 }
 
 // ---------------------------------------------------------------------
