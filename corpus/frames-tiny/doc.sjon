@@ -1,0 +1,15 @@
+; The f unit's TINY regime — the final ruling's finding-1 fixture: :fps
+; [1 100] under :us 1, where a frame is 100 s and one tick is
+; 1/(TPQ·1e6) s ≈ 2.17e-14 s. 0.000000000000002f is 2e-15 frames =
+; 2e-13 s = 9.225216 ticks — NINE ticks past its anchor — and the seam
+; must PLACE it, not collapse it to the anchor the shift-only cutoff
+; once chose while the same instant by the clock said 9.
+(timeline :fps [1 100] :length 100q :end hold)
+
+(tempo-point :at 0q :us 1)
+(meter-point :at 0bar :sig [4 4])
+
+(lane :name flash :kind notes
+  (note :at 0.000000000000002f :dur 0.000000000000002f :key 38)
+  (note :at 0q :dur 0.000000000000002f :key 39)
+  (note :at 1q :dur 0.000000000000002f :key 40))

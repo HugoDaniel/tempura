@@ -1,0 +1,27 @@
+; frames-tiny — plan 03's T2, the frame unit's tiny regime (the final
+; ruling's finding 1, fixed 2026-10-15): the schema-legal extreme where
+; the frame literal's own shift (101) once outweighed its instant. The
+; oracle arithmetic, derived from Grid.TPQ and the authored tempo —
+; never from output:
+;
+;   TPQ = 46 126 080 ticks per quarter note
+;   :us 1: one quarter is a MICROSECOND, so one tick is 1/(TPQ·1e6) s
+;          ≈ 2.168e-14 s (the ruling's prose said 1/46126080 s; the
+;          seconds conversion needs the 1e6 — its ≈2.17e-14 s value
+;          and its floors are right), and one second is TPQ·1e6 ticks
+;          = 46 126 080 000 000
+;   a frame at [1 100] is 100 s = 4 612 608 000 000 000 ticks
+;   0.000000000000002f is 2e-15 frames = 2e-13 s = 9.225216 ticks —
+;          NINE ticks past its anchor, inexact (the .225216 tail);
+;          1q = tick 46 126 080, so the 1q note spans 9 ticks to
+;          46 126 089, its sounding line back
+;
+; The times directive asks 2e-13 s of the CLOCK — the same instant the
+; frame names — and the two routes agree on tick 9; the red they
+; replaced answered 0 by the frame and 9 by the clock.
+(times "3D4C25C268497682")
+; The document re-printed: 9 ticks is no frame line at a rate whose
+; frame is 4.6e15 ticks, and no bar or beat line either, so the notes
+; read back in the grid's own t spelling — the placed answers, never
+; the anchors.
+(dump)
