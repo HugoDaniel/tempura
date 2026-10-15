@@ -263,3 +263,34 @@ The wasm exports mirror these ([10](10-hosts-and-cli.md)).
   (`:qpm 300`) a frame is `5 · TPQ / fps` ticks, an integer at 24, 25, 30, 48, 50, 60, 90,
   100, 120, 144 and 240; 29.97 and 23.976 never land, as in SMF. Not built; waits on a piece
   that counts frames.
+
+- **T2 ruled, built and corrected (2026-10-15).** The ask above is built (`c6f72b2` the
+  schema key and the two codes, `a2d308d` the resolution, `da84f68` the printer's rule,
+  `ecc777b` the exact judgment, `dc57775` the frame-free edit spellings); the "waits on a
+  piece that counts frames" gate was waived by the owner on 2026-10-14, recorded here rather
+  than deleted. The ruling: the rate is `:fps` on `(timeline …)` — an integer or an exact
+  rational `[num den]` (`[30000 1001]`; a bare decimal is refused, 29.97 would mean
+  2997/100) — and NOT a fourth conductor kind; frames resolve through whatever map conducts
+  (`fromSjon.mapOf` threads `Doc.frames()` beside the conductor's tables). No default rate:
+  an `f` position with no `:fps` is `frame_rate_missing` and is not placed; a declared rate
+  with no `f` position is harmless and changes no spelling. An off-grid frame floors to the
+  tick beneath and warns `frame_inexact` — never a wrap. Exactness is now two declared
+  regimes: on the integral map (whole-`:us` segments inside `EXACT_US_MAX`) the literal, the
+  duration and the printer's frame line judge in exact integers end to end — integer
+  cross-multiplication over the segment table, the frame value reduced and dyadic-or-none —
+  after a review showed both f64 directions lying one ulp apart (frame 35 at the fallback
+  tempo answered one tick short; `:at 20f :dur 1f` at `:fps 25`/`:qpm 300` warned on an
+  exact one-frame span); the f64 path (a fractional `us`) keeps its one float seam and is
+  determinism-only, the declared limit. The printer writes `f` only for a document that
+  wrote it (`Doc.wrote_frames`, authored intent — set even where the literal is refused,
+  excluded from `eql`), a frame line ahead of `Nbar`, checked by reading back; tempo and
+  meter points — `grid-position`, which refuses `f` as it refuses `s` — stay frame-free in
+  print and in edits (`TimeMap.spellGrid`, `edit/value.positionGrid`), so a frames document
+  survives its own tempo and meter edits. A rate alone leaves every position byte as the
+  frozen rule spelled it; the only new bytes are the header's `:fps`. Dated correction of
+  the ask's arithmetic: "29.97 and 23.976 never land, as in SMF" is false — at `:qpm 300` a
+  `[30000 1001]` frame is `192 384 192/25` ticks, so every 25th frame lands (frame 25 IS
+  tick 192 384 192) and a `[24000 1001]` frame is `48 096 048/5`, so every 5th one does
+  (frame 5 IS tick 48 096 048); both are pinned by test. Not fully complete: the
+  `frames-25` and `frames-ntsc` corpus cases, plan 02's `:fps` key row and plan 11's ledger
+  are the remaining sweep — no corpus case uses `f` today, so no golden moved.
