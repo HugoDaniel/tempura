@@ -318,14 +318,14 @@ pub const TimeMap = struct {
     /// the exact path never re-associates a float. `huge` marks a
     /// literal of 2^127 frames or more, which no grid this map can
     /// hold lands (any schema-legal rate puts it past `MAX_TICK`
-    /// ticks); `tiny` marks one whose instant sits inside a single
-    /// tick of every grid (under 2^-76 s where one tick is at least
-    /// `us / TICK_US ≥ 2^-45.4` s), so its floor is the anchor itself.
+    /// ticks). Nothing here classifies a SMALL literal: whether its
+    /// instant leaves its anchor's own tick is a question about the
+    /// rate and the anchor's segment (`exactFloor`'s two-arm test),
+    /// never about the literal's exponent alone.
     const FrameParts = struct {
         p: i128,
         shift: u32,
         huge: bool = false,
-        tiny: bool = false,
     };
 
     fn frameParts(n: f64) FrameParts {
@@ -333,8 +333,10 @@ pub const TimeMap = struct {
         const mant = raw & 0x000F_FFFF_FFFF_FFFF;
         const biased: u32 = @intCast((raw >> 52) & 0x7FF);
         if (biased == 0) {
-            // Zero, or a denormal: `mant · 2^-1074`.
-            return .{ .p = @intCast(mant), .shift = 1074, .tiny = mant != 0 };
+            // Zero, or a denormal: `mant · 2^-1074`. Both reach
+            // `exactFloor`, where zero is the anchor exactly and the
+            // denormal's shift 1074 falls to the wide-shift arm.
+            return .{ .p = @intCast(mant), .shift = 1074 };
         }
         const p: i128 = (@as(i128, 1) << 52) | @as(i128, mant);
         const e: i32 = @as(i32, @intCast(biased)) - 1075;
@@ -346,9 +348,7 @@ pub const TimeMap = struct {
             if (e > 74) return .{ .p = 0, .shift = 0, .huge = true };
             return .{ .p = p << @intCast(e), .shift = 0 };
         }
-        const shift: u32 = @intCast(-e);
-        if (shift > 100) return .{ .p = p, .shift = shift, .tiny = true };
-        return .{ .p = p, .shift = shift };
+        return .{ .p = p, .shift = @intCast(-e) };
     }
 
     /// Where an instant measured from `anchor` lands, exactly: the
@@ -378,10 +378,12 @@ pub const TimeMap = struct {
 
         const parts = frameParts(n);
         if (parts.huge) return Error.TickOverflow;
-        // Zero frames is the anchor itself; a literal too small to
-        // leave the anchor's own tick never starts it either.
+        // Zero frames is the anchor itself. A literal small enough to
+        // stay inside its anchor's own tick is NOT decided here: that
+        // judgment needs the rate and the anchor's segment, and it is
+        // `exactFloor`'s first question — an exponent alone cannot
+        // answer it, which is the whole of the finding-1 defect.
         if (parts.p == 0) return ExactLanding{ .tick = anchor, .exact = true };
-        if (parts.tiny) return ExactLanding{ .tick = anchor, .exact = false };
 
         // The ceiling pre-check, in f64 where it only ever classifies:
         // an instant past the grid's own last second by a relative band
@@ -396,10 +398,47 @@ pub const TimeMap = struct {
         return self.exactFloor(rate, parts, anchor) catch |e| return e;
     }
 
+    /// Whether a frame literal's instant stays strictly inside its
+    /// anchor's own tick — the judgment the shift-only cutoff once
+    /// guessed at and got wrong at schema-legal rates (finding 1, plan
+    /// 03's dated 2026-10-15 ruling): a literal under `2^-48` frames
+    /// can still be millions of ticks wide when `den` is large and
+    /// `us` small, so the answer is this EXACT compare, never a
+    /// threshold. Tiny is `r_num / r_den < us_a`, with
+    /// `r_den = num · 2^shift` and `us_a` the anchor segment's whole
+    /// `us` — two arms, each keeping every product inside `i128`:
+    ///
+    ///   * Arm A — the shift cannot hold the denominator. `shift ≥
+    ///     127`, or `shift + bits(num) > 127`, means `num << shift`
+    ///     needs more than 127 bits, so `r_den > 2^127 > r_num`: a
+    ///     fractional literal's `p` is under `2^53` by construction
+    ///     and the manifest bounds `den < 2^24` and `num ≥ 1`, so
+    ///     `r_num < 2^123` while `r_den` is past `2^127` — the
+    ///     instant is under `2^-4` of a unit and cannot reach the
+    ///     `us_a ≥ 1` mark. (Arm A never fires at `shift = 0`: a u32
+    ///     `num` cannot carry 128 bits.) The old cutoff's overflow
+    ///     guard, restated as a proof.
+    ///   * Arm B — the exact compare, without the product:
+    ///     `r_num < us_a · num · 2^shift ⟺ (r_num >> shift) <
+    ///     us_a · num`, the floor-shift identity for positive
+    ///     integers, with `shift ≤ 126` here (so the shift itself is
+    ///     legal) and `us_a · num ≤ 2^36 · 2^24 = 2^60`.
+    ///
+    /// In the non-tiny case `r_den ≤ r_num / us_a ≤ r_num < 2^123`,
+    /// so the caller's `num << shift` is PROVEN to fit — no widening,
+    /// no f64 fallback, and no classification a tolerance could move.
+    fn frameTiny(rate: FrameRate, parts: FrameParts, r_num: i128, us_a: i128) bool {
+        const num_bits: u32 = 32 - @as(u32, @clz(rate.num));
+        if (parts.shift >= 127 or parts.shift + num_bits > 127) return true;
+        const held = us_a * @as(i128, rate.num);
+        return r_num >> @intCast(parts.shift) < held;
+    }
+
     /// `exactLanding`'s arithmetic, apart so the parent stays the
-    /// guard: the anchor's own numerator, the literal's length in
-    /// microseconds as an exact integer-plus-remainder, the segment
-    /// walk, and the one division that floors.
+    /// guard: the tiny judgment, the anchor's own numerator, the
+    /// literal's length in microseconds as an exact
+    /// integer-plus-remainder, the segment walk, and the one division
+    /// that floors.
     fn exactFloor(
         self: *const TimeMap,
         rate: FrameRate,
@@ -407,14 +446,22 @@ pub const TimeMap = struct {
         anchor: i64,
     ) Error!ExactLanding {
         const a_seg = self.segments[self.segmentOfTick(anchor)];
+        const anchor_us: i128 = @intFromFloat(a_seg.us);
         const anchor_num = a_seg.t_i +
-            @as(i128, anchor - a_seg.tick) * @as(i128, @intFromFloat(a_seg.us));
+            @as(i128, anchor - a_seg.tick) * anchor_us;
 
         // The literal's length in MICROSECONDS: `r = p · den · TICK_US
         // / (num · 2^shift)`, split into its integer part and the
         // remainder over its own denominator, so the floor below is
         // two exact divisions and never a common-denominator product.
         const r_num = parts.p * @as(i128, rate.den) * TICK_US_I;
+        // Tiny, judged exactly: an instant strictly inside the
+        // anchor's own tick floors to the anchor from ANY segment —
+        // it stays before the next segment's origin too (`us_a` more
+        // units away at least) — so the walk below is skipped whole.
+        if (frameTiny(rate, parts, r_num, anchor_us)) {
+            return .{ .tick = anchor, .exact = false };
+        }
         const r_den = @as(i128, rate.num) << @intCast(parts.shift);
         const r_int = @divFloor(r_num, r_den);
         const r_rem = r_num - r_int * r_den;
@@ -430,7 +477,12 @@ pub const TimeMap = struct {
         while (i > 0) : (i -= 1) {
             const d = anchor_num - self.segments[i].t_i;
             const dt, const ov = @mulWithOverflow(d, r_den);
-            const reached = if (ov != 0) d > 0 else dt + r_num >= 0;
+            // `dt + r_num ≥ 0` without the sum, which could itself
+            // wrap when `dt` sits just under `2^127`: `r_num > 0`, so
+            // a non-negative `dt` needs no sum at all, and a negative
+            // one crosses zero exactly at `-r_num` — sign-identical
+            // to the intent, with every operand a legal `i128`.
+            const reached = if (ov != 0) d > 0 else if (dt >= 0) true else dt >= -r_num;
             if (reached) break;
         }
         const seg = self.segments[i];
@@ -2551,6 +2603,218 @@ test "TimeMap.durationTicks: an f duration's exactness is not the float sum's" {
     try testing.expectEqualStrings("1f", w.buffered());
 }
 
+test "TimeMap.tickFromLiteral: a wide-shift frame leaves its anchor's tick exactly as the rate says" {
+    // The finding-1 map: :fps [1 100] under :us 1, where a frame is
+    // 100 s and one tick is us/(TPQ · 1e6) s = 1/(46 126 080 · 1e6) s
+    // ≈ 2.17e-14 s. A 2e-15f literal is 2e-13 s = 9.225216 ticks —
+    // NINE ticks past tick 0 — yet its shift (101) sat past the old
+    // 100-shift cutoff, and the anchor was answered instead: a silent
+    // nine-tick misplacement inside the schema's legal extremes, while
+    // the same instant by the clock (`--seconds 2e-13`) said 9. The
+    // two-arm test asks the rate and the segment instead of the
+    // exponent: 9.225216 ≥ one tick, so not tiny.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .us = 1 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 1, .den = 100 },
+        .wrote = true,
+    });
+    defer r.deinit();
+    const m = &r.map;
+
+    switch (try m.tickFromLiteral(.{ .value = 2e-15, .unit = .f })) {
+        .tick => return error.TestInexactFrameSaidExact,
+        .inexact => |t| try testing.expectEqual(@as(i64, 9), t),
+        .err => return error.TestFrameRefused,
+    }
+    // The seam neighbour, green before and after: 5e-15f is shift 100,
+    // the widest the old cutoff walked, and 23.0632 ticks — the exact
+    // path's old working band must keep answering it.
+    switch (try m.tickFromLiteral(.{ .value = 5e-15, .unit = .f })) {
+        .tick => return error.TestInexactFrameSaidExact,
+        .inexact => |t| try testing.expectEqual(@as(i64, 23), t),
+        .err => return error.TestFrameRefused,
+    }
+    // The arm-B boundary, both sides of one tick: a tick is 2^-52.04
+    // frames here, so 2e-16f (0.9225 ticks) stays inside the anchor's
+    // own tick, and 2.5e-16f (1.1531 ticks) is the FIRST tick past it
+    // — a shift-104 literal the cutoff collapsed to 0.
+    switch (try m.tickFromLiteral(.{ .value = 2e-16, .unit = .f })) {
+        .tick => return error.TestInexactFrameSaidExact,
+        .inexact => |t| try testing.expectEqual(@as(i64, 0), t),
+        .err => return error.TestFrameRefused,
+    }
+    switch (try m.tickFromLiteral(.{ .value = 2.5e-16, .unit = .f })) {
+        .tick => return error.TestInexactFrameSaidExact,
+        .inexact => |t| try testing.expectEqual(@as(i64, 1), t),
+        .err => return error.TestFrameRefused,
+    }
+    // Genuinely tiny stays tiny: 1e-30f is 4.6e-15 ticks (arm A, its
+    // shift 152 cannot hold any denominator), and the smallest
+    // denormal 5e-324f (shift 1074) falls to the same arm.
+    switch (try m.tickFromLiteral(.{ .value = 1e-30, .unit = .f })) {
+        .tick => return error.TestInexactFrameSaidExact,
+        .inexact => |t| try testing.expectEqual(@as(i64, 0), t),
+        .err => return error.TestFrameRefused,
+    }
+    switch (try m.tickFromLiteral(.{ .value = 5e-324, .unit = .f })) {
+        .tick => return error.TestInexactFrameSaidExact,
+        .inexact => |t| try testing.expectEqual(@as(i64, 0), t),
+        .err => return error.TestFrameRefused,
+    }
+}
+
+test "TimeMap.durationTicks: a frame duration the shift cutoff collapsed spans its true ticks" {
+    // The same map's sounding collapse: a note at 1q (tick 46 126 080)
+    // with :dur 2e-15f spans 9.225216 ticks — the cutoff answered
+    // span 0 and the note's sounding line vanished, while a nonzero
+    // duration IS listed at its onset tick (the frames-25 control).
+    // The floor is 9 ticks past the anchor, inexact, standing.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .us = 1 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 1, .den = 100 },
+        .wrote = true,
+    });
+    defer r.deinit();
+    const m = &r.map;
+
+    switch (try m.durationTicks(.{ .value = 2e-15, .unit = .f }, 46_126_080)) {
+        .tick => return error.TestInexactDurationSaidExact,
+        .inexact => |d| try testing.expectEqual(@as(i64, 9), d),
+        .err => return error.TestDurationRefused,
+    }
+    // From tick 0 the same span: nine ticks, not the anchor.
+    switch (try m.durationTicks(.{ .value = 2e-15, .unit = .f }, 0)) {
+        .tick => return error.TestInexactDurationSaidExact,
+        .inexact => |d| try testing.expectEqual(@as(i64, 9), d),
+        .err => return error.TestDurationRefused,
+    }
+}
+
+test "TimeMap.durationTicks: a frame from a segment's last tick floors at the segment it reaches" {
+    // Crossing: :us 1 changes to :us 16 777 215 at tick 1000, and the
+    // anchor is 999 — the last tick of the fast segment. The 2e-15f
+    // instant is 9.225216 fast-segment ticks past it, past the change
+    // (origin 1000), and 8.225 units into the slow segment's FIRST
+    // tick (a whole 16 777 215 units wide) — so the floor is tick
+    // 1000, a span of 1, inexact. The cutoff answered 0 without
+    // looking; a next segment anywhere cannot move a floor that is
+    // computed from the instant itself.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .us = 1 } },
+        .{ .tick = 1000, .tempo = .{ .us = 16_777_215 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 1, .den = 100 },
+        .wrote = true,
+    });
+    defer r.deinit();
+    const m = &r.map;
+
+    switch (try m.durationTicks(.{ .value = 2e-15, .unit = .f }, 999)) {
+        .tick => return error.TestInexactDurationSaidExact,
+        .inexact => |d| try testing.expectEqual(@as(i64, 1), d),
+        .err => return error.TestDurationRefused,
+    }
+    // Crossing-adjacent, green before and after: 1e-16f from the same
+    // anchor is 0.4613 fast-segment ticks — strictly inside the
+    // anchor's own tick — so the answer IS the anchor, span 0,
+    // whatever the next segment's width.
+    switch (try m.durationTicks(.{ .value = 1e-16, .unit = .f }, 999)) {
+        .tick => return error.TestInexactDurationSaidExact,
+        .inexact => |d| try testing.expectEqual(@as(i64, 0), d),
+        .err => return error.TestDurationRefused,
+    }
+}
+
+test "TimeMap.tickFromLiteral: schema extremes — the r_num ceiling and the 127-bit denominator" {
+    // The widest products the exact path can form, pinned at both
+    // schema ceilings. :fps [1 16 777 215] under :us 16 777 215: a
+    // 1e-11f literal's r_num is 122 bits (the envelope's 2^123
+    // ceiling, a hair under it), and its instant is 461.2608 ticks —
+    // one tick is us/TPQ µs and the 16 777 215s cancel — floored to
+    // 461, inexact.
+    var wide = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .us = 16_777_215 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 1, .den = 16_777_215 },
+        .wrote = true,
+    });
+    defer wide.deinit();
+
+    switch (try wide.map.tickFromLiteral(.{ .value = 1e-11, .unit = .f })) {
+        .tick => return error.TestInexactFrameSaidExact,
+        .inexact => |t| try testing.expectEqual(@as(i64, 461), t),
+        .err => return error.TestFrameRefused,
+    }
+
+    // :fps [16 777 215 1]: num is odd and 24 bits wide. A shift-103
+    // literal's r_den = 16 777 215 · 2^103 is 127 bits — the widest
+    // that fits i128 — and arm B compares against it without ever
+    // forming it; a shift-104 one (r_den 128 bits) is arm A, answered
+    // without the shift a naive `num << shift` would wrap. Both
+    // instants are truly tiny — under 2^-29 of the anchor's own tick
+    // — so the anchor, inexact, is the true answer from both arms.
+    var odd = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .us = 1 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 16_777_215, .den = 1 },
+        .wrote = true,
+    });
+    defer odd.deinit();
+
+    switch (try odd.map.tickFromLiteral(.{ .value = 5e-16, .unit = .f })) {
+        .tick => return error.TestInexactFrameSaidExact,
+        .inexact => |t| try testing.expectEqual(@as(i64, 0), t),
+        .err => return error.TestFrameRefused,
+    }
+    switch (try odd.map.tickFromLiteral(.{ .value = 2.5e-16, .unit = .f })) {
+        .tick => return error.TestInexactFrameSaidExact,
+        .inexact => |t| try testing.expectEqual(@as(i64, 0), t),
+        .err => return error.TestFrameRefused,
+    }
+    // The huge arm is untouched: 2^127 frames is past every grid.
+    switch (try odd.map.tickFromLiteral(.{ .value = 0x1p127, .unit = .f })) {
+        .tick, .inexact => return error.TestHugeFrameLanded,
+        .err => |c| switch (c) {
+            .tick_overflow => {},
+            else => return error.TestWrongCode,
+        },
+    }
+}
+
+test "TimeMap.durationTicks: the walk's compare never wraps at the envelope's edge" {
+    // The hardened compare's own case, built at the envelope's edge:
+    // the anchor is 4 400 000 000 000 000 ticks into the map's SECOND
+    // :us 1 segment (origin 10 000 000 000 000 000), a third segment
+    // follows at 4 600 000 000 000 000, rate [1 16 777 215], literal
+    // 0x1.8p-23 (shift 75, p = 3 · 2^51). Walking down, the anchor's
+    // own iteration has dt = d · r_den at 127 bits — it fits — but
+    // dt + r_num is one bit past 2^127: the wrapped sum reads
+    // negative, "not reached", and the walk would run past the
+    // segment table's floor. The sign-split compare never sums:
+    // dt ≥ 0 reaches.
+    var r = try derive(testing.allocator, &.{
+        .{ .tick = 0, .tempo = .{ .us = 1 } },
+        .{ .tick = 10_000_000_000_000, .tempo = .{ .us = 1 } },
+        .{ .tick = 4_600_000_000_000_000, .tempo = .{ .us = 1 } },
+    }, &.{.{ .tick = 0, .n = 4, .d = 4 }}, 0, .hold, .{
+        .rate = .{ .num = 1, .den = 16_777_215 },
+        .wrote = true,
+    });
+    defer r.deinit();
+    const m = &r.map;
+
+    // The instant is the literal's 138 378 231 752 014.7 tick-widths
+    // into a segment whose ticks are 1 unit wide: floored to 138 378
+    // 231 752 014 ticks past the anchor, inexact (the .7 tail).
+    switch (try m.durationTicks(.{ .value = 0x1.8p-23, .unit = .f }, 4_410_000_000_000_000)) {
+        .tick => return error.TestInexactDurationSaidExact,
+        .inexact => |d| try testing.expectEqual(@as(i64, 138_378_231_752_014), d),
+        .err => return error.TestDurationRefused,
+    }
+}
+
 test "TimeMap.durationTicks: an f duration anchors at its form's :at" {
     // 120 qpm doubling to 240 at 4q (tick 184 504 320, exactly 2 s): a
     // second of wall clock is 92 252 160 ticks before the change and
@@ -2853,7 +3117,6 @@ test "TimeMap: durationTicks(spellDuration(d, at), at) is d, across a tempo chan
     }
     try testing.expect(f_spellings > 50);
 }
-
 
 test "TimeMap.echo: the canonical text of a map, floats as bit patterns" {
     var r = try twoSegmentMap(.loop);
