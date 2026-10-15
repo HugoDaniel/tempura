@@ -512,7 +512,8 @@ const Ctx = struct {
     /// Whether any position literal the walk has met names `f` — the
     /// derived half of the frame state, copied onto the document at the
     /// end of the walk (`Doc.wrote_frames`, the printer's per-document
-    /// rule).
+    /// rule). Marked where the literal is MET, before any refusal is
+    /// decided: authored intent, per `Doc.wrote_frames`'s own rule.
     wrote_frames: bool = false,
 
     /// The CONDUCTOR's tables and where its material ends, copied into

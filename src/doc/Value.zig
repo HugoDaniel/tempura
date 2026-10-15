@@ -443,13 +443,17 @@ pub const Doc = struct {
     /// Null when the document declared none, which is the one state an
     /// `f` position cannot resolve (`frame_rate_missing`).
     frame_rate: ?TimeMap.FrameRate = null,
-    /// Whether any position literal in the document names `f` — derived
-    /// state the load marks as it resolves, and the printer's
-    /// per-document rule reads (a rate alone changes no spelling).
-    /// EXCLUDED from `eql`, the `length_lit` precedent below: the tick a
-    /// position resolved to is what two documents must agree on, and an
-    /// off-grid frame that floored has no `f` spelling to round-trip
-    /// anyway.
+    /// Whether any position literal in the document NAMES `f` — derived
+    /// state the load marks as it walks, and the printer's per-document
+    /// rule reads (a rate alone changes no spelling). AUTHORED intent,
+    /// not successful resolution: the mark is set even where the
+    /// literal is then refused — an `f` on a grid form, an `f` with no
+    /// declared rate — because the printer's branch belongs to what the
+    /// document wrote, never to which diagnostics the load happened to
+    /// raise. EXCLUDED from `eql`, the `length_lit` precedent below:
+    /// the tick a position resolved to is what two documents must agree
+    /// on, and an off-grid frame that floored has no `f` spelling to
+    /// round-trip anyway.
     wrote_frames: bool = false,
     /// The CONDUCTOR anchor's own bytes, when it conducts BY REFERENCE
     /// and the host could read and verify them — arena-owned, like every

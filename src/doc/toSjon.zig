@@ -902,7 +902,7 @@ test "toSjon: a document that wrote frames prints frames" {
     try testing.expect(std.mem.indexOf(u8, fx.text, ":name \"half\" :at 0.5q)") == null);
 }
 
-test "toSjon: a rate without an f position prints byte-identical to today" {
+test "toSjon: a rate alone — the positions stay in the old spelling, the header retains the rate" {
     // The golden-protection half of the per-document rule: `wrote` is
     // false, no branch fires, and every position spells exactly as the
     // rate-free rule always spelled it. The one new byte is the rate
@@ -945,19 +945,36 @@ test "toSjon: an f document round-trips" {
     // every landing position prints `Nf` (so the re-read marks
     // `wrote_frames` again), and `fromSource(print(d)) ≡ d` holds — the
     // rate by the header, the ticks by the spellings, `wrote_frames`
-    // excluded from `eql` as derived state.
+    // excluded from `eql` as derived state. The note is the fresh
+    // review's own repro shape, `:at 20f :dur 1f` at :fps 25 under
+    // :qpm 300, which the float judgment once answered
+    // `frame_inexact` for: 20f is tick 184 504 320 and one frame more
+    // is 21/25 s = 193 729 536 exactly — a span of one whole frame —
+    // so the load below meets ZERO `frame_inexact`, named as its own
+    // assertion and not only through `loaded`'s required silence.
     const gpa = testing.allocator;
     var schema = try Schema.load(gpa);
     defer schema.deinit();
-    try expectRoundTrip(gpa, &schema,
+    const source: [:0]const u8 =
         \\(timeline :fps 25 :length 30f)
         \\(tempo-point :at 0q :qpm 300)
         \\(meter-point :at 0bar :sig [4 4])
         \\(section :name a :at 0f :dur 20f)
         \\(cue :name "half" :at 2.5f)
         \\(lane :name flash :kind notes
-        \\  (note :at 0f :dur 2.5f :key 36))
-    );
+        \\  (note :at 20f :dur 1f :key 36))
+    ;
+
+    var res = try fromSjon.fromSource(gpa, &schema, source, null);
+    defer res.deinit();
+    var inexact: usize = 0;
+    for (res.diags.items()) |d| {
+        if (d.code == .frame_inexact) inexact += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), inexact);
+    try testing.expect(res.doc.wrote_frames);
+
+    try expectRoundTrip(gpa, &schema, source);
 }
 
 test "toSjon: a tempo point keeps the spelling it was authored in" {
