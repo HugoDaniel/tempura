@@ -410,7 +410,7 @@ The wasm exports mirror these ([10](10-hosts-and-cli.md)).
   is tempura's own — NTSC `25f` IS tick 192 384 192 — while pacer's grid rounds
   (`mul + floor`): that exact tick maps UP to pacer tick 751 501, the wall-clock
   floor of 1001/1200 s is 751 500 (one pacer tick under the event), and the
-  floored `1f` lane begins at pacer 300 60. T1, the source map, stays BUILT and
+  floored `1f` lane begins at pacer 30 060. T1, the source map, stays BUILT and
   consumed (2026-10-08), its `'TPMP'` spans verified against the document by the
   probe; the frame-clock world provider's part in the matrix is a clean identity
   load (`scoreMap` state `identity+null`) — its provider EXECUTION remains
@@ -434,7 +434,7 @@ The wasm exports mirror these ([10](10-hosts-and-cli.md)).
   resolved by the rename to `timeline-frame-rate` (`3345301`,
   [02](02-timeline-schema.md)). And nothing above adds or implies a default rate:
   an `f` position with no `:fps` is still `frame_rate_missing`, and a rate alone
-  still spells nothing. The ruling stays committed at
+  retains the `:fps` header and changes no position's spelling. The ruling stays committed at
   [evidence/t2-final-ruling.md](evidence/t2-final-ruling.md). **Standing: T2 is
   built, ruled, fixed, locally integrated and locally verified — not published,
   not accepted by animader beyond this machine, no artwork or GPU-motion claim,
