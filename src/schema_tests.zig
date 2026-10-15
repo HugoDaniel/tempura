@@ -89,7 +89,7 @@ fn readSiblingFile(gpa: std.mem.Allocator, rel: []const u8) !?[:0]u8 {
 // The eight global heads: a minimal instance, and one malformed key
 // ---------------------------------------------------------------------
 
-test "tempura: (timeline …) takes its four keys and refuses a foreign :end" {
+test "tempura: (timeline …) takes its five keys, :fps among them, and refuses a foreign :end" {
     var schema = try Schema.load(t_.allocator);
     defer schema.deinit();
 
@@ -97,6 +97,14 @@ test "tempura: (timeline …) takes its four keys and refuses a foreign :end" {
     // document, and the rest is the plan's own header line.
     try expectClean(&schema, "(timeline)");
     try expectClean(&schema, "(timeline :title \"impulsos\" :length 128bar :end loop)");
+
+    // The frame rate, for the `f` position unit (plan 03): an integer or
+    // an exact [num den] rational — never a bare decimal, which would
+    // bake 2997/100 into every NTSC document.
+    try expectClean(&schema, "(timeline :fps 25)");
+    try expectClean(&schema, "(timeline :fps [30000 1001])");
+    try expectCode(&schema, "(timeline :fps 29.97)", .number_not_integer);
+    try expectCode(&schema, "(timeline :fps [30000 1001 1])", .vector_length_mismatch);
 
     // `:end` is pacer's `end-behavior` set, spelled here as its own kind.
     try expectCode(&schema, "(timeline :end stop)", .not_member);

@@ -1,12 +1,12 @@
-//! Positions: the five unit spellings a document writes, the one place a
+//! Positions: the six unit spellings a document writes, the one place a
 //! literal rounds, and the printer's rule that spells a tick back.
 //!
 //! Plan 03, "Positions". A `position` is a number with a REQUIRED unit —
-//! `2.5q`, `16bar`, `1t`, `0.5b`, `12.5s` — because a bare number names no
-//! grid (SJON's `(unit-shape :required true …)`, pacer's `time-pos`). Two
-//! units resolve here, on the grid alone (`q` and `t`); the other three
-//! need the tempo or meter map and come back as `needs_map` for the layer
-//! that owns those tables.
+//! `2.5q`, `16bar`, `1t`, `0.5b`, `12.5s`, `25f` — because a bare number
+//! names no grid (SJON's `(unit-shape :required true …)`, pacer's
+//! `time-pos`). Two units resolve here, on the grid alone (`q` and `t`);
+//! the other four need the tempo or meter map and come back as
+//! `needs_map` for the layer that owns those tables.
 //!
 //! The two roundings of plan 03 live in exactly one function each, and
 //! this file owns the first: `tickFromQuarters` rounds a literal to the
@@ -29,7 +29,7 @@ const Grid = @import("Grid.zig");
 /// `Diag.Code` on a returned value instead.
 pub const Error = error{TickOverflow};
 
-/// The five position units (plan 03, "Positions").
+/// The six position units (plan 03, "Positions").
 pub const Unit = enum {
     /// Quarter notes, decimal.
     q,
@@ -42,6 +42,12 @@ pub const Unit = enum {
     /// Seconds, decimal, through the tempo map. Forbidden on
     /// `tempo-point` and `meter-point` (circular; pacer's rule).
     s,
+    /// Frames, decimal, through the document's declared `:fps` rate and
+    /// the tempo map. Forbidden on `tempo-point` and `meter-point` with
+    /// `s` (a frame is counted through the tempo map those forms
+    /// define), and `frame_rate_missing` on a document that declares no
+    /// rate.
+    f,
 };
 
 /// A position as WRITTEN: the number and the unit it named, before any
@@ -134,10 +140,10 @@ pub fn tickFromQuarters(q: f64) Error!i64 {
 /// Resolve a literal as far as the grid alone allows.
 ///
 /// `q` rounds through the seam above and `t` is taken as written; `bar`,
-/// `b` and `s` need the meter or tempo map and come back as `needs_map`
-/// for the layer that owns those tables. The document rules are restated
-/// here rather than trusted from `parse`, because a literal also arrives
-/// from a validated SJON number plus a unit token.
+/// `b`, `s` and `f` need the meter or tempo map and come back as
+/// `needs_map` for the layer that owns those tables. The document rules
+/// are restated here rather than trusted from `parse`, because a literal
+/// also arrives from a validated SJON number plus a unit token.
 pub fn tickFromLiteral(lit: Literal) TickResult {
     if (lit.value < 0) return .{ .err = .position_negative };
     const result: TickResult = switch (lit.unit) {
@@ -154,7 +160,7 @@ pub fn tickFromLiteral(lit: Literal) TickResult {
             if (lit.value > ceiling) break :blk .{ .err = .tick_overflow };
             break :blk .{ .tick = @intFromFloat(lit.value) };
         },
-        .bar, .b, .s => .{ .needs_map = lit.unit },
+        .bar, .b, .s, .f => .{ .needs_map = lit.unit },
     };
     switch (result) {
         // A point on the grid: never before tick 0, never past the ceiling.
@@ -252,12 +258,16 @@ pub fn spellAlloc(gpa: std.mem.Allocator, tick: i64, bar_line: ?i64) std.mem.All
     return aw.toOwnedSlice();
 }
 
-test "Pos.parse: each of the five units, in its plan-03 spelling" {
+test "Pos.parse: each of the six units, in its plan-03 spelling" {
     try testing.expectEqual(Literal{ .value = 2.5, .unit = .q }, parse("2.5q").ok);
     try testing.expectEqual(Literal{ .value = 16, .unit = .bar }, parse("16bar").ok);
     try testing.expectEqual(Literal{ .value = 1, .unit = .t }, parse("1t").ok);
     try testing.expectEqual(Literal{ .value = 0.5, .unit = .b }, parse("0.5b").ok);
     try testing.expectEqual(Literal{ .value = 12.5, .unit = .s }, parse("12.5s").ok);
+    // Frames are a decimal unit like the rest: a half frame is real in
+    // the formats animader mirrors.
+    try testing.expectEqual(Literal{ .value = 25, .unit = .f }, parse("25f").ok);
+    try testing.expectEqual(Literal{ .value = 2.5, .unit = .f }, parse("2.5f").ok);
 
     // Zero is a position, and `bar` and `b` count from 0 like pacer's.
     try testing.expectEqual(Literal{ .value = 0, .unit = .q }, parse("0q").ok);
@@ -384,10 +394,13 @@ test "Pos.tickFromLiteral: q and t resolve here, the map units do not" {
         tickFromLiteral(.{ .value = @floatFromInt(Grid.MAX_TICK), .unit = .t }).tick,
     );
 
-    // `bar`, `b` and `s` need a table this file does not own.
+    // `bar`, `b`, `s` and `f` need a table this file does not own.
     try testing.expectEqual(Unit.bar, tickFromLiteral(.{ .value = 16, .unit = .bar }).needs_map);
     try testing.expectEqual(Unit.b, tickFromLiteral(.{ .value = 0.5, .unit = .b }).needs_map);
     try testing.expectEqual(Unit.s, tickFromLiteral(.{ .value = 12.5, .unit = .s }).needs_map);
+    // A frame is resolved through the tempo map at the document's own
+    // declared rate, so it asks for the map like the other three.
+    try testing.expectEqual(Unit.f, tickFromLiteral(.{ .value = 25, .unit = .f }).needs_map);
 }
 
 test "Pos.tickFromLiteral: the diagnostics, on literals no parse built" {

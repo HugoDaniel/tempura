@@ -353,7 +353,7 @@ pub const TimeMap = struct {
         return seg.first_bar + @divFloor(tick - seg.tick, Grid.barTicks(seg.n, seg.d));
     }
 
-    /// Resolve a position literal against the maps — all five units of
+    /// Resolve a position literal against the maps — all six units of
     /// plan 03, "Positions".
     ///
     /// `q` and `t` are the grid's own and go through `Pos`; `bar` and `b`
@@ -369,6 +369,12 @@ pub const TimeMap = struct {
     /// A `bar` or `b` past `:length` still answers: the last meter
     /// carries on past the bar table, because a position may name a bar
     /// the timeline does not reach.
+    ///
+    /// `f` is the frame unit (plan 03's T2): frames resolve through the
+    /// tempo map's one clock seam at the document's declared `:fps` rate.
+    /// Until that resolution lands, the arm refuses every frame literal
+    /// with `frame_rate_missing` — the code the layer that owns the rate
+    /// will answer with.
     pub fn tickFromLiteral(self: *const TimeMap, lit: Pos.Literal) Error!union(enum) {
         tick: i64,
         err: Diag.Code,
@@ -433,6 +439,8 @@ pub const TimeMap = struct {
                     .tick = capped(beat_start + into) catch return .{ .err = .tick_overflow },
                 };
             },
+            // The frame arm's refusal until the rate lands (phase 2).
+            .f => return .{ .err = .frame_rate_missing },
         }
     }
 
@@ -450,7 +458,9 @@ pub const TimeMap = struct {
     ///   * `bar` lands on `barAt(at) + k` and answers the distance to it,
     ///     the fraction scaled by the LANDING bar's length;
     ///   * `b` is the beat twin, over the cumulative beat count;
-    ///   * `s` is wall-clock from `at`, through the one clock seam.
+    ///   * `s` is wall-clock from `at`, through the one clock seam;
+    ///   * `f` refuses with `frame_rate_missing` until the frame
+    ///     resolution lands (phase 2), mirroring `tickFromLiteral`'s arm.
     ///
     /// Both roundings stay where plan 03 put them: a fraction goes
     /// through `Pos.tickFromQuarters` (half to even) and seconds through
@@ -470,9 +480,11 @@ pub const TimeMap = struct {
                 std.debug.assert(t >= 0);
                 std.debug.assert(t <= Grid.MAX_TICK);
             },
-            // Only the codes a position can earn.
+            // Only the codes a position can earn — `frame_rate_missing`
+            // too, an `f` duration on a map with no declared rate.
             .err => |code| std.debug.assert(code == .position_negative or
-                code == .position_not_integer or code == .tick_overflow),
+                code == .position_not_integer or code == .tick_overflow or
+                code == .frame_rate_missing),
         }
         return answer;
     }
@@ -537,6 +549,8 @@ pub const TimeMap = struct {
                     ) catch return .{ .err = .tick_overflow },
                 };
             },
+            // The frame arm's refusal until the rate lands (phase 2).
+            .f => return .{ .err = .frame_rate_missing },
         }
     }
 
@@ -1829,6 +1843,30 @@ test "TimeMap.tickFromLiteral: a bar, a beat and a seconds literal each resolve"
     try testing.expectEqual(
         Diag.Code.position_negative,
         (try m.tickFromLiteral(.{ .value = -2, .unit = .s })).err,
+    );
+}
+
+test "TimeMap.tickFromLiteral: a frame literal is frame_rate_missing until the rate lands" {
+    // The `f` arm's first landing (phase 1) is the refusal the coming
+    // resolution replaces: no map holds a declared rate yet, so every
+    // frame literal — position or duration — answers the code the layer
+    // that owns the rate will raise. The test pins the arm's existence
+    // and the code, and phase 2 re-cuts it against a real rate.
+    var r = try meterChangeMap();
+    defer r.deinit();
+    const m = &r.map;
+
+    try testing.expectEqual(
+        Diag.Code.frame_rate_missing,
+        (try m.tickFromLiteral(.{ .value = 25, .unit = .f })).err,
+    );
+    try testing.expectEqual(
+        Diag.Code.frame_rate_missing,
+        (try m.tickFromLiteral(.{ .value = 0, .unit = .f })).err,
+    );
+    try testing.expectEqual(
+        Diag.Code.frame_rate_missing,
+        (try m.durationTicks(.{ .value = 25, .unit = .f }, 0)).err,
     );
 }
 

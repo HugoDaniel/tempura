@@ -52,12 +52,12 @@
   ; =====================================================================
 
   (value-kind :name position
-    :description "A position or duration on the tick grid: a number carrying a REQUIRED unit — q (quarter notes), t (tempura ticks, TPQ = 46126080 per quarter), bar and b (bars and beats, counted from 0 through the meter map), or s (seconds, through the tempo map). A bare number is unit_required, never a guess. A duration (:dur, :length, :offset) is measured from its own form's :at, so an s duration resolves at that anchor. Negative positions are a tempura position_negative diagnostic, not a bound here."
+    :description "A position or duration on the tick grid: a number carrying a REQUIRED unit — q (quarter notes), t (tempura ticks, TPQ = 46126080 per quarter), bar and b (bars and beats, counted from 0 through the meter map), s (seconds, through the tempo map), or f (frames, through the document's declared :fps rate and the tempo map). A bare number is unit_required, never a guess. A duration (:dur, :length, :offset) is measured from its own form's :at, so an s or f duration resolves at that anchor. Negative positions are a tempura position_negative diagnostic, not a bound here."
     :underlying number
-    :unit (unit-shape :required true :allowed [q t bar b s]))
+    :unit (unit-shape :required true :allowed [q t bar b s f]))
 
   (value-kind :name grid-position
-    :description "A position on the tempo and meter maps themselves: q, t, bar or b, never s. Seconds are derived FROM these maps, so a seconds position on the form that defines them is circular — pacer refuses it on (tempo :at …) for the same reason."
+    :description "A position on the tempo and meter maps themselves: q, t, bar or b, never s. Seconds are derived FROM these maps, so a seconds position on the form that defines them is circular — pacer refuses it on (tempo :at …) for the same reason. Never f either — frames are counted through the tempo map, which these forms define."
     :underlying number
     :unit (unit-shape :required true :allowed [q t bar b]))
 
@@ -124,6 +124,22 @@
     :description "A time signature as [beats-per-bar note-value], e.g. [4 4] or [7 8]. A bar is (4 n / d) quarters."
     :underlying vector
     :vector (vector-shape :len 2 :element sig-component))
+
+  (value-kind :name frame-rate-scalar
+    :description "A frame rate as whole frames per second, e.g. 25 — the rates film and video count in. Bounded like us-per-quarter, to catch typos; the f unit's arithmetic cannot overflow at any bound."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 16777215 :integer true)
+    :unit (unit-shape :reject true))
+
+  (value-kind :name frame-rate-pair
+    :description "A frame rate as an exact [num den] rational, e.g. [30000 1001] for NTSC or [24000 1001] for 23.976 film. Never a bare decimal: 29.97 would mean 2997/100, and NTSC does not."
+    :underlying vector
+    :vector (vector-shape :len 2 :element frame-rate-scalar))
+
+  (value-kind :name frame-rate
+    :description "The document's frame rate for the f position unit (plan 03): an integer or an exact [num den] rational."
+    :underlying union
+    :union (union-shape :alternatives [frame-rate-scalar frame-rate-pair]))
 
   ; =====================================================================
   ; Names
@@ -316,6 +332,8 @@
       :description "The piece's title. Prose, not an identifier.")
     (key :name length :type position :optional true
       :description "The piece's length. Omitted, it is the end of the last event or clip rounded up to a bar.")
+    (key :name fps :type frame-rate :optional true
+      :description "The document's frame rate, for the `f` position unit (plan 03): frames per second as an integer (`:fps 25`) or an exact rational (`:fps [30000 1001]`). Never a bare decimal — 29.97 would mean 2997/100, and NTSC is 30000/1001. Declaring a rate without writing an `f` position is harmless and prints nothing; an `f` position without this key is a tempura frame_rate_missing.")
     (key :name end :type timeline-end :optional true :default hold
       :description "What the playhead does past :length. Exported as pacer's transport :end.")
     (key :name conductor :type anchor-ref :optional true

@@ -207,6 +207,24 @@ pub const Code = enum(u16) {
     /// documents remain valid, but pacer requires a positive transport
     /// duration; the author must give this export a positive `:length`.
     export_zero_length,
+
+    /// An `f` position whose frame lands on no tick start: the instant
+    /// `N · den / num` seconds sits between two ticks of the grid this
+    /// document's tempo map makes, so the one clock seam floors it and
+    /// the floored tick STANDS — never a wrap, never a round to nearest
+    /// (plan 03, "Positions"). A WARNING in the literal direction, where
+    /// the author can re-spell; the printer direction raises nothing and
+    /// falls through to `bar` / `q` / `t` — the `Pos.spell` read-back
+    /// precedent.
+    frame_inexact,
+
+    /// An `f` position on a document that declares no `:fps`. There is no
+    /// default rate — a default would silently re-time every frame
+    /// document, the same silent guess `unit_required` exists to refuse —
+    /// so the value the caller asked for is not usable as asked for: an
+    /// ERR, the position is not placed, and the document still loads
+    /// (plan 03, "Positions").
+    frame_rate_missing,
 };
 
 /// How much a diagnostic costs its caller. Orthogonal to `Code` — the
@@ -477,6 +495,8 @@ const code_order = [_]Code{
     .export_tempo_budget,
     .it_midi_macro_invalid,
     .export_zero_length,
+    .frame_inexact,
+    .frame_rate_missing,
 };
 
 test "Diag.Code: ordinals are dense and unique — the wire contract" {
@@ -510,6 +530,40 @@ test "Diag.Code: every code is pinned by name to its ordinal" {
     for (code_order, 0..) |code, i| {
         try testing.expectEqual(i, @intFromEnum(code));
     }
+}
+
+test "Diag.Code: the frame pair appends after export_zero_length, 90 then 91" {
+    // T2's two codes, appended at the END as the wire contract demands —
+    // `frame_inexact` the warning of a frame that lands between ticks,
+    // `frame_rate_missing` the error of an `f` position with no declared
+    // rate — and the severities their producers choose, spelled the one
+    // way every renderer prints.
+    try testing.expectEqual(@as(u16, 89), @intFromEnum(Code.export_zero_length));
+    try testing.expectEqual(@as(u16, 90), @intFromEnum(Code.frame_inexact));
+    try testing.expectEqual(@as(u16, 91), @intFromEnum(Code.frame_rate_missing));
+
+    var list: List = .init(testing.allocator);
+    defer list.deinit();
+    try list.add(
+        .frame_inexact,
+        .warning,
+        .{ .start = 4, .end = 8 },
+        "frame 1 lands between ticks at :fps [30000 1001]",
+        .{},
+    );
+    try list.add(
+        .frame_rate_missing,
+        .err,
+        .{ .start = 12, .end = 16 },
+        "this document declares no :fps",
+        .{},
+    );
+    const got = list.items();
+    try testing.expectEqual(Code.frame_inexact, got[0].code);
+    try testing.expectEqual(Severity.warning, got[0].severity);
+    try testing.expectEqual(Code.frame_rate_missing, got[1].code);
+    try testing.expectEqual(Severity.err, got[1].severity);
+    list.invariants();
 }
 
 test "Diag.List: add formats the message and preserves insertion order" {

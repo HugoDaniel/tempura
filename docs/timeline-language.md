@@ -26,7 +26,8 @@ The document's header: what the piece is called, how long it is, what happens at
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
 | `:title` | `string` | no | — | The piece's title. Prose, not an identifier. |
-| `:length` | `number+unit` | no | — | unit `q`/`t`/`bar`/`b`/`s`<br>The piece's length. Omitted, it is the end of the last event or clip rounded up to a bar. |
+| `:length` | `number+unit` | no | — | unit `q`/`t`/`bar`/`b`/`s`/`f`<br>The piece's length. Omitted, it is the end of the last event or clip rounded up to a bar. |
+| `:fps` | `frame-rate-scalar \| frame-rate-pair` | no | — | integer; min 1; max 16777215; len 2; integer; min 1; max 16777215<br>The document's frame rate, for the `f` position unit (plan 03): frames per second as an integer (`:fps 25`) or an exact rational (`:fps [30000 1001]`). Never a bare decimal — 29.97 would mean 2997/100, and NTSC is 30000/1001. Declaring a rate without writing an `f` position is harmless and prints nothing; an `f` position without this key is a tempura frame_rate_missing. |
 | `:end` | `symbol enum` | no | `hold` | one of: `loop`, `hold`<br>What the playhead does past :length. Exported as pacer's transport :end. |
 | `:conductor` | `ref → (anchor :id …)` | no | — | The anchor whose tempo and meter conduct this document (plan 03, "Three conductors"). With one, the document's own (tempo-point …) and (meter-point …) forms are a conductor_conflict; without one, a tempo point and a meter point at tick 0 are required. |
 
@@ -70,8 +71,8 @@ A named window on the timeline, exported as a pacer (scene …) of the same name
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
 | `:name` | `symbol` | yes | — | The window's name, unique per document. |
-| `:at` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`<br>Where the window opens. |
-| `:dur` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`<br>How long the window lasts. |
+| `:at` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`/`f`<br>Where the window opens. |
+| `:dur` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`/`f`<br>How long the window lasts. |
 
 ### `(cue …)`
 
@@ -80,7 +81,7 @@ A named point in time — never a window. SMF markers and cue points dump to cue
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
 | `:name` | `string` | yes | — | What the point is called. Prose: SMF marker text is arbitrary bytes. |
-| `:at` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`<br>Where the point sits. |
+| `:at` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`/`f`<br>Where the point sits. |
 
 ### `(lane …)`
 
@@ -134,8 +135,8 @@ A note event. Two notes on one key overlapping in one lane are note_overlap.
 
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
-| `:at` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`<br>The onset. |
-| `:dur` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`<br>How long the note sounds, measured from :at. |
+| `:at` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`/`f`<br>The onset. |
+| `:dur` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`/`f`<br>How long the note sounds, measured from :at. |
 | `:key` | `note-key-number \| note-key-name` | yes | — | integer; min 0; max 127<br>Which key: the MIDI number, or the note name. |
 | `:vel` | `number` | no | `100` | integer; min 1; max 127; repr f32<br>On-velocity. |
 | `:ch` | `number` | no | — | integer; min 1; max 16<br>MIDI channel for rendering. Defaults to 1. A lane's own :ch is a BINDING key — which channels of a bound anchor the lane reads — and says nothing about the notes a native lane carries, so it is not the default here (a ruling `doc/fromSjon.zig` records at `default_note_ch`). |
@@ -147,7 +148,7 @@ A value reached exactly at :at, with the easing that shaped the segment ENDING h
 
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
-| `:at` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`<br>Where the value lands. |
+| `:at` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`/`f`<br>Where the value lands. |
 | `:value` | `key-scalar \| key-vector` | yes | — | repr f32; min-len 1; max-len 4; repr f32<br>The value reached at :at: a scalar or a 1-4 component vector. |
 | `:ease` | `ease-name \| ease-form` | no | `linear` | one of: `linear`, `hold`, `smoothstep`, `in-quad`, `out-quad`, `in-out-quad`, `in-cubic`, `out-cubic`, `in-out-cubic`, `in-quart`, `out-quart`, `in-out-quart`, `in-sine`, `out-sine`, `in-out-sine`, `in-expo`, `out-expo`, `in-out-expo`<br>The easing over the segment ending at this keyframe: a pacer easing name (in-cubic, hold, …) or a pacer easing form ((spring …), (steps …), (cubic-bezier …), (seq …), (chain …)). Typed by pacer's OWN kind, so the two vocabularies cannot drift. |
 
@@ -157,11 +158,11 @@ A phrase placed on this lane. It places the phrase's lane of the same :name as t
 
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
-| `:at` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`<br>Where the phrase starts. |
+| `:at` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`/`f`<br>Where the phrase starts. |
 | `:phrase` | `ref → (phrase :name …)` | yes | — | Which phrase to place. |
 | `:repeat` | `number` | no | `1` | integer; min 1<br>How many times the phrase plays. |
-| `:offset` | `number+unit` | no | — | unit `q`/`t`/`bar`/`b`/`s`<br>Where in the phrase playback begins. Defaults to 0 — a default this manifest cannot declare, because a :default literal is unit-free and dropping the unit off a position would be exactly the silent guess the position kind exists to refuse (pacer says the same of a trigger's :offset). |
-| `:length` | `number+unit` | no | — | unit `q`/`t`/`bar`/`b`/`s`<br>The playback window measured from :offset. Defaults to the phrase's length times :repeat minus :offset; content past the window is not placed, which is what a split clip's left half needs. |
+| `:offset` | `number+unit` | no | — | unit `q`/`t`/`bar`/`b`/`s`/`f`<br>Where in the phrase playback begins. Defaults to 0 — a default this manifest cannot declare, because a :default literal is unit-free and dropping the unit off a position would be exactly the silent guess the position kind exists to refuse (pacer says the same of a trigger's :offset). |
+| `:length` | `number+unit` | no | — | unit `q`/`t`/`bar`/`b`/`s`/`f`<br>The playback window measured from :offset. Defaults to the phrase's length times :repeat minus :offset; content past the window is not placed, which is what a split clip's left half needs. |
 | `:transpose` | `number` | no | `0` | integer; min -120; max 120<br>Semitones to shift the placed notes by. Notes only. |
 
 ### `(phrase …)`
@@ -171,7 +172,7 @@ A reusable fragment: lanes with content, placed by a (clip …). A phrase's lane
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
 | `:name` | `symbol` | yes | — | This phrase's name, referenced by a clip's :phrase. |
-| `:length` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`<br>The phrase's length. A clip that repeats places one copy per :length. |
+| `:length` | `number+unit` | yes | — | unit `q`/`t`/`bar`/`b`/`s`/`f`<br>The phrase's length. A clip that repeats places one copy per :length. |
 
 Positional children: `form: (lane …)`.
 
@@ -183,13 +184,13 @@ Positional children: `form: (lane …)`.
 
 ### position
 
-A position or duration on the tick grid: a number carrying a REQUIRED unit — q (quarter notes), t (tempura ticks, TPQ = 46126080 per quarter), bar and b (bars and beats, counted from 0 through the meter map), or s (seconds, through the tempo map). A bare number is unit_required, never a guess. A duration (:dur, :length, :offset) is measured from its own form's :at, so an s duration resolves at that anchor. Negative positions are a tempura position_negative diagnostic, not a bound here.
+A position or duration on the tick grid: a number carrying a REQUIRED unit — q (quarter notes), t (tempura ticks, TPQ = 46126080 per quarter), bar and b (bars and beats, counted from 0 through the meter map), s (seconds, through the tempo map), or f (frames, through the document's declared :fps rate and the tempo map). A bare number is unit_required, never a guess. A duration (:dur, :length, :offset) is measured from its own form's :at, so an s or f duration resolves at that anchor. Negative positions are a tempura position_negative diagnostic, not a bound here.
 
-Type: `number+unit` — unit `q`/`t`/`bar`/`b`/`s`.
+Type: `number+unit` — unit `q`/`t`/`bar`/`b`/`s`/`f`.
 
 ### grid-position
 
-A position on the tempo and meter maps themselves: q, t, bar or b, never s. Seconds are derived FROM these maps, so a seconds position on the form that defines them is circular — pacer refuses it on (tempo :at …) for the same reason.
+A position on the tempo and meter maps themselves: q, t, bar or b, never s. Seconds are derived FROM these maps, so a seconds position on the form that defines them is circular — pacer refuses it on (tempo :at …) for the same reason. Never f either — frames are counted through the tempo map, which these forms define.
 
 Type: `number+unit` — unit `q`/`t`/`bar`/`b`.
 
@@ -246,6 +247,24 @@ Type: `number` — integer; min 1; max 64.
 A time signature as [beats-per-bar note-value], e.g. [4 4] or [7 8]. A bar is (4 n / d) quarters.
 
 Type: `vector<number>` — len 2; integer; min 1; max 64.
+
+### frame-rate-scalar
+
+A frame rate as whole frames per second, e.g. 25 — the rates film and video count in. Bounded like us-per-quarter, to catch typos; the f unit's arithmetic cannot overflow at any bound.
+
+Type: `number` — integer; min 1; max 16777215.
+
+### frame-rate-pair
+
+A frame rate as an exact [num den] rational, e.g. [30000 1001] for NTSC or [24000 1001] for 23.976 film. Never a bare decimal: 29.97 would mean 2997/100, and NTSC does not.
+
+Type: `vector<number>` — len 2; integer; min 1; max 16777215.
+
+### frame-rate
+
+The document's frame rate for the f position unit (plan 03): an integer or an exact [num den] rational.
+
+Type: `frame-rate-scalar | frame-rate-pair` — integer; min 1; max 16777215; len 2; integer; min 1; max 16777215.
 
 ### section-name
 
