@@ -315,8 +315,8 @@ fn addWasm(ctx: Ctx) Wasm {
 }
 
 /// `zig build sjon-wasm` — SJON's own `sjon.wasm`, built from the same
-/// PINNED dependency Tempura compiles against and copied to the node
-/// leg's vendor directory. The map proof asks SJON to answer both ends of
+/// PINNED dependency Tempura compiles against and installed under
+/// `zig-out/sjon-wasm`. The map proof asks SJON to answer both ends of
 /// every span, so it must run SJON's artifact and not whatever a sibling
 /// checkout happens to hold: the release archive has source, not a wasm,
 /// and a stale `../SJON/zig-out` would silently test a different SJON.
