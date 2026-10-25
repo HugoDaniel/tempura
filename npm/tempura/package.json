@@ -16,6 +16,10 @@
   ],
   "author": "Hugo Daniel <mail@hugodaniel.pt>",
   "license": "CC0-1.0",
+  "homepage": "https://github.com/HugoDaniel/tempura#readme",
+  "bugs": {
+    "url": "https://github.com/HugoDaniel/tempura/issues"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/HugoDaniel/tempura.git",

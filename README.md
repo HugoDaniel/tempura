@@ -16,6 +16,8 @@ tracker still opens it as if nothing were there.
 tempura never evaluates a value at time `t`. It exports the pacer score
 that does.
 
+Source and releases: <https://github.com/HugoDaniel/tempura>.
+
 Zig 0.16, CC0-1.0, no runtime dependency but SJON (pinned to the
 published 1.5.0 release archive, fetched by Zig; no sibling checkout
 needed). Same inputs give byte-identical outputs, native and wasm32.

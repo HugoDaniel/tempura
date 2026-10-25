@@ -1,0 +1,46 @@
+
+> tempura@0.1.0 prepack
+> npm run build
+
+
+> tempura@0.1.0 build
+> npm run build:wasm && npm run build:types
+
+
+> tempura@0.1.0 build:wasm
+> cd ../.. && tools/zt wasm
+
+
+> tempura@0.1.0 build:types
+> tsc
+
+npm notice
+npm notice 📦  tempura@0.1.0
+npm notice Tarball Contents
+npm notice 7.0kB LICENSE
+npm notice 4.7kB README.md
+npm notice 2.3kB package.json
+npm notice 11.5kB src/blobs.js
+npm notice 17.8kB src/index.js
+npm notice 10.2kB src/ops.js
+npm notice 8.8kB src/types.js
+npm notice 1.4MB tempura.wasm
+npm notice 2.7kB types/blobs.d.ts
+npm notice 665B types/blobs.d.ts.map
+npm notice 10.1kB types/index.d.ts
+npm notice 1.9kB types/index.d.ts.map
+npm notice 5.5kB types/ops.d.ts
+npm notice 3.4kB types/ops.d.ts.map
+npm notice 8.0kB types/types.d.ts
+npm notice 2.3kB types/types.d.ts.map
+npm notice Tarball Details
+npm notice name: tempura
+npm notice version: 0.1.0
+npm notice filename: tempura-0.1.0.tgz
+npm notice package size: 530.7 kB
+npm notice unpacked size: 1.5 MB
+npm notice shasum: 77b3e22641a2aa133bde7dbee1fd52b0061f6d0e
+npm notice integrity: sha512-eDudpGwQSUgcY[...]yDZRCOwUNJpwA==
+npm notice total files: 16
+npm notice
+tempura-0.1.0.tgz

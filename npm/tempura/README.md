@@ -12,6 +12,8 @@ score that does. Same input ⇒ byte-identical output, in the browser and native
 
 ESM-only. Ships JavaScript source + generated `.d.ts` types + `tempura.wasm`.
 
+Source and issues: <https://github.com/HugoDaniel/tempura>.
+
 ## Install
 
 `tempura` publishes to a self-hosted registry, and it's unscoped (no per-scope
