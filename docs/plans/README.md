@@ -1,7 +1,8 @@
 # The Timeline as a Value — Plans Index
 
-Planning set for **tempura** (`~/Dev/tempura`, cloned empty on 2026-09-19; remote
-`git.hugodaniel.com/hugo/tempura`): the family's **timeline core**, a versatile timeline with
+Planning set for **tempura** (`~/Dev/tempura`, cloned empty on 2026-09-19; development
+remote `git.hugodaniel.com/hugo/tempura`, release remote
+`github.com/HugoDaniel/tempura` since 2026-10-25): the family's **timeline core**, a versatile timeline with
 no UI. One SJON document, `(timeline …)`, is the authoritative arrangement of a piece in
 musical time. Around it, four things in one Zig package:
 
