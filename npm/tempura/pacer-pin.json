@@ -1,11 +1,9 @@
 {
   "name": "pacer",
-  "version": "0.2.0",
-  "builtVersion": "0.1.0",
-  "sourceDirty": true,
-  "source": "https://git.hugodaniel.com/hugo/pacer.git",
-  "commit": "5face6f368d20e3baea40a0a4d4427f9f466ca52",
+  "version": "0.1.0",
+  "source": "https://github.com/HugoDaniel/pacer.git",
+  "commit": "678af2dfca71ccbcea185c7a752b4a179664161d",
   "wasmSha256": "5a6d5316241f6c210970a652a1c030dfbc983f28855c2f9cafe773c365eb097a",
   "recorded": "2026-10-25",
-  "note": "Dev-only landing-proof driver. HEAD is the 0.2.0 cut; the working tree recorded here was mid-release with the manifest at 0.1.0. The wasm hash is the authority: `npm run build:pacer-wasm` rebuilds from this source and refuses any other artifact. Not a runtime dependency and not published."
+  "note": "Dev-only landing-proof driver, pinned to pacer's 0.1.0 release cut. `npm run build:pacer-wasm` rebuilds from this source and refuses any other artifact. Not a runtime dependency and not published."
 }
