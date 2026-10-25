@@ -1,0 +1,196 @@
+corpus: 87 case(s), 0 failed
+te
+r.sjon matches ../pacer/schema/pacer.sjon byte for byte
+timeline-docs: docs/timeline-language.md is current
+cli-golden: CLI output is current
+wasm-budget: ok — ./.zig-cache/o/c6e5e55eaba041b347d5759b7db0966a/tempura.wasm is 1416572 bytes, 94% of the 1491224-byte ceiling
+✔ the magics are the four-character codes read little-endian (0.396417ms)
+✔ 'TPTL': every list the derivation has, and the bar table's shape (36.649ms)
+✔ 'TPTL': a document with no sections, cues or lanes omits those sections (16.43375ms)
+✔ 'TPTL': a section this decoder predates is skipped by its length (0.230625ms)
+✔ 'TPTL': a wrong magic or version is a throw, not a wrong timeline (0.257833ms)
+✔ 'TPPH': a position, its cue pair, its section tail and a tracker row (10.208667ms)
+✔ 'TPPH': a refusal carries the guard and no position at all (9.86775ms)
+✔ 'TPDG': the stage, the severity, the code ordinal, the span, the message (7.423333ms)
+✔ 'TPDG': an empty zone decodes to no diagnostics (0.091666ms)
+✔ corpus parity: edit-bind (51.593083ms)
+✔ corpus parity: edit-bound-it-cell (11.788375ms)
+✔ corpus parity: edit-bound-it-shared (5.718459ms)
+✔ corpus parity: edit-bound-it-shared-allowed (4.20275ms)
+✔ corpus parity: edit-bound-materialize (8.814083ms)
+✔ corpus parity: edit-bound-smf-pair (5.061125ms)
+✔ corpus parity: edit-bound-smf-step (3.765625ms)
+✔ corpus parity: edit-duplicate (6.884709ms)
+✔ corpus parity: edit-ease (5.81875ms)
+✔ corpus parity: edit-insert (5.067875ms)
+✔ corpus parity: edit-insert-meter (3.38275ms)
+✔ corpus parity: edit-insert-meter-off-bar (2.939542ms)
+✔ corpus parity: edit-insert-tempo (3.822375ms)
+✔ corpus parity: edit-merge (3.046084ms)
+✔ corpus parity: edit-nudge (4.222583ms)
+✔ corpus parity: edit-quantize (3.229709ms)
+✔ corpus parity: edit-remove (3.288ms)
+✔ corpus parity: edit-rename (3.214709ms)
+✔ corpus parity: edit-resize (3.148958ms)
+✔ corpus parity: edit-retime (4.445125ms)
+✔ corpus parity: edit-revalue (3.292417ms)
+✔ corpus parity: edit-split (2.935958ms)
+✔ corpus parity: edit-stretch (3.193708ms)
+✔ corpus parity: edit-transpose (2.934875ms)
+✔ corpus parity: edit-unbind (4.134625ms)
+✔ corpus parity: edit-velocity (3.090416ms)
+✔ corpus parity: examples-daw (4.052208ms)
+✔ corpus parity: examples-daw-mid (5.033959ms)
+✔ corpus parity: examples-native (11.775958ms)
+✔ corpus parity: examples-tracker (5.03ms)
+✔ corpus parity: examples-tracker-it (4.185292ms)
+✔ corpus parity: export-512 (7.028167ms)
+✔ corpus parity: export-budget (2.787667ms)
+✔ corpus parity: export-meter-6-8 (2.521375ms)
+✔ corpus parity: export-meter-unsupported (2.584417ms)
+✔ corpus parity: export-quintuplets (2.633792ms)
+✔ corpus parity: export-zero-length (3.381917ms)
+✔ corpus parity: frames-25 (2.868458ms)
+✔ corpus parity: frames-ntsc (2.38725ms)
+✔ corpus parity: frames-tiny (2.283709ms)
+✔ corpus parity: grid-table (2.379417ms)
+✔ corpus parity: it-midi-macros (5.252708ms)
+✔ corpus parity: it-minimal (0.19775ms)
+✔ corpus parity: it-passthrough (0.140125ms)
+✔ corpus parity: it-patterns-masks (0.153375ms)
+✔ corpus parity: loop-wrap-seconds (2.345667ms)
+✔ corpus parity: meter-change (2.290125ms)
+✔ corpus parity: native-curve-cc (3.353791ms)
+✔ corpus parity: playhead-sections-cues (2.952375ms)
+✔ corpus parity: positions-units (3.876458ms)
+✔ corpus parity: printer-rule (2.443875ms)
+✔ corpus parity: render-it (2.712167ms)
+✔ corpus parity: render-smf (2.3775ms)
+✔ corpus parity: residue-corrupt (2.510708ms)
+✔ corpus parity: residue-it-exact (3.810708ms)
+✔ corpus parity: residue-newer-version (3.463333ms)
+✔ corpus parity: residue-smf-exact (2.496458ms)
+✔ corpus parity: residue-stale-conductor (2.601542ms)
+✔ corpus parity: residue-stale-curve (2.792167ms)
+✔ corpus parity: residue-stale-lane (3.494667ms)
+✔ corpus parity: residue-stale-lane-partial (2.526375ms)
+✔ corpus parity: residue-tail-only (2.909125ms)
+✔ corpus parity: seams-three-segment (2.3985ms)
+✔ corpus parity: seams-three-segment-f64 (2.349792ms)
+✔ corpus parity: skeleton-it (4.330584ms)
+✔ corpus parity: skeleton-smf (2.803917ms)
+✔ corpus parity: smf-format0 (0.171375ms)
+✔ corpus parity: smf-running-status (0.145209ms)
+✔ corpus parity: smf-smpte (2.437084ms)
+✔ corpus parity: smf-vlq-edges (0.19275ms)
+✔ corpus parity: tempo-by-reference-conductor (2.539291ms)
+✔ corpus parity: tempo-three-conductors-it (2.643375ms)
+✔ corpus parity: tempo-three-conductors-native (3.405458ms)
+✔ corpus parity: tempo-three-conductors-smf (2.539166ms)
+✔ corpus parity: tempo-us-vs-qpm (2.2785ms)
+✔ corpus parity: walk-axx (0.180125ms)
+✔ corpus parity: walk-bxx (0.1805ms)
+✔ corpus parity: walk-constant (0.180167ms)
+✔ corpus parity: walk-cxx-past-end (0.172875ms)
+✔ corpus parity: walk-cxx-sbx (0.158167ms)
+✔ corpus parity: walk-runaway (0.158125ms)
+✔ corpus parity: walk-s6x (0.183958ms)
+✔ corpus parity: walk-sdx (0.154292ms)
+✔ corpus parity: walk-sex (0.153875ms)
+✔ corpus parity: walk-skip-end (0.137875ms)
+✔ corpus parity: walk-t0x-slide (0.288875ms)
+✔ corpus parity: walk-txx-memory (0.310541ms)
+✔ what the walk compared, and the closed set of what it could not (0.28625ms)
+✔ publishable: ESM, side-effect free, ships the wasm + types + license (1.00175ms)
+✔ publishConfig points the publish at the self-hosted registry (0.098542ms)
+✔ the three subpath exports point at runtime files on disk (0.136792ms)
+✔ public API resolves through the package name (self-reference) (1.017708ms)
+✔ version is in lockstep across package.json, build.zig.zon, and root.zig (0.257708ms)
+✔ the wasm declares exactly the frozen tpr_* surface (2.538041ms)
+✔ the wasm imports nothing but SJON plugin dispatch (0.329209ms)
+✔ the handshake: abi version and every cap (24.892542ms)
+✔ load → text → timeline → at → atTick → snap, one document (16.429083ms)
+✔ at(): a clock no map can answer for comes back as a refusal (11.274584ms)
+✔ plan → apply → text, and the plan is held between them (10.035166ms)
+✔ plan(): a refusal is the empty action list, and nothing is held to commit (5.699583ms)
+✔ apply(op): a plan the planner refused never reaches the document (6.217125ms)
+✔ apply(actions): the list a plan handed back commits in a fresh instance (11.740542ms)
+✔ apply(actions): a host that struck a line out applies the rest (5.72175ms)
+✔ apply(actions): a list that is not an action list is diagnostics, document intact (6.104459ms)
+✔ plan(): an ask that is not an operation is diagnostics, never a throw (4.789667ms)
+✔ exportScore(): a pacer score, and the velocity switch reaches it (4.1585ms)
+✔ exportScore(): a conducted document whose file is not here yields nothing, and says why (5.094542ms)
+✔ build(): both kinds, and a document with no anchor builds either (7.406166ms)
+✔ loadFile(): a .mid becomes a document in the wasm (7.044166ms)
+✔ attachAnchor(): the bytes are verified, and a mismatch changes nothing (6.938458ms)
+✔ a bad call changes nothing, and an unloaded instance answers empty (5.45975ms)
+✔ a zero-length answer says its own reason, never the previous report (3.609083ms)
+✔ landing: every printed position lands on the tick tempura claims (78.642292ms)
+✔ landing: a position one tick short is caught (the mutation the proof exists for) (1.29925ms)
+✔ scores: every golden skeleton loads clean through pacer.wasm (6.098875ms)
+✔ scores: every golden trigger lands on the tick the exporter claims (7.72275ms)
+✔ map: every fixture records a span in the text and a span in the document (0.82325ms)
+✔ map: the glue decodes the blob and refuses a corrupt one (0.253458ms)
+✔ map: SJON answers both ends, a score node per text span and a document node per doc span (16.041917ms)
+✔ map: the wasm produces the native fixture bindings byte for byte (70.625125ms)
+✔ fresh-instance round trip: a .mid through a second wasm instance (190.671416ms)
+✔ fresh-instance round trip: a .it through a second wasm instance (139.103375ms)
+✔ a document that keeps its anchor by reference says so, and rebuilds once attached (125.174458ms)
+✔ the anchored document a build needs is verified, not assumed (2.875ms)
+✔ file score: corpus/residue-stale-curve/song.mid — the wasm's is the CLI's (189.933708ms)
+✔ file score: corpus/residue-stale-curve/song.mid --no-hints — the wasm's is the CLI's (127.017916ms)
+✔ file score: corpus/residue-stale-lane/song.mid — the wasm's is the CLI's (125.322208ms)
+✔ file score: the kept hint is what shapes the stale curve, in the wasm too (7.149792ms)
+ℹ tests 137
+ℹ suites 0
+ℹ pass 137
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 569.989833
+verify
++- run test w
+sibling-compose: no animader checkout — TEMPURA_ANIMADER=no-such-animader-checkout, candidate `/Users/hugo/Dev/tempura/no-such-animader-checkout/schema` not found; point the override at a checkout (or check the sibling out) — SKIPPING, nothing composed, nothing claimed
+failed command: ./.zig-cache/o/9608db416b77258677e3104aff887319/test --cache-dir=./.zig-cache --seed=0x4ef7ab24 --listen=-
+
+Build Summary: 30/30 steps succeeded; 1024/1024 tests passed
+verify success
++- run test 890 pass (890 total) 2m MaxRSS:905M
+|  +- compile test Debug native cached 52ms MaxRSS:32M
+|     +- options cached
+|     +- options cached
++- run test 119 pass (119 total) 23s MaxRSS:214M
+|  +- compile test Debug native cached 50ms MaxRSS:32M
+|     +- options (reused)
+|     +- options (reused)
++- run exe lint success 302ms
+|  +- compile exe lint Debug native cached 59ms MaxRSS:31M
+|  +- run test 15 pass (15 total) 12ms MaxRSS:3M
+|     +- compile test Debug native cached 58ms MaxRSS:31M
++- run tools/cli_golden.sh success 5s
+|  +- compile exe tempura Debug native cached 59ms MaxRSS:32M
+|     +- options (reused)
++- run exe corpus-runner success 1s
+|  +- compile exe corpus-runner Debug native cached 52ms MaxRSS:32M
+|     +- options (reused)
++- run tools/pacer_schema_drift.sh success 21ms
++- run tools/wasm_budget.sh success 14ms
+|  +- compile exe tempura ReleaseSmall wasm32-freestanding cached 33ms MaxRSS:31M
+|     +- options cached
++- run tools/timeline_docs.sh success 217ms
+|  +- compile exe sjon Debug native cached 58ms MaxRSS:31M
+|     +- options (reused)
++- run exe gen-landing success 482ms
+|  +- compile exe gen-landing Debug native cached 52ms MaxRSS:32M
+|     +- WriteFile . cached
+|     +- options (reused)
++- run sh success 663ms
+   +- install generated to tempura.wasm cached
+   |  +- compile exe tempura ReleaseSmall wasm32-freestanding (+1 more reused dependencies)
+   +- install generated to sjon.wasm cached
+   |  +- compile exe sjon ReleaseSmall wasm32-freestanding cached 31ms MaxRSS:31M
+   |     +- options cached
+   +- install tempura cached
+      +- compile exe tempura Debug native (+1 more reused dependencies)
+
