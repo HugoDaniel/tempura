@@ -13,13 +13,15 @@ comparison before believing it. A file whose hash differs from the pin is refuse
 
 | Tool | Role | Pinned version | Present here? |
 | --- | --- | --- | --- |
-| `libopenmpt` / `openmpt123` | the `.it` oracle: `openmpt123 --info` reports duration, tempo and channel names | **unpinned** | no |
-| `midicsv` / `csvmidi` | the `.mid` oracle: a file as one CSV row per event, and back | **unpinned** | no |
+| `libopenmpt` / `openmpt123` | the `.it` oracle: `openmpt123 --info` reports duration, tempo and channel names | `0.8.9` (`openmpt123 v0.8.9, libopenmpt 0.8.9+r25652.pkg`) | yes, 2026-10-25 |
+| `midicsv` / `csvmidi` | the `.mid` oracle: a file as one CSV row per event, and back | `1.1` (Homebrew formula) | yes, 2026-10-25 |
+| Schism Tracker | the second tracker for the manual load/play gate | `20260524` (upstream macOS build, headless `--diskwrite`) | yes, 2026-10-25 |
 | DOSBox | hosts Impulse Tracker 2.14 for the manual gate | **unpinned** | no |
 
-**None of the three is installed on the authoring machine on 2026-09-21** (checked
-with `command -v`), so every version above is **unpinned**: writing one would be
-writing a number nobody read.
+On **2026-10-25** `libopenmpt`, `midicsv` and Schism were installed and exercised
+for the 0.1.0 candidate; DOSBox and Impulse Tracker 2.14 were not. The
+`midicsv` row's version is Homebrew's formula version because the tool prints no
+version banner of its own (`midicsv -h` is an illegal option).
 
 Install:
 

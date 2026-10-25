@@ -5,18 +5,45 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         // SJON: the substrate — parser, validator, `Expr`, the `Pattern`
-        // tick core, `Edit`. Path dependency on the sibling checkout,
-        // pacer's arrangement (`../pacer/build.zig.zon`), consumed with
-        // `plugin-exec = false` (see build.zig) so nothing links
-        // libwasmtime.
+        // tick core, `Edit`. Pinned to the PUBLISHED 1.5.0 release archive
+        // (peeled commit eb63b3fc4765795062943b5c731aa9bba36264ce), not a
+        // sibling checkout: a clean clone resolves with no `../SJON`.
+        // Consumed with `plugin-exec = false` (see build.zig) so nothing
+        // links libwasmtime.
         .sjon = .{
-            .path = "../SJON",
+            .url = "https://git.hugodaniel.com/releases/sjon/archive/eb63b3fc4765795062943b5c731aa9bba36264ce.tar.gz",
+            .hash = "sjon-1.5.0-QUbZyz2SdgClKGQFDvenzv0dXMEtBXbqxzsWEmQLmV12",
         },
     },
+    // The zip surface for a fetched source package. Every directory a
+    // build or gate step reads is listed explicitly; `npm` is not listed
+    // wholesale because that would pull in `node_modules` (Zig does not
+    // apply `.gitignore` to `.paths`). Generated wasm/types stay out: the
+    // build produces them.
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
         "schema",
+        "tools",
+        "corpus",
+        "examples",
+        "conformance",
+        "docs",
+        "sjon-project.sjon",
+        "README.md",
+        "CHANGELOG.md",
+        "THIRD_PARTY_NOTICES.md",
+        "LICENSE",
+        "npm/tempura/src",
+        "npm/tempura/test",
+        "npm/tempura/scripts",
+        "npm/tempura/package.json",
+        "npm/tempura/package-lock.json",
+        "npm/tempura/tsconfig.json",
+        "npm/tempura/biome.jsonc",
+        "npm/tempura/pacer-pin.json",
+        "npm/tempura/README.md",
+        "npm/tempura/LICENSE",
     },
 }

@@ -1,0 +1,9 @@
+{
+  "name": "pacer",
+  "version": "0.1.0",
+  "source": "https://git.hugodaniel.com/hugo/pacer.git",
+  "commit": "5face6f368d20e3baea40a0a4d4427f9f466ca52",
+  "wasmSha256": "5a6d5316241f6c210970a652a1c030dfbc983f28855c2f9cafe773c365eb097a",
+  "recorded": "2026-10-25",
+  "note": "Dev-only landing-proof driver. The wasm is rebuilt from this source by `npm run build:pacer-wasm`; a source or artifact drift fails before the landing test reads it. Not a runtime dependency and not published."
+}

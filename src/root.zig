@@ -121,11 +121,12 @@ test "version: src/root.zig and build.zig.zon spell the same version" {
     try std.testing.expectEqualStrings(rest[0..end], version);
 }
 
-test "build graph: the sjon path dependency and every schema import are wired" {
+test "build graph: the sjon dependency and every schema import are wired" {
     // This repo's parts all plug into the same two seams, and neither is
-    // visible to a type checker: SJON arrives as a sibling PATH dependency
-    // built `plugin-exec = false`, and the five manifests arrive as
-    // anonymous imports so they are readable with no filesystem (wasm32).
+    // visible to a type checker: SJON arrives as a pinned release
+    // dependency (no sibling checkout) built `plugin-exec = false`, and
+    // the five manifests arrive as anonymous imports so they are readable
+    // with no filesystem (wasm32).
     // A renamed import or a moved manifest breaks every part at once, so
     // it fails here first, on the root, with one line to read.
     try std.testing.expectEqual(@as(i64, 0), @rem(sjon.Pattern.PPC, 16));

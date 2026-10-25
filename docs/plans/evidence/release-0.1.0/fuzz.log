@@ -1,0 +1,15 @@
+fuzz
++- run test w
+sibling-compose: no animader checkout — TEMPURA_ANIMADER=no-such-animader-checkout, candidate `/Users/hugo/Dev/tempura/no-such-animader-checkout/schema` not found; point the override at a checkout (or check the sibling out) — SKIPPING, nothing composed, nothing claimed
+failed command: ./.zig-cache/o/880fb2ffdabc17277a3c6adb6390f360/test --cache-dir=./.zig-cache --seed=0xd225117d --listen=-
+
+Build Summary: 5/5 steps succeeded; 887/887 tests passed
+fuzz success
++- run test 887 pass (887 total) 2m MaxRSS:887M
+   +- compile test Debug native cached 39ms MaxRSS:32M
+      +- options cached
+      +- options cached
+
+real 156.53
+user 155.48
+sys 0.96

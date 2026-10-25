@@ -114,6 +114,7 @@ stage. 03 before 02 because the time model motivates the vocabulary, the batida 
 | [11-demos-and-milestones.md](11-demos-and-milestones.md) | E0–E5, the spike, demos, sequencing against the family, effort, decision log | Active |
 | [12-zig-mastery.md](12-zig-mastery.md) | the Zig mastery audit: rulings on assertions, decomposition, allocator names, bounded loops, OOM sweeps, the IO border; `tools/zt lint` as the gate; both waves' logs and the rulings filed for Hugo | Active |
 | [13-stage-pngine-pacer.md](13-stage-pngine-pacer.md) | the stage: a pngine piece conducted by a tempura timeline through pacer, the movements exported as tracker channels, the musicians' round trip; P110, E5 | Draft |
+| [14-release-0.1.0.md](14-release-0.1.0.md) | pin SJON 1.5.0 or newer, repair packaging, verify clean consumers and manual gates, publish and audit the first release | Active — R0–R2 done, R3 partial, R4 prepared, R5 blocked |
 
 Statuses: **Active** (guiding current work), **Draft** (proposed, still moving), **Reference**,
 **Complete**. When a plan completes, mark it in its header and in this table. Decisions changed

@@ -1,0 +1,18 @@
+sandbox_extension_issue_file_to_process failed for /var/folders/4n/m6fk3sgd4zg82f539tp6mdm80000gn/T//schism.vqcYCs/Schism Tracker.app: 1 (Operation not permitted)
+2026-10-25 18:54:13.149 schismtracker[30804:17992840] NSEventModifierFlagFunction specified to -setKeyEquivalentModifierMask: for item <NSMenuItem: 0x78d101fac0 Message Log, ke='Command-F11', action: _menu_callback:>, but is only supported for system-provided menu items; will not be used
+2026-10-25 18:54:13.149 schismtracker[30804:17992840] NSEventModifierFlagFunction specified to -setKeyEquivalentModifierMask: for item <NSMenuItem: 0x78d125c000 Calculate Length, ke='Command-P', action: _menu_callback:>, but is only supported for system-provided menu items; will not be used
+Schism Tracker 20260524
+
+Creating directory /Users/hugo/Library/Application Support/Schism Tracker
+Schism Tracker uses this directory to store your settings.
+
+L
+
+ Unknown tracker
+ 1 patterns, 0 samples
+
+
+E
+
+ 44100 Hz, 16 bit, stereo
+ 1.10 MiB (0:06) written in 0.00 sec

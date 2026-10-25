@@ -1,0 +1,2 @@
+corpus/render-smf/doc.sjon:0x00000585: warning render_cc_missing: the curve lane 'glow' has no controller to render onto (:cc on the lane, or --cc), so its keyframes ride in the residue alone and no DAW will hear them
+corpus/render-smf/doc.sjon:0x00000647: warning residue_only: the query lane 'hats' is computed, and a .mid holds no query or formula: it rides in the residue alone

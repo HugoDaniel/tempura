@@ -567,6 +567,16 @@ IT tiers; everything else is the family's known loop (schema → diagnostics →
   T1 is the source map, built and consumed 2026-10-08; frame-clock is animader's
   existing provider, identity-load only, execution still unimplemented.
 
+- 2026-10-25 — **SJON moves from a sibling path to the published release pin.**
+  `build.zig.zon` now fetches SJON 1.5.0 (`v1.5.0`, peeled
+  `eb63b3fc4765795062943b5c731aa9bba36264ce`) by immutable archive URL and
+  hash, so a clean clone builds with no `../SJON` checkout. The 2026-09-20
+  ruling's reason for working in-repo ("the build depends on `../SJON` as a
+  sibling path") no longer applies to tempura's own build; it is kept as the
+  dated record of that decision. The landing proof's pacer source is pinned
+  separately in `npm/tempura/pacer-pin.json` (dev-only, never published).
+  Release execution is [plan 14](14-release-0.1.0.md).
+
 ## Status board
 
 | Milestone | Item | Status |

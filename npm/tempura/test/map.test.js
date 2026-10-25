@@ -16,8 +16,10 @@
 //   * tempura's own wasm must produce the same bindings as the native
 //     fixture for the cases whose document text is written beside it.
 //
-// SJON is a sibling checkout; a machine without it skips the first
-// check with a printed reason rather than failing on a missing file.
+// SJON's wasm is built from the PINNED dependency by `zig build sjon-wasm`
+// (`tools/zt sjon-wasm`), not read from a sibling checkout: the release
+// archive carries source, and `../SJON/zig-out` may hold a different SJON.
+// A direct `node --test` without the vendored artifact skips with a reason.
 
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -28,9 +30,9 @@ import { Tempura } from '../src/index.js';
 
 const fromRoot = (rel) => fileURLToPath(new URL(`../${rel}`, import.meta.url));
 const scoresDir = fileURLToPath(new URL('./fixtures/scores/', import.meta.url));
-const sjonWasmPath = fileURLToPath(
-  new URL('../../../../SJON/zig-out/bin/sjon.wasm', import.meta.url),
-);
+const sjonWasmPath =
+  process.env.TEMPURA_SJON_WASM ??
+  fileURLToPath(new URL('../../../zig-out/sjon-wasm/sjon.wasm', import.meta.url));
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -70,83 +72,85 @@ test('map: the glue decodes the blob and refuses a corrupt one', () => {
 
 const sjonAvailable = existsSync(sjonWasmPath);
 
-test(
-  'map: SJON answers both ends, a score node per text span and a document node per doc span',
-  { skip: sjonAvailable ? false : 'no sibling SJON wasm (build SJON first)' },
-  () => {
-    const sjon = loadSjon(readFileSync(sjonWasmPath));
-    for (const c of cases) {
-      const scoreText = decoder.decode(c.score);
-      const table = sjon.nodeTable(scoreText);
-      // The score text is real SJON and parses clean: the observation the
-      // record is argued from, not just the node spans it yields.
-      assert.equal(table.diagnostics.length, 0, `${c.file}: score diagnostics`);
-      const rows = new Set(table.nodes.map((n) => `${n.span[0]}:${n.span[1]}`));
-      const docText = c.doc === null ? null : decoder.decode(c.doc);
-      for (const e of c.map.entries) {
-        const key = `${e.text[0]}:${e.text[1]}`;
-        if (!rows.has(key)) {
-          // The one shape the ruling names as a scope note: a cue is
-          // emitted as a comment, and a comment has no node. Spans are
-          // UTF-8 bytes, so the slice comes from the bytes.
-          const token = decoder.decode(c.score.subarray(e.text[0], e.text[1]));
-          assert.ok(
-            token.startsWith('; cue '),
-            `${c.file}: no score node covers ${key} (${JSON.stringify(token)})`,
-          );
-          continue;
-        }
-        // A constructed Doc has no text to address: its spans were
-        // shape-checked above, and this end cannot be resolved without
-        // the bytes.
-        if (docText === null) continue;
-        for (const d of e.doc) {
-          const answer = sjon.addressOfSpan(docText, d[0], d[1]);
-          assert.notEqual(answer, null, `${c.file}: doc span ${d} names no node`);
-          assert.deepEqual(answer.span, d, `${c.file}: doc span ${d} resolved elsewhere`);
-          assert.equal(typeof answer.root, 'number', `${c.file}: doc span ${d} has no root`);
-          assert.ok(Array.isArray(answer.path), `${c.file}: doc span ${d} has no path`);
-        }
+test('map: SJON answers both ends, a score node per text span and a document node per doc span', {
+  skip: sjonAvailable ? false : 'no vendored SJON wasm (run `tools/zt sjon-wasm`)',
+}, () => {
+  const sjon = loadSjon(readFileSync(sjonWasmPath));
+  for (const c of cases) {
+    const scoreText = decoder.decode(c.score);
+    const table = sjon.nodeTable(scoreText);
+    // The score text is real SJON and parses clean: the observation the
+    // record is argued from, not just the node spans it yields.
+    assert.equal(table.diagnostics.length, 0, `${c.file}: score diagnostics`);
+    const rows = new Set(table.nodes.map((n) => `${n.span[0]}:${n.span[1]}`));
+    const docText = c.doc === null ? null : decoder.decode(c.doc);
+    for (const e of c.map.entries) {
+      const key = `${e.text[0]}:${e.text[1]}`;
+      if (!rows.has(key)) {
+        // The one shape the ruling names as a scope note: a cue is
+        // emitted as a comment, and a comment has no node. Spans are
+        // UTF-8 bytes, so the slice comes from the bytes.
+        const token = decoder.decode(c.score.subarray(e.text[0], e.text[1]));
+        assert.ok(
+          token.startsWith('; cue '),
+          `${c.file}: no score node covers ${key} (${JSON.stringify(token)})`,
+        );
+        continue;
+      }
+      // A constructed Doc has no text to address: its spans were
+      // shape-checked above, and this end cannot be resolved without
+      // the bytes.
+      if (docText === null) continue;
+      for (const d of e.doc) {
+        const answer = sjon.addressOfSpan(docText, d[0], d[1]);
+        assert.notEqual(answer, null, `${c.file}: doc span ${d} names no node`);
+        assert.deepEqual(answer.span, d, `${c.file}: doc span ${d} resolved elsewhere`);
+        assert.equal(typeof answer.root, 'number', `${c.file}: doc span ${d} has no root`);
+        assert.ok(Array.isArray(answer.path), `${c.file}: doc span ${d} has no path`);
       }
     }
+  }
 
-    // The observation native.pacer carries in the T1 record, committed in
-    // full: the score table is 75 rows, one per form (20), per `(key …)`,
-    // per `:at` element (14 number_with_unit) and per scene, with no
-    // diagnostics; and the 8.5b phrase-note binding is answered by SJON
-    // at both ends, the score node first and the document node it came
-    // from second.
-    const native = cases.find((c) => c.file === 'native.pacer.map.json');
-    assert.ok(native, 'native.pacer.map.json is missing');
-    const nativeText = decoder.decode(native.score);
-    const nativeTable = sjon.nodeTable(nativeText);
-    assert.equal(nativeTable.diagnostics.length, 0, 'native.pacer: score diagnostics');
-    assert.equal(nativeTable.nodes.length, 75, 'native.pacer: node table rows');
-    const kindCount = (kind) => nativeTable.nodes.filter((n) => n.kind === kind).length;
-    assert.equal(kindCount('form'), 20, 'native.pacer: form rows');
-    assert.equal(kindCount('number_with_unit'), 14, 'native.pacer: number_with_unit rows');
+  // The observation native.pacer carries in the T1 record, committed in
+  // full: the score table is 75 rows, one per form (20), per `(key …)`,
+  // per `:at` element (14 number_with_unit) and per scene, with no
+  // diagnostics; and the 8.5b phrase-note binding is answered by SJON
+  // at both ends, the score node first and the document node it came
+  // from second.
+  const native = cases.find((c) => c.file === 'native.pacer.map.json');
+  assert.ok(native, 'native.pacer.map.json is missing');
+  const nativeText = decoder.decode(native.score);
+  const nativeTable = sjon.nodeTable(nativeText);
+  assert.equal(nativeTable.diagnostics.length, 0, 'native.pacer: score diagnostics');
+  assert.equal(nativeTable.nodes.length, 75, 'native.pacer: node table rows');
+  const kindCount = (kind) => nativeTable.nodes.filter((n) => n.kind === kind).length;
+  assert.equal(kindCount('form'), 20, 'native.pacer: form rows');
+  assert.equal(kindCount('number_with_unit'), 14, 'native.pacer: number_with_unit rows');
 
-    const nativeDoc = decoder.decode(native.doc);
-    const phrase = native.map.entries.find(
-      (e) => e.text[0] === 368 && e.text[1] === 372 && e.doc.length === 1 &&
-        e.doc[0][0] === 879 && e.doc[0][1] === 921,
-    );
-    assert.ok(phrase, 'native.pacer: the 8.5b phrase-note entry');
-    assert.equal(decoder.decode(native.score.subarray(...phrase.text)), '8.5b');
-    assert.deepEqual(sjon.addressOfSpan(nativeText, 368, 372), {
-      root: 3,
-      path: ['at', 3],
-      span: [368, 372],
-      kind: 'number_with_unit',
-    });
-    assert.deepEqual(sjon.addressOfSpan(nativeDoc, 879, 921), {
-      root: 10,
-      path: [0, 1],
-      span: [879, 921],
-      kind: 'form',
-    });
-  },
-);
+  const nativeDoc = decoder.decode(native.doc);
+  const phrase = native.map.entries.find(
+    (e) =>
+      e.text[0] === 368 &&
+      e.text[1] === 372 &&
+      e.doc.length === 1 &&
+      e.doc[0][0] === 879 &&
+      e.doc[0][1] === 921,
+  );
+  assert.ok(phrase, 'native.pacer: the 8.5b phrase-note entry');
+  assert.equal(decoder.decode(native.score.subarray(...phrase.text)), '8.5b');
+  assert.deepEqual(sjon.addressOfSpan(nativeText, 368, 372), {
+    root: 3,
+    path: ['at', 3],
+    span: [368, 372],
+    kind: 'number_with_unit',
+  });
+  assert.deepEqual(sjon.addressOfSpan(nativeDoc, 879, 921), {
+    root: 10,
+    path: [0, 1],
+    span: [879, 921],
+    kind: 'form',
+  });
+});
 
 test('map: the wasm produces the native fixture bindings byte for byte', async () => {
   let checked = 0;

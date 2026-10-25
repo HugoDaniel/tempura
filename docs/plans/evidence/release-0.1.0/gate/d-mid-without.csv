@@ -1,0 +1,23 @@
+0, 0, Header, 1, 2, 960
+1, 0, Start_track
+1, 0, Time_signature, 4, 2, 24, 8
+1, 0, Tempo, 500000
+1, 3840, Tempo, 400000
+1, 3840, Marker_t, "the drop"
+1, 3840, End_track
+2, 0, Start_track
+2, 0, Title_t, "kick"
+2, 0, Note_on_c, 9, 36, 110
+2, 480, Note_off_c, 9, 36, 64
+2, 960, Note_on_c, 9, 38, 90
+2, 1440, Note_off_c, 9, 38, 64
+2, 3840, Note_on_c, 9, 42, 100
+2, 4080, Note_off_c, 9, 42, 64
+2, 4320, Note_on_c, 9, 42, 80
+2, 4560, Note_off_c, 9, 42, 64
+2, 5760, Note_on_c, 9, 42, 100
+2, 6000, Note_off_c, 9, 42, 64
+2, 6240, Note_on_c, 9, 42, 80
+2, 6480, Note_off_c, 9, 42, 64
+2, 6480, End_track
+0, 0, End_of_file

@@ -1,0 +1,9 @@
+chunk: present, read
+tail: present
+essence: 2827 bytes, envelope version 1
+conductor: hash matches
+lane chord: channel 1, hash matches
+lane chord: channel 2, hash matches
+lane chord: channel 3, hash matches
+lane lead: channel 4, hash matches
+lane glow: channel 5 column vol, hash matches

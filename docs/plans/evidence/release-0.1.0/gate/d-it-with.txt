@@ -1,0 +1,16 @@
+openmpt123 v0.8.9, libopenmpt 0.8.9+r25652.pkg (OpenMPT 1.32.11.02-r25652p https://source.openmpt.org/svn/openmpt/tags/libopenmpt-0.8.9@25652 (2026-08-19T07:15:57.388610Z) clean-pkg)
+Copyright (c) 2013-2026 OpenMPT Project Developers and Contributors <https://lib.openmpt.org/>
+
+Filename...: gate.it
+Size.......: 3744B
+Type.......: it (Impulse Tracker 2.14)
+Tracker....: Unknown
+Title......: render-it
+Duration...: 00:06.559
+Subsongs...: 1
+Channels...: 5
+Orders.....: 1
+Patterns...: 1
+Instruments: 0
+Samples....: 1
+

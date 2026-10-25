@@ -65,7 +65,7 @@ depends on nothing.
 
 ```
 tempura/
-├── build.zig / build.zig.zon         # dep: sjon (path ../SJON, plugin-exec=false)
+├── build.zig / build.zig.zon         # dep: sjon (pinned 1.5.0 archive, plugin-exec=false)
 ├── sjon-project.sjon                 # composes the four manifests below for the LSP
 ├── schema/
 │   ├── tempura.sjon                  # the timeline vocabulary (P99)

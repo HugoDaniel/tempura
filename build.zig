@@ -39,6 +39,7 @@ pub fn build(b: *std.Build) void {
     const ctx = context(b);
     const tests = addTests(ctx);
     const wasm = addWasm(ctx);
+    const sjon_wasm = addSjonWasm(ctx);
     const corpus_verify = addCorpus(ctx);
     addFixtures(ctx);
     const landing_check = addLanding(ctx);
@@ -68,7 +69,7 @@ pub fn build(b: *std.Build) void {
     // tree produces rather than whatever `zig-out` happens to hold.
     verify.dependOn(wasm.budget);
     verify.dependOn(docs_check);
-    addNodeLeg(ctx, verify, landing_check, wasm.copy, cli.install);
+    addNodeLeg(ctx, verify, landing_check, wasm.copy, cli.install, sjon_wasm);
 }
 
 fn context(b: *std.Build) Ctx {
@@ -311,6 +312,47 @@ fn addWasm(ctx: Ctx) Wasm {
     const budget_step = b.step("wasm-budget", "Check tempura.wasm against its frozen size ceiling");
     budget_step.dependOn(&wasm_budget.step);
     return .{ .copy = &copy_wasm.step, .budget = &wasm_budget.step };
+}
+
+/// `zig build sjon-wasm` — SJON's own `sjon.wasm`, built from the same
+/// PINNED dependency Tempura compiles against and copied to the node
+/// leg's vendor directory. The map proof asks SJON to answer both ends of
+/// every span, so it must run SJON's artifact and not whatever a sibling
+/// checkout happens to hold: the release archive has source, not a wasm,
+/// and a stale `../SJON/zig-out` would silently test a different SJON.
+/// SJON's own recipe is one module rooted at `src/wasm.zig`, its
+/// `build_options` (plugin dispatch is a host import on wasm), disabled
+/// entry and `rdynamic`; `ReleaseSmall` matches its published artifact.
+fn addSjonWasm(ctx: Ctx) *std.Build.Step {
+    const b = ctx.b;
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const sjon_options = b.addOptions();
+    sjon_options.addOption(bool, "plugin_exec", false);
+    sjon_options.addOption(bool, "wasm_plugin_host", true);
+    const sjon_wasm_mod = b.createModule(.{
+        .root_source_file = ctx.sjon_dep.path("src/wasm.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+        .link_libc = false,
+        .imports = &.{.{ .name = "build_options", .module = sjon_options.createModule() }},
+    });
+    const sjon_wasm = b.addExecutable(.{ .name = "sjon", .root_module = sjon_wasm_mod });
+    sjon_wasm.entry = .disabled;
+    sjon_wasm.rdynamic = true;
+    // The artifact lands under the install prefix (`zig-out/sjon-wasm`),
+    // outside the package's tracked tree: it is generated, pinned and
+    // read only by the node leg.
+    const copy = b.addInstallFileWithDir(
+        sjon_wasm.getEmittedBin(),
+        .{ .custom = "sjon-wasm" },
+        "sjon.wasm",
+    );
+    const step = b.step(
+        "sjon-wasm",
+        "Build SJON's wasm from the pinned dependency for the map proof",
+    );
+    step.dependOn(&copy.step);
+    return &copy.step;
 }
 
 /// `zig build corpus` — the native golden gate. `-- --update`
@@ -665,6 +707,7 @@ fn addNodeLeg(
     landing_check: *std.Build.Step,
     copy_wasm: *std.Build.Step,
     install_cli: *std.Build.Step,
+    sjon_wasm: *std.Build.Step,
 ) void {
     const b = ctx.b;
     // Unconditional, with or without node: the fixtures are what the map
@@ -697,6 +740,10 @@ fn addNodeLeg(
     // stale artifact would pass on anything, which is the same rule the
     // landing fixtures' `--check` leg is written to.
     node_test.step.dependOn(copy_wasm);
+    // …and the map proof asks SJON's OWN wasm to answer both ends of every
+    // fixture span, so it is built from the same pinned dependency rather
+    // than read from a sibling checkout.
+    node_test.step.dependOn(sjon_wasm);
     // …and the round trip's native leg compares the wasm's bytes against
     // the CLI's, so the binary it looks for is built too (it degrades to a
     // printed skip without one, and a gate that skips silently is not a

@@ -1,0 +1,1 @@
+tsc --strict --noEmit: no output, exit 0 (2026-10-25)

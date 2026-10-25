@@ -1,0 +1,56 @@
+conform: it/libopenmpt — openmpt123 v0.8.9, libopenmpt 0.8.9+r25652.pkg (OpenMPT 1.32.11.02-r25652p https://source.openmpt.org/svn/openmpt/tags/libopenmpt-0.8.9@25652 (2026-08-19T07:15:57.388610Z) clean-pkg)
+  ok    examples-tracker-it — Duration...: 00:14.123
+  ok    it-midi-macros — Duration...: 00:07.680
+  ok    it-minimal — Duration...: 00:07.680
+  ok    it-passthrough — Duration...: 00:07.680
+  ok    it-patterns-masks — Duration...: 00:03.840
+  ok    residue-it-exact — Duration...: 00:08.000
+  ok    residue-newer-version — Duration...: 00:08.000
+  ok    residue-tail-only — Duration...: 00:08.000
+  ok    skeleton-it — Duration...: 00:03.794
+  ok    tempo-three-conductors-it — Duration...: 00:01.554
+  ok    walk-axx — Duration...: 00:00.360
+  ok    walk-bxx — Duration...: 00:00.480
+  ok    walk-constant — Duration...: 00:00.480
+  ok    walk-cxx-past-end — Duration...: 00:00.360
+  ok    walk-cxx-sbx — Duration...: 00:00.960
+  ok    walk-runaway — Duration...: 00:00.480
+  ok    walk-s6x — Duration...: 00:00.520
+  ok    walk-sdx — Duration...: 00:00.240
+  ok    walk-sex — Duration...: 00:00.560
+  ok    walk-skip-end — Duration...: 00:00.720
+  ok    walk-t0x-slide — Duration...: 00:00.250
+  ok    walk-txx-memory — Duration...: 00:00.822
+conform: it/libopenmpt — 22 fixture(s), 0 refused
+conform: smf/midicsv — midicsv: illegal option -- h
+  ok    examples-daw-mid — 177 event row(s), round trip identical
+  ok    residue-corrupt — 16 event row(s), round trip identical
+  ok    residue-smf-exact — 16 event row(s), round trip identical
+  ok    residue-stale-conductor — 16 event row(s), round trip identical
+  ok    residue-stale-curve — 20 event row(s), round trip identical
+  ok    residue-stale-lane-partial — 17 event row(s), round trip identical
+  ok    residue-stale-lane — 16 event row(s), round trip identical
+  ok    skeleton-smf — 20 event row(s), round trip identical
+  ok    smf-format0 — 18 event row(s), round trip identical
+  ok    smf-running-status — 13 event row(s), round trip identical
+  FAIL  smf-smpte — csvmidi refused the CSV
+        csvmidi: Error on line 1:
+            0, 0, Header, 0, 1, -6360
+          Field 6 (Pulses per quarter note) out of range.  Value (-6360) outside limits of 0 to 65535.
+  ok    smf-vlq-edges — 9 event row(s), round trip identical
+  ok    tempo-by-reference-conductor — 10 event row(s), round trip identical
+  ok    tempo-three-conductors-smf — 10 event row(s), round trip identical
+conform: smf/midicsv — 14 fixture(s), 1 refused
+conform: it/wiki-cases — skipped: nothing fetched (conformance/fetch_wiki_cases.sh)
+conform: an oracle refused a fixture — see the FAIL rows above
+conform
++- run conformance/conform.sh failure
+error: process exited with error code 1
+failed command: cd /Users/hugo/Dev/tempura && conformance/conform.sh
+
+Build Summary: 0/2 steps succeeded (1 failed)
+conform transitive failure
++- run conformance/conform.sh failure
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/8d41b5dd60ef1166889295fce68586ab/build /Users/hugo/.local/share/zigup/0.16.0/files/zig /Users/hugo/.local/share/zigup/0.16.0/files/lib /Users/hugo/Dev/tempura .zig-cache /Users/hugo/.cache/zig --seed 0x22211ba9 -Zd5789950a79e1150 -j4 conform

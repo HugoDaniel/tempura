@@ -1,0 +1,15 @@
+clean checkout: /var/folders/4n/m6fk3sgd4zg82f539tp6mdm80000gn/T//tempura-clean.0aizcQ
+zig: 0.16.0
+sjon sibling present: no
+TEMPURA_ANIMADER=unset
+--- tools/zt cli ---
+verify: npm/tempura/node_modules is missing; skipping the npm/tempura pacer landing test. This reduced gate does not prove the node suite, the wasm map blob or the SJON map proof (run `cd npm/tempura && npm install`, and `cd ../pacer && zig build wasm` with pacer's `build:wasm-copy`)
+verify: npm/tempura/node_modules is missing; skipping the npm/tempura pacer landing test. This reduced gate does not prove the node suite, the wasm map blob or the SJON map proof (run `cd npm/tempura && npm install`, and `cd ../pacer && zig build wasm` with pacer's `build:wasm-copy`)
+--- tools/zt wasm ---
+verify: npm/tempura/node_modules is missing; skipping the npm/tempura pacer landing test. This reduced gate does not prove the node suite, the wasm map blob or the SJON map proof (run `cd npm/tempura && npm install`, and `cd ../pacer && zig build wasm` with pacer's `build:wasm-copy`)
+--- artifacts ---
+-rwxr-xr-x@ 1 hugo  staff  1416572 Oct 25 18:49 npm/tempura/tempura.wasm
+-rwxr-xr-x@ 1 hugo  staff  9602312 Oct 25 18:49 zig-out/bin/tempura
+-rwxr-xr-x@ 1 hugo  staff  1416572 Oct 25 18:49 zig-out/bin/tempura.wasm
+741f54d6fc1e92c71a97130c410a4a9eab8760b9d060c6b87ecda24dc7178158  zig-out/bin/tempura
+b3827aabcf69095f2a25634af276d68dbad7971e594250e7a0d0d5bc469d40e8  zig-out/bin/tempura.wasm

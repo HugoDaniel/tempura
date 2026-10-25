@@ -16,9 +16,9 @@ tracker still opens it as if nothing were there.
 tempura never evaluates a value at time `t`. It exports the pacer score
 that does.
 
-Zig 0.16, CC0-1.0, no runtime dependency but SJON (a sibling path
-checkout at `../SJON`). Same inputs give byte-identical outputs, native
-and wasm32.
+Zig 0.16, CC0-1.0, no runtime dependency but SJON (pinned to the
+published 1.5.0 release archive, fetched by Zig; no sibling checkout
+needed). Same inputs give byte-identical outputs, native and wasm32.
 
 ```
 tools/zt cli
@@ -26,6 +26,17 @@ zig-out/bin/tempura build examples/tracker/piece.sjon --kind it -o piece.it
 zig-out/bin/tempura dump piece.it            # the document comes back
 zig-out/bin/tempura check-residue piece.it   # and here is why it could
 ```
+
+## Install
+
+- **npm** (self-hosted registry):
+  `npm install tempura --registry=https://git.hugodaniel.com/api/packages/hugo/npm/`
+  — see `npm/tempura/README.md` for the wasm-bytes handoff.
+- **Zig**: declare the package and import the `tempura` module; SJON 1.5.0 is
+  fetched from the pinned archive. Zig 0.16.0 or newer.
+- **CLI**: `tools/zt cli` builds `zig-out/bin/tempura`.
+
+Release notes are in `CHANGELOG.md`.
 
 ## The verbs
 
@@ -91,22 +102,25 @@ machine's memory. If it prints `waiting`, wait.
 
 ## What is unmeasured
 
-Three claims are stated and NOT verified, and none of them is assumed
+These claims are stated and NOT fully verified, and none of them is assumed
 green anywhere in this repo.
 
 1. **Residue survival per tool.** Whether OpenMPT, Schism, IT 2.14 or any
-   DAW keeps the payloads through a re-save or a re-export. The procedure
-   and the empty tables are `conformance/CHECKLIST.md` section C, with
-   the summary in `demos/e0-carriers/README.md`. The design is total
-   either way: a file whose residue is gone dumps as a derived skeleton.
-2. **Invisibility to foreign readers.** That a file with residue and the
-   same file without it report the same duration, tempo and names.
-   Automatable in part — `tools/zt conform` runs the libopenmpt half —
-   and unrun because the oracles are not installed
-   (`conformance/PINS.md`).
+   DAW keeps the payloads through a re-save or a re-export. libopenmpt and
+   Schism Tracker have measured loads and playback, but no re-save result;
+   Impulse Tracker 2.14 and the DAWs are unrun. The procedure and the tables
+   are `conformance/CHECKLIST.md` section C. The design is total either way: a
+   file whose residue is gone dumps as a derived skeleton.
+2. **Invisibility to foreign readers.** The libopenmpt half now runs over the
+   corpus (`tools/zt conform`); the DAW half is manual and unrun. The
+   `midicsv` round trip refuses the SMPTE fixture, an oracle limitation named
+   in section C and `CHANGELOG.md`.
 3. **The impulsos measure.** E0's census of a real piece's beat-level
    facts. The piece is not on this machine, so no count was estimated and
    no conclusion drawn from it.
+
+`docs/plans/04-residue.md`'s progress log carries the same list with its
+date.
 
 `docs/plans/04-residue.md`'s progress log carries the same list with its
 date.
@@ -127,5 +141,6 @@ date.
 | `conformance/` | the oracle matrix, the manual checklist, the version pins |
 | `npm/tempura/` | the ESM glue around `tempura.wasm`, and the parity and landing tests |
 
-The 0.1.0 tag is not cut. The code reaches E3 with its freezes
+The 0.1.0 release candidate is prepared and verified on the recorded source;
+the tag and publication are pending. The code reaches E3 with its freezes
 documented, and the tag is the user's signal to give.

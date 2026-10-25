@@ -150,6 +150,24 @@ export {};
  */
 
 /**
+ * One position map record: a byte span into the score text, and the
+ * document span (or spans, when the exporter merged sources) it came
+ * from. Both pairs are half-open `[start, end)` byte offsets.
+ * @typedef {object} PositionMapEntry
+ * @property {[number, number]} text
+ * @property {Array<[number, number]>} doc
+ */
+
+/**
+ * The position map of one score, decoded from the `'TPMP'` blob: one
+ * entry per emitted position, in emission order. The text spans index
+ * the exact string `exportScore()` hands back under the same options;
+ * the document spans index `Tempura.text`.
+ * @typedef {object} PositionMap
+ * @property {PositionMapEntry[]} entries
+ */
+
+/**
  * `exportScore`'s switches — plan 10's four, as booleans.
  * @typedef {object} ScoreOptions
  * @property {boolean} [velocity] A sibling `<lane>-vel` track per notes lane.
@@ -175,6 +193,8 @@ export {};
  * @property {() => number} tpr_outPtr
  * @property {() => number} tpr_outCap
  * @property {() => number} tpr_timelinePtr
+ * @property {() => number} tpr_mapPtr
+ * @property {() => number} tpr_mapCap
  * @property {() => number} tpr_playheadPtr
  * @property {() => number} tpr_diagPtr
  * @property {() => number} tpr_diagLen
@@ -189,6 +209,7 @@ export {};
  * @property {(len: number) => number} tpr_plan
  * @property {(len: number) => number} tpr_apply
  * @property {(flags: number) => number} tpr_exportScore
+ * @property {(flags: number) => number} tpr_exportScoreMap
  * @property {(kind: number) => number} tpr_build
  */
 

@@ -1,11 +1,12 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.0/schema.json",
   // Lint + format for the JS+JSDoc glue, pacer's configuration verbatim. Scoped to
-  // src/ and test/; the generated types/ and the wasm binary are left alone.
+  // src/, test/ and the dev-only build scripts; the generated types/ and the wasm
+  // binary are left alone.
   // quoteStyle is single to formalize the existing source idiom (not Biome's
   // double-quote default). Recommended rules are on by default.
   "files": {
-    "includes": ["src/**/*.js", "test/**/*.js"]
+    "includes": ["src/**/*.js", "test/**/*.js", "scripts/**/*.mjs"]
   },
   "formatter": {
     "enabled": true,

@@ -1,0 +1,4 @@
+Type.......: it (Impulse Tracker 2.14)
+Title......: render-it
+Duration...: 00:06.559
+Channels...: 5

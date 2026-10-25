@@ -15,6 +15,13 @@ fixtures, skipping with a reason when a tool is absent).
 The authoring machine has none of the tools installed (`conformance/PINS.md`), and
 no DAW, tracker or DOSBox session has been performed.
 
+**Status on 2026-10-25 (0.1.0 candidate):** libopenmpt 0.8.9 and Schism Tracker
+20260524 were installed and used for loads and playback of a built `.it`. No
+re-save survival result, no Impulse Tracker 2.14/DOSBox run and no DAW import
+exist, so section A is PARTIAL, section B is UNMEASURED and the residue survival
+columns that need a re-save stay unmeasured. The commands and logs are under
+`docs/plans/evidence/release-0.1.0/gate/`.
+
 ---
 
 ## A. A built `.it` loads and plays, with the residue attached
@@ -42,8 +49,9 @@ Run at E0 and at every tag, in each of three players.
 
 | Player | Version | Date | Loads | Tail visible | Plays as built | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
+| libopenmpt (`openmpt123`) | 0.8.9 | 2026-10-25 | yes, `--probe`/`--info` clean | yes, `;; tempura` tail in `--info --message` | yes, `--batch -o gate.wav` rendered 2,557,914 bytes | PARTIAL — load and play; no re-save |
+| Schism Tracker | 20260524 | 2026-10-25 | yes, headless load (`--headless --play --diskwrite`) | not observed headless | yes, rendered 1,157,290-byte WAV | PARTIAL — load and play; no re-save |
 | OpenMPT | — | — | — | — | — | UNMEASURED |
-| Schism Tracker | — | — | — | — | — | UNMEASURED |
 | Impulse Tracker 2.14 (DOSBox) | — | — | — | — | — | UNMEASURED |
 
 For IT 2.14: run under DOSBox, mount the directory holding the file, load it in the
@@ -94,6 +102,8 @@ Count each payload class independently. `check-residue` reports them by name.
 
 | Tool | Version | Date | Kind | Essence | Lane records | Conductor record | `TMPU` chunk | Message tail | Verdict |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| libopenmpt (`openmpt123`) | 0.8.9 | 2026-10-25 | .it | n/a | n/a | n/a | — | — | n/a — the tool never writes a file |
+| Schism Tracker | 20260524 | 2026-10-25 | .it | — | — | — | — | — | UNMEASURED — headless playback only, no re-save |
 | OpenMPT | — | — | .it | — | — | — | — | — | UNMEASURED |
 | Schism Tracker | — | — | .it | — | — | — | — | — | UNMEASURED |
 | Impulse Tracker 2.14 | — | — | .it | — | — | — | — | — | UNMEASURED |
@@ -131,8 +141,8 @@ corpus); the DAW half is manual and belongs to gate B.
 
 | Check | Date | Outcome |
 | --- | --- | --- |
-| `.it` with and without residue report the same duration, tempo and names | — | UNMEASURED |
-| `.mid` with and without residue hold the same events | — | UNMEASURED |
+| `.it` with and without residue report the same duration, tempo and names | 2026-10-25 | PASS — `openmpt123 --info` key fields identical for `corpus/render-it` with residue and `export` without |
+| `.mid` with and without residue hold the same events | 2026-10-25 | PASS — `midicsv` rows identical after stripping every `Sequencer_specific` row from the residue-bearing CSV |
 
 ---
 
