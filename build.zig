@@ -721,17 +721,20 @@ fn addNodeLeg(
     // instead. This is a REDUCED gate and the announcement says what it
     // does not prove: the node suite, the wasm map blob and the SJON map
     // proof all live only in the run being skipped.
-    b.build_root.handle.access(b.graph.io, "npm/tempura/node_modules/pacer", .{}) catch {
-        std.debug.print(
-            "verify: npm/tempura/node_modules is missing; skipping the npm/tempura pacer " ++
-                "landing test. This reduced gate does not prove the node suite, the wasm map " ++
-                "blob or the SJON map proof (run `cd npm/tempura && npm install`, and " ++
-                "`cd ../pacer && zig build wasm` with pacer's `build:wasm-copy`)\n",
-            .{},
-        );
-        return;
-    };
-    const node_test = b.addSystemCommand(&.{ "node", "--test" });
+    //
+    // The check is INSIDE the run step, not at graph construction: every
+    // command builds this graph, so a graph-time probe printed a
+    // `verify: … skipping` line for `zig build cli`, for `wasm`, and for
+    // any consumer of the Zig package. The fixture check stays
+    // unconditional; only the node run is conditional.
+    const node_test = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\if [ -d node_modules/pacer ]; then exec node --test; fi
+        \\printf '%s\n' 'verify: npm/tempura/node_modules/pacer is missing; skipping the node suite, the wasm map blob and the SJON map proof (run npm install in npm/tempura, then build pacer wasm in ../pacer)' >&2
+        \\exit 0
+        ,
+    });
     node_test.setCwd(b.path("npm/tempura"));
     node_test.has_side_effects = true;
     // The suite drives `npm/tempura/tempura.wasm` — the exports test, the
