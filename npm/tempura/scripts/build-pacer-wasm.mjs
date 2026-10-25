@@ -58,10 +58,14 @@ if (!existsSync(join(pacerPkg, 'package.json'))) {
   );
 }
 const manifest = JSON.parse(readFileSync(join(pacerPkg, 'package.json'), 'utf8'));
-if (manifest.name !== pin.name || manifest.version !== pin.version) {
+// The pin records the HEAD manifest version and, when the recorded tree was
+// mid-release, the version it carried. Either is acceptable; the wasm hash
+// below is what actually identifies the built driver.
+const pinnedVersions = new Set([pin.version, pin.builtVersion].filter(Boolean));
+if (manifest.name !== pin.name || !pinnedVersions.has(manifest.version)) {
   throw new Error(
-    `pacer package is ${manifest.name}@${manifest.version}, pin is ${pin.name}@${pin.version}; ` +
-      'update pacer-pin.json deliberately after reviewing the change',
+    `pacer package is ${manifest.name}@${manifest.version}, pin is ${pin.name}@` +
+      `${[...pinnedVersions].join('/')}; update pacer-pin.json deliberately after reviewing the change`,
   );
 }
 const commit = sourceCommit();
@@ -95,5 +99,5 @@ writeFileSync(installed, readFileSync(built));
 const installedHash = sha256(installed);
 if (installedHash !== got) throw new Error(`copy to ${installed} did not round-trip`);
 console.log(
-  `pacer.wasm: ${pin.name}@${pin.version} ${commit ?? '(no git)'} — sha256 ${installedHash}`,
+  `pacer.wasm: ${pin.name}@${manifest.version} ${commit ?? '(no git)'} — sha256 ${installedHash}`,
 );

@@ -1,0 +1,5 @@
+2026-10-25: clean pacer source at 5face6f (git archive), Zig 0.16.0
+command: zig build wasm (pacer's own convention; no tools/zt in pacer)
+pacer.wasm 668,296 bytes
+5a6d5316241f6c210970a652a1c030dfbc983f28855c2f9cafe773c365eb097a  /Users/hugo/Dev/pacer-pincheck.Ef4vRH/zig-out/bin/pacer.wasm
+matches pacer-pin.json wasmSha256: yes
