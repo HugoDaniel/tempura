@@ -1,0 +1,5 @@
+2026-10-25, candidate a4b70d8, Zig 0.16.0, fresh ZIG_GLOBAL_CACHE_DIR
+package hash: tempura-0.1.0-6LG9rVG9VACrg66AukawMyo_Vh2jOdDRDT-HBsKrSuZs
+archive: 1,399,152 bytes, sha256 62c0ebc38596e79966cb07913bee5a8e21669df68328772742ec4f9ee6c7ccad
+--- minimal project: zig build run (no graph-time warning) ---
+tempura 0.1.0
