@@ -54,6 +54,10 @@ resolve nowhere here; `~/llm/plans/<set>/` is what they mean.)
 | `~/Dev/pstudio`, `~/Dev/animader/plans` | the studio and the sibling emitter; **not on this machine** on 2026-09-19; both present by 2026-09-29 (pstudio still `b8464f5`, animader at `ff0eb04`), with `~/Dev/2026_impulse` beside them | pstudio `b8464f5`; animader `f014db4` |
 
 Every claim about pacer, SJON and Theatre was verified against the pins above on 2026-09-19.
+**Superseded for the build on 2026-10-25:** tempura now fetches SJON 1.5.0 from
+the published release archive at peeled commit `eb63b3fc4765795062943b5c731aa9bba36264ce`
+(`build.zig.zon`, [14](14-release-0.1.0.md)); the `~/Dev/SJON` row above stays as
+the dated record of what the plan set was written against.
 Line citations use `file.ext:NNN`. Claims about OpenMPT and ITTECH cite the it set's lines
 and carry the it set's date. Re-verify before building on them if significant time has passed.
 

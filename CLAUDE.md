@@ -8,7 +8,8 @@ nothing played. It does not evaluate a value at time `t`; it exports the pacer
 score that does. Same inputs ⇒ byte-identical outputs, native and wasm32.
 
 tempura sits in a constellation: it consumes **SJON** (parser, validator, `Expr`,
-the `Pattern` tick core, `Edit` — a sibling path dependency), and feeds **pacer**
+the `Pattern` tick core, `Edit` — fetched from the published 1.5.0 release
+archive and pinned by hash, not a sibling path), and feeds **pacer**
 (the deterministic playback kernel) the score text it plays. Its hosts are the
 `tempura` CLI, `npm/tempura` around `tempura.wasm`, expansible-player's payload
 kind and animader's piece format. pstudio is NOT a host (ruled 2026-09-20). The
